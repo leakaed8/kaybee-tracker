@@ -1,0 +1,14 @@
+{
+  "name": "kaybee-tracker",
+  "version": "1.0.0",
+  "description": "Field sales and inventory tracker",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "build": "npm install"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "googleapis": "^140.0.0"
+  }
+}
