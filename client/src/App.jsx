@@ -26,6 +26,7 @@ export default function App() {
   const [outreachLog, setOutreachLog] = useState([]);
   const [orders, setOrders] = useState([]);
   const [repNames, setRepNames] = useState([]);
+  const [offers, setOffers] = useState([]);
   const [settings, setSettings] = useState({
     slowThreshold: 15, repPhone: "", dailyTarget: 3, monthlyVisitTarget: 60, templates: [],
   });
@@ -57,6 +58,7 @@ export default function App() {
       setOutreachLog(data.outreachLog);
       setOrders(data.orders || []);
       setRepNames(data.repNames || []);
+      setOffers(data.offers || []);
       if (!settingsDirtyRef.current) setSettings(data.settings);
       setLoadError("");
     } catch (e) {
@@ -120,6 +122,13 @@ export default function App() {
   const bulkImportClients = (payload) => withSync(() => api.importClientsBulk(payload));
   const assignClientRep = (id, assignedRep) => withSync(() => api.assignClientRep(id, assignedRep));
   const logOutreach = (entry) => withSync(() => api.logOutreach(entry));
+  const deleteOrder = (id) => withSync(() => api.deleteOrder(id));
+  const requestDeleteOrder = (id) => withSync(() => api.requestDeleteOrder(id));
+  const approveDeleteOrder = (id) => withSync(() => api.approveDeleteOrder(id));
+  const denyDeleteOrder = (id) => withSync(() => api.denyDeleteOrder(id));
+  const addOffer = (offer) => withSync(() => api.addOffer(offer));
+  const toggleOfferActive = (id, active) => withSync(() => api.updateOffer(id, { active }));
+  const removeOffer = (id) => withSync(() => api.removeOffer(id));
 
   const zoned = products.map((p) => ({ ...p, zone: zoneFor(p, role, settings.slowThreshold) }));
   const sorted = [...zoned].sort((a, b) => daysUntil(a.expiry) - daysUntil(b.expiry));
@@ -206,7 +215,17 @@ export default function App() {
               />
             )}
             {tab === "checkin" && role === "rep" && (
-              <CheckInView visits={visits} clients={clients} products={products} onAddVisit={addVisit} onCreateOrder={createOrder} />
+              <CheckInView
+                visits={visits}
+                clients={clients}
+                products={products}
+                offers={offers}
+                orders={orders}
+                repName={repName}
+                onAddVisit={addVisit}
+                onCreateOrder={createOrder}
+                onRequestDeleteOrder={requestDeleteOrder}
+              />
             )}
             {tab === "clients" && (
               <ClientsView
@@ -222,7 +241,9 @@ export default function App() {
             )}
             {tab === "route" && role === "rep" && <RouteView clients={clients} visits={visits} />}
             {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} visits={visits} />}
-            {tab === "orders" && role === "manager" && <OrdersView orders={orders} />}
+            {tab === "orders" && role === "manager" && (
+              <OrdersView orders={orders} onDelete={deleteOrder} onApproveDelete={approveDeleteOrder} onDenyDelete={denyDeleteOrder} />
+            )}
             {tab === "performance" && role === "manager" && (
               <PerformanceView
                 visits={visits}
@@ -252,6 +273,10 @@ export default function App() {
                 onBulkImport={bulkImportProducts}
                 productCount={products.length}
                 onRepsChanged={refresh}
+                offers={offers}
+                onAddOffer={addOffer}
+                onToggleOfferActive={toggleOfferActive}
+                onRemoveOffer={removeOffer}
               />
             )}
           </>
@@ -493,7 +518,7 @@ function Field({ label, children }) {
 const inputStyle = { width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #E5DFD3", fontSize: 13, background: "#FAF7F2" };
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ visits, clients, products, onAddVisit, onCreateOrder }) {
+function CheckInView({ visits, clients, products, offers, orders, repName, onAddVisit, onCreateOrder, onRequestDeleteOrder }) {
   const [client, setClient] = useState("");
   const [notes, setNotes] = useState("");
   const [coords, setCoords] = useState(null);
@@ -589,6 +614,7 @@ function CheckInView({ visits, clients, products, onAddVisit, onCreateOrder }) {
           clientName={lastVisit.client}
           visitId={lastVisit.id}
           products={products}
+          offers={offers}
           onCreateOrder={onCreateOrder}
           onDone={() => { setShowOrderBuilder(false); setShowOrderPrompt(false); }}
         />
@@ -608,6 +634,28 @@ function CheckInView({ visits, clients, products, onAddVisit, onCreateOrder }) {
         ))}
         {todayVisits.length === 0 && <EmptyState text="No visits logged yet today." />}
       </div>
+
+      <h3 style={{ fontSize: 14, fontWeight: 600, margin: "20px 0 10px", color: "#8A8272" }}>Your recent orders</h3>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {orders.filter((o) => o.repName === repName).slice(0, 10).map((o) => (
+          <div key={o.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13.5 }}>{o.clientName}</div>
+              <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
+                {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })} · total {o.total.toFixed(2)}
+              </div>
+            </div>
+            {o.status === "deletion_requested" ? (
+              <span style={{ fontSize: 11.5, color: "#C17817" }}>Deletion requested — awaiting approval</span>
+            ) : (
+              <button onClick={() => onRequestDeleteOrder(o.id)} style={{ fontSize: 11.5, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "6px 10px" }}>
+                Request deletion
+              </button>
+            )}
+          </div>
+        ))}
+        {orders.filter((o) => o.repName === repName).length === 0 && <EmptyState text="No orders yet." />}
+      </div>
     </div>
   );
 }
@@ -624,10 +672,10 @@ function downloadOrderPdf(order) {
     startY: 42,
     head: [["Item", "Qty", "Unit Price", "Line Total"]],
     body: order.items.map((it) => [
-      it.name,
+      it.name + (it.isFree ? " (FREE)" : ""),
       String(it.qty),
-      Number(it.unitPrice).toFixed(2),
-      (it.qty * it.unitPrice).toFixed(2),
+      it.isFree ? "FREE" : Number(it.unitPrice).toFixed(2),
+      it.isFree ? "0.00" : (it.qty * it.unitPrice).toFixed(2),
     ]),
     foot: [["", "", "Total", Number(order.total).toFixed(2)]],
   });
@@ -635,12 +683,15 @@ function downloadOrderPdf(order) {
 }
 
 // ---------- Order Builder (used from Check-In) ----------
-function OrderBuilder({ clientName, visitId, products, onCreateOrder, onDone }) {
+function OrderBuilder({ clientName, visitId, products, offers, onCreateOrder, onDone }) {
   const [productQuery, setProductQuery] = useState("");
   const [qty, setQty] = useState("");
   const [items, setItems] = useState([]);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [appliedOfferIds, setAppliedOfferIds] = useState(new Set());
+  const [applyingOfferId, setApplyingOfferId] = useState(null);
+  const [freeProductQuery, setFreeProductQuery] = useState("");
 
   const matchedProduct = products.find((p) => p.name.toLowerCase().trim() === productQuery.toLowerCase().trim());
 
@@ -655,14 +706,50 @@ function OrderBuilder({ clientName, visitId, products, onCreateOrder, onDone }) 
       qty: q,
       unitPrice: matchedProduct.price || 0,
       availableQty: matchedProduct.qty,
+      isFree: false,
     }]);
     setProductQuery("");
     setQty("");
   };
 
-  const removeItem = (idx) => setItems((prev) => prev.filter((_, i) => i !== idx));
+  const removeItem = (idx) => {
+    setItems((prev) => {
+      const removed = prev[idx];
+      if (removed?.isFree && removed.viaOfferId) {
+        setAppliedOfferIds((ids) => { const next = new Set(ids); next.delete(removed.viaOfferId); return next; });
+      }
+      return prev.filter((_, i) => i !== idx);
+    });
+  };
 
+  const regularItems = items.filter((it) => !it.isFree);
+  const regularQty = regularItems.reduce((sum, it) => sum + it.qty, 0);
+  const weightedAvgPrice = regularQty > 0 ? regularItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0) / regularQty : 0;
   const total = items.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const eligibleOffers = offers.filter((o) =>
+    o.active && (!o.expiresAt || o.expiresAt >= todayStr) && regularQty >= o.buyQty && !appliedOfferIds.has(o.id)
+  );
+  const eligibleFreeProducts = products.filter((p) => p.qty > 0 && p.price > 0 && p.price <= weightedAvgPrice);
+  const matchedFreeProduct = eligibleFreeProducts.find((p) => p.name.toLowerCase().trim() === freeProductQuery.toLowerCase().trim());
+
+  const applyOffer = (offer) => {
+    if (!matchedFreeProduct) return;
+    setItems((prev) => [...prev, {
+      productId: matchedFreeProduct.id,
+      name: matchedFreeProduct.name,
+      qty: offer.getQty,
+      unitPrice: 0,
+      originalPrice: matchedFreeProduct.price,
+      availableQty: matchedFreeProduct.qty,
+      isFree: true,
+      viaOfferId: offer.id,
+    }]);
+    setAppliedOfferIds((prev) => new Set(prev).add(offer.id));
+    setApplyingOfferId(null);
+    setFreeProductQuery("");
+  };
 
   const doCreateOrder = async () => {
     if (items.length === 0) { setError("Add at least one item first."); return; }
@@ -672,7 +759,9 @@ function OrderBuilder({ clientName, visitId, products, onCreateOrder, onDone }) 
       const payload = {
         clientName,
         visitId,
-        items: items.map(({ productId, name, qty, unitPrice }) => ({ productId, name, qty, unitPrice })),
+        items: items.map(({ productId, name, qty, unitPrice, isFree, originalPrice }) => ({
+          productId, name, qty, unitPrice, isFree: !!isFree, originalPrice: originalPrice || 0,
+        })),
       };
       const created = await onCreateOrder(payload);
       downloadOrderPdf(created || { ...payload, date: new Date().toISOString(), total });
@@ -715,6 +804,54 @@ function OrderBuilder({ clientName, visitId, products, onCreateOrder, onDone }) 
 
       {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
 
+      {eligibleOffers.length > 0 && !applyingOfferId && (
+        <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 8, padding: 10, marginBottom: 10 }}>
+          {eligibleOffers.map((o) => (
+            <div key={o.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5, marginBottom: 6, flexWrap: "wrap", gap: 6 }}>
+              <span>🎉 Qualifies for <strong>{o.label}</strong> — {o.getQty} free item{o.getQty === 1 ? "" : "s"}, up to {weightedAvgPrice.toFixed(2)} each</span>
+              <button onClick={() => { setApplyingOfferId(o.id); setFreeProductQuery(""); }} style={{ padding: "5px 10px", borderRadius: 6, border: "none", background: "#C17817", color: "#fff", fontSize: 11.5, fontWeight: 500 }}>
+                Apply
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {applyingOfferId && (() => {
+        const offer = offers.find((o) => o.id === applyingOfferId);
+        if (!offer) return null;
+        return (
+          <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 8, padding: 10, marginBottom: 10 }}>
+            <div style={{ fontSize: 12.5, marginBottom: 6 }}>Pick a free item (up to {weightedAvgPrice.toFixed(2)}) for "{offer.label}":</div>
+            <input
+              value={freeProductQuery}
+              onChange={(e) => setFreeProductQuery(e.target.value)}
+              placeholder="Search eligible items…"
+              list="free-item-options"
+              style={inputStyle}
+            />
+            <datalist id="free-item-options">
+              {eligibleFreeProducts.map((p) => <option key={p.id} value={p.name} />)}
+            </datalist>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button
+                disabled={!matchedFreeProduct}
+                onClick={() => applyOffer(offer)}
+                style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: matchedFreeProduct ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
+              >
+                Add {offer.getQty} free
+              </button>
+              <button onClick={() => setApplyingOfferId(null)} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
+                Cancel
+              </button>
+            </div>
+            {eligibleFreeProducts.length === 0 && (
+              <div style={{ fontSize: 11.5, color: "#B33A3A", marginTop: 6 }}>No in-stock items priced at or below {weightedAvgPrice.toFixed(2)}.</div>
+            )}
+          </div>
+        );
+      })()}
+
       {items.length > 0 && (
         <div style={{ marginBottom: 12 }}>
           <div style={{ overflowX: "auto" }}>
@@ -732,13 +869,15 @@ function OrderBuilder({ clientName, visitId, products, onCreateOrder, onDone }) 
               <tbody>
                 {items.map((it, i) => (
                   <tr key={i} style={{ borderTop: "1px solid #E5DFD3" }}>
-                    <td style={{ padding: "4px 6px" }}>{it.name}</td>
+                    <td style={{ padding: "4px 6px" }}>
+                      {it.name}{it.isFree && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 600, padding: "1px 6px", borderRadius: 4, background: "#4C7A5E1A", color: "#4C7A5E" }}>FREE</span>}
+                    </td>
                     <td style={{ padding: "4px 6px" }}>{it.qty}</td>
                     <td style={{ padding: "4px 6px", color: it.qty > it.availableQty ? "#B33A3A" : "#4C7A5E" }}>
                       {it.availableQty}{it.qty > it.availableQty ? " ⚠" : ""}
                     </td>
-                    <td style={{ padding: "4px 6px" }}>{it.unitPrice.toFixed(2)}</td>
-                    <td style={{ padding: "4px 6px" }}>{(it.qty * it.unitPrice).toFixed(2)}</td>
+                    <td style={{ padding: "4px 6px" }}>{it.isFree ? "FREE" : it.unitPrice.toFixed(2)}</td>
+                    <td style={{ padding: "4px 6px" }}>{it.isFree ? "0.00" : (it.qty * it.unitPrice).toFixed(2)}</td>
                     <td style={{ padding: "4px 6px" }}>
                       <button onClick={() => removeItem(i)} style={{ background: "none", border: "none", color: "#B7AF9E" }}><X size={13} /></button>
                     </td>
@@ -766,22 +905,51 @@ function OrderBuilder({ clientName, visitId, products, onCreateOrder, onDone }) 
 }
 
 // ---------- Orders View (manager, order history) ----------
-function OrdersView({ orders }) {
+function OrdersView({ orders, onDelete, onApproveDelete, onDenyDelete }) {
+  const [confirmIds, setConfirmIds] = useState(new Set());
+  const askConfirm = (id) => setConfirmIds((prev) => new Set(prev).add(id));
+  const cancelConfirm = (id) => setConfirmIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
+  const doDelete = (id) => { onDelete(id); cancelConfirm(id); };
+
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Orders</h2>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {orders.map((o) => (
-          <div key={o.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+          <div
+            key={o.id}
+            style={{
+              background: o.status === "deletion_requested" ? "#FBF3F0" : "#fff",
+              border: o.status === "deletion_requested" ? "1px solid #E5B8B0" : "1px solid #E5DFD3",
+              borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8,
+            }}
+          >
             <div>
-              <div style={{ fontWeight: 600, fontSize: 13.5 }}>{o.clientName}</div>
+              <div style={{ fontWeight: 600, fontSize: 13.5 }}>{o.clientName}{o.repName ? ` · ${o.repName}` : ""}</div>
               <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
                 {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })} · {o.items.length} item{o.items.length === 1 ? "" : "s"} · total {o.total.toFixed(2)}
               </div>
+              {o.status === "deletion_requested" && <div style={{ fontSize: 11.5, color: "#B33A3A", marginTop: 4 }}>Rep requested deletion</div>}
             </div>
-            <button onClick={() => downloadOrderPdf(o)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12, fontWeight: 500 }}>
-              <Download size={13} /> PDF
-            </button>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <button onClick={() => downloadOrderPdf(o)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12, fontWeight: 500 }}>
+                <Download size={13} /> PDF
+              </button>
+              {o.status === "deletion_requested" ? (
+                <>
+                  <button onClick={() => onApproveDelete(o.id)} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "7px 12px" }}>Approve delete</button>
+                  <button onClick={() => onDenyDelete(o.id)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "7px 12px" }}>Deny</button>
+                </>
+              ) : confirmIds.has(o.id) ? (
+                <>
+                  <span style={{ fontSize: 11.5, color: "#B33A3A" }}>Delete?</span>
+                  <button onClick={() => doDelete(o.id)} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}>Yes</button>
+                  <button onClick={() => cancelConfirm(o.id)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Cancel</button>
+                </>
+              ) : (
+                <button onClick={() => askConfirm(o.id)} style={{ fontSize: 12, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "7px 12px" }}>Delete</button>
+              )}
+            </div>
           </div>
         ))}
         {orders.length === 0 && <EmptyState text="No orders logged yet." />}
@@ -1802,8 +1970,78 @@ function RepsManagementSection({ onRepsChanged }) {
   );
 }
 
+// ---------- Discounts & offers management (manager only) ----------
+function OffersManagementSection({ offers, onAdd, onToggleActive, onRemove }) {
+  const [label, setLabel] = useState("");
+  const [buyQty, setBuyQty] = useState("");
+  const [getQty, setGetQty] = useState("1");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const addOffer = async () => {
+    if (!label || !buyQty || !getQty) return;
+    setSaving(true);
+    setError("");
+    try {
+      await onAdd({ label, buyQty: Number(buyQty), getQty: Number(getQty), expiresAt });
+      setLabel(""); setBuyQty(""); setGetQty("1"); setExpiresAt("");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Discounts & offers</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Set up "buy X, get Y free" offers based on total items in an order (any mix of products). Leave the expiry blank for an offer that stays on until you remove or disable it.
+      </p>
+
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
+
+      {offers.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+          {offers.map((o) => (
+            <div key={o.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px", fontSize: 12.5 }}>
+              <div>
+                <strong>{o.label}</strong> — buy {o.buyQty}, get {o.getQty} free
+                {o.expiresAt ? ` · until ${o.expiresAt}` : " · always on"}
+                {!o.active && <span style={{ color: "#B33A3A" }}> · disabled</span>}
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button onClick={() => onToggleActive(o.id, !o.active)} style={{ background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "4px 8px", fontSize: 11.5 }}>
+                  {o.active ? "Disable" : "Enable"}
+                </button>
+                <button onClick={() => onRemove(o.id)} style={{ background: "none", border: "none", color: "#B33A3A", fontSize: 11.5 }}>Remove</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {offers.length === 0 && <div style={{ fontSize: 12.5, color: "#8A8272", marginBottom: 12 }}>No offers set up yet.</div>}
+
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Offer name, e.g. Buy 7 Get 1 Free" style={inputStyle} />
+        <input type="number" min="1" value={buyQty} onChange={(e) => setBuyQty(e.target.value)} placeholder="Buy qty" style={inputStyle} />
+        <input type="number" min="1" value={getQty} onChange={(e) => setGetQty(e.target.value)} placeholder="Get free qty" style={inputStyle} />
+        <input type="date" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} style={inputStyle} />
+      </div>
+      <button
+        disabled={!label || !buyQty || !getQty || saving}
+        onClick={addOffer}
+        style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: label && buyQty && getQty && !saving ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+      >
+        {saving ? "Adding…" : "Add offer"}
+      </button>
+    </div>
+  );
+}
+
 // ---------- Settings ----------
-function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, loadImportedInventory, onBulkImport, productCount, onRepsChanged }) {
+function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, loadImportedInventory, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer }) {
   const [showImportConfirm, setShowImportConfirm] = useState(false);
   const [imported, setImported] = useState(false);
 
@@ -1819,6 +2057,10 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Settings</h2>
 
       {role === "manager" && <RepsManagementSection onRepsChanged={onRepsChanged} />}
+
+      {role === "manager" && (
+        <OffersManagementSection offers={offers} onAdd={onAddOffer} onToggleActive={onToggleOfferActive} onRemove={onRemoveOffer} />
+      )}
 
       <ExcelImportSection onImport={onBulkImport} productCount={productCount} />
 

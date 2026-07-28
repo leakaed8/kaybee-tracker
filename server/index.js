@@ -95,9 +95,22 @@ function parseOrder(o) {
     id: o.id,
     clientName: o.clientName,
     visitId: o.visitId || "",
+    repName: o.repName || "",
     date: o.date,
     items: JSON.parse(o.items || "[]"),
     total: Number(o.total) || 0,
+    status: o.status || "confirmed",
+  };
+}
+
+function parseOffer(o) {
+  return {
+    id: o.id,
+    label: o.label,
+    buyQty: Number(o.buyQty) || 0,
+    getQty: Number(o.getQty) || 0,
+    expiresAt: o.expiresAt || "",
+    active: o.active !== "false",
   };
 }
 
@@ -159,13 +172,14 @@ app.get("/api/session", (req, res) => res.json({ role: req.role, repName: req.re
 
 app.get("/api/bootstrap", async (req, res) => {
   try {
-    const [products, visits, clients, outreachLog, orders, reps, rawSettings] = await Promise.all([
+    const [products, visits, clients, outreachLog, orders, reps, offers, rawSettings] = await Promise.all([
       db.getAllRows("Products"),
       db.getAllRows("Visits"),
       db.getAllRows("Clients"),
       db.getAllRows("OutreachLog"),
       db.getAllRows("Orders"),
       db.getAllRows("Reps"),
+      db.getAllRows("Offers"),
       db.getSettings(),
     ]);
     res.json({
@@ -175,6 +189,7 @@ app.get("/api/bootstrap", async (req, res) => {
       outreachLog: outreachLog.sort((a, b) => new Date(b.date) - new Date(a.date)),
       orders: orders.map(parseOrder).sort((a, b) => new Date(b.date) - new Date(a.date)),
       repNames: reps.map((r) => r.name),
+      offers: offers.map(parseOffer),
       settings: parseSettings(rawSettings),
     });
   } catch (e) {
@@ -284,18 +299,107 @@ app.post("/api/orders", async (req, res) => {
       name: String(it.name || "").trim(),
       qty: Number(it.qty) || 0,
       unitPrice: Number(it.unitPrice) || 0,
+      isFree: !!it.isFree,
+      originalPrice: Number(it.originalPrice) || 0,
     }));
     const total = cleanItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
     const order = {
       id: `ord${crypto.randomUUID()}`,
       clientName,
       visitId: visitId || "",
+      repName: req.repName || "",
       date: new Date().toISOString(),
       items: JSON.stringify(cleanItems),
       total,
+      status: "confirmed",
     };
     await db.appendRow("Orders", order);
     res.json(parseOrder(order));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/orders/:id/request-delete", async (req, res) => {
+  try {
+    const ok = await db.updateRowById("Orders", req.params.id, { status: "deletion_requested" });
+    if (!ok) return res.status(404).json({ error: "Order not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/orders/:id/approve-delete", requireManager, async (req, res) => {
+  try {
+    await db.deleteRowById("Orders", req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/orders/:id/deny-delete", requireManager, async (req, res) => {
+  try {
+    const ok = await db.updateRowById("Orders", req.params.id, { status: "confirmed" });
+    if (!ok) return res.status(404).json({ error: "Order not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/orders/:id", requireManager, async (req, res) => {
+  try {
+    await db.deleteRowById("Orders", req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/offers", requireManager, async (req, res) => {
+  try {
+    const { label, buyQty, getQty, expiresAt } = req.body;
+    if (!label || !buyQty || !getQty) return res.status(400).json({ error: "label, buyQty and getQty are required" });
+    const offer = {
+      id: `offer${crypto.randomUUID()}`,
+      label: String(label).trim(),
+      buyQty: Number(buyQty),
+      getQty: Number(getQty),
+      expiresAt: expiresAt || "",
+      active: "true",
+    };
+    await db.appendRow("Offers", offer);
+    res.json(parseOffer(offer));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/offers/:id", requireManager, async (req, res) => {
+  try {
+    const patch = {};
+    if (req.body.active !== undefined) patch.active = req.body.active ? "true" : "false";
+    const ok = await db.updateRowById("Offers", req.params.id, patch);
+    if (!ok) return res.status(404).json({ error: "Offer not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/offers/:id", requireManager, async (req, res) => {
+  try {
+    await db.deleteRowById("Offers", req.params.id);
+    res.json({ ok: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

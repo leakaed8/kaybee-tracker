@@ -7,8 +7,9 @@ const SCHEMAS = {
   Visits: ["id", "client", "notes", "coordsLat", "coordsLng", "time"],
   Clients: ["id", "name", "phone", "tier", "area", "assignedRep"],
   OutreachLog: ["id", "name", "date", "templateIndex"],
-  Orders: ["id", "clientName", "visitId", "date", "items", "total"],
+  Orders: ["id", "clientName", "visitId", "repName", "date", "items", "total", "status"],
   Reps: ["id", "name", "passcode"],
+  Offers: ["id", "label", "buyQty", "getQty", "expiresAt", "active"],
   Settings: ["key", "value"],
 };
 
