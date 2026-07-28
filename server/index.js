@@ -8,6 +8,51 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
+const IS_PROD = process.env.NODE_ENV === "production";
+const SESSION_SECRET = process.env.SESSION_SECRET || "kaybee-tracker-default-secret-change-me";
+
+function signRole(role) {
+  const hmac = crypto.createHmac("sha256", SESSION_SECRET).update(role).digest("hex");
+  return `${role}.${hmac}`;
+}
+
+function verifySessionToken(token) {
+  if (!token) return null;
+  const dotIndex = token.lastIndexOf(".");
+  if (dotIndex === -1) return null;
+  const role = token.slice(0, dotIndex);
+  const hmac = token.slice(dotIndex + 1);
+  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(role).digest("hex");
+  const a = Buffer.from(hmac);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  return role;
+}
+
+function parseCookies(req) {
+  const header = req.headers.cookie;
+  const out = {};
+  if (!header) return out;
+  header.split(";").forEach((pair) => {
+    const idx = pair.indexOf("=");
+    if (idx === -1) return;
+    out[pair.slice(0, idx).trim()] = decodeURIComponent(pair.slice(idx + 1).trim());
+  });
+  return out;
+}
+
+function setSessionCookie(res, token, maxAgeSeconds) {
+  const parts = [`kb_session=${encodeURIComponent(token)}`, "HttpOnly", "SameSite=Lax", "Path=/", `Max-Age=${maxAgeSeconds}`];
+  if (IS_PROD) parts.push("Secure");
+  res.setHeader("Set-Cookie", parts.join("; "));
+}
+
+function requireAuth(req, res, next) {
+  const role = verifySessionToken(parseCookies(req).kb_session);
+  if (!role) return res.status(401).json({ error: "Please log in." });
+  req.role = role;
+  next();
+}
 
 const DEFAULT_SETTINGS = {
   slowThreshold: 15,
@@ -49,6 +94,27 @@ function visitToRow(v) {
 }
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
+
+app.post("/api/login", (req, res) => {
+  const { passcode } = req.body || {};
+  const managerCode = process.env.MANAGER_PASSCODE;
+  const repCode = process.env.REP_PASSCODE;
+  let role = null;
+  if (managerCode && passcode === managerCode) role = "manager";
+  else if (repCode && passcode === repCode) role = "rep";
+  if (!role) return res.status(401).json({ error: "Incorrect passcode." });
+  setSessionCookie(res, signRole(role), 60 * 60 * 24 * 30);
+  res.json({ ok: true, role });
+});
+
+app.post("/api/logout", (req, res) => {
+  setSessionCookie(res, "", 0);
+  res.json({ ok: true });
+});
+
+app.use("/api", requireAuth);
+
+app.get("/api/session", (req, res) => res.json({ role: req.role }));
 
 app.get("/api/bootstrap", async (req, res) => {
   try {
@@ -107,6 +173,34 @@ app.post("/api/products/import-sample", async (req, res) => {
   try {
     await db.replaceAllRows("Products", importedInventory);
     res.json({ ok: true, count: importedInventory.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/products/import-bulk", async (req, res) => {
+  try {
+    const { products } = req.body;
+    if (!Array.isArray(products) || products.length === 0) {
+      return res.status(400).json({ error: "No products provided" });
+    }
+    const normalized = products
+      .filter((p) => p.name && p.expiry)
+      .map((p) => ({
+        id: `p${crypto.randomUUID()}`,
+        name: String(p.name).trim(),
+        category: p.category || "Supplement",
+        expiry: p.expiry,
+        qty: Number(p.qty) || 0,
+        sold90: Number(p.sold90) || 0,
+        description: p.description || "",
+      }));
+    if (normalized.length === 0) {
+      return res.status(400).json({ error: "None of the rows had both a name and an expiry date" });
+    }
+    await db.replaceAllRows("Products", normalized);
+    res.json({ ok: true, count: normalized.length });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

@@ -11,10 +11,14 @@ async function request(path, options) {
 }
 
 export const api = {
+  login: (passcode) => request("/login", { method: "POST", body: JSON.stringify({ passcode }) }),
+  logout: () => request("/logout", { method: "POST" }),
+  getSession: () => request("/session"),
   bootstrap: () => request("/bootstrap"),
   addProduct: (product) => request("/products", { method: "POST", body: JSON.stringify(product) }),
   removeProduct: (id) => request(`/products/${id}`, { method: "DELETE" }),
   importSampleInventory: () => request("/products/import-sample", { method: "POST" }),
+  importBulkProducts: (products) => request("/products/import-bulk", { method: "POST", body: JSON.stringify({ products }) }),
   addVisit: (visit) => request("/visits", { method: "POST", body: JSON.stringify(visit) }),
   addClient: (client) => request("/clients", { method: "POST", body: JSON.stringify(client) }),
   removeClient: (id) => request(`/clients/${id}`, { method: "DELETE" }),

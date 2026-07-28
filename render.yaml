@@ -14,3 +14,7 @@ services:
         sync: false
       - key: SHEET_ID
         sync: false
+      - key: MANAGER_PASSCODE
+        sync: false
+      - key: REP_PASSCODE
+        sync: false

@@ -52,3 +52,22 @@ export const daysSince = (dateStr) => {
   if (!dateStr) return null;
   return Math.round((new Date() - new Date(dateStr)) / 86400000);
 };
+
+// Handles the three shapes a spreadsheet cell can hand back: a JS Date (xlsx
+// parses formatted date cells this way), an Excel serial day number (cells
+// that hold a date but aren't formatted as one), or a plain text date string.
+export const parseExcelCellDate = (value) => {
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10);
+  }
+  if (typeof value === "number" && isFinite(value)) {
+    const epoch = Date.UTC(1899, 11, 30);
+    const d = new Date(epoch + value * 86400000);
+    if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  }
+  if (typeof value === "string" && value.trim()) {
+    const d = new Date(value.trim());
+    if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  }
+  return null;
+};

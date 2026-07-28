@@ -1,18 +1,20 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import * as XLSX from "xlsx";
 import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
-  TrendingDown, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download,
+  TrendingDown, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
   Navigation, Users, Target, Megaphone,
 } from "lucide-react";
 import { api } from "./api.js";
 import {
-  daysUntil, fmtDate, turnoverPct, zoneFor, lifecyclePct, TIER_CADENCE, haversineKm, daysSince,
+  daysUntil, fmtDate, turnoverPct, zoneFor, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
 } from "./helpers.js";
 
 const POLL_INTERVAL_MS = 20000;
 
 // ---------- main app ----------
 export default function App() {
+  const [authState, setAuthState] = useState("checking"); // checking | out | in
   const [role, setRole] = useState(() => localStorage.getItem("kb-role") || "manager");
   const [tab, setTab] = useState("expiry");
   const [products, setProducts] = useState([]);
@@ -32,6 +34,17 @@ export default function App() {
 
   useEffect(() => { localStorage.setItem("kb-role", role); }, [role]);
 
+  useEffect(() => {
+    api.getSession()
+      .then((data) => { setRole(data.role); setAuthState("in"); })
+      .catch(() => setAuthState("out"));
+  }, []);
+
+  const logout = async () => {
+    try { await api.logout(); } catch { /* cookie is cleared client-side regardless */ }
+    setAuthState("out");
+  };
+
   const refresh = useCallback(async () => {
     try {
       const data = await api.bootstrap();
@@ -49,10 +62,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (authState !== "in") return;
     refresh();
     const id = setInterval(refresh, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [refresh]);
+  }, [refresh, authState]);
 
   const withSync = useCallback(async (fn) => {
     setSyncStatus("saving");
@@ -91,6 +105,7 @@ export default function App() {
   const addProduct = (prod) => withSync(() => api.addProduct(prod));
   const removeProduct = (id) => withSync(() => api.removeProduct(id));
   const loadImportedInventory = () => withSync(() => api.importSampleInventory());
+  const bulkImportProducts = (products) => withSync(() => api.importBulkProducts(products));
   const addVisit = (visit) => withSync(() => api.addVisit(visit));
   const addClient = (client) => withSync(() => api.addClient(client));
   const removeClient = (id) => withSync(() => api.removeClient(id));
@@ -98,6 +113,18 @@ export default function App() {
 
   const zoned = products.map((p) => ({ ...p, zone: zoneFor(p, role, settings.slowThreshold) }));
   const sorted = [...zoned].sort((a, b) => daysUntil(a.expiry) - daysUntil(b.expiry));
+
+  if (authState === "checking") {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#FAF7F2" }}>
+        <Loader2 size={22} className="spin" color="#8A8272" />
+      </div>
+    );
+  }
+
+  if (authState === "out") {
+    return <LoginView onSuccess={(r) => { setRole(r); setAuthState("in"); }} />;
+  }
 
   return (
     <div style={{ minHeight: "100vh", background: "#FAF7F2", fontFamily: "'IBM Plex Sans', system-ui, sans-serif", color: "#1F2A24" }}>
@@ -120,7 +147,12 @@ export default function App() {
             {syncStatus === "saving" ? "syncing…" : syncStatus === "saved" ? "✓ synced" : syncStatus === "error" ? "⚠ sync error, will retry" : "expiry · routes · visits"}
           </div>
         </div>
-        <RoleToggle role={role} setRole={setRole} />
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <RoleToggle role={role} setRole={setRole} />
+          <button onClick={logout} style={{ fontSize: 12, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 8, padding: "9px 12px" }}>
+            Log out
+          </button>
+        </div>
       </header>
 
       <nav style={{ display: "flex", gap: 4, padding: "12px 24px 0", borderBottom: "1px solid #E5DFD3", overflowX: "auto" }}>
@@ -189,12 +221,58 @@ export default function App() {
                 dailyTarget={settings.dailyTarget} setDailyTarget={(v) => updateSettingsField({ dailyTarget: v })}
                 templates={settings.templates} setTemplates={(v) => updateSettingsField({ templates: v })}
                 loadImportedInventory={loadImportedInventory}
+                onBulkImport={bulkImportProducts}
                 productCount={products.length}
               />
             )}
           </>
         )}
       </main>
+    </div>
+  );
+}
+
+function LoginView({ onSuccess }) {
+  const [passcode, setPasscode] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    try {
+      const data = await api.login(passcode);
+      onSuccess(data.role);
+    } catch (err) {
+      setError("Incorrect passcode.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#FAF7F2", fontFamily: "'IBM Plex Sans', system-ui, sans-serif", padding: 16 }}>
+      <form onSubmit={submit} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 12, padding: 28, width: "100%", maxWidth: 300 }}>
+        <div className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, marginBottom: 4 }}>KayBee Field Tracker</div>
+        <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>Enter your passcode to continue.</p>
+        <input
+          type="password"
+          value={passcode}
+          onChange={(e) => setPasscode(e.target.value)}
+          placeholder="Passcode"
+          autoFocus
+          style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 14, marginBottom: 10, background: "#FAF7F2" }}
+        />
+        {error && <div style={{ fontSize: 12.5, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
+        <button
+          type="submit"
+          disabled={!passcode || loading}
+          style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "none", background: passcode && !loading ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 14, fontWeight: 500 }}
+        >
+          {loading ? "Checking…" : "Continue"}
+        </button>
+      </form>
     </div>
   );
 }
@@ -946,8 +1024,202 @@ function OutreachView({ dailyTarget, contactedToday, templates, outreachLog, tod
   );
 }
 
+// ---------- Excel upload with column mapping ----------
+function ExcelImportSection({ onImport, productCount }) {
+  const [sheetNames, setSheetNames] = useState([]);
+  const [selectedSheet, setSelectedSheet] = useState("");
+  const [workbook, setWorkbook] = useState(null);
+  const [headers, setHeaders] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [mapping, setMapping] = useState({ name: "", expiry: "", qty: "", sold90: "", category: "", description: "" });
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const readSheet = (wb, sheetName) => {
+    const ws = wb.Sheets[sheetName];
+    const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+    const headerRow = (json[0] || []).map((h, i) => (h === "" ? `Column ${i + 1}` : String(h)));
+    const dataRows = json.slice(1).filter((r) => r.some((cell) => cell !== ""));
+    setHeaders(headerRow);
+    setRows(dataRows);
+  };
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setError("");
+    setResult(null);
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: "array", cellDates: true });
+        setWorkbook(wb);
+        setSheetNames(wb.SheetNames);
+        setSelectedSheet(wb.SheetNames[0]);
+        readSheet(wb, wb.SheetNames[0]);
+        setMapping({ name: "", expiry: "", qty: "", sold90: "", category: "", description: "" });
+      } catch (err) {
+        setError("Couldn't read that file. Make sure it's a valid Excel (.xlsx) file.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const changeSheet = (name) => {
+    setSelectedSheet(name);
+    readSheet(workbook, name);
+    setMapping({ name: "", expiry: "", qty: "", sold90: "", category: "", description: "" });
+  };
+
+  const parsed = useMemo(() => {
+    if (!mapping.name || !mapping.expiry || !mapping.qty) return { valid: [], skipped: 0 };
+    const nameIdx = headers.indexOf(mapping.name);
+    const expiryIdx = headers.indexOf(mapping.expiry);
+    const qtyIdx = headers.indexOf(mapping.qty);
+    const sold90Idx = headers.indexOf(mapping.sold90);
+    const categoryIdx = headers.indexOf(mapping.category);
+    const descIdx = headers.indexOf(mapping.description);
+
+    let skipped = 0;
+    const valid = [];
+    rows.forEach((r) => {
+      const name = String(r[nameIdx] ?? "").trim();
+      const expiry = parseExcelCellDate(r[expiryIdx]);
+      if (!name || !expiry) { skipped++; return; }
+      valid.push({
+        name,
+        expiry,
+        qty: Number(r[qtyIdx]) || 0,
+        sold90: sold90Idx >= 0 ? Number(r[sold90Idx]) || 0 : 0,
+        category: categoryIdx >= 0 && r[categoryIdx] ? String(r[categoryIdx]).trim() : "Supplement",
+        description: descIdx >= 0 ? String(r[descIdx] || "").trim() : "",
+      });
+    });
+    return { valid, skipped };
+  }, [mapping, rows, headers]);
+
+  const canImport = mapping.name && mapping.expiry && mapping.qty && parsed.valid.length > 0;
+
+  const doImport = async () => {
+    setError("");
+    setImporting(true);
+    try {
+      await onImport(parsed.valid);
+      setResult({ count: parsed.valid.length });
+      setWorkbook(null);
+      setHeaders([]);
+      setRows([]);
+      setSheetNames([]);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    } catch (e) {
+      setError(e.message || "Import failed.");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const fieldSelect = (field, label, required) => (
+    <div>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>
+        {label}{required ? " *" : " (optional)"}
+      </label>
+      <select value={mapping[field]} onChange={(e) => setMapping((m) => ({ ...m, [field]: e.target.value }))} style={inputStyle}>
+        <option value="">{required ? "— select a column —" : "— none —"}</option>
+        {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+      </select>
+    </div>
+  );
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Upload your own inventory (Excel file)</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Upload an .xlsx file with your current stock. Match its columns to what the app needs below, preview the result, then confirm — this replaces the current product list ({productCount} items now).
+      </p>
+
+      <button
+        onClick={() => fileInputRef.current?.click()}
+        style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500, marginBottom: 10 }}
+      >
+        <Upload size={15} /> Choose Excel file
+      </button>
+      <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ display: "none" }} />
+
+      {error && <div style={{ fontSize: 12.5, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
+      {result && <div style={{ fontSize: 12.5, color: "#4C7A5E", display: "flex", alignItems: "center", gap: 5, marginBottom: 10 }}><Check size={14} /> Imported {result.count} products.</div>}
+
+      {headers.length > 0 && (
+        <div style={{ padding: 12, background: "#FAF7F2", borderRadius: 8 }}>
+          {sheetNames.length > 1 && (
+            <div style={{ marginBottom: 10 }}>
+              <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>Sheet / tab</label>
+              <select value={selectedSheet} onChange={(e) => changeSheet(e.target.value)} style={inputStyle}>
+                {sheetNames.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {fieldSelect("name", "Product name column", true)}
+            {fieldSelect("expiry", "Expiry date column", true)}
+            {fieldSelect("qty", "Quantity in stock column", true)}
+            {fieldSelect("sold90", "Units sold (last 90 days) column", false)}
+            {fieldSelect("category", "Category column", false)}
+            {fieldSelect("description", "Description column", false)}
+          </div>
+
+          {mapping.name && mapping.expiry && mapping.qty && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 12, color: "#5B5445", marginBottom: 6 }}>
+                {parsed.valid.length} rows ready to import{parsed.skipped > 0 ? `, ${parsed.skipped} skipped (missing name or unreadable expiry date)` : ""}.
+              </div>
+              {parsed.valid.length > 0 && (
+                <div style={{ overflowX: "auto", marginBottom: 10 }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+                    <thead>
+                      <tr style={{ textAlign: "left", color: "#8A8272" }}>
+                        <th style={{ padding: "4px 6px" }}>Name</th>
+                        <th style={{ padding: "4px 6px" }}>Category</th>
+                        <th style={{ padding: "4px 6px" }}>Expiry</th>
+                        <th style={{ padding: "4px 6px" }}>Qty</th>
+                        <th style={{ padding: "4px 6px" }}>Sold/90d</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {parsed.valid.slice(0, 5).map((p, i) => (
+                        <tr key={i} style={{ borderTop: "1px solid #E5DFD3" }}>
+                          <td style={{ padding: "4px 6px" }}>{p.name}</td>
+                          <td style={{ padding: "4px 6px" }}>{p.category}</td>
+                          <td style={{ padding: "4px 6px" }}>{p.expiry}</td>
+                          <td style={{ padding: "4px 6px" }}>{p.qty}</td>
+                          <td style={{ padding: "4px 6px" }}>{p.sold90}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {parsed.valid.length > 5 && <div style={{ fontSize: 11, color: "#8A8272", marginTop: 4 }}>...and {parsed.valid.length - 5} more</div>}
+                </div>
+              )}
+              <button
+                disabled={!canImport || importing}
+                onClick={doImport}
+                style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: canImport && !importing ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+              >
+                {importing ? "Importing…" : `Replace inventory with these ${parsed.valid.length} products`}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------- Settings ----------
-function SettingsView({ slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, loadImportedInventory, productCount }) {
+function SettingsView({ slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, loadImportedInventory, onBulkImport, productCount }) {
   const [showImportConfirm, setShowImportConfirm] = useState(false);
   const [imported, setImported] = useState(false);
 
@@ -961,6 +1233,8 @@ function SettingsView({ slowThreshold, setSlowThreshold, repPhone, setRepPhone, 
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Settings</h2>
+
+      <ExcelImportSection onImport={onBulkImport} productCount={productCount} />
 
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
         <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Sample inventory import</label>
