@@ -192,7 +192,7 @@ export default function App() {
                 onRemove={removeProduct}
               />
             )}
-            {tab === "checkin" && role === "rep" && <CheckInView visits={visits} onAddVisit={addVisit} />}
+            {tab === "checkin" && role === "rep" && <CheckInView visits={visits} clients={clients} onAddVisit={addVisit} />}
             {tab === "clients" && <ClientsView clients={clients} visits={visits} onAdd={addClient} onRemove={removeClient} />}
             {tab === "route" && role === "rep" && <RouteView clients={clients} visits={visits} />}
             {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} visits={visits} />}
@@ -460,7 +460,7 @@ function Field({ label, children }) {
 const inputStyle = { width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #E5DFD3", fontSize: 13, background: "#FAF7F2" };
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ visits, onAddVisit }) {
+function CheckInView({ visits, clients, onAddVisit }) {
   const [client, setClient] = useState("");
   const [notes, setNotes] = useState("");
   const [coords, setCoords] = useState(null);
@@ -495,7 +495,16 @@ function CheckInView({ visits, onAddVisit }) {
 
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
         <Field label="Client / pharmacy name">
-          <input value={client} onChange={(e) => setClient(e.target.value)} placeholder="e.g. Pharmacie Al Nour" style={{ ...inputStyle, marginBottom: 10 }} />
+          <input
+            value={client}
+            onChange={(e) => setClient(e.target.value)}
+            placeholder="e.g. Pharmacie Al Nour"
+            list="checkin-client-options"
+            style={{ ...inputStyle, marginBottom: 10 }}
+          />
+          <datalist id="checkin-client-options">
+            {clients.map((c) => <option key={c.id} value={c.name} />)}
+          </datalist>
         </Field>
         <Field label="Visit notes">
           <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="What was discussed, orders taken, objections…" rows={3} style={{ ...inputStyle, marginBottom: 10, resize: "vertical" }} />
