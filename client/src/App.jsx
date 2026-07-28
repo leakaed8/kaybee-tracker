@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
+﻿import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import * as XLSX from "xlsx";
 import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
@@ -15,7 +15,7 @@ const POLL_INTERVAL_MS = 20000;
 // ---------- main app ----------
 export default function App() {
   const [authState, setAuthState] = useState("checking"); // checking | out | in
-  const [role, setRole] = useState(() => localStorage.getItem("kb-role") || "manager");
+  const [role, setRole] = useState("manager");
   const [tab, setTab] = useState("expiry");
   const [products, setProducts] = useState([]);
   const [visits, setVisits] = useState([]);
@@ -31,8 +31,6 @@ export default function App() {
 
   const settingsDirtyRef = useRef(false);
   const settingsDebounceRef = useRef(null);
-
-  useEffect(() => { localStorage.setItem("kb-role", role); }, [role]);
 
   useEffect(() => {
     api.getSession()
@@ -148,7 +146,9 @@ export default function App() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <RoleToggle role={role} setRole={setRole} />
+          <span style={{ fontSize: 13, fontWeight: 500, color: "#5B5445", background: "#F0EBE0", borderRadius: 8, padding: "9px 16px" }}>
+            {role === "manager" ? "Manager" : "Med Rep"}
+          </span>
           <button onClick={logout} style={{ fontSize: 12, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 8, padding: "9px 12px" }}>
             Log out
           </button>
@@ -273,23 +273,6 @@ function LoginView({ onSuccess }) {
           {loading ? "Checking…" : "Continue"}
         </button>
       </form>
-    </div>
-  );
-}
-
-function RoleToggle({ role, setRole }) {
-  return (
-    <div style={{ display: "flex", background: "#F0EBE0", borderRadius: 10, padding: 3 }}>
-      {["manager", "rep"].map((r) => (
-        <button key={r} onClick={() => setRole(r)} style={{
-          padding: "7px 16px", borderRadius: 8, border: "none",
-          background: role === r ? "#1F2A24" : "transparent",
-          color: role === r ? "#FAF7F2" : "#5B5445",
-          fontSize: 13, fontWeight: 500, transition: "all .15s",
-        }}>
-          {r === "manager" ? "Manager (you)" : "Med Rep"}
-        </button>
-      ))}
     </div>
   );
 }
@@ -1313,3 +1296,5 @@ function SettingsView({ slowThreshold, setSlowThreshold, repPhone, setRepPhone, 
 function EmptyState({ text }) {
   return <div style={{ textAlign: "center", padding: "30px 0", color: "#B7AF9E", fontSize: 13 }}>{text}</div>;
 }
+
+
