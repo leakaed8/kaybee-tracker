@@ -3,10 +3,11 @@ const { google } = require("googleapis");
 const SHEET_ID = process.env.SHEET_ID;
 
 const SCHEMAS = {
-  Products: ["id", "name", "category", "expiry", "qty", "sold90", "description"],
+  Products: ["id", "name", "category", "expiry", "qty", "sold90", "description", "price"],
   Visits: ["id", "client", "notes", "coordsLat", "coordsLng", "time"],
   Clients: ["id", "name", "phone", "tier", "area"],
   OutreachLog: ["id", "name", "date", "templateIndex"],
+  Orders: ["id", "clientName", "visitId", "date", "items", "total"],
   Settings: ["key", "value"],
 };
 
@@ -123,6 +124,37 @@ async function appendRow(tab, obj) {
   });
 }
 
+async function appendRows(tab, objects) {
+  await ensureSheets();
+  if (objects.length === 0) return;
+  const sheets = getSheets();
+  const headers = SCHEMAS[tab];
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SHEET_ID,
+    range: `${tab}!A1`,
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: objects.map((o) => objectToRow(headers, o)) },
+  });
+}
+
+async function updateRowById(tab, id, patch) {
+  await ensureSheets();
+  const sheets = getSheets();
+  const headers = SCHEMAS[tab];
+  const rows = await getAllRows(tab);
+  const target = rows.find((r) => String(r.id) === String(id));
+  if (!target) return false;
+  const merged = { ...target, ...patch };
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID,
+    range: `${tab}!A${target._row}:${String.fromCharCode(64 + headers.length)}${target._row}`,
+    valueInputOption: "RAW",
+    requestBody: { values: [objectToRow(headers, merged)] },
+  });
+  return true;
+}
+
 async function deleteRowById(tab, id) {
   await ensureSheets();
   const sheets = getSheets();
@@ -228,6 +260,8 @@ module.exports = {
   ensureSheets,
   getAllRows,
   appendRow,
+  appendRows,
+  updateRowById,
   deleteRowById,
   replaceAllRows,
   getSettings,

@@ -74,7 +74,18 @@ function parseSettings(raw) {
 }
 
 function parseProduct(p) {
-  return { ...p, qty: Number(p.qty) || 0, sold90: Number(p.sold90) || 0 };
+  return { ...p, qty: Number(p.qty) || 0, sold90: Number(p.sold90) || 0, price: Number(p.price) || 0 };
+}
+
+function parseOrder(o) {
+  return {
+    id: o.id,
+    clientName: o.clientName,
+    visitId: o.visitId || "",
+    date: o.date,
+    items: JSON.parse(o.items || "[]"),
+    total: Number(o.total) || 0,
+  };
 }
 
 function parseVisit(v) {
@@ -118,11 +129,12 @@ app.get("/api/session", (req, res) => res.json({ role: req.role }));
 
 app.get("/api/bootstrap", async (req, res) => {
   try {
-    const [products, visits, clients, outreachLog, rawSettings] = await Promise.all([
+    const [products, visits, clients, outreachLog, orders, rawSettings] = await Promise.all([
       db.getAllRows("Products"),
       db.getAllRows("Visits"),
       db.getAllRows("Clients"),
       db.getAllRows("OutreachLog"),
+      db.getAllRows("Orders"),
       db.getSettings(),
     ]);
     res.json({
@@ -130,6 +142,7 @@ app.get("/api/bootstrap", async (req, res) => {
       visits: visits.map(parseVisit).sort((a, b) => new Date(b.time) - new Date(a.time)),
       clients,
       outreachLog: outreachLog.sort((a, b) => new Date(b.date) - new Date(a.date)),
+      orders: orders.map(parseOrder).sort((a, b) => new Date(b.date) - new Date(a.date)),
       settings: parseSettings(rawSettings),
     });
   } catch (e) {
@@ -140,7 +153,7 @@ app.get("/api/bootstrap", async (req, res) => {
 
 app.post("/api/products", async (req, res) => {
   try {
-    const { name, category, expiry, qty, sold90, description } = req.body;
+    const { name, category, expiry, qty, sold90, description, price } = req.body;
     if (!name || !expiry) return res.status(400).json({ error: "name and expiry are required" });
     const product = {
       id: `p${crypto.randomUUID()}`,
@@ -150,6 +163,7 @@ app.post("/api/products", async (req, res) => {
       qty: Number(qty) || 0,
       sold90: Number(sold90) || 0,
       description: description || "",
+      price: Number(price) || 0,
     };
     await db.appendRow("Products", product);
     res.json(product);
@@ -195,6 +209,7 @@ app.post("/api/products/import-bulk", async (req, res) => {
         qty: Number(p.qty) || 0,
         sold90: Number(p.sold90) || 0,
         description: p.description || "",
+        price: Number(p.price) || 0,
       }));
     if (normalized.length === 0) {
       return res.status(400).json({ error: "None of the rows had both a name and an expiry date" });
@@ -226,6 +241,35 @@ app.post("/api/visits", async (req, res) => {
   }
 });
 
+app.post("/api/orders", async (req, res) => {
+  try {
+    const { clientName, visitId, items } = req.body;
+    if (!clientName || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "clientName and at least one item are required" });
+    }
+    const cleanItems = items.map((it) => ({
+      productId: it.productId || "",
+      name: String(it.name || "").trim(),
+      qty: Number(it.qty) || 0,
+      unitPrice: Number(it.unitPrice) || 0,
+    }));
+    const total = cleanItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
+    const order = {
+      id: `ord${crypto.randomUUID()}`,
+      clientName,
+      visitId: visitId || "",
+      date: new Date().toISOString(),
+      items: JSON.stringify(cleanItems),
+      total,
+    };
+    await db.appendRow("Orders", order);
+    res.json(parseOrder(order));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/clients", async (req, res) => {
   try {
     const { name, phone, tier, area } = req.body;
@@ -233,6 +277,42 @@ app.post("/api/clients", async (req, res) => {
     const client = { id: `c${crypto.randomUUID()}`, name, phone: phone || "", tier: tier || "B", area: area || "" };
     await db.appendRow("Clients", client);
     res.json(client);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/clients/import-bulk", async (req, res) => {
+  try {
+    const { toAdd, toUpdate } = req.body;
+    const addList = Array.isArray(toAdd) ? toAdd : [];
+    const updateList = Array.isArray(toUpdate) ? toUpdate : [];
+
+    const newClients = addList
+      .filter((c) => c.name)
+      .map((c) => ({
+        id: `c${crypto.randomUUID()}`,
+        name: String(c.name).trim(),
+        phone: c.phone || "",
+        tier: c.tier || "B",
+        area: c.area || "",
+      }));
+
+    if (newClients.length > 0) await db.appendRows("Clients", newClients);
+
+    let updatedCount = 0;
+    for (const u of updateList) {
+      if (!u.id) continue;
+      const patch = {};
+      if (u.phone !== undefined) patch.phone = u.phone;
+      if (u.area !== undefined) patch.area = u.area;
+      if (u.tier !== undefined) patch.tier = u.tier;
+      const ok = await db.updateRowById("Clients", u.id, patch);
+      if (ok) updatedCount++;
+    }
+
+    res.json({ ok: true, added: newClients.length, updated: updatedCount });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

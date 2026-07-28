@@ -1,9 +1,11 @@
-﻿import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import * as XLSX from "xlsx";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
   TrendingDown, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
-  Navigation, Users, Target, Megaphone,
+  Navigation, Users, Target, Megaphone, ShoppingCart,
 } from "lucide-react";
 import { api } from "./api.js";
 import {
@@ -21,6 +23,7 @@ export default function App() {
   const [visits, setVisits] = useState([]);
   const [clients, setClients] = useState([]);
   const [outreachLog, setOutreachLog] = useState([]);
+  const [orders, setOrders] = useState([]);
   const [settings, setSettings] = useState({
     slowThreshold: 15, repPhone: "", dailyTarget: 3, monthlyVisitTarget: 60, templates: [],
   });
@@ -50,6 +53,7 @@ export default function App() {
       setVisits(data.visits);
       setClients(data.clients);
       setOutreachLog(data.outreachLog);
+      setOrders(data.orders || []);
       if (!settingsDirtyRef.current) setSettings(data.settings);
       setLoadError("");
     } catch (e) {
@@ -69,13 +73,15 @@ export default function App() {
   const withSync = useCallback(async (fn) => {
     setSyncStatus("saving");
     try {
-      await fn();
+      const result = await fn();
       await refresh();
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus(""), 1200);
+      return result;
     } catch (e) {
       setSyncStatus("error");
       setLoadError(e.message);
+      return undefined;
     }
   }, [refresh]);
 
@@ -105,8 +111,10 @@ export default function App() {
   const loadImportedInventory = () => withSync(() => api.importSampleInventory());
   const bulkImportProducts = (products) => withSync(() => api.importBulkProducts(products));
   const addVisit = (visit) => withSync(() => api.addVisit(visit));
+  const createOrder = (order) => withSync(() => api.createOrder(order));
   const addClient = (client) => withSync(() => api.addClient(client));
   const removeClient = (id) => withSync(() => api.removeClient(id));
+  const bulkImportClients = (payload) => withSync(() => api.importClientsBulk(payload));
   const logOutreach = (entry) => withSync(() => api.logOutreach(entry));
 
   const zoned = products.map((p) => ({ ...p, zone: zoneFor(p, role, settings.slowThreshold) }));
@@ -164,6 +172,7 @@ export default function App() {
         {role === "manager" && <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<Target size={15} />} label="Performance" />}
         {role === "manager" && <TabBtn active={tab === "outreach"} onClick={() => setTab("outreach")} icon={<MessageCircle size={15} />} label="Outreach" />}
         {role === "manager" && <TabBtn active={tab === "broadcast"} onClick={() => setTab("broadcast")} icon={<Megaphone size={15} />} label="Broadcast" />}
+        {role === "manager" && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
         <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />
       </nav>
 
@@ -192,10 +201,13 @@ export default function App() {
                 onRemove={removeProduct}
               />
             )}
-            {tab === "checkin" && role === "rep" && <CheckInView visits={visits} clients={clients} onAddVisit={addVisit} />}
-            {tab === "clients" && <ClientsView clients={clients} visits={visits} onAdd={addClient} onRemove={removeClient} />}
+            {tab === "checkin" && role === "rep" && (
+              <CheckInView visits={visits} clients={clients} products={products} onAddVisit={addVisit} onCreateOrder={createOrder} />
+            )}
+            {tab === "clients" && <ClientsView clients={clients} visits={visits} onAdd={addClient} onRemove={removeClient} onBulkImport={bulkImportClients} />}
             {tab === "route" && role === "rep" && <RouteView clients={clients} visits={visits} />}
             {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} visits={visits} />}
+            {tab === "orders" && role === "manager" && <OrdersView orders={orders} />}
             {tab === "performance" && role === "manager" && (
               <PerformanceView
                 visits={visits}
@@ -354,7 +366,7 @@ function ProductRow({ product, repPhone, onRemove }) {
         <div>
           <div style={{ fontSize: 14.5, fontWeight: 600 }}>{product.name}</div>
           <div className="kb-font-mono" style={{ fontSize: 11.5, color: "#8A8272", marginTop: 2 }}>
-            {product.category} · {product.qty} units · expires {fmtDate(product.expiry)}
+            {product.category} · {product.qty} units · expires {fmtDate(product.expiry)}{product.price ? ` · price ${product.price.toFixed(2)}` : ""}
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -406,6 +418,7 @@ function AddProductForm({ onAdd, onCancel }) {
   const [qty, setQty] = useState("");
   const [sold90, setSold90] = useState("");
   const [description, setDescription] = useState("");
+  const [price, setPrice] = useState("");
 
   const canSubmit = name && expiry && qty !== "" && sold90 !== "";
 
@@ -429,6 +442,9 @@ function AddProductForm({ onAdd, onCancel }) {
         <Field label="Units sold, last 90 days">
           <input type="number" min="0" value={sold90} onChange={(e) => setSold90(e.target.value)} placeholder="0" style={inputStyle} />
         </Field>
+        <Field label="Price (optional)">
+          <input type="number" min="0" step="0.01" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="0.00" style={inputStyle} />
+        </Field>
       </div>
       <div style={{ marginBottom: 10 }}>
         <Field label="Description (optional)">
@@ -438,7 +454,7 @@ function AddProductForm({ onAdd, onCancel }) {
       <div style={{ display: "flex", gap: 8 }}>
         <button
           disabled={!canSubmit}
-          onClick={() => onAdd({ name, category, expiry, qty: Number(qty), sold90: Number(sold90), description: description || undefined })}
+          onClick={() => onAdd({ name, category, expiry, qty: Number(qty), sold90: Number(sold90), price: Number(price) || 0, description: description || undefined })}
           style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: canSubmit ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
           Add product
         </button>
@@ -460,12 +476,15 @@ function Field({ label, children }) {
 const inputStyle = { width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #E5DFD3", fontSize: 13, background: "#FAF7F2" };
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ visits, clients, onAddVisit }) {
+function CheckInView({ visits, clients, products, onAddVisit, onCreateOrder }) {
   const [client, setClient] = useState("");
   const [notes, setNotes] = useState("");
   const [coords, setCoords] = useState(null);
   const [locating, setLocating] = useState(false);
   const [locError, setLocError] = useState("");
+  const [lastVisit, setLastVisit] = useState(null);
+  const [showOrderPrompt, setShowOrderPrompt] = useState(false);
+  const [showOrderBuilder, setShowOrderBuilder] = useState(false);
 
   const getLocation = () => {
     setLocating(true);
@@ -482,9 +501,13 @@ function CheckInView({ visits, clients, onAddVisit }) {
     );
   };
 
-  const submit = () => {
-    onAddVisit({ client, notes, coords });
+  const submit = async () => {
+    const visitClient = client;
+    const created = await onAddVisit({ client, notes, coords });
+    setLastVisit(created || { client: visitClient });
     setClient(""); setNotes(""); setCoords(null);
+    setShowOrderPrompt(true);
+    setShowOrderBuilder(false);
   };
 
   const todayVisits = visits.filter((v) => new Date(v.time).toDateString() === new Date().toDateString());
@@ -530,6 +553,30 @@ function CheckInView({ visits, clients, onAddVisit }) {
         </button>
       </div>
 
+      {showOrderPrompt && lastVisit && !showOrderBuilder && (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+          <span style={{ fontSize: 13.5 }}>Did <strong>{lastVisit.client}</strong> place an order?</span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setShowOrderBuilder(true)} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+              Yes, add order
+            </button>
+            <button onClick={() => setShowOrderPrompt(false)} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
+              No
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showOrderBuilder && lastVisit && (
+        <OrderBuilder
+          clientName={lastVisit.client}
+          visitId={lastVisit.id}
+          products={products}
+          onCreateOrder={onCreateOrder}
+          onDone={() => { setShowOrderBuilder(false); setShowOrderPrompt(false); }}
+        />
+      )}
+
       <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 10px", color: "#8A8272" }}>Today's visits ({todayVisits.length})</h3>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {todayVisits.map((v) => (
@@ -548,9 +595,416 @@ function CheckInView({ visits, clients, onAddVisit }) {
   );
 }
 
+// ---------- Proforma invoice PDF ----------
+function downloadOrderPdf(order) {
+  const doc = new jsPDF();
+  doc.setFontSize(16);
+  doc.text("KayBee Pharma — Proforma Invoice", 14, 18);
+  doc.setFontSize(10);
+  doc.text(`Client: ${order.clientName}`, 14, 28);
+  doc.text(`Date: ${new Date(order.date).toLocaleDateString("en-GB")}`, 14, 34);
+  autoTable(doc, {
+    startY: 42,
+    head: [["Item", "Qty", "Unit Price", "Line Total"]],
+    body: order.items.map((it) => [
+      it.name,
+      String(it.qty),
+      Number(it.unitPrice).toFixed(2),
+      (it.qty * it.unitPrice).toFixed(2),
+    ]),
+    foot: [["", "", "Total", Number(order.total).toFixed(2)]],
+  });
+  doc.save(`order-${order.clientName.replace(/\s+/g, "_")}-${order.date.slice(0, 10)}.pdf`);
+}
+
+// ---------- Order Builder (used from Check-In) ----------
+function OrderBuilder({ clientName, visitId, products, onCreateOrder, onDone }) {
+  const [productQuery, setProductQuery] = useState("");
+  const [qty, setQty] = useState("");
+  const [items, setItems] = useState([]);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const matchedProduct = products.find((p) => p.name.toLowerCase().trim() === productQuery.toLowerCase().trim());
+
+  const addItem = () => {
+    setError("");
+    if (!matchedProduct) { setError("Pick a product from the list."); return; }
+    const q = Number(qty);
+    if (!q || q <= 0) { setError("Enter a quantity greater than 0."); return; }
+    setItems((prev) => [...prev, {
+      productId: matchedProduct.id,
+      name: matchedProduct.name,
+      qty: q,
+      unitPrice: matchedProduct.price || 0,
+      availableQty: matchedProduct.qty,
+    }]);
+    setProductQuery("");
+    setQty("");
+  };
+
+  const removeItem = (idx) => setItems((prev) => prev.filter((_, i) => i !== idx));
+
+  const total = items.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
+
+  const doCreateOrder = async () => {
+    if (items.length === 0) { setError("Add at least one item first."); return; }
+    setError("");
+    setSaving(true);
+    try {
+      const payload = {
+        clientName,
+        visitId,
+        items: items.map(({ productId, name, qty, unitPrice }) => ({ productId, name, qty, unitPrice })),
+      };
+      const created = await onCreateOrder(payload);
+      downloadOrderPdf(created || { ...payload, date: new Date().toISOString(), total });
+      onDone();
+    } catch (e) {
+      setError(e.message || "Couldn't save the order.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+      <h3 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 10px" }}>Order for {clientName}</h3>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+        <div style={{ flex: 2, minWidth: 160 }}>
+          <input
+            value={productQuery}
+            onChange={(e) => setProductQuery(e.target.value)}
+            placeholder="Search product…"
+            list="order-product-options"
+            style={inputStyle}
+          />
+          <datalist id="order-product-options">
+            {products.map((p) => <option key={p.id} value={p.name} />)}
+          </datalist>
+        </div>
+        <input type="number" min="1" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Qty" style={{ ...inputStyle, flex: 1, minWidth: 80 }} />
+        <button onClick={addItem} style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+          Add item
+        </button>
+      </div>
+
+      {matchedProduct && (
+        <div style={{ fontSize: 11.5, color: matchedProduct.qty > 0 ? "#4C7A5E" : "#B33A3A", marginBottom: 8 }}>
+          {matchedProduct.qty > 0 ? `${matchedProduct.qty} in stock` : "Out of stock"} · price {matchedProduct.price ? matchedProduct.price.toFixed(2) : "not set"}
+        </div>
+      )}
+
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
+
+      {items.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ textAlign: "left", color: "#8A8272" }}>
+                  <th style={{ padding: "4px 6px" }}>Item</th>
+                  <th style={{ padding: "4px 6px" }}>Qty</th>
+                  <th style={{ padding: "4px 6px" }}>Stock</th>
+                  <th style={{ padding: "4px 6px" }}>Unit price</th>
+                  <th style={{ padding: "4px 6px" }}>Total</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((it, i) => (
+                  <tr key={i} style={{ borderTop: "1px solid #E5DFD3" }}>
+                    <td style={{ padding: "4px 6px" }}>{it.name}</td>
+                    <td style={{ padding: "4px 6px" }}>{it.qty}</td>
+                    <td style={{ padding: "4px 6px", color: it.qty > it.availableQty ? "#B33A3A" : "#4C7A5E" }}>
+                      {it.availableQty}{it.qty > it.availableQty ? " ⚠" : ""}
+                    </td>
+                    <td style={{ padding: "4px 6px" }}>{it.unitPrice.toFixed(2)}</td>
+                    <td style={{ padding: "4px 6px" }}>{(it.qty * it.unitPrice).toFixed(2)}</td>
+                    <td style={{ padding: "4px 6px" }}>
+                      <button onClick={() => removeItem(i)} style={{ background: "none", border: "none", color: "#B7AF9E" }}><X size={13} /></button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ textAlign: "right", fontSize: 13, fontWeight: 600, marginTop: 6 }}>Total: {total.toFixed(2)}</div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          disabled={saving || items.length === 0}
+          onClick={doCreateOrder}
+          style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: !saving && items.length > 0 ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+        >
+          {saving ? "Creating…" : "Create order & download PDF"}
+        </button>
+        <button onClick={onDone} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Orders View (manager, order history) ----------
+function OrdersView({ orders }) {
+  return (
+    <div>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Orders</h2>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {orders.map((o) => (
+          <div key={o.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13.5 }}>{o.clientName}</div>
+              <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
+                {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })} · {o.items.length} item{o.items.length === 1 ? "" : "s"} · total {o.total.toFixed(2)}
+              </div>
+            </div>
+            <button onClick={() => downloadOrderPdf(o)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12, fontWeight: 500 }}>
+              <Download size={13} /> PDF
+            </button>
+          </div>
+        ))}
+        {orders.length === 0 && <EmptyState text="No orders logged yet." />}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Excel upload for clients, with duplicate review ----------
+function ClientExcelImportSection({ existingClients, onImport, onDone }) {
+  const [sheetNames, setSheetNames] = useState([]);
+  const [selectedSheet, setSelectedSheet] = useState("");
+  const [workbook, setWorkbook] = useState(null);
+  const [headers, setHeaders] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [mapping, setMapping] = useState({ name: "", phone: "", area: "" });
+  const [skipIds, setSkipIds] = useState(new Set());
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const readSheet = (wb, sheetName) => {
+    const ws = wb.Sheets[sheetName];
+    const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+    const headerRow = (json[0] || []).map((h, i) => (h === "" ? `Column ${i + 1}` : String(h)));
+    const dataRows = json.slice(1).filter((r) => r.some((cell) => cell !== ""));
+    setHeaders(headerRow);
+    setRows(dataRows);
+  };
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setError("");
+    setResult(null);
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: "array", cellDates: true });
+        setWorkbook(wb);
+        setSheetNames(wb.SheetNames);
+        setSelectedSheet(wb.SheetNames[0]);
+        readSheet(wb, wb.SheetNames[0]);
+        setMapping({ name: "", phone: "", area: "" });
+        setSkipIds(new Set());
+      } catch (err) {
+        setError("Couldn't read that file. Make sure it's a valid Excel (.xlsx) file.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const changeSheet = (name) => {
+    setSelectedSheet(name);
+    readSheet(workbook, name);
+    setMapping({ name: "", phone: "", area: "" });
+    setSkipIds(new Set());
+  };
+
+  const { newClients, updates, unchangedCount } = useMemo(() => {
+    if (!mapping.name) return { newClients: [], updates: [], unchangedCount: 0 };
+    const nameIdx = headers.indexOf(mapping.name);
+    const phoneIdx = headers.indexOf(mapping.phone);
+    const areaIdx = headers.indexOf(mapping.area);
+
+    const existingByName = new Map(existingClients.map((c) => [c.name.toLowerCase().trim(), c]));
+
+    const fresh = [];
+    const dupes = [];
+    let unchanged = 0;
+
+    rows.forEach((r) => {
+      const name = String(r[nameIdx] ?? "").trim();
+      if (!name) return;
+      const phone = phoneIdx >= 0 ? String(r[phoneIdx] ?? "").trim() : "";
+      const area = areaIdx >= 0 ? String(r[areaIdx] ?? "").trim() : "";
+      const existing = existingByName.get(name.toLowerCase().trim());
+      if (!existing) {
+        fresh.push({ name, phone, area });
+      } else if ((existing.phone || "") !== phone || (existing.area || "") !== area) {
+        dupes.push({ existing, incoming: { phone, area } });
+      } else {
+        unchanged++;
+      }
+    });
+
+    return { newClients: fresh, updates: dupes, unchangedCount: unchanged };
+  }, [mapping, rows, headers, existingClients]);
+
+  const toggleSkip = (id) => setSkipIds((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  const doImport = async () => {
+    setError("");
+    setImporting(true);
+    try {
+      const toUpdate = updates
+        .filter((u) => !skipIds.has(u.existing.id))
+        .map((u) => ({ id: u.existing.id, phone: u.incoming.phone, area: u.incoming.area }));
+      const data = await onImport({ toAdd: newClients, toUpdate });
+      setResult({ added: newClients.length, updated: toUpdate.length });
+      setWorkbook(null);
+      setHeaders([]);
+      setRows([]);
+      setSheetNames([]);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    } catch (e) {
+      setError(e.message || "Import failed.");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const fieldSelect = (field, label, required) => (
+    <div>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>
+        {label}{required ? " *" : " (optional)"}
+      </label>
+      <select value={mapping[field]} onChange={(e) => setMapping((m) => ({ ...m, [field]: e.target.value }))} style={inputStyle}>
+        <option value="">{required ? "— select a column —" : "— none —"}</option>
+        {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+      </select>
+    </div>
+  );
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Import clients from Excel</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Upload an .xlsx file of pharmacies. New names get added; names that already exist are shown below so you can choose whether to update their info instead of skipping them.
+      </p>
+
+      <button
+        onClick={() => fileInputRef.current?.click()}
+        style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500, marginBottom: 10 }}
+      >
+        <Upload size={15} /> Choose Excel file
+      </button>
+      <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ display: "none" }} />
+
+      {error && <div style={{ fontSize: 12.5, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
+      {result && (
+        <div style={{ fontSize: 12.5, color: "#4C7A5E", display: "flex", alignItems: "center", gap: 5, marginBottom: 10 }}>
+          <Check size={14} /> Added {result.added}, updated {result.updated}.
+        </div>
+      )}
+
+      {headers.length > 0 && (
+        <div style={{ padding: 12, background: "#FAF7F2", borderRadius: 8 }}>
+          {sheetNames.length > 1 && (
+            <div style={{ marginBottom: 10 }}>
+              <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>Sheet / tab</label>
+              <select value={selectedSheet} onChange={(e) => changeSheet(e.target.value)} style={inputStyle}>
+                {sheetNames.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+            {fieldSelect("name", "Name column", true)}
+            {fieldSelect("phone", "Phone number column", false)}
+            {fieldSelect("area", "Address / area column", false)}
+          </div>
+
+          {mapping.name && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 12, color: "#5B5445", marginBottom: 10 }}>
+                {newClients.length} new client{newClients.length === 1 ? "" : "s"} will be added
+                {updates.length > 0 ? `, ${updates.length} existing client${updates.length === 1 ? "" : "s"} have different info in your file` : ""}
+                {unchangedCount > 0 ? `, ${unchangedCount} already match (no changes needed)` : ""}.
+              </div>
+
+              {updates.length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 6 }}>Review matched clients — uncheck any you don't want updated:</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto" }}>
+                    {updates.map((u) => (
+                      <label key={u.existing.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, fontSize: 12 }}>
+                        <input type="checkbox" checked={!skipIds.has(u.existing.id)} onChange={() => toggleSkip(u.existing.id)} style={{ marginTop: 2 }} />
+                        <div>
+                          <div style={{ fontWeight: 600, marginBottom: 2 }}>{u.existing.name}</div>
+                          <div style={{ color: "#8A8272" }}>
+                            phone: {u.existing.phone || "(none)"} → {u.incoming.phone || "(none)"}<br />
+                            area: {u.existing.area || "(none)"} → {u.incoming.area || "(none)"}
+                          </div>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {newClients.length > 0 && (
+                <div style={{ overflowX: "auto", marginBottom: 10 }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+                    <thead>
+                      <tr style={{ textAlign: "left", color: "#8A8272" }}>
+                        <th style={{ padding: "4px 6px" }}>Name</th>
+                        <th style={{ padding: "4px 6px" }}>Phone</th>
+                        <th style={{ padding: "4px 6px" }}>Area</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {newClients.slice(0, 5).map((c, i) => (
+                        <tr key={i} style={{ borderTop: "1px solid #E5DFD3" }}>
+                          <td style={{ padding: "4px 6px" }}>{c.name}</td>
+                          <td style={{ padding: "4px 6px" }}>{c.phone || "—"}</td>
+                          <td style={{ padding: "4px 6px" }}>{c.area || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {newClients.length > 5 && <div style={{ fontSize: 11, color: "#8A8272", marginTop: 4 }}>...and {newClients.length - 5} more</div>}
+                </div>
+              )}
+
+              <button
+                disabled={importing || (newClients.length === 0 && updates.length === 0)}
+                onClick={doImport}
+                style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: !importing && (newClients.length > 0 || updates.length > 0) ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+              >
+                {importing ? "Importing…" : `Import (${newClients.length} new, ${updates.filter((u) => !skipIds.has(u.existing.id)).length} update${updates.filter((u) => !skipIds.has(u.existing.id)).length === 1 ? "" : "s"})`}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------- Clients View (tiering + follow-up nudges) ----------
-function ClientsView({ clients, visits, onAdd, onRemove }) {
+function ClientsView({ clients, visits, onAdd, onRemove, onBulkImport }) {
   const [showAdd, setShowAdd] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [tier, setTier] = useState("B");
@@ -588,13 +1042,23 @@ function ClientsView({ clients, visits, onAdd, onRemove }) {
             Tier A: visit every {TIER_CADENCE.A}d · B: {TIER_CADENCE.B}d · C: {TIER_CADENCE.C}d. Overdue clients sort to the top.
           </p>
         </div>
-        <button onClick={() => setShowAdd((v) => !v)} style={{
-          display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
-          background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500,
-        }}>
-          <Plus size={15} /> Add client
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => { setShowImport((v) => !v); setShowAdd(false); }} style={{
+            display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
+            background: "#fff", color: "#1F2A24", border: "1px solid #E5DFD3", fontSize: 13, fontWeight: 500,
+          }}>
+            <Upload size={15} /> Import from Excel
+          </button>
+          <button onClick={() => { setShowAdd((v) => !v); setShowImport(false); }} style={{
+            display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
+            background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500,
+          }}>
+            <Plus size={15} /> Add client
+          </button>
+        </div>
       </div>
+
+      {showImport && <ClientExcelImportSection existingClients={clients} onImport={onBulkImport} onDone={() => setShowImport(false)} />}
 
       {showAdd && (
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
@@ -1023,7 +1487,7 @@ function ExcelImportSection({ onImport, productCount }) {
   const [workbook, setWorkbook] = useState(null);
   const [headers, setHeaders] = useState([]);
   const [rows, setRows] = useState([]);
-  const [mapping, setMapping] = useState({ name: "", expiry: "", qty: "", sold90: "", category: "", description: "" });
+  const [mapping, setMapping] = useState({ name: "", expiry: "", qty: "", sold90: "", category: "", description: "", price: "" });
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const [importing, setImporting] = useState(false);
@@ -1052,7 +1516,7 @@ function ExcelImportSection({ onImport, productCount }) {
         setSheetNames(wb.SheetNames);
         setSelectedSheet(wb.SheetNames[0]);
         readSheet(wb, wb.SheetNames[0]);
-        setMapping({ name: "", expiry: "", qty: "", sold90: "", category: "", description: "" });
+        setMapping({ name: "", expiry: "", qty: "", sold90: "", category: "", description: "", price: "" });
       } catch (err) {
         setError("Couldn't read that file. Make sure it's a valid Excel (.xlsx) file.");
       }
@@ -1063,7 +1527,7 @@ function ExcelImportSection({ onImport, productCount }) {
   const changeSheet = (name) => {
     setSelectedSheet(name);
     readSheet(workbook, name);
-    setMapping({ name: "", expiry: "", qty: "", sold90: "", category: "", description: "" });
+    setMapping({ name: "", expiry: "", qty: "", sold90: "", category: "", description: "", price: "" });
   };
 
   const parsed = useMemo(() => {
@@ -1074,6 +1538,7 @@ function ExcelImportSection({ onImport, productCount }) {
     const sold90Idx = headers.indexOf(mapping.sold90);
     const categoryIdx = headers.indexOf(mapping.category);
     const descIdx = headers.indexOf(mapping.description);
+    const priceIdx = headers.indexOf(mapping.price);
 
     let skipped = 0;
     const valid = [];
@@ -1088,6 +1553,7 @@ function ExcelImportSection({ onImport, productCount }) {
         sold90: sold90Idx >= 0 ? Number(r[sold90Idx]) || 0 : 0,
         category: categoryIdx >= 0 && r[categoryIdx] ? String(r[categoryIdx]).trim() : "Supplement",
         description: descIdx >= 0 ? String(r[descIdx] || "").trim() : "",
+        price: priceIdx >= 0 ? Number(r[priceIdx]) || 0 : 0,
       });
     });
     return { valid, skipped };
@@ -1161,6 +1627,7 @@ function ExcelImportSection({ onImport, productCount }) {
             {fieldSelect("sold90", "Units sold (last 90 days) column", false)}
             {fieldSelect("category", "Category column", false)}
             {fieldSelect("description", "Description column", false)}
+            {fieldSelect("price", "Price column", false)}
           </div>
 
           {mapping.name && mapping.expiry && mapping.qty && (
@@ -1178,6 +1645,7 @@ function ExcelImportSection({ onImport, productCount }) {
                         <th style={{ padding: "4px 6px" }}>Expiry</th>
                         <th style={{ padding: "4px 6px" }}>Qty</th>
                         <th style={{ padding: "4px 6px" }}>Sold/90d</th>
+                        <th style={{ padding: "4px 6px" }}>Price</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1188,6 +1656,7 @@ function ExcelImportSection({ onImport, productCount }) {
                           <td style={{ padding: "4px 6px" }}>{p.expiry}</td>
                           <td style={{ padding: "4px 6px" }}>{p.qty}</td>
                           <td style={{ padding: "4px 6px" }}>{p.sold90}</td>
+                          <td style={{ padding: "4px 6px" }}>{p.price || "—"}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -1305,5 +1774,3 @@ function SettingsView({ slowThreshold, setSlowThreshold, repPhone, setRepPhone, 
 function EmptyState({ text }) {
   return <div style={{ textAlign: "center", padding: "30px 0", color: "#B7AF9E", fontSize: 13 }}>{text}</div>;
 }
-
-
