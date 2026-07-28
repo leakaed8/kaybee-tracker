@@ -1,6 +1,7 @@
 const path = require("path");
 const crypto = require("crypto");
 const express = require("express");
+const webpush = require("web-push");
 const db = require("./sheetsDb");
 const { importedInventory, defaultTemplates } = require("./seedData");
 
@@ -10,6 +11,45 @@ app.use(express.json());
 const PORT = process.env.PORT || 3001;
 const IS_PROD = process.env.NODE_ENV === "production";
 const SESSION_SECRET = process.env.SESSION_SECRET || "kaybee-tracker-default-secret-change-me";
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails("mailto:kaybee-tracker@example.com", VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+}
+
+async function sendPushToSubscriptions(subs, payload) {
+  const results = await Promise.allSettled(subs.map((s) =>
+    webpush.sendNotification(
+      { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
+      JSON.stringify(payload)
+    )
+  ));
+  results.forEach((r, i) => {
+    if (r.status === "rejected" && (r.reason?.statusCode === 410 || r.reason?.statusCode === 404)) {
+      db.deleteRowById("PushSubscriptions", subs[i].id).catch(() => {});
+    }
+  });
+}
+
+async function notifyManagers(payload) {
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+  try {
+    const subs = await db.getAllRows("PushSubscriptions");
+    await sendPushToSubscriptions(subs.filter((s) => s.role === "manager"), payload);
+  } catch (e) {
+    console.error("notifyManagers failed", e);
+  }
+}
+
+async function notifyRep(repName, payload) {
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY || !repName) return;
+  try {
+    const subs = await db.getAllRows("PushSubscriptions");
+    await sendPushToSubscriptions(subs.filter((s) => s.role === "rep" && s.repName === repName), payload);
+  } catch (e) {
+    console.error("notifyRep failed", e);
+  }
+}
 
 function signPayload(payload) {
   const hmac = crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("hex");
@@ -170,6 +210,31 @@ app.use("/api", requireAuth);
 
 app.get("/api/session", (req, res) => res.json({ role: req.role, repName: req.repName }));
 
+app.get("/api/push/vapid-public-key", (req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY || "" }));
+
+app.post("/api/push/subscribe", async (req, res) => {
+  try {
+    const { subscription } = req.body;
+    if (!subscription || !subscription.endpoint) return res.status(400).json({ error: "Invalid subscription" });
+    const existing = await db.getAllRows("PushSubscriptions");
+    const already = existing.find((s) => s.endpoint === subscription.endpoint);
+    if (already) return res.json({ ok: true });
+    const record = {
+      id: `push${crypto.randomUUID()}`,
+      role: req.role,
+      repName: req.repName || "",
+      endpoint: subscription.endpoint,
+      p256dh: subscription.keys?.p256dh || "",
+      auth: subscription.keys?.auth || "",
+    };
+    await db.appendRow("PushSubscriptions", record);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get("/api/bootstrap", async (req, res) => {
   try {
     const [products, visits, clients, outreachLog, orders, reps, offers, rawSettings] = await Promise.all([
@@ -314,6 +379,7 @@ app.post("/api/orders", async (req, res) => {
       status: "confirmed",
     };
     await db.appendRow("Orders", order);
+    notifyManagers({ title: "New order placed", body: `${clientName} — ${total.toFixed(2)}`, url: "/" });
     res.json(parseOrder(order));
   } catch (e) {
     console.error(e);
@@ -325,6 +391,7 @@ app.post("/api/orders/:id/request-delete", async (req, res) => {
   try {
     const ok = await db.updateRowById("Orders", req.params.id, { status: "deletion_requested" });
     if (!ok) return res.status(404).json({ error: "Order not found" });
+    notifyManagers({ title: "Order deletion requested", body: "A rep asked to delete an order — review in the Orders tab.", url: "/" });
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -554,5 +621,69 @@ app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "not found" });
   res.sendFile(path.join(clientDist, "index.html"));
 });
+
+function daysUntilFromToday(dateStr) {
+  const d = new Date(dateStr);
+  const now = new Date();
+  d.setHours(0, 0, 0, 0);
+  now.setHours(0, 0, 0, 0);
+  return Math.round((d - now) / 86400000);
+}
+
+const TIER_CADENCE_DAYS = { A: 14, B: 30, C: 60 };
+
+async function checkExpiryAndOverdueAlerts() {
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+  try {
+    const [products, clients, visits, rawSettings] = await Promise.all([
+      db.getAllRows("Products"),
+      db.getAllRows("Clients"),
+      db.getAllRows("Visits"),
+      db.getSettings(),
+    ]);
+    const newlySent = {};
+
+    for (const p of products) {
+      if (!p.expiry) continue;
+      const dLeft = daysUntilFromToday(p.expiry);
+      if (dLeft <= 30) {
+        const key = `alert_expiry_${p.id}`;
+        if (!rawSettings[key]) {
+          await notifyManagers({ title: "Product expiring soon", body: `${p.name} — ${dLeft}d left`, url: "/" });
+          newlySent[key] = "sent";
+        }
+      }
+    }
+
+    for (const c of clients) {
+      const matches = visits.filter((v) => v.client.toLowerCase().trim() === c.name.toLowerCase().trim());
+      const lastVisit = matches.length
+        ? matches.reduce((a, b) => (new Date(b.time) > new Date(a.time) ? b : a), matches[0])
+        : null;
+      const daysSinceVisit = lastVisit ? Math.round((Date.now() - new Date(lastVisit.time)) / 86400000) : null;
+      const cadence = TIER_CADENCE_DAYS[c.tier] || 30;
+      const overdue = daysSinceVisit === null || daysSinceVisit > cadence;
+      if (overdue) {
+        const key = `alert_overdue_${c.id}`;
+        if (!rawSettings[key]) {
+          const payload = { title: "Client overdue for a visit", body: `${c.name} hasn't been visited in a while`, url: "/" };
+          await notifyManagers(payload);
+          if (c.assignedRep) await notifyRep(c.assignedRep, payload);
+          newlySent[key] = "sent";
+        }
+      }
+    }
+
+    if (Object.keys(newlySent).length > 0) await db.setSettings(newlySent);
+  } catch (e) {
+    console.error("checkExpiryAndOverdueAlerts failed", e);
+  }
+}
+
+const ALERT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  checkExpiryAndOverdueAlerts();
+  setInterval(checkExpiryAndOverdueAlerts, ALERT_CHECK_INTERVAL_MS);
+}
 
 app.listen(PORT, () => console.log(`KayBee Tracker server listening on port ${PORT}`));

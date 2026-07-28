@@ -1526,18 +1526,27 @@ function PerformanceView({ visits, monthlyVisitTarget, setMonthlyVisitTarget }) 
 
 // ---------- Broadcast View (stock reminder to existing clients) ----------
 function BroadcastView({ zoned, clients }) {
+  const [mode, setMode] = useState("healthy"); // healthy | clearance
   const [selectedProducts, setSelectedProducts] = useState([]);
   const [selectedTier, setSelectedTier] = useState("all");
   const [copied, setCopied] = useState(false);
 
-  const healthy = zoned.filter((p) => p.zone.key === "ok").slice(0, 20);
+  const pool = mode === "healthy"
+    ? zoned.filter((p) => p.zone.key === "ok").slice(0, 20)
+    : zoned.filter((p) => ["urgent", "soon", "watch", "watch2", "slow"].includes(p.zone.key)).slice(0, 20);
+
+  const changeMode = (m) => { setMode(m); setSelectedProducts([]); };
   const toggleProduct = (id) => setSelectedProducts((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
   const targetClients = clients.filter((c) => selectedTier === "all" || c.tier === selectedTier);
 
-  const message = `Hi! Quick reminder from KayBee Pharma — we currently have good stock of:\n${
-    zoned.filter((p) => selectedProducts.includes(p.id)).map((p) => `• ${p.name}`).join("\n") || "(select items below)"
-  }\n\nLet us know if you'd like to reorder or need pricing. No pressure, just keeping you posted!`;
+  const message = mode === "healthy"
+    ? `Hi! Quick reminder from KayBee Pharma — we currently have good stock of:\n${
+        zoned.filter((p) => selectedProducts.includes(p.id)).map((p) => `• ${p.name}`).join("\n") || "(select items below)"
+      }\n\nLet us know if you'd like to reorder or need pricing. No pressure, just keeping you posted!`
+    : `Hi! Special pricing from KayBee Pharma while stock lasts:\n${
+        zoned.filter((p) => selectedProducts.includes(p.id)).map((p) => `• ${p.name}`).join("\n") || "(select items below)"
+      }\n\nGreat opportunity to stock up at a discount — let us know if you'd like to order!`;
 
   const copyMessage = () => { navigator.clipboard?.writeText(message); setCopied(true); setTimeout(() => setCopied(false), 1500); };
 
@@ -1548,16 +1557,37 @@ function BroadcastView({ zoned, clients }) {
         Pulled from your own inventory — pick items you want to remind clients about, then send via your WhatsApp Business broadcast list.
       </p>
 
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <button onClick={() => changeMode("healthy")} style={{
+          flex: 1, padding: "8px 14px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12.5, fontWeight: 500,
+          background: mode === "healthy" ? "#1F2A24" : "#fff", color: mode === "healthy" ? "#FAF7F2" : "#1F2A24",
+        }}>
+          Promote healthy stock
+        </button>
+        <button onClick={() => changeMode("clearance")} style={{
+          flex: 1, padding: "8px 14px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12.5, fontWeight: 500,
+          background: mode === "clearance" ? "#1F2A24" : "#fff", color: mode === "clearance" ? "#FAF7F2" : "#1F2A24",
+        }}>
+          Push near-expiry / slow movers
+        </button>
+      </div>
+
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
-        <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Select items to feature (showing healthy-stock items)</label>
+        <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>
+          Select items to feature ({mode === "healthy" ? "showing healthy-stock items" : "showing near-expiry and slow-moving items"})
+        </label>
         <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto" }}>
-          {healthy.map((p) => (
+          {pool.map((p) => (
             <label key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
               <input type="checkbox" checked={selectedProducts.includes(p.id)} onChange={() => toggleProduct(p.id)} />
-              {p.name}
+              {p.name} <span style={{ fontSize: 10.5, color: "#8A8272" }}>({p.zone.label})</span>
             </label>
           ))}
-          {healthy.length === 0 && <span style={{ fontSize: 12, color: "#8A8272" }}>No healthy-stock items found — import your inventory first.</span>}
+          {pool.length === 0 && (
+            <span style={{ fontSize: 12, color: "#8A8272" }}>
+              {mode === "healthy" ? "No healthy-stock items found — import your inventory first." : "No near-expiry or slow-moving items right now."}
+            </span>
+          )}
         </div>
       </div>
 
@@ -2040,6 +2070,79 @@ function OffersManagementSection({ offers, onAdd, onToggleActive, onRemove }) {
   );
 }
 
+// ---------- Push notification setup ----------
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; i++) outputArray[i] = rawData.charCodeAt(i);
+  return outputArray;
+}
+
+function PushNotificationSetup() {
+  const [status, setStatus] = useState("idle"); // idle | unsupported | subscribing | subscribed | denied | error
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      setStatus("unsupported");
+      return;
+    }
+    navigator.serviceWorker.getRegistration().then((reg) => {
+      if (!reg) return;
+      reg.pushManager.getSubscription().then((sub) => { if (sub) setStatus("subscribed"); });
+    });
+  }, []);
+
+  const enable = async () => {
+    setStatus("subscribing");
+    setError("");
+    try {
+      const reg = await navigator.serviceWorker.register("/sw.js");
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") {
+        setStatus("denied");
+        return;
+      }
+      const { publicKey } = await api.getVapidPublicKey();
+      if (!publicKey) {
+        setError("Push notifications aren't configured on the server yet.");
+        setStatus("error");
+        return;
+      }
+      const sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey),
+      });
+      await api.savePushSubscription(sub.toJSON());
+      setStatus("subscribed");
+    } catch (e) {
+      setError(e.message || "Couldn't enable notifications.");
+      setStatus("error");
+    }
+  };
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Push notifications</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Get alerted on this device for new orders, deletion requests, expiring stock, and overdue visits. On iPhone: add this app to your Home Screen first (Share → Add to Home Screen), then open it from there before enabling — a regular Safari tab can't receive notifications.
+      </p>
+      {status === "unsupported" && <div style={{ fontSize: 12.5, color: "#B33A3A" }}>Notifications aren't supported on this browser/device.</div>}
+      {status === "subscribed" && <div style={{ fontSize: 12.5, color: "#4C7A5E", display: "flex", alignItems: "center", gap: 5 }}><Check size={14} /> Notifications enabled on this device.</div>}
+      {status === "denied" && <div style={{ fontSize: 12.5, color: "#B33A3A", marginBottom: 8 }}>Notifications were blocked. Enable them in your browser/phone settings, then try again.</div>}
+      {error && <div style={{ fontSize: 12.5, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
+      {(status === "idle" || status === "error" || status === "denied") && (
+        <button onClick={enable} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
+          Enable notifications on this device
+        </button>
+      )}
+      {status === "subscribing" && <div style={{ fontSize: 12.5, color: "#8A8272" }}>Setting up…</div>}
+    </div>
+  );
+}
+
 // ---------- Settings ----------
 function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, loadImportedInventory, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer }) {
   const [showImportConfirm, setShowImportConfirm] = useState(false);
@@ -2055,6 +2158,8 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Settings</h2>
+
+      <PushNotificationSetup />
 
       {role === "manager" && <RepsManagementSection onRepsChanged={onRepsChanged} />}
 

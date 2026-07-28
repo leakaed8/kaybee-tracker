@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "googleapis": "^140.0.1"
+    "googleapis": "^140.0.1",
+    "web-push": "^3.6.7"
   }
 }

@@ -10,6 +10,7 @@ const SCHEMAS = {
   Orders: ["id", "clientName", "visitId", "repName", "date", "items", "total", "status"],
   Reps: ["id", "name", "passcode"],
   Offers: ["id", "label", "buyQty", "getQty", "expiresAt", "active"],
+  PushSubscriptions: ["id", "role", "repName", "endpoint", "p256dh", "auth"],
   Settings: ["key", "value"],
 };
 

@@ -35,6 +35,8 @@ export const api = {
   getReps: () => request("/reps"),
   addRep: (rep) => request("/reps", { method: "POST", body: JSON.stringify(rep) }),
   removeRep: (id) => request(`/reps/${id}`, { method: "DELETE" }),
+  getVapidPublicKey: () => request("/push/vapid-public-key"),
+  savePushSubscription: (subscription) => request("/push/subscribe", { method: "POST", body: JSON.stringify({ subscription }) }),
   logOutreach: (entry) => request("/outreach-log", { method: "POST", body: JSON.stringify(entry) }),
   updateSettings: (patch) => request("/settings", { method: "PATCH", body: JSON.stringify(patch) }),
 };
