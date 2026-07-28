@@ -24,6 +24,10 @@ export const api = {
   addClient: (client) => request("/clients", { method: "POST", body: JSON.stringify(client) }),
   importClientsBulk: (payload) => request("/clients/import-bulk", { method: "POST", body: JSON.stringify(payload) }),
   removeClient: (id) => request(`/clients/${id}`, { method: "DELETE" }),
+  assignClientRep: (id, assignedRep) => request(`/clients/${id}`, { method: "PATCH", body: JSON.stringify({ assignedRep }) }),
+  getReps: () => request("/reps"),
+  addRep: (rep) => request("/reps", { method: "POST", body: JSON.stringify(rep) }),
+  removeRep: (id) => request(`/reps/${id}`, { method: "DELETE" }),
   logOutreach: (entry) => request("/outreach-log", { method: "POST", body: JSON.stringify(entry) }),
   updateSettings: (patch) => request("/settings", { method: "PATCH", body: JSON.stringify(patch) }),
 };

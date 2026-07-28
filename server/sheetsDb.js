@@ -5,9 +5,10 @@ const SHEET_ID = process.env.SHEET_ID;
 const SCHEMAS = {
   Products: ["id", "name", "category", "expiry", "qty", "sold90", "description", "price"],
   Visits: ["id", "client", "notes", "coordsLat", "coordsLng", "time"],
-  Clients: ["id", "name", "phone", "tier", "area"],
+  Clients: ["id", "name", "phone", "tier", "area", "assignedRep"],
   OutreachLog: ["id", "name", "date", "templateIndex"],
   Orders: ["id", "clientName", "visitId", "date", "items", "total"],
+  Reps: ["id", "name", "passcode"],
   Settings: ["key", "value"],
 };
 

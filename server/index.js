@@ -11,22 +11,22 @@ const PORT = process.env.PORT || 3001;
 const IS_PROD = process.env.NODE_ENV === "production";
 const SESSION_SECRET = process.env.SESSION_SECRET || "kaybee-tracker-default-secret-change-me";
 
-function signRole(role) {
-  const hmac = crypto.createHmac("sha256", SESSION_SECRET).update(role).digest("hex");
-  return `${role}.${hmac}`;
+function signPayload(payload) {
+  const hmac = crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("hex");
+  return `${payload}.${hmac}`;
 }
 
 function verifySessionToken(token) {
   if (!token) return null;
   const dotIndex = token.lastIndexOf(".");
   if (dotIndex === -1) return null;
-  const role = token.slice(0, dotIndex);
+  const payload = token.slice(0, dotIndex);
   const hmac = token.slice(dotIndex + 1);
-  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(role).digest("hex");
+  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("hex");
   const a = Buffer.from(hmac);
   const b = Buffer.from(expected);
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-  return role;
+  return payload;
 }
 
 function parseCookies(req) {
@@ -48,9 +48,22 @@ function setSessionCookie(res, token, maxAgeSeconds) {
 }
 
 function requireAuth(req, res, next) {
-  const role = verifySessionToken(parseCookies(req).kb_session);
-  if (!role) return res.status(401).json({ error: "Please log in." });
-  req.role = role;
+  const payload = verifySessionToken(parseCookies(req).kb_session);
+  if (!payload) return res.status(401).json({ error: "Please log in." });
+  if (payload === "manager") {
+    req.role = "manager";
+    req.repName = null;
+  } else if (payload.startsWith("rep|")) {
+    req.role = "rep";
+    req.repName = decodeURIComponent(payload.slice(4));
+  } else {
+    return res.status(401).json({ error: "Please log in." });
+  }
+  next();
+}
+
+function requireManager(req, res, next) {
+  if (req.role !== "manager") return res.status(403).json({ error: "Managers only." });
   next();
 }
 
@@ -106,16 +119,33 @@ function visitToRow(v) {
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
 
-app.post("/api/login", (req, res) => {
-  const { passcode } = req.body || {};
-  const managerCode = process.env.MANAGER_PASSCODE;
-  const repCode = process.env.REP_PASSCODE;
-  let role = null;
-  if (managerCode && passcode === managerCode) role = "manager";
-  else if (repCode && passcode === repCode) role = "rep";
-  if (!role) return res.status(401).json({ error: "Incorrect passcode." });
-  setSessionCookie(res, signRole(role), 60 * 60 * 24 * 30);
-  res.json({ ok: true, role });
+app.post("/api/login", async (req, res) => {
+  try {
+    const { passcode } = req.body || {};
+    const managerCode = process.env.MANAGER_PASSCODE;
+    const legacyRepCode = process.env.REP_PASSCODE;
+
+    if (managerCode && passcode === managerCode) {
+      setSessionCookie(res, signPayload("manager"), 60 * 60 * 24 * 30);
+      return res.json({ ok: true, role: "manager" });
+    }
+    if (legacyRepCode && passcode === legacyRepCode) {
+      setSessionCookie(res, signPayload("rep|"), 60 * 60 * 24 * 30);
+      return res.json({ ok: true, role: "rep", repName: "" });
+    }
+
+    const reps = await db.getAllRows("Reps");
+    const matched = reps.find((r) => r.passcode === passcode);
+    if (matched) {
+      setSessionCookie(res, signPayload(`rep|${encodeURIComponent(matched.name)}`), 60 * 60 * 24 * 30);
+      return res.json({ ok: true, role: "rep", repName: matched.name });
+    }
+
+    res.status(401).json({ error: "Incorrect passcode." });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post("/api/logout", (req, res) => {
@@ -125,16 +155,17 @@ app.post("/api/logout", (req, res) => {
 
 app.use("/api", requireAuth);
 
-app.get("/api/session", (req, res) => res.json({ role: req.role }));
+app.get("/api/session", (req, res) => res.json({ role: req.role, repName: req.repName }));
 
 app.get("/api/bootstrap", async (req, res) => {
   try {
-    const [products, visits, clients, outreachLog, orders, rawSettings] = await Promise.all([
+    const [products, visits, clients, outreachLog, orders, reps, rawSettings] = await Promise.all([
       db.getAllRows("Products"),
       db.getAllRows("Visits"),
       db.getAllRows("Clients"),
       db.getAllRows("OutreachLog"),
       db.getAllRows("Orders"),
+      db.getAllRows("Reps"),
       db.getSettings(),
     ]);
     res.json({
@@ -143,6 +174,7 @@ app.get("/api/bootstrap", async (req, res) => {
       clients,
       outreachLog: outreachLog.sort((a, b) => new Date(b.date) - new Date(a.date)),
       orders: orders.map(parseOrder).sort((a, b) => new Date(b.date) - new Date(a.date)),
+      repNames: reps.map((r) => r.name),
       settings: parseSettings(rawSettings),
     });
   } catch (e) {
@@ -272,11 +304,64 @@ app.post("/api/orders", async (req, res) => {
 
 app.post("/api/clients", async (req, res) => {
   try {
-    const { name, phone, tier, area } = req.body;
+    const { name, phone, tier, area, assignedRep } = req.body;
     if (!name) return res.status(400).json({ error: "name is required" });
-    const client = { id: `c${crypto.randomUUID()}`, name, phone: phone || "", tier: tier || "B", area: area || "" };
+    const client = {
+      id: `c${crypto.randomUUID()}`,
+      name,
+      phone: phone || "",
+      tier: tier || "B",
+      area: area || "",
+      assignedRep: assignedRep || "",
+    };
     await db.appendRow("Clients", client);
     res.json(client);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/clients/:id", requireManager, async (req, res) => {
+  try {
+    const patch = {};
+    if (req.body.assignedRep !== undefined) patch.assignedRep = req.body.assignedRep;
+    const ok = await db.updateRowById("Clients", req.params.id, patch);
+    if (!ok) return res.status(404).json({ error: "Client not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/reps", requireManager, async (req, res) => {
+  try {
+    const reps = await db.getAllRows("Reps");
+    res.json(reps.map((r) => ({ id: r.id, name: r.name, passcode: r.passcode })));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/reps", requireManager, async (req, res) => {
+  try {
+    const { name, passcode } = req.body;
+    if (!name || !passcode) return res.status(400).json({ error: "name and passcode are required" });
+    const rep = { id: `rep${crypto.randomUUID()}`, name: name.trim(), passcode };
+    await db.appendRow("Reps", rep);
+    res.json(rep);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/reps/:id", requireManager, async (req, res) => {
+  try {
+    await db.deleteRowById("Reps", req.params.id);
+    res.json({ ok: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

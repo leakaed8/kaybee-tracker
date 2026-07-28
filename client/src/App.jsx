@@ -18,12 +18,14 @@ const POLL_INTERVAL_MS = 20000;
 export default function App() {
   const [authState, setAuthState] = useState("checking"); // checking | out | in
   const [role, setRole] = useState("manager");
+  const [repName, setRepName] = useState("");
   const [tab, setTab] = useState("expiry");
   const [products, setProducts] = useState([]);
   const [visits, setVisits] = useState([]);
   const [clients, setClients] = useState([]);
   const [outreachLog, setOutreachLog] = useState([]);
   const [orders, setOrders] = useState([]);
+  const [repNames, setRepNames] = useState([]);
   const [settings, setSettings] = useState({
     slowThreshold: 15, repPhone: "", dailyTarget: 3, monthlyVisitTarget: 60, templates: [],
   });
@@ -37,7 +39,7 @@ export default function App() {
 
   useEffect(() => {
     api.getSession()
-      .then((data) => { setRole(data.role); setAuthState("in"); })
+      .then((data) => { setRole(data.role); setRepName(data.repName || ""); setAuthState("in"); })
       .catch(() => setAuthState("out"));
   }, []);
 
@@ -54,6 +56,7 @@ export default function App() {
       setClients(data.clients);
       setOutreachLog(data.outreachLog);
       setOrders(data.orders || []);
+      setRepNames(data.repNames || []);
       if (!settingsDirtyRef.current) setSettings(data.settings);
       setLoadError("");
     } catch (e) {
@@ -115,6 +118,7 @@ export default function App() {
   const addClient = (client) => withSync(() => api.addClient(client));
   const removeClient = (id) => withSync(() => api.removeClient(id));
   const bulkImportClients = (payload) => withSync(() => api.importClientsBulk(payload));
+  const assignClientRep = (id, assignedRep) => withSync(() => api.assignClientRep(id, assignedRep));
   const logOutreach = (entry) => withSync(() => api.logOutreach(entry));
 
   const zoned = products.map((p) => ({ ...p, zone: zoneFor(p, role, settings.slowThreshold) }));
@@ -129,7 +133,7 @@ export default function App() {
   }
 
   if (authState === "out") {
-    return <LoginView onSuccess={(r) => { setRole(r); setAuthState("in"); }} />;
+    return <LoginView onSuccess={(r, rn) => { setRole(r); setRepName(rn || ""); setAuthState("in"); }} />;
   }
 
   return (
@@ -155,7 +159,7 @@ export default function App() {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontSize: 13, fontWeight: 500, color: "#5B5445", background: "#F0EBE0", borderRadius: 8, padding: "9px 16px" }}>
-            {role === "manager" ? "Manager" : "Med Rep"}
+            {role === "manager" ? "Manager" : repName ? `Med Rep · ${repName}` : "Med Rep"}
           </span>
           <button onClick={logout} style={{ fontSize: 12, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 8, padding: "9px 12px" }}>
             Log out
@@ -204,7 +208,18 @@ export default function App() {
             {tab === "checkin" && role === "rep" && (
               <CheckInView visits={visits} clients={clients} products={products} onAddVisit={addVisit} onCreateOrder={createOrder} />
             )}
-            {tab === "clients" && <ClientsView clients={clients} visits={visits} onAdd={addClient} onRemove={removeClient} onBulkImport={bulkImportClients} />}
+            {tab === "clients" && (
+              <ClientsView
+                clients={clients}
+                visits={visits}
+                role={role}
+                repNames={repNames}
+                onAdd={addClient}
+                onRemove={removeClient}
+                onBulkImport={bulkImportClients}
+                onAssignRep={assignClientRep}
+              />
+            )}
             {tab === "route" && role === "rep" && <RouteView clients={clients} visits={visits} />}
             {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} visits={visits} />}
             {tab === "orders" && role === "manager" && <OrdersView orders={orders} />}
@@ -228,6 +243,7 @@ export default function App() {
             {tab === "broadcast" && role === "manager" && <BroadcastView zoned={zoned} clients={clients} />}
             {tab === "settings" && (
               <SettingsView
+                role={role}
                 slowThreshold={settings.slowThreshold} setSlowThreshold={(v) => updateSettingsField({ slowThreshold: v })}
                 repPhone={settings.repPhone} setRepPhone={(v) => updateSettingsField({ repPhone: v })}
                 dailyTarget={settings.dailyTarget} setDailyTarget={(v) => updateSettingsField({ dailyTarget: v })}
@@ -235,6 +251,7 @@ export default function App() {
                 loadImportedInventory={loadImportedInventory}
                 onBulkImport={bulkImportProducts}
                 productCount={products.length}
+                onRepsChanged={refresh}
               />
             )}
           </>
@@ -255,7 +272,7 @@ function LoginView({ onSuccess }) {
     setLoading(true);
     try {
       const data = await api.login(passcode);
-      onSuccess(data.role);
+      onSuccess(data.role, data.repName);
     } catch (err) {
       setError("Incorrect passcode.");
     } finally {
@@ -1002,13 +1019,14 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
 }
 
 // ---------- Clients View (tiering + follow-up nudges) ----------
-function ClientsView({ clients, visits, onAdd, onRemove, onBulkImport }) {
+function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkImport, onAssignRep }) {
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [tier, setTier] = useState("B");
   const [area, setArea] = useState("");
+  const [assignedRep, setAssignedRep] = useState("");
 
   const lastVisitFor = (clientName) => {
     const matches = visits.filter((v) => v.client.toLowerCase().trim() === clientName.toLowerCase().trim());
@@ -1018,8 +1036,8 @@ function ClientsView({ clients, visits, onAdd, onRemove, onBulkImport }) {
 
   const addClient = () => {
     if (!name) return;
-    onAdd({ name, phone, tier, area });
-    setName(""); setPhone(""); setArea(""); setTier("B");
+    onAdd({ name, phone, tier, area, assignedRep });
+    setName(""); setPhone(""); setArea(""); setTier("B"); setAssignedRep("");
     setShowAdd(false);
   };
 
@@ -1073,6 +1091,12 @@ function ClientsView({ clients, visits, onAdd, onRemove, onBulkImport }) {
               </select>
             </Field>
             <Field label="Area"><input value={area} onChange={(e) => setArea(e.target.value)} placeholder="e.g. Jbeil" style={inputStyle} /></Field>
+            <Field label="Assigned sales rep (optional)">
+              <select value={assignedRep} onChange={(e) => setAssignedRep(e.target.value)} style={inputStyle}>
+                <option value="">Unassigned</option>
+                {repNames.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </Field>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button disabled={!name} onClick={addClient} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>Add client</button>
@@ -1092,6 +1116,22 @@ function ClientsView({ clients, visits, onAdd, onRemove, onBulkImport }) {
                 </div>
                 <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 3 }}>
                   {c.area || "no area set"} {c.phone ? `· ${c.phone}` : ""}
+                </div>
+                <div style={{ marginTop: 6 }}>
+                  {role === "manager" ? (
+                    <select
+                      value={c.assignedRep || ""}
+                      onChange={(e) => onAssignRep(c.id, e.target.value)}
+                      style={{ fontSize: 11, padding: "3px 6px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445" }}
+                    >
+                      <option value="">Unassigned</option>
+                      {repNames.map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  ) : (
+                    <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 7px", borderRadius: 5, background: "#F0EBE0", color: "#5B5445" }}>
+                      {c.assignedRep ? `Rep: ${c.assignedRep}` : "Unassigned"}
+                    </span>
+                  )}
                 </div>
               </div>
               <div style={{ textAlign: "right" }}>
@@ -1679,8 +1719,91 @@ function ExcelImportSection({ onImport, productCount }) {
   );
 }
 
+// ---------- Sales reps management (manager only) ----------
+function RepsManagementSection({ onRepsChanged }) {
+  const [reps, setReps] = useState(null); // null = loading
+  const [name, setName] = useState("");
+  const [passcode, setPasscode] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const load = async () => {
+    try {
+      const data = await api.getReps();
+      setReps(data);
+    } catch (e) {
+      setError(e.message);
+      setReps([]);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const addRep = async () => {
+    if (!name || !passcode) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api.addRep({ name: name.trim(), passcode });
+      setName(""); setPasscode("");
+      await load();
+      onRepsChanged?.();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeRep = async (id) => {
+    try {
+      await api.removeRep(id);
+      await load();
+      onRepsChanged?.();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Sales reps</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Give each rep their own name and passcode to log in with. Once added, you can assign pharmacies to them in the Clients tab.
+      </p>
+
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
+      {reps === null && <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>}
+
+      {reps && reps.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+          {reps.map((r) => (
+            <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px", fontSize: 12.5 }}>
+              <span><strong>{r.name}</strong> · passcode: {r.passcode}</span>
+              <button onClick={() => removeRep(r.id)} style={{ background: "none", border: "none", color: "#B33A3A", fontSize: 11.5 }}>Remove</button>
+            </div>
+          ))}
+        </div>
+      )}
+      {reps && reps.length === 0 && <div style={{ fontSize: 12.5, color: "#8A8272", marginBottom: 12 }}>No reps added yet.</div>}
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Rep name, e.g. Rita" style={{ ...inputStyle, flex: 1, minWidth: 140 }} />
+        <input value={passcode} onChange={(e) => setPasscode(e.target.value)} placeholder="Passcode" style={{ ...inputStyle, flex: 1, minWidth: 140 }} />
+        <button
+          disabled={!name || !passcode || saving}
+          onClick={addRep}
+          style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name && passcode && !saving ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+        >
+          {saving ? "Adding…" : "Add rep"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Settings ----------
-function SettingsView({ slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, loadImportedInventory, onBulkImport, productCount }) {
+function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, loadImportedInventory, onBulkImport, productCount, onRepsChanged }) {
   const [showImportConfirm, setShowImportConfirm] = useState(false);
   const [imported, setImported] = useState(false);
 
@@ -1694,6 +1817,8 @@ function SettingsView({ slowThreshold, setSlowThreshold, repPhone, setRepPhone, 
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Settings</h2>
+
+      {role === "manager" && <RepsManagementSection onRepsChanged={onRepsChanged} />}
 
       <ExcelImportSection onImport={onBulkImport} productCount={productCount} />
 
