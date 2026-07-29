@@ -156,7 +156,7 @@ function parseOffer(o) {
 
 function parseVisit(v) {
   const coords = v.coordsLat && v.coordsLng ? { lat: v.coordsLat, lng: v.coordsLng } : null;
-  return { id: v.id, client: v.client, notes: v.notes, coords, time: v.time };
+  return { id: v.id, client: v.client, notes: v.notes, coords, time: v.time, repName: v.repName || "" };
 }
 
 function visitToRow(v) {
@@ -167,6 +167,7 @@ function visitToRow(v) {
     coordsLat: v.coords ? v.coords.lat : "",
     coordsLng: v.coords ? v.coords.lng : "",
     time: v.time,
+    repName: v.repName || "",
   };
 }
 
@@ -237,10 +238,11 @@ app.post("/api/push/subscribe", async (req, res) => {
 
 app.get("/api/bootstrap", async (req, res) => {
   try {
-    const [products, visits, clients, outreachLog, orders, reps, offers, rawSettings] = await Promise.all([
+    const [products, visits, clients, doctors, outreachLog, orders, reps, offers, rawSettings] = await Promise.all([
       db.getAllRows("Products"),
       db.getAllRows("Visits"),
       db.getAllRows("Clients"),
+      db.getAllRows("Doctors"),
       db.getAllRows("OutreachLog"),
       db.getAllRows("Orders"),
       db.getAllRows("Reps"),
@@ -251,6 +253,7 @@ app.get("/api/bootstrap", async (req, res) => {
       products: products.map(parseProduct),
       visits: visits.map(parseVisit).sort((a, b) => new Date(b.time) - new Date(a.time)),
       clients,
+      doctors,
       outreachLog: outreachLog.sort((a, b) => new Date(b.date) - new Date(a.date)),
       orders: orders.map(parseOrder).sort((a, b) => new Date(b.date) - new Date(a.date)),
       repNames: reps.map((r) => r.name),
@@ -344,9 +347,26 @@ app.post("/api/visits", async (req, res) => {
       notes: notes || "",
       coords: coords || null,
       time: new Date().toISOString(),
+      repName: req.repName || "",
     };
-    await db.appendRow("Visits", visitToRow(visit));
+    const row = visitToRow(visit);
+    await db.appendRow("Visits", row);
+    if (req.repName) {
+      const reps = await db.getAllRows("Reps");
+      const rep = reps.find((r) => r.name === req.repName);
+      if (rep?.exportSheetId) await db.appendToRepExportSheet(rep.exportSheetId, row);
+    }
     res.json(visit);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/visits/:id", async (req, res) => {
+  try {
+    await db.deleteRowById("Visits", req.params.id);
+    res.json({ ok: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -509,7 +529,7 @@ app.patch("/api/clients/:id", requireManager, async (req, res) => {
 app.get("/api/reps", requireManager, async (req, res) => {
   try {
     const reps = await db.getAllRows("Reps");
-    res.json(reps.map((r) => ({ id: r.id, name: r.name, passcode: r.passcode })));
+    res.json(reps.map((r) => ({ id: r.id, name: r.name, passcode: r.passcode, email: r.email || "", exportSheetId: r.exportSheetId || "" })));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -518,11 +538,47 @@ app.get("/api/reps", requireManager, async (req, res) => {
 
 app.post("/api/reps", requireManager, async (req, res) => {
   try {
-    const { name, passcode } = req.body;
+    const { name, passcode, email } = req.body;
     if (!name || !passcode) return res.status(400).json({ error: "name and passcode are required" });
-    const rep = { id: `rep${crypto.randomUUID()}`, name: name.trim(), passcode };
+    let exportSheetId = "";
+    if (email) {
+      try {
+        exportSheetId = await db.createRepExportSheet(name.trim(), email.trim());
+      } catch (e) {
+        console.error("Couldn't create visits export sheet", e.message);
+      }
+    }
+    const rep = { id: `rep${crypto.randomUUID()}`, name: name.trim(), passcode, email: email || "", exportSheetId };
     await db.appendRow("Reps", rep);
     res.json(rep);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/reps/:id/create-export-sheet", requireManager, async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: "email is required" });
+    const reps = await db.getAllRows("Reps");
+    const rep = reps.find((r) => r.id === req.params.id);
+    if (!rep) return res.status(404).json({ error: "Rep not found" });
+    const exportSheetId = await db.createRepExportSheet(rep.name, email.trim());
+    await db.updateRowById("Reps", req.params.id, { email: email.trim(), exportSheetId });
+    res.json({ ok: true, exportSheetId });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/reps/me/export-sheet", async (req, res) => {
+  try {
+    if (!req.repName) return res.json({ exportSheetId: "" });
+    const reps = await db.getAllRows("Reps");
+    const rep = reps.find((r) => r.name === req.repName);
+    res.json({ exportSheetId: rep?.exportSheetId || "" });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -578,6 +634,76 @@ app.post("/api/clients/import-bulk", async (req, res) => {
 app.delete("/api/clients/:id", async (req, res) => {
   try {
     await db.deleteRowById("Clients", req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/doctors", async (req, res) => {
+  try {
+    const { name, hospital, area, phone, specialty, tier } = req.body;
+    if (!name) return res.status(400).json({ error: "name is required" });
+    const doctor = {
+      id: `doc${crypto.randomUUID()}`,
+      name,
+      hospital: hospital || "",
+      area: area || "",
+      phone: phone || "",
+      specialty: specialty || "",
+      tier: tier || "B",
+    };
+    await db.appendRow("Doctors", doctor);
+    res.json(doctor);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/doctors/import-bulk", requireManager, async (req, res) => {
+  try {
+    const { toAdd, toUpdate } = req.body;
+    const addList = Array.isArray(toAdd) ? toAdd : [];
+    const updateList = Array.isArray(toUpdate) ? toUpdate : [];
+
+    const newDoctors = addList
+      .filter((d) => d.name)
+      .map((d) => ({
+        id: `doc${crypto.randomUUID()}`,
+        name: String(d.name).trim(),
+        hospital: d.hospital || "",
+        area: d.area || "",
+        phone: d.phone || "",
+        specialty: d.specialty || "",
+        tier: d.tier || "B",
+      }));
+
+    if (newDoctors.length > 0) await db.appendRows("Doctors", newDoctors);
+
+    let updatedCount = 0;
+    for (const u of updateList) {
+      if (!u.id) continue;
+      const patch = {};
+      if (u.hospital !== undefined) patch.hospital = u.hospital;
+      if (u.area !== undefined) patch.area = u.area;
+      if (u.phone !== undefined) patch.phone = u.phone;
+      if (u.specialty !== undefined) patch.specialty = u.specialty;
+      const ok = await db.updateRowById("Doctors", u.id, patch);
+      if (ok) updatedCount++;
+    }
+
+    res.json({ ok: true, added: newDoctors.length, updated: updatedCount });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/doctors/:id", async (req, res) => {
+  try {
+    await db.deleteRowById("Doctors", req.params.id);
     res.json({ ok: true });
   } catch (e) {
     console.error(e);

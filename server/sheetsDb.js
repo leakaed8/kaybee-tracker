@@ -4,15 +4,18 @@ const SHEET_ID = process.env.SHEET_ID;
 
 const SCHEMAS = {
   Products: ["id", "name", "category", "expiry", "qty", "sold90", "description", "price"],
-  Visits: ["id", "client", "notes", "coordsLat", "coordsLng", "time"],
+  Visits: ["id", "client", "notes", "coordsLat", "coordsLng", "time", "repName"],
   Clients: ["id", "name", "phone", "tier", "area", "assignedRep"],
+  Doctors: ["id", "name", "hospital", "area", "phone", "specialty", "tier"],
   OutreachLog: ["id", "name", "date", "templateIndex"],
   Orders: ["id", "clientName", "visitId", "repName", "date", "items", "total", "status"],
-  Reps: ["id", "name", "passcode"],
+  Reps: ["id", "name", "passcode", "email", "exportSheetId"],
   Offers: ["id", "label", "buyQty", "getQty", "expiresAt", "active"],
   PushSubscriptions: ["id", "role", "repName", "endpoint", "p256dh", "auth"],
   Settings: ["key", "value"],
 };
+
+const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];
 
 function getAuth() {
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
@@ -26,7 +29,10 @@ function getAuth() {
   return new google.auth.JWT({
     email,
     key,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    scopes: [
+      "https://www.googleapis.com/auth/spreadsheets",
+      "https://www.googleapis.com/auth/drive.file",
+    ],
   });
 }
 
@@ -36,6 +42,62 @@ function getSheets() {
     sheetsClient = google.sheets({ version: "v4", auth: getAuth() });
   }
   return sheetsClient;
+}
+
+let driveClient = null;
+function getDrive() {
+  if (!driveClient) {
+    driveClient = google.drive({ version: "v3", auth: getAuth() });
+  }
+  return driveClient;
+}
+
+// Creates a personal spreadsheet for a rep's own visit history, shares
+// view access with their email, and returns the new spreadsheet's ID.
+async function createRepExportSheet(repName, email) {
+  const sheets = getSheets();
+  const created = await sheets.spreadsheets.create({
+    requestBody: {
+      properties: { title: `KayBee Visits — ${repName}` },
+      sheets: [{ properties: { title: "Visits" } }],
+    },
+  });
+  const spreadsheetId = created.data.spreadsheetId;
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: "Visits!A1",
+    valueInputOption: "RAW",
+    requestBody: { values: [VISIT_EXPORT_HEADERS] },
+  });
+  if (email) {
+    try {
+      const drive = getDrive();
+      await drive.permissions.create({
+        fileId: spreadsheetId,
+        sendNotificationEmail: true,
+        requestBody: { type: "user", role: "reader", emailAddress: email },
+      });
+    } catch (e) {
+      console.error("Couldn't share visits export sheet", e.message);
+    }
+  }
+  return spreadsheetId;
+}
+
+async function appendToRepExportSheet(spreadsheetId, visitRow) {
+  if (!spreadsheetId) return;
+  try {
+    const sheets = getSheets();
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: "Visits!A1",
+      valueInputOption: "RAW",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { values: [VISIT_EXPORT_HEADERS.map((h) => visitRow[h] ?? "")] },
+    });
+  } catch (e) {
+    console.error("Couldn't append to rep's visits export sheet", e.message);
+  }
 }
 
 if (!SHEET_ID) {
@@ -269,4 +331,6 @@ module.exports = {
   replaceAllRows,
   getSettings,
   setSettings,
+  createRepExportSheet,
+  appendToRepExportSheet,
 };

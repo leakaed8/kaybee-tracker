@@ -5,7 +5,7 @@ import autoTable from "jspdf-autotable";
 import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
   TrendingDown, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
-  Navigation, Users, Target, Megaphone, ShoppingCart,
+  Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar, Search,
 } from "lucide-react";
 import { api } from "./api.js";
 import {
@@ -23,6 +23,7 @@ export default function App() {
   const [products, setProducts] = useState([]);
   const [visits, setVisits] = useState([]);
   const [clients, setClients] = useState([]);
+  const [doctors, setDoctors] = useState([]);
   const [outreachLog, setOutreachLog] = useState([]);
   const [orders, setOrders] = useState([]);
   const [repNames, setRepNames] = useState([]);
@@ -55,6 +56,7 @@ export default function App() {
       setProducts(data.products);
       setVisits(data.visits);
       setClients(data.clients);
+      setDoctors(data.doctors || []);
       setOutreachLog(data.outreachLog);
       setOrders(data.orders || []);
       setRepNames(data.repNames || []);
@@ -116,11 +118,15 @@ export default function App() {
   const loadImportedInventory = () => withSync(() => api.importSampleInventory());
   const bulkImportProducts = (products) => withSync(() => api.importBulkProducts(products));
   const addVisit = (visit) => withSync(() => api.addVisit(visit));
+  const removeVisit = (id) => withSync(() => api.removeVisit(id));
   const createOrder = (order) => withSync(() => api.createOrder(order));
   const addClient = (client) => withSync(() => api.addClient(client));
   const removeClient = (id) => withSync(() => api.removeClient(id));
   const bulkImportClients = (payload) => withSync(() => api.importClientsBulk(payload));
   const assignClientRep = (id, assignedRep) => withSync(() => api.assignClientRep(id, assignedRep));
+  const addDoctor = (doctor) => withSync(() => api.addDoctor(doctor));
+  const removeDoctor = (id) => withSync(() => api.removeDoctor(id));
+  const bulkImportDoctors = (payload) => withSync(() => api.importDoctorsBulk(payload));
   const logOutreach = (entry) => withSync(() => api.logOutreach(entry));
   const deleteOrder = (id) => withSync(() => api.deleteOrder(id));
   const requestDeleteOrder = (id) => withSync(() => api.requestDeleteOrder(id));
@@ -179,6 +185,7 @@ export default function App() {
       <nav style={{ display: "flex", gap: 4, padding: "12px 24px 0", borderBottom: "1px solid #E5DFD3", overflowX: "auto" }}>
         <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />
         <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Clients" />
+        <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />
         {role === "rep" && <TabBtn active={tab === "checkin"} onClick={() => setTab("checkin")} icon={<MapPin size={15} />} label="Check-In" />}
         {role === "rep" && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
         {role === "manager" && <TabBtn active={tab === "dashboard"} onClick={() => setTab("dashboard")} icon={<LayoutDashboard size={15} />} label="Dashboard" />}
@@ -186,6 +193,7 @@ export default function App() {
         {role === "manager" && <TabBtn active={tab === "outreach"} onClick={() => setTab("outreach")} icon={<MessageCircle size={15} />} label="Outreach" />}
         {role === "manager" && <TabBtn active={tab === "broadcast"} onClick={() => setTab("broadcast")} icon={<Megaphone size={15} />} label="Broadcast" />}
         {role === "manager" && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
+        {role === "manager" && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<Radar size={15} />} label="Locations" />}
         <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />
       </nav>
 
@@ -218,11 +226,13 @@ export default function App() {
               <CheckInView
                 visits={visits}
                 clients={clients}
+                doctors={doctors}
                 products={products}
                 offers={offers}
                 orders={orders}
                 repName={repName}
                 onAddVisit={addVisit}
+                onRemoveVisit={removeVisit}
                 onCreateOrder={createOrder}
                 onRequestDeleteOrder={requestDeleteOrder}
               />
@@ -239,11 +249,22 @@ export default function App() {
                 onAssignRep={assignClientRep}
               />
             )}
-            {tab === "route" && role === "rep" && <RouteView clients={clients} visits={visits} />}
+            {tab === "doctors" && (
+              <DoctorsView
+                doctors={doctors}
+                visits={visits}
+                role={role}
+                onAdd={addDoctor}
+                onRemove={removeDoctor}
+                onBulkImport={bulkImportDoctors}
+              />
+            )}
+            {tab === "route" && role === "rep" && <RouteView clients={clients} doctors={doctors} visits={visits} />}
             {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} visits={visits} />}
             {tab === "orders" && role === "manager" && (
               <OrdersView orders={orders} onDelete={deleteOrder} onApproveDelete={approveDeleteOrder} onDenyDelete={denyDeleteOrder} />
             )}
+            {tab === "locations" && role === "manager" && <LocationsView visits={visits} />}
             {tab === "performance" && role === "manager" && (
               <PerformanceView
                 visits={visits}
@@ -518,7 +539,8 @@ function Field({ label, children }) {
 const inputStyle = { width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #E5DFD3", fontSize: 13, background: "#FAF7F2" };
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ visits, clients, products, offers, orders, repName, onAddVisit, onCreateOrder, onRequestDeleteOrder }) {
+function CheckInView({ visits, clients, doctors, products, offers, orders, repName, onAddVisit, onRemoveVisit, onCreateOrder, onRequestDeleteOrder }) {
+  const [entityType, setEntityType] = useState("pharmacy"); // pharmacy | doctor
   const [client, setClient] = useState("");
   const [notes, setNotes] = useState("");
   const [coords, setCoords] = useState(null);
@@ -527,6 +549,14 @@ function CheckInView({ visits, clients, products, offers, orders, repName, onAdd
   const [lastVisit, setLastVisit] = useState(null);
   const [showOrderPrompt, setShowOrderPrompt] = useState(false);
   const [showOrderBuilder, setShowOrderBuilder] = useState(false);
+  const [confirmVisitId, setConfirmVisitId] = useState(null);
+  const [exportSheetId, setExportSheetId] = useState("");
+
+  useEffect(() => {
+    api.getMyExportSheet().then((data) => setExportSheetId(data.exportSheetId || "")).catch(() => {});
+  }, []);
+
+  const nameOptions = entityType === "pharmacy" ? clients : doctors;
 
   const getLocation = () => {
     setLocating(true);
@@ -556,19 +586,41 @@ function CheckInView({ visits, clients, products, offers, orders, repName, onAdd
 
   return (
     <div>
-      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Log a client visit</h2>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 10, marginBottom: 16 }}>
+        <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Log a visit</h2>
+        {exportSheetId && (
+          <a href={`https://docs.google.com/spreadsheets/d/${exportSheetId}/edit`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: "#4C7A5E", textDecoration: "none", border: "1px solid #4C7A5E33", borderRadius: 6, padding: "5px 10px" }}>
+            View my visits sheet
+          </a>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <button onClick={() => { setEntityType("pharmacy"); setClient(""); }} style={{
+          flex: 1, padding: "8px 14px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12.5, fontWeight: 500,
+          background: entityType === "pharmacy" ? "#1F2A24" : "#fff", color: entityType === "pharmacy" ? "#FAF7F2" : "#1F2A24",
+        }}>
+          Pharmacy
+        </button>
+        <button onClick={() => { setEntityType("doctor"); setClient(""); }} style={{
+          flex: 1, padding: "8px 14px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12.5, fontWeight: 500,
+          background: entityType === "doctor" ? "#1F2A24" : "#fff", color: entityType === "doctor" ? "#FAF7F2" : "#1F2A24",
+        }}>
+          Doctor
+        </button>
+      </div>
 
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
-        <Field label="Client / pharmacy name">
+        <Field label={entityType === "pharmacy" ? "Client / pharmacy name" : "Doctor name"}>
           <input
             value={client}
             onChange={(e) => setClient(e.target.value)}
-            placeholder="e.g. Pharmacie Al Nour"
+            placeholder={entityType === "pharmacy" ? "e.g. Pharmacie Al Nour" : "e.g. Dr. Nour Khalil"}
             list="checkin-client-options"
             style={{ ...inputStyle, marginBottom: 10 }}
           />
           <datalist id="checkin-client-options">
-            {clients.map((c) => <option key={c.id} value={c.name} />)}
+            {nameOptions.map((c) => <option key={c.id} value={c.name} />)}
           </datalist>
         </Field>
         <Field label="Visit notes">
@@ -624,9 +676,21 @@ function CheckInView({ visits, clients, products, offers, orders, repName, onAdd
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {todayVisits.map((v) => (
           <div key={v.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
               <span style={{ fontWeight: 600, fontSize: 13.5 }}>{v.client}</span>
-              <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>{new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>{new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span>
+                {confirmVisitId === v.id ? (
+                  <>
+                    <button onClick={() => { onRemoveVisit(v.id); setConfirmVisitId(null); }} style={{ fontSize: 11, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "3px 8px" }}>Yes</button>
+                    <button onClick={() => setConfirmVisitId(null)} style={{ fontSize: 11, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "3px 8px" }}>Cancel</button>
+                  </>
+                ) : (
+                  <button onClick={() => setConfirmVisitId(v.id)} title="Delete" style={{ background: "none", border: "none", color: "#B7AF9E", padding: 2 }}>
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
             </div>
             {v.notes && <div style={{ fontSize: 12.5, color: "#5B5445", marginTop: 4 }}>{v.notes}</div>}
             {v.coords && <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 4 }}><MapPin size={11} style={{ verticalAlign: -1 }} /> {v.coords.lat}, {v.coords.lng}</div>}
@@ -958,6 +1022,36 @@ function OrdersView({ orders, onDelete, onApproveDelete, onDenyDelete }) {
   );
 }
 
+// ---------- Locations View (manager, check-in GPS history) ----------
+function LocationsView({ visits }) {
+  const withLocation = visits.filter((v) => v.coords).sort((a, b) => new Date(b.time) - new Date(a.time));
+
+  return (
+    <div>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Check-in locations</h2>
+      <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
+        Shows where each visit was captured, based on the GPS a rep recorded at check-in time. This isn't live tracking — a web app can only record location at the moment "Capture GPS location" is tapped.
+      </p>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {withLocation.map((v) => (
+          <div key={v.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13.5 }}>{v.client}{v.repName ? ` · ${v.repName}` : ""}</div>
+              <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
+                {new Date(v.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })} · {v.coords.lat}, {v.coords.lng}
+              </div>
+            </div>
+            <a href={`https://maps.google.com/?q=${v.coords.lat},${v.coords.lng}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: "#4C7A5E", textDecoration: "none", border: "1px solid #4C7A5E33", borderRadius: 6, padding: "6px 10px" }}>
+              View on map
+            </a>
+          </div>
+        ))}
+        {withLocation.length === 0 && <EmptyState text="No visits with a captured location yet." />}
+      </div>
+    </div>
+  );
+}
+
 // ---------- Excel upload for clients, with duplicate review ----------
 function ClientExcelImportSection({ existingClients, onImport, onDone }) {
   const [sheetNames, setSheetNames] = useState([]);
@@ -1195,6 +1289,7 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
   const [tier, setTier] = useState("B");
   const [area, setArea] = useState("");
   const [assignedRep, setAssignedRep] = useState("");
+  const [search, setSearch] = useState("");
 
   const lastVisitFor = (clientName) => {
     const matches = visits.filter((v) => v.client.toLowerCase().trim() === clientName.toLowerCase().trim());
@@ -1217,6 +1312,9 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
     return { ...c, days, overdue, cadence };
   }).sort((a, b) => (b.days ?? 9999) - (a.days ?? 9999));
 
+  const filteredRows = rows.filter((c) => c.name.toLowerCase().includes(search.toLowerCase().trim()));
+  const suggestedFollowUps = rows.filter((c) => c.overdue).slice(0, 5);
+
   const tierColor = { A: "#B33A3A", B: "#D9A441", C: "#6B7280" };
 
   return (
@@ -1229,12 +1327,14 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
           </p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={() => { setShowImport((v) => !v); setShowAdd(false); }} style={{
-            display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
-            background: "#fff", color: "#1F2A24", border: "1px solid #E5DFD3", fontSize: 13, fontWeight: 500,
-          }}>
-            <Upload size={15} /> Import from Excel
-          </button>
+          {role === "manager" && (
+            <button onClick={() => { setShowImport((v) => !v); setShowAdd(false); }} style={{
+              display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
+              background: "#fff", color: "#1F2A24", border: "1px solid #E5DFD3", fontSize: 13, fontWeight: 500,
+            }}>
+              <Upload size={15} /> Import from Excel
+            </button>
+          )}
           <button onClick={() => { setShowAdd((v) => !v); setShowImport(false); }} style={{
             display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
             background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500,
@@ -1244,7 +1344,35 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
         </div>
       </div>
 
-      {showImport && <ClientExcelImportSection existingClients={clients} onImport={onBulkImport} onDone={() => setShowImport(false)} />}
+      {role === "manager" && showImport && <ClientExcelImportSection existingClients={clients} onImport={onBulkImport} onDone={() => setShowImport(false)} />}
+
+      <div style={{ position: "relative", marginBottom: 14 }}>
+        <Search size={15} style={{ position: "absolute", left: 12, top: 10, color: "#8A8272" }} />
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search clients by name…"
+          style={{ ...inputStyle, paddingLeft: 34 }}
+        />
+      </div>
+
+      {suggestedFollowUps.length > 0 && (
+        <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 10, padding: 16, marginBottom: 18 }}>
+          <h3 style={{ fontSize: 13.5, fontWeight: 600, margin: "0 0 10px", color: "#7A5B2E" }}>Suggested follow-ups</h3>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {suggestedFollowUps.map((c) => (
+              <div key={c.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#fff", border: "1px solid #E9C88A", borderRadius: 8, padding: "8px 12px", fontSize: 12.5 }}>
+                <span><strong>{c.name}</strong> — {c.days === null ? "never visited" : `${c.days}d since visit`} (cadence {c.cadence}d)</span>
+                {c.phone && (
+                  <a href={`https://wa.me/${c.phone.replace(/\D/g, "")}`} target="_blank" rel="noreferrer" style={{ fontSize: 11.5, color: "#4C7A5E", textDecoration: "none" }}>
+                    WhatsApp
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {showAdd && (
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
@@ -1274,7 +1402,7 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
       )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {rows.map((c) => (
+        {filteredRows.map((c) => (
           <div key={c.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <div>
@@ -1312,18 +1440,389 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
             <button onClick={() => onRemove(c.id)} style={{ marginTop: 6, background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
           </div>
         ))}
-        {rows.length === 0 && <EmptyState text="No clients added yet." />}
+        {filteredRows.length === 0 && <EmptyState text={search ? "No clients match your search." : "No clients added yet."} />}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Excel upload for doctors, with duplicate review (manager only) ----------
+function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
+  const [sheetNames, setSheetNames] = useState([]);
+  const [selectedSheet, setSelectedSheet] = useState("");
+  const [workbook, setWorkbook] = useState(null);
+  const [headers, setHeaders] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [mapping, setMapping] = useState({ name: "", hospital: "", area: "", phone: "", specialty: "" });
+  const [skipIds, setSkipIds] = useState(new Set());
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const readSheet = (wb, sheetName) => {
+    const ws = wb.Sheets[sheetName];
+    const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+    const headerRow = (json[0] || []).map((h, i) => (h === "" ? `Column ${i + 1}` : String(h)));
+    const dataRows = json.slice(1).filter((r) => r.some((cell) => cell !== ""));
+    setHeaders(headerRow);
+    setRows(dataRows);
+  };
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setError("");
+    setResult(null);
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: "array", cellDates: true });
+        setWorkbook(wb);
+        setSheetNames(wb.SheetNames);
+        setSelectedSheet(wb.SheetNames[0]);
+        readSheet(wb, wb.SheetNames[0]);
+        setMapping({ name: "", hospital: "", area: "", phone: "", specialty: "" });
+        setSkipIds(new Set());
+      } catch (err) {
+        setError("Couldn't read that file. Make sure it's a valid Excel (.xlsx) file.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const changeSheet = (name) => {
+    setSelectedSheet(name);
+    readSheet(workbook, name);
+    setMapping({ name: "", hospital: "", area: "", phone: "", specialty: "" });
+    setSkipIds(new Set());
+  };
+
+  const { newDoctors, updates } = useMemo(() => {
+    if (!mapping.name) return { newDoctors: [], updates: [] };
+    const nameIdx = headers.indexOf(mapping.name);
+    const hospitalIdx = headers.indexOf(mapping.hospital);
+    const areaIdx = headers.indexOf(mapping.area);
+    const phoneIdx = headers.indexOf(mapping.phone);
+    const specialtyIdx = headers.indexOf(mapping.specialty);
+
+    const existingByName = new Map(existingDoctors.map((d) => [d.name.toLowerCase().trim(), d]));
+
+    const fresh = [];
+    const dupes = [];
+
+    rows.forEach((r) => {
+      const name = String(r[nameIdx] ?? "").trim();
+      if (!name) return;
+      const hospital = hospitalIdx >= 0 ? String(r[hospitalIdx] ?? "").trim() : "";
+      const area = areaIdx >= 0 ? String(r[areaIdx] ?? "").trim() : "";
+      const phone = phoneIdx >= 0 ? String(r[phoneIdx] ?? "").trim() : "";
+      const specialty = specialtyIdx >= 0 ? String(r[specialtyIdx] ?? "").trim() : "";
+      const existing = existingByName.get(name.toLowerCase().trim());
+      if (!existing) {
+        fresh.push({ name, hospital, area, phone, specialty });
+      } else if ((existing.hospital || "") !== hospital || (existing.area || "") !== area || (existing.phone || "") !== phone || (existing.specialty || "") !== specialty) {
+        dupes.push({ existing, incoming: { hospital, area, phone, specialty } });
+      }
+    });
+
+    return { newDoctors: fresh, updates: dupes };
+  }, [mapping, rows, headers, existingDoctors]);
+
+  const toggleSkip = (id) => setSkipIds((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  const doImport = async () => {
+    setError("");
+    setImporting(true);
+    try {
+      const toUpdate = updates
+        .filter((u) => !skipIds.has(u.existing.id))
+        .map((u) => ({ id: u.existing.id, ...u.incoming }));
+      await onImport({ toAdd: newDoctors, toUpdate });
+      setResult({ added: newDoctors.length, updated: toUpdate.length });
+      setWorkbook(null);
+      setHeaders([]);
+      setRows([]);
+      setSheetNames([]);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    } catch (e) {
+      setError(e.message || "Import failed.");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const fieldSelect = (field, label, required) => (
+    <div>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>
+        {label}{required ? " *" : " (optional)"}
+      </label>
+      <select value={mapping[field]} onChange={(e) => setMapping((m) => ({ ...m, [field]: e.target.value }))} style={inputStyle}>
+        <option value="">{required ? "— select a column —" : "— none —"}</option>
+        {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+      </select>
+    </div>
+  );
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Import doctors from Excel</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Upload an .xlsx file of doctors. New names get added; names that already exist are shown below so you can choose whether to update their info.
+      </p>
+
+      <button
+        onClick={() => fileInputRef.current?.click()}
+        style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500, marginBottom: 10 }}
+      >
+        <Upload size={15} /> Choose Excel file
+      </button>
+      <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ display: "none" }} />
+
+      {error && <div style={{ fontSize: 12.5, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
+      {result && (
+        <div style={{ fontSize: 12.5, color: "#4C7A5E", display: "flex", alignItems: "center", gap: 5, marginBottom: 10 }}>
+          <Check size={14} /> Added {result.added}, updated {result.updated}.
+        </div>
+      )}
+
+      {headers.length > 0 && (
+        <div style={{ padding: 12, background: "#FAF7F2", borderRadius: 8 }}>
+          {sheetNames.length > 1 && (
+            <div style={{ marginBottom: 10 }}>
+              <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>Sheet / tab</label>
+              <select value={selectedSheet} onChange={(e) => changeSheet(e.target.value)} style={inputStyle}>
+                {sheetNames.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {fieldSelect("name", "Name column", true)}
+            {fieldSelect("hospital", "Hospital column", false)}
+            {fieldSelect("area", "Area column", false)}
+            {fieldSelect("phone", "Phone column", false)}
+            {fieldSelect("specialty", "Specialty column", false)}
+          </div>
+
+          {mapping.name && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 12, color: "#5B5445", marginBottom: 10 }}>
+                {newDoctors.length} new doctor{newDoctors.length === 1 ? "" : "s"} will be added
+                {updates.length > 0 ? `, ${updates.length} existing doctor${updates.length === 1 ? "" : "s"} have different info in your file` : ""}.
+              </div>
+
+              {updates.length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 6 }}>Review matched doctors — uncheck any you don't want updated:</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto" }}>
+                    {updates.map((u) => (
+                      <label key={u.existing.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, fontSize: 12 }}>
+                        <input type="checkbox" checked={!skipIds.has(u.existing.id)} onChange={() => toggleSkip(u.existing.id)} style={{ marginTop: 2 }} />
+                        <div>
+                          <div style={{ fontWeight: 600, marginBottom: 2 }}>{u.existing.name}</div>
+                          <div style={{ color: "#8A8272" }}>
+                            hospital: {u.existing.hospital || "(none)"} → {u.incoming.hospital || "(none)"}<br />
+                            area: {u.existing.area || "(none)"} → {u.incoming.area || "(none)"}<br />
+                            phone: {u.existing.phone || "(none)"} → {u.incoming.phone || "(none)"}<br />
+                            specialty: {u.existing.specialty || "(none)"} → {u.incoming.specialty || "(none)"}
+                          </div>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {newDoctors.length > 0 && (
+                <div style={{ overflowX: "auto", marginBottom: 10 }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+                    <thead>
+                      <tr style={{ textAlign: "left", color: "#8A8272" }}>
+                        <th style={{ padding: "4px 6px" }}>Name</th>
+                        <th style={{ padding: "4px 6px" }}>Hospital</th>
+                        <th style={{ padding: "4px 6px" }}>Area</th>
+                        <th style={{ padding: "4px 6px" }}>Specialty</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {newDoctors.slice(0, 5).map((d, i) => (
+                        <tr key={i} style={{ borderTop: "1px solid #E5DFD3" }}>
+                          <td style={{ padding: "4px 6px" }}>{d.name}</td>
+                          <td style={{ padding: "4px 6px" }}>{d.hospital || "—"}</td>
+                          <td style={{ padding: "4px 6px" }}>{d.area || "—"}</td>
+                          <td style={{ padding: "4px 6px" }}>{d.specialty || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {newDoctors.length > 5 && <div style={{ fontSize: 11, color: "#8A8272", marginTop: 4 }}>...and {newDoctors.length - 5} more</div>}
+                </div>
+              )}
+
+              <button
+                disabled={importing || (newDoctors.length === 0 && updates.length === 0)}
+                onClick={doImport}
+                style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: !importing && (newDoctors.length > 0 || updates.length > 0) ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+              >
+                {importing ? "Importing…" : `Import (${newDoctors.length} new, ${updates.filter((u) => !skipIds.has(u.existing.id)).length} updates)`}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Doctors View (tiering + follow-up nudges) ----------
+function DoctorsView({ doctors, visits, role, onAdd, onRemove, onBulkImport }) {
+  const [showAdd, setShowAdd] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+  const [name, setName] = useState("");
+  const [hospital, setHospital] = useState("");
+  const [area, setArea] = useState("");
+  const [phone, setPhone] = useState("");
+  const [specialty, setSpecialty] = useState("");
+  const [tier, setTier] = useState("B");
+  const [search, setSearch] = useState("");
+
+  const lastVisitFor = (doctorName) => {
+    const matches = visits.filter((v) => v.client.toLowerCase().trim() === doctorName.toLowerCase().trim());
+    if (matches.length === 0) return null;
+    return matches.reduce((latest, v) => (new Date(v.time) > new Date(latest.time) ? v : latest), matches[0]);
+  };
+
+  const addDoctor = () => {
+    if (!name) return;
+    onAdd({ name, hospital, area, phone, specialty, tier });
+    setName(""); setHospital(""); setArea(""); setPhone(""); setSpecialty(""); setTier("B");
+    setShowAdd(false);
+  };
+
+  const rows = doctors.map((d) => {
+    const lv = lastVisitFor(d.name);
+    const days = lv ? daysSince(lv.time) : null;
+    const cadence = TIER_CADENCE[d.tier] || 30;
+    const overdue = days === null || days > cadence;
+    return { ...d, days, overdue, cadence };
+  }).sort((a, b) => (b.days ?? 9999) - (a.days ?? 9999));
+
+  const filteredRows = rows.filter((d) => d.name.toLowerCase().includes(search.toLowerCase().trim()));
+  const tierColor = { A: "#B33A3A", B: "#D9A441", C: "#6B7280" };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 18, flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Doctors & follow-up</h2>
+          <p style={{ fontSize: 13, color: "#8A8272", margin: "4px 0 0" }}>
+            Same cadence system as pharmacies — Tier A: every {TIER_CADENCE.A}d · B: {TIER_CADENCE.B}d · C: {TIER_CADENCE.C}d.
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {role === "manager" && (
+            <button onClick={() => { setShowImport((v) => !v); setShowAdd(false); }} style={{
+              display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
+              background: "#fff", color: "#1F2A24", border: "1px solid #E5DFD3", fontSize: 13, fontWeight: 500,
+            }}>
+              <Upload size={15} /> Import from Excel
+            </button>
+          )}
+          <button onClick={() => { setShowAdd((v) => !v); setShowImport(false); }} style={{
+            display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
+            background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500,
+          }}>
+            <Plus size={15} /> Add doctor
+          </button>
+        </div>
+      </div>
+
+      {role === "manager" && showImport && <DoctorExcelImportSection existingDoctors={doctors} onImport={onBulkImport} onDone={() => setShowImport(false)} />}
+
+      <div style={{ position: "relative", marginBottom: 14 }}>
+        <Search size={15} style={{ position: "absolute", left: 12, top: 10, color: "#8A8272" }} />
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search doctors by name…"
+          style={{ ...inputStyle, paddingLeft: 34 }}
+        />
+      </div>
+
+      {showAdd && (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+            <Field label="Doctor name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Dr. Nour Khalil" style={inputStyle} /></Field>
+            <Field label="Hospital / clinic"><input value={hospital} onChange={(e) => setHospital(e.target.value)} placeholder="e.g. Beirut Hospital" style={inputStyle} /></Field>
+            <Field label="Area"><input value={area} onChange={(e) => setArea(e.target.value)} placeholder="e.g. Jbeil" style={inputStyle} /></Field>
+            <Field label="Phone"><input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+961 xx xxx xxx" style={inputStyle} /></Field>
+            <Field label="Specialty"><input value={specialty} onChange={(e) => setSpecialty(e.target.value)} placeholder="e.g. Cardiology" style={inputStyle} /></Field>
+            <Field label="Tier">
+              <select value={tier} onChange={(e) => setTier(e.target.value)} style={inputStyle}>
+                <option value="A">A — high value, visit every 14d</option>
+                <option value="B">B — standard, visit every 30d</option>
+                <option value="C">C — low priority, visit every 60d</option>
+              </select>
+            </Field>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button disabled={!name} onClick={addDoctor} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>Add doctor</button>
+            <button onClick={() => setShowAdd(false)} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {filteredRows.map((d) => (
+          <div key={d.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                  <span style={{ fontWeight: 600, fontSize: 13.5 }}>{d.name}</span>
+                  <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 7px", borderRadius: 5, background: `${tierColor[d.tier]}1A`, color: tierColor[d.tier] }}>Tier {d.tier}</span>
+                </div>
+                <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 3 }}>
+                  {d.hospital || "no hospital set"} · {d.area || "no area"} {d.phone ? `· ${d.phone}` : ""}
+                </div>
+                {d.specialty && <div style={{ fontSize: 11.5, color: "#5B5445", marginTop: 3 }}>{d.specialty}</div>}
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: d.overdue ? "#B33A3A" : "#4C7A5E" }}>
+                  {d.days === null ? "never visited" : `${d.days}d since visit`}
+                </div>
+                {d.overdue && <div style={{ fontSize: 10.5, color: "#B33A3A" }}>overdue (cadence {d.cadence}d)</div>}
+              </div>
+            </div>
+            <button onClick={() => onRemove(d.id)} style={{ marginTop: 6, background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
+          </div>
+        ))}
+        {filteredRows.length === 0 && <EmptyState text={search ? "No doctors match your search." : "No doctors added yet."} />}
       </div>
     </div>
   );
 }
 
 // ---------- Route View (simple nearest-neighbor route ordering) ----------
-function RouteView({ clients, visits }) {
+function RouteView({ clients, doctors, visits }) {
+  const [entityType, setEntityType] = useState("pharmacy"); // pharmacy | doctor
+  const [search, setSearch] = useState("");
   const [selected, setSelected] = useState([]);
   const [myLoc, setMyLoc] = useState(null);
   const [locating, setLocating] = useState(false);
   const [ordered, setOrdered] = useState(null);
+
+  const entities = entityType === "pharmacy" ? clients : doctors;
+  const filteredEntities = entities.filter((e) =>
+    e.name.toLowerCase().includes(search.toLowerCase().trim()) || (e.area || "").toLowerCase().includes(search.toLowerCase().trim())
+  );
+
+  const changeEntityType = (t) => { setEntityType(t); setSelected([]); setOrdered(null); };
 
   const lastCoordsFor = (clientName) => {
     const matches = visits.filter((v) => v.client.toLowerCase().trim() === clientName.toLowerCase().trim() && v.coords);
@@ -1344,7 +1843,7 @@ function RouteView({ clients, visits }) {
   };
 
   const optimize = () => {
-    const stops = selected.map((id) => clients.find((c) => c.id === id)).filter(Boolean).map((c) => {
+    const stops = selected.map((id) => entities.find((c) => c.id === id)).filter(Boolean).map((c) => {
       const coords = lastCoordsFor(c.name);
       return { ...c, coords: coords ? { lat: parseFloat(coords.lat), lng: parseFloat(coords.lng) } : null };
     });
@@ -1372,6 +1871,21 @@ function RouteView({ clients, visits }) {
         Orders stops by straight-line distance from you, using each client's last captured GPS. Not real driving directions — use judgement for one-way streets or traffic.
       </p>
 
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <button onClick={() => changeEntityType("pharmacy")} style={{
+          flex: 1, padding: "8px 14px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12.5, fontWeight: 500,
+          background: entityType === "pharmacy" ? "#1F2A24" : "#fff", color: entityType === "pharmacy" ? "#FAF7F2" : "#1F2A24",
+        }}>
+          Pharmacies
+        </button>
+        <button onClick={() => changeEntityType("doctor")} style={{
+          flex: 1, padding: "8px 14px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12.5, fontWeight: 500,
+          background: entityType === "doctor" ? "#1F2A24" : "#fff", color: entityType === "doctor" ? "#FAF7F2" : "#1F2A24",
+        }}>
+          Doctors
+        </button>
+      </div>
+
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
         <button onClick={getMyLocation} disabled={locating} style={{
           display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
@@ -1382,14 +1896,26 @@ function RouteView({ clients, visits }) {
         {myLoc && <span className="kb-font-mono" style={{ fontSize: 11, color: "#4C7A5E", alignSelf: "center" }}><Check size={12} style={{ verticalAlign: -1 }} /> location set</span>}
       </div>
 
+      <div style={{ position: "relative", marginBottom: 12 }}>
+        <Search size={15} style={{ position: "absolute", left: 12, top: 10, color: "#8A8272" }} />
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search by name or area…"
+          style={{ ...inputStyle, paddingLeft: 34 }}
+        />
+      </div>
+
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
-        {clients.map((c) => (
+        {filteredEntities.map((c) => (
           <label key={c.id} style={{ display: "flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>
             <input type="checkbox" checked={selected.includes(c.id)} onChange={() => toggle(c.id)} />
             {c.name} <span style={{ fontSize: 10.5, color: "#8A8272" }}>({c.area || "no area"})</span>
           </label>
         ))}
-        {clients.length === 0 && <EmptyState text="Add clients in the Clients tab first." />}
+        {filteredEntities.length === 0 && (
+          <EmptyState text={entityType === "pharmacy" ? "Add clients in the Clients tab first." : "Add doctors in the Doctors tab first."} />
+        )}
       </div>
 
       <button onClick={optimize} disabled={selected.length === 0} style={{
@@ -1922,8 +2448,11 @@ function RepsManagementSection({ onRepsChanged }) {
   const [reps, setReps] = useState(null); // null = loading
   const [name, setName] = useState("");
   const [passcode, setPasscode] = useState("");
+  const [email, setEmail] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [sheetEmails, setSheetEmails] = useState({}); // per-rep email input for "create visits sheet"
+  const [creatingSheetFor, setCreatingSheetFor] = useState(null);
 
   const load = async () => {
     try {
@@ -1942,8 +2471,8 @@ function RepsManagementSection({ onRepsChanged }) {
     setSaving(true);
     setError("");
     try {
-      await api.addRep({ name: name.trim(), passcode });
-      setName(""); setPasscode("");
+      await api.addRep({ name: name.trim(), passcode, email: email.trim() });
+      setName(""); setPasscode(""); setEmail("");
       await load();
       onRepsChanged?.();
     } catch (e) {
@@ -1963,11 +2492,26 @@ function RepsManagementSection({ onRepsChanged }) {
     }
   };
 
+  const createSheetFor = async (rep) => {
+    const emailToUse = sheetEmails[rep.id];
+    if (!emailToUse) return;
+    setCreatingSheetFor(rep.id);
+    setError("");
+    try {
+      await api.createRepExportSheet(rep.id, emailToUse.trim());
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setCreatingSheetFor(null);
+    }
+  };
+
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
       <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Sales reps</label>
       <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
-        Give each rep their own name and passcode to log in with. Once added, you can assign pharmacies to them in the Clients tab.
+        Give each rep their own name and passcode to log in with. Add their Google account email too and they'll get a personal Google Sheet of their own visits, shared automatically. Once added, you can assign pharmacies to them in the Clients tab.
       </p>
 
       {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
@@ -1976,9 +2520,32 @@ function RepsManagementSection({ onRepsChanged }) {
       {reps && reps.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
           {reps.map((r) => (
-            <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px", fontSize: 12.5 }}>
-              <span><strong>{r.name}</strong> · passcode: {r.passcode}</span>
-              <button onClick={() => removeRep(r.id)} style={{ background: "none", border: "none", color: "#B33A3A", fontSize: 11.5 }}>Remove</button>
+            <div key={r.id} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px", fontSize: 12.5 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span><strong>{r.name}</strong> · passcode: {r.passcode}</span>
+                <button onClick={() => removeRep(r.id)} style={{ background: "none", border: "none", color: "#B33A3A", fontSize: 11.5 }}>Remove</button>
+              </div>
+              {r.exportSheetId ? (
+                <a href={`https://docs.google.com/spreadsheets/d/${r.exportSheetId}/edit`} target="_blank" rel="noreferrer" style={{ fontSize: 11.5, color: "#4C7A5E", display: "inline-block", marginTop: 6 }}>
+                  Visits sheet ({r.email}) →
+                </a>
+              ) : (
+                <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                  <input
+                    value={sheetEmails[r.id] || ""}
+                    onChange={(e) => setSheetEmails((prev) => ({ ...prev, [r.id]: e.target.value }))}
+                    placeholder="Rep's Google email for their visits sheet"
+                    style={{ ...inputStyle, flex: 1, minWidth: 160, fontSize: 11.5, padding: "5px 8px" }}
+                  />
+                  <button
+                    disabled={!sheetEmails[r.id] || creatingSheetFor === r.id}
+                    onClick={() => createSheetFor(r)}
+                    style={{ fontSize: 11.5, padding: "5px 10px", borderRadius: 6, border: "none", background: sheetEmails[r.id] ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2" }}
+                  >
+                    {creatingSheetFor === r.id ? "Creating…" : "Create visits sheet"}
+                  </button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -1988,6 +2555,7 @@ function RepsManagementSection({ onRepsChanged }) {
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Rep name, e.g. Rita" style={{ ...inputStyle, flex: 1, minWidth: 140 }} />
         <input value={passcode} onChange={(e) => setPasscode(e.target.value)} placeholder="Passcode" style={{ ...inputStyle, flex: 1, minWidth: 140 }} />
+        <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Google email (optional)" style={{ ...inputStyle, flex: 1, minWidth: 160 }} />
         <button
           disabled={!name || !passcode || saving}
           onClick={addRep}
@@ -2167,32 +2735,34 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
         <OffersManagementSection offers={offers} onAdd={onAddOffer} onToggleActive={onToggleOfferActive} onRemove={onRemoveOffer} />
       )}
 
-      <ExcelImportSection onImport={onBulkImport} productCount={productCount} />
+      {role === "manager" && <ExcelImportSection onImport={onBulkImport} productCount={productCount} />}
 
-      <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
-        <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Sample inventory import</label>
-        <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
-          Loads 124 batches pulled from <strong>INVENTORY EXPIRY AND MOVEMENT</strong> (STOCK tab) on Jul 26, 2026 — each expiry batch as its own row. 90-day sales are matched where available; items without a match show 0 and are treated as slow-movers until you update them. This replaces the current product list in this app ({productCount} items now).
-        </p>
-        {!showImportConfirm && !imported && (
-          <button onClick={() => setShowImportConfirm(true)} style={{
-            display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
-            background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500,
-          }}>
-            <Download size={15} /> Import 124 batches
-          </button>
-        )}
-        {showImportConfirm && (
-          <div style={{ padding: 10, background: "#FBF3E8", borderRadius: 8 }}>
-            <p style={{ fontSize: 12.5, color: "#7A5B2E", marginBottom: 8 }}>This replaces all {productCount} current products. Continue?</p>
-            <div style={{ display: "flex", gap: 6 }}>
-              <button onClick={doImport} style={{ fontSize: 12, background: "#C17817", color: "#fff", border: "none", borderRadius: 6, padding: "6px 12px" }}>Yes, import</button>
-              <button onClick={() => setShowImportConfirm(false)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 12px" }}>Cancel</button>
+      {role === "manager" && (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+          <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Sample inventory import</label>
+          <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+            Loads 124 batches pulled from <strong>INVENTORY EXPIRY AND MOVEMENT</strong> (STOCK tab) on Jul 26, 2026 — each expiry batch as its own row. 90-day sales are matched where available; items without a match show 0 and are treated as slow-movers until you update them. This replaces the current product list in this app ({productCount} items now).
+          </p>
+          {!showImportConfirm && !imported && (
+            <button onClick={() => setShowImportConfirm(true)} style={{
+              display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
+              background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500,
+            }}>
+              <Download size={15} /> Import 124 batches
+            </button>
+          )}
+          {showImportConfirm && (
+            <div style={{ padding: 10, background: "#FBF3E8", borderRadius: 8 }}>
+              <p style={{ fontSize: 12.5, color: "#7A5B2E", marginBottom: 8 }}>This replaces all {productCount} current products. Continue?</p>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button onClick={doImport} style={{ fontSize: 12, background: "#C17817", color: "#fff", border: "none", borderRadius: 6, padding: "6px 12px" }}>Yes, import</button>
+                <button onClick={() => setShowImportConfirm(false)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 12px" }}>Cancel</button>
+              </div>
             </div>
-          </div>
-        )}
-        {imported && <div style={{ fontSize: 12.5, color: "#4C7A5E", display: "flex", alignItems: "center", gap: 5 }}><Check size={14} /> Imported 124 batches.</div>}
-      </div>
+          )}
+          {imported && <div style={{ fontSize: 12.5, color: "#4C7A5E", display: "flex", alignItems: "center", gap: 5 }}><Check size={14} /> Imported 124 batches.</div>}
+        </div>
+      )}
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
         <Field label={`Slow-mover threshold: flag if turnover falls below ${slowThreshold}% of stock sold per 90 days`}>
           <input type="range" min="5" max="40" value={slowThreshold} onChange={(e) => setSlowThreshold(Number(e.target.value))} style={{ width: "100%" }} />
