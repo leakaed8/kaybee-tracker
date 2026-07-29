@@ -551,12 +551,22 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, repNa
   const [showOrderBuilder, setShowOrderBuilder] = useState(false);
   const [confirmVisitId, setConfirmVisitId] = useState(null);
   const [exportSheetId, setExportSheetId] = useState("");
+  const [mentionedItems, setMentionedItems] = useState([]);
+  const [itemQuery, setItemQuery] = useState("");
 
   useEffect(() => {
     api.getMyExportSheet().then((data) => setExportSheetId(data.exportSheetId || "")).catch(() => {});
   }, []);
 
   const nameOptions = entityType === "pharmacy" ? clients : doctors;
+
+  const matchedItem = products.find((p) => p.name.toLowerCase().trim() === itemQuery.toLowerCase().trim());
+  const addMentionedItem = () => {
+    if (!matchedItem || mentionedItems.some((it) => it.productId === matchedItem.id)) return;
+    setMentionedItems((prev) => [...prev, { productId: matchedItem.id, name: matchedItem.name }]);
+    setItemQuery("");
+  };
+  const removeMentionedItem = (productId) => setMentionedItems((prev) => prev.filter((it) => it.productId !== productId));
 
   const getLocation = () => {
     setLocating(true);
@@ -575,9 +585,9 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, repNa
 
   const submit = async () => {
     const visitClient = client;
-    const created = await onAddVisit({ client, notes, coords });
+    const created = await onAddVisit({ client, notes, coords, mentionedItems });
     setLastVisit(created || { client: visitClient });
-    setClient(""); setNotes(""); setCoords(null);
+    setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery("");
     setShowOrderPrompt(true);
     setShowOrderBuilder(false);
   };
@@ -626,6 +636,55 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, repNa
         <Field label="Visit notes">
           <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="What was discussed, orders taken, objections…" rows={3} style={{ ...inputStyle, marginBottom: 10, resize: "vertical" }} />
         </Field>
+
+        {entityType === "doctor" && (
+          <Field label="Items mentioned during visit">
+            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+              <input
+                value={itemQuery}
+                onChange={(e) => setItemQuery(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addMentionedItem(); } }}
+                placeholder="Search product…"
+                list="checkin-item-options"
+                style={{ ...inputStyle, flex: 1 }}
+              />
+              <datalist id="checkin-item-options">
+                {products.map((p) => <option key={p.id} value={p.name} />)}
+              </datalist>
+              <button
+                type="button"
+                onClick={addMentionedItem}
+                disabled={!matchedItem}
+                style={{
+                  padding: "8px 14px", borderRadius: 8, border: "none", whiteSpace: "nowrap",
+                  background: matchedItem ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
+                }}
+              >
+                Add item
+              </button>
+            </div>
+            {mentionedItems.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                {mentionedItems.map((it) => (
+                  <span key={it.productId} style={{
+                    display: "flex", alignItems: "center", gap: 6, fontSize: 12,
+                    background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 20, padding: "4px 6px 4px 10px",
+                  }}>
+                    {it.name}
+                    <button
+                      type="button"
+                      onClick={() => removeMentionedItem(it.productId)}
+                      style={{ border: "none", background: "none", cursor: "pointer", display: "flex", padding: 2, color: "#8A8272" }}
+                      aria-label={`Remove ${it.name}`}
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </Field>
+        )}
 
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
           <button onClick={getLocation} disabled={locating} style={{
@@ -693,6 +752,11 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, repNa
               </div>
             </div>
             {v.notes && <div style={{ fontSize: 12.5, color: "#5B5445", marginTop: 4 }}>{v.notes}</div>}
+            {v.mentionedItems && v.mentionedItems.length > 0 && (
+              <div style={{ fontSize: 11.5, color: "#4C7A5E", marginTop: 4 }}>
+                Mentioned: {v.mentionedItems.map((it) => it.name).join(", ")}
+              </div>
+            )}
             {v.coords && <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 4 }}><MapPin size={11} style={{ verticalAlign: -1 }} /> {v.coords.lat}, {v.coords.lng}</div>}
           </div>
         ))}

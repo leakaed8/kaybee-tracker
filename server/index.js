@@ -156,7 +156,11 @@ function parseOffer(o) {
 
 function parseVisit(v) {
   const coords = v.coordsLat && v.coordsLng ? { lat: v.coordsLat, lng: v.coordsLng } : null;
-  return { id: v.id, client: v.client, notes: v.notes, coords, time: v.time, repName: v.repName || "" };
+  let mentionedItems = [];
+  if (v.itemsMentioned) {
+    try { mentionedItems = JSON.parse(v.itemsMentioned); } catch { mentionedItems = []; }
+  }
+  return { id: v.id, client: v.client, notes: v.notes, coords, time: v.time, repName: v.repName || "", mentionedItems };
 }
 
 function visitToRow(v) {
@@ -168,6 +172,7 @@ function visitToRow(v) {
     coordsLng: v.coords ? v.coords.lng : "",
     time: v.time,
     repName: v.repName || "",
+    itemsMentioned: v.mentionedItems && v.mentionedItems.length ? JSON.stringify(v.mentionedItems) : "",
   };
 }
 
@@ -339,7 +344,7 @@ app.post("/api/products/import-bulk", async (req, res) => {
 
 app.post("/api/visits", async (req, res) => {
   try {
-    const { client, notes, coords } = req.body;
+    const { client, notes, coords, mentionedItems } = req.body;
     if (!client) return res.status(400).json({ error: "client is required" });
     const visit = {
       id: `v${crypto.randomUUID()}`,
@@ -348,6 +353,7 @@ app.post("/api/visits", async (req, res) => {
       coords: coords || null,
       time: new Date().toISOString(),
       repName: req.repName || "",
+      mentionedItems: Array.isArray(mentionedItems) ? mentionedItems : [],
     };
     const row = visitToRow(visit);
     await db.appendRow("Visits", row);
