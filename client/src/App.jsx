@@ -194,7 +194,7 @@ export default function App() {
         {role === "manager" && <TabBtn active={tab === "broadcast"} onClick={() => setTab("broadcast")} icon={<Megaphone size={15} />} label="Broadcast" />}
         {role === "manager" && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
         {role === "manager" && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<Radar size={15} />} label="Locations" />}
-        <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />
+        {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
       </nav>
 
       <main style={{ padding: "24px", maxWidth: 900, margin: "0 auto" }}>
@@ -283,7 +283,7 @@ export default function App() {
               />
             )}
             {tab === "broadcast" && role === "manager" && <BroadcastView zoned={zoned} clients={clients} />}
-            {tab === "settings" && (
+            {tab === "settings" && role === "manager" && (
               <SettingsView
                 role={role}
                 slowThreshold={settings.slowThreshold} setSlowThreshold={(v) => updateSettingsField({ slowThreshold: v })}
@@ -719,6 +719,10 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, repNa
           </div>
         ))}
         {orders.filter((o) => o.repName === repName).length === 0 && <EmptyState text="No orders yet." />}
+      </div>
+
+      <div style={{ marginTop: 20 }}>
+        <PushNotificationSetup />
       </div>
     </div>
   );
