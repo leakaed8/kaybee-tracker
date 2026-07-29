@@ -386,6 +386,12 @@ app.post("/api/visits", async (req, res) => {
 
 app.delete("/api/visits/:id", async (req, res) => {
   try {
+    if (req.role !== "manager") {
+      const visits = await db.getAllRows("Visits");
+      const target = visits.find((v) => v.id === req.params.id);
+      if (!target) return res.status(404).json({ error: "Visit not found" });
+      if (target.repName !== req.repName) return res.status(403).json({ error: "You can only delete your own visits" });
+    }
     await db.deleteRowById("Visits", req.params.id);
     res.json({ ok: true });
   } catch (e) {
@@ -560,16 +566,14 @@ app.get("/api/reps", requireManager, async (req, res) => {
 app.post("/api/reps", requireManager, async (req, res) => {
   try {
     const { name, passcode, email } = req.body;
-    if (!name || !passcode) return res.status(400).json({ error: "name and passcode are required" });
+    if (!name || !passcode || !email) return res.status(400).json({ error: "name, passcode, and email are required" });
     let exportSheetId = "";
-    if (email) {
-      try {
-        exportSheetId = await db.createRepExportSheet(name.trim(), email.trim());
-      } catch (e) {
-        console.error("Couldn't create visits export sheet", e.message);
-      }
+    try {
+      exportSheetId = await db.createRepExportSheet(name.trim(), email.trim());
+    } catch (e) {
+      console.error("Couldn't create visits export sheet", e.message);
     }
-    const rep = { id: `rep${crypto.randomUUID()}`, name: name.trim(), passcode, email: email || "", exportSheetId };
+    const rep = { id: `rep${crypto.randomUUID()}`, name: name.trim(), passcode, email: email.trim(), exportSheetId };
     await db.appendRow("Reps", rep);
     res.json(rep);
   } catch (e) {

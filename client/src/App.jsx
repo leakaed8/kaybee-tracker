@@ -600,7 +600,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, repNa
     setShowOrderBuilder(false);
   };
 
-  const todayVisits = visits.filter((v) => new Date(v.time).toDateString() === new Date().toDateString());
+  const todayVisits = visits.filter((v) => v.repName === repName && new Date(v.time).toDateString() === new Date().toDateString());
 
   return (
     <div>
@@ -2617,7 +2617,7 @@ function RepsManagementSection({ onRepsChanged }) {
   useEffect(() => { load(); }, []);
 
   const addRep = async () => {
-    if (!name || !passcode) return;
+    if (!name || !passcode || !email) return;
     setSaving(true);
     setError("");
     try {
@@ -2661,7 +2661,7 @@ function RepsManagementSection({ onRepsChanged }) {
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
       <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Sales reps</label>
       <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
-        Give each rep their own name and passcode to log in with. Add their Google account email too and they'll get a personal Google Sheet of their own visits, shared automatically. Once added, you can assign pharmacies to them in the Pharmacies tab.
+        Give each rep their own name, passcode, and Google account email. Their own personal Google Sheet of their visits is created and shared with them automatically — no other rep can see it. Once added, you can assign pharmacies to them in the Pharmacies tab.
       </p>
 
       {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
@@ -2705,11 +2705,11 @@ function RepsManagementSection({ onRepsChanged }) {
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Rep name, e.g. Rita" style={{ ...inputStyle, flex: 1, minWidth: 140 }} />
         <input value={passcode} onChange={(e) => setPasscode(e.target.value)} placeholder="Passcode" style={{ ...inputStyle, flex: 1, minWidth: 140 }} />
-        <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Google email (optional)" style={{ ...inputStyle, flex: 1, minWidth: 160 }} />
+        <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Google email (required for their sheet)" style={{ ...inputStyle, flex: 1, minWidth: 160 }} />
         <button
-          disabled={!name || !passcode || saving}
+          disabled={!name || !passcode || !email || saving}
           onClick={addRep}
-          style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name && passcode && !saving ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+          style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name && passcode && email && !saving ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
         >
           {saving ? "Adding…" : "Add rep"}
         </button>
