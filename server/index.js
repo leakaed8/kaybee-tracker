@@ -243,7 +243,7 @@ app.post("/api/push/subscribe", async (req, res) => {
 
 app.get("/api/bootstrap", async (req, res) => {
   try {
-    const [products, visits, clients, doctors, outreachLog, orders, reps, offers, rawSettings] = await Promise.all([
+    const [products, visits, clients, doctors, outreachLog, orders, reps, offers, rawSettings, samples] = await Promise.all([
       db.getAllRows("Products"),
       db.getAllRows("Visits"),
       db.getAllRows("Clients"),
@@ -253,6 +253,7 @@ app.get("/api/bootstrap", async (req, res) => {
       db.getAllRows("Reps"),
       db.getAllRows("Offers"),
       db.getSettings(),
+      db.getAllRows("Samples"),
     ]);
     res.json({
       products: products.map(parseProduct),
@@ -264,6 +265,7 @@ app.get("/api/bootstrap", async (req, res) => {
       repNames: reps.map((r) => r.name),
       offers: offers.map(parseOffer),
       settings: parseSettings(rawSettings),
+      samples: samples.sort((a, b) => new Date(b.date) - new Date(a.date)),
     });
   } catch (e) {
     console.error(e);
@@ -362,6 +364,19 @@ app.post("/api/visits", async (req, res) => {
       const rep = reps.find((r) => r.name === req.repName);
       if (rep?.exportSheetId) await db.appendToRepExportSheet(rep.exportSheetId, row);
     }
+    const sampleRows = visit.mentionedItems
+      .filter((it) => it.sampleStatus === "gave" || it.sampleStatus === "next_visit")
+      .map((it) => ({
+        id: `s${crypto.randomUUID()}`,
+        doctorName: visit.client,
+        productName: it.name,
+        productId: it.productId,
+        status: it.sampleStatus,
+        repName: req.repName || "",
+        visitId: visit.id,
+        date: visit.time,
+      }));
+    if (sampleRows.length) await db.appendRows("Samples", sampleRows);
     res.json(visit);
   } catch (e) {
     console.error(e);

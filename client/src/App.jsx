@@ -28,6 +28,7 @@ export default function App() {
   const [orders, setOrders] = useState([]);
   const [repNames, setRepNames] = useState([]);
   const [offers, setOffers] = useState([]);
+  const [samples, setSamples] = useState([]);
   const [settings, setSettings] = useState({
     slowThreshold: 15, repPhone: "", dailyTarget: 3, monthlyVisitTarget: 60, templates: [],
   });
@@ -61,6 +62,7 @@ export default function App() {
       setOrders(data.orders || []);
       setRepNames(data.repNames || []);
       setOffers(data.offers || []);
+      setSamples(data.samples || []);
       if (!settingsDirtyRef.current) setSettings(data.settings);
       setLoadError("");
     } catch (e) {
@@ -184,7 +186,7 @@ export default function App() {
 
       <nav style={{ display: "flex", gap: 4, padding: "12px 24px 0", borderBottom: "1px solid #E5DFD3", overflowX: "auto" }}>
         <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />
-        <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Clients" />
+        <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />
         <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />
         {role === "rep" && <TabBtn active={tab === "checkin"} onClick={() => setTab("checkin")} icon={<MapPin size={15} />} label="Check-In" />}
         {role === "rep" && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
@@ -253,6 +255,7 @@ export default function App() {
               <DoctorsView
                 doctors={doctors}
                 visits={visits}
+                samples={samples}
                 role={role}
                 onAdd={addDoctor}
                 onRemove={removeDoctor}
@@ -553,6 +556,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, repNa
   const [exportSheetId, setExportSheetId] = useState("");
   const [mentionedItems, setMentionedItems] = useState([]);
   const [itemQuery, setItemQuery] = useState("");
+  const [sampleMenuFor, setSampleMenuFor] = useState(null);
 
   useEffect(() => {
     api.getMyExportSheet().then((data) => setExportSheetId(data.exportSheetId || "")).catch(() => {});
@@ -563,10 +567,14 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, repNa
   const matchedItem = products.find((p) => p.name.toLowerCase().trim() === itemQuery.toLowerCase().trim());
   const addMentionedItem = () => {
     if (!matchedItem || mentionedItems.some((it) => it.productId === matchedItem.id)) return;
-    setMentionedItems((prev) => [...prev, { productId: matchedItem.id, name: matchedItem.name }]);
+    setMentionedItems((prev) => [...prev, { productId: matchedItem.id, name: matchedItem.name, sampleStatus: null }]);
     setItemQuery("");
   };
   const removeMentionedItem = (productId) => setMentionedItems((prev) => prev.filter((it) => it.productId !== productId));
+  const setSampleStatus = (productId, status) => {
+    setMentionedItems((prev) => prev.map((it) => (it.productId === productId ? { ...it, sampleStatus: status } : it)));
+    setSampleMenuFor(null);
+  };
 
   const getLocation = () => {
     setLocating(true);
@@ -587,7 +595,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, repNa
     const visitClient = client;
     const created = await onAddVisit({ client, notes, coords, mentionedItems });
     setLastVisit(created || { client: visitClient });
-    setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery("");
+    setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
     setShowOrderPrompt(true);
     setShowOrderBuilder(false);
   };
@@ -621,7 +629,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, repNa
       </div>
 
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
-        <Field label={entityType === "pharmacy" ? "Client / pharmacy name" : "Doctor name"}>
+        <Field label={entityType === "pharmacy" ? "Pharmacy name" : "Doctor name"}>
           <input
             value={client}
             onChange={(e) => setClient(e.target.value)}
@@ -664,22 +672,48 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, repNa
               </button>
             </div>
             {mentionedItems.length > 0 && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
                 {mentionedItems.map((it) => (
-                  <span key={it.productId} style={{
-                    display: "flex", alignItems: "center", gap: 6, fontSize: 12,
-                    background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 20, padding: "4px 6px 4px 10px",
+                  <div key={it.productId} style={{
+                    display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, fontSize: 12,
+                    background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 10, padding: "6px 8px 6px 10px",
                   }}>
-                    {it.name}
+                    <span style={{ fontWeight: 500 }}>{it.name}</span>
+
+                    {it.sampleStatus === "gave" && (
+                      <span style={{ fontSize: 10.5, color: "#4C7A5E", fontWeight: 600 }}>✓ Sample given</span>
+                    )}
+                    {it.sampleStatus === "next_visit" && (
+                      <span style={{ fontSize: 10.5, color: "#C17817", fontWeight: 600 }}>→ Give next visit</span>
+                    )}
+
+                    {sampleMenuFor === it.productId ? (
+                      <div style={{ display: "flex", gap: 4 }}>
+                        <button type="button" onClick={() => setSampleStatus(it.productId, "gave")} style={{ fontSize: 10.5, border: "none", background: "#4C7A5E", color: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
+                          Gave
+                        </button>
+                        <button type="button" onClick={() => setSampleStatus(it.productId, "next_visit")} style={{ fontSize: 10.5, border: "none", background: "#C17817", color: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
+                          Give next visit
+                        </button>
+                        <button type="button" onClick={() => setSampleMenuFor(null)} style={{ fontSize: 10.5, border: "1px solid #E5DFD3", background: "#fff", borderRadius: 5, padding: "3px 8px" }}>
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button type="button" onClick={() => setSampleMenuFor(it.productId)} style={{ fontSize: 10.5, border: "1px solid #D8D2C4", background: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
+                        {it.sampleStatus ? "Change" : "Sample"}
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       onClick={() => removeMentionedItem(it.productId)}
-                      style={{ border: "none", background: "none", cursor: "pointer", display: "flex", padding: 2, color: "#8A8272" }}
+                      style={{ border: "none", background: "none", cursor: "pointer", display: "flex", padding: 2, marginLeft: "auto", color: "#8A8272" }}
                       aria-label={`Remove ${it.name}`}
                     >
                       <X size={12} />
                     </button>
-                  </span>
+                  </div>
                 ))}
               </div>
             )}
@@ -754,7 +788,11 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, repNa
             {v.notes && <div style={{ fontSize: 12.5, color: "#5B5445", marginTop: 4 }}>{v.notes}</div>}
             {v.mentionedItems && v.mentionedItems.length > 0 && (
               <div style={{ fontSize: 11.5, color: "#4C7A5E", marginTop: 4 }}>
-                Mentioned: {v.mentionedItems.map((it) => it.name).join(", ")}
+                Mentioned: {v.mentionedItems.map((it) => (
+                  it.sampleStatus === "gave" ? `${it.name} (sample given)`
+                  : it.sampleStatus === "next_visit" ? `${it.name} (sample next visit)`
+                  : it.name
+                )).join(", ")}
               </div>
             )}
             {v.coords && <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 4 }}><MapPin size={11} style={{ verticalAlign: -1 }} /> {v.coords.lat}, {v.coords.lng}</div>}
@@ -798,7 +836,7 @@ function downloadOrderPdf(order) {
   doc.setFontSize(16);
   doc.text("KayBee Pharma — Proforma Invoice", 14, 18);
   doc.setFontSize(10);
-  doc.text(`Client: ${order.clientName}`, 14, 28);
+  doc.text(`Pharmacy: ${order.clientName}`, 14, 28);
   doc.text(`Date: ${new Date(order.date).toLocaleDateString("en-GB")}`, 14, 34);
   autoTable(doc, {
     startY: 42,
@@ -1120,7 +1158,7 @@ function LocationsView({ visits }) {
   );
 }
 
-// ---------- Excel upload for clients, with duplicate review ----------
+// ---------- Excel upload for pharmacies, with duplicate review ----------
 function ClientExcelImportSection({ existingClients, onImport, onDone }) {
   const [sheetNames, setSheetNames] = useState([]);
   const [selectedSheet, setSelectedSheet] = useState("");
@@ -1244,7 +1282,7 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
 
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
-      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Import clients from Excel</label>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Import pharmacies from Excel</label>
       <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
         Upload an .xlsx file of pharmacies. New names get added; names that already exist are shown below so you can choose whether to update their info instead of skipping them.
       </p>
@@ -1284,14 +1322,14 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
           {mapping.name && (
             <div style={{ marginTop: 12 }}>
               <div style={{ fontSize: 12, color: "#5B5445", marginBottom: 10 }}>
-                {newClients.length} new client{newClients.length === 1 ? "" : "s"} will be added
-                {updates.length > 0 ? `, ${updates.length} existing client${updates.length === 1 ? "" : "s"} have different info in your file` : ""}
+                {newClients.length} new pharmac{newClients.length === 1 ? "y" : "ies"} will be added
+                {updates.length > 0 ? `, ${updates.length} existing pharmac${updates.length === 1 ? "y" : "ies"} have different info in your file` : ""}
                 {unchangedCount > 0 ? `, ${unchangedCount} already match (no changes needed)` : ""}.
               </div>
 
               {updates.length > 0 && (
                 <div style={{ marginBottom: 12 }}>
-                  <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 6 }}>Review matched clients — uncheck any you don't want updated:</div>
+                  <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 6 }}>Review matched pharmacies — uncheck any you don't want updated:</div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto" }}>
                     {updates.map((u) => (
                       <label key={u.existing.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, fontSize: 12 }}>
@@ -1348,7 +1386,7 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
   );
 }
 
-// ---------- Clients View (tiering + follow-up nudges) ----------
+// ---------- Pharmacies View (tiering + follow-up nudges) ----------
 function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkImport, onAssignRep }) {
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -1389,9 +1427,9 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 18, flexWrap: "wrap", gap: 10 }}>
         <div>
-          <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Clients & follow-up</h2>
+          <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Pharmacies & follow-up</h2>
           <p style={{ fontSize: 13, color: "#8A8272", margin: "4px 0 0" }}>
-            Tier A: visit every {TIER_CADENCE.A}d · B: {TIER_CADENCE.B}d · C: {TIER_CADENCE.C}d. Overdue clients sort to the top.
+            Tier A: visit every {TIER_CADENCE.A}d · B: {TIER_CADENCE.B}d · C: {TIER_CADENCE.C}d. Overdue pharmacies sort to the top.
           </p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -1407,7 +1445,7 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
             display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
             background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500,
           }}>
-            <Plus size={15} /> Add client
+            <Plus size={15} /> Add pharmacy
           </button>
         </div>
       </div>
@@ -1419,7 +1457,7 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search clients by name…"
+          placeholder="Search pharmacies by name…"
           style={{ ...inputStyle, paddingLeft: 34 }}
         />
       </div>
@@ -1445,7 +1483,7 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
       {showAdd && (
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-            <Field label="Client / pharmacy name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Pharmacie Al Nour" style={inputStyle} /></Field>
+            <Field label="Pharmacy name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Pharmacie Al Nour" style={inputStyle} /></Field>
             <Field label="WhatsApp number"><input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+961 xx xxx xxx" style={inputStyle} /></Field>
             <Field label="Tier">
               <select value={tier} onChange={(e) => setTier(e.target.value)} style={inputStyle}>
@@ -1463,7 +1501,7 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
             </Field>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button disabled={!name} onClick={addClient} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>Add client</button>
+            <button disabled={!name} onClick={addClient} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>Add pharmacy</button>
             <button onClick={() => setShowAdd(false)} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>Cancel</button>
           </div>
         </div>
@@ -1508,7 +1546,7 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
             <button onClick={() => onRemove(c.id)} style={{ marginTop: 6, background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
           </div>
         ))}
-        {filteredRows.length === 0 && <EmptyState text={search ? "No clients match your search." : "No clients added yet."} />}
+        {filteredRows.length === 0 && <EmptyState text={search ? "No pharmacies match your search." : "No pharmacies added yet."} />}
       </div>
     </div>
   );
@@ -1749,7 +1787,7 @@ function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
 }
 
 // ---------- Doctors View (tiering + follow-up nudges) ----------
-function DoctorsView({ doctors, visits, role, onAdd, onRemove, onBulkImport }) {
+function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkImport }) {
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [name, setName] = useState("");
@@ -1766,6 +1804,16 @@ function DoctorsView({ doctors, visits, role, onAdd, onRemove, onBulkImport }) {
     return matches.reduce((latest, v) => (new Date(v.time) > new Date(latest.time) ? v : latest), matches[0]);
   };
 
+  const pendingSamplesFor = (doctorName) => {
+    const matches = (samples || []).filter((s) => s.doctorName.toLowerCase().trim() === doctorName.toLowerCase().trim());
+    const latestByProduct = new Map();
+    matches.forEach((s) => {
+      const existing = latestByProduct.get(s.productId);
+      if (!existing || new Date(s.date) > new Date(existing.date)) latestByProduct.set(s.productId, s);
+    });
+    return [...latestByProduct.values()].filter((s) => s.status === "next_visit");
+  };
+
   const addDoctor = () => {
     if (!name) return;
     onAdd({ name, hospital, area, phone, specialty, tier });
@@ -1778,7 +1826,8 @@ function DoctorsView({ doctors, visits, role, onAdd, onRemove, onBulkImport }) {
     const days = lv ? daysSince(lv.time) : null;
     const cadence = TIER_CADENCE[d.tier] || 30;
     const overdue = days === null || days > cadence;
-    return { ...d, days, overdue, cadence };
+    const pendingSamples = pendingSamplesFor(d.name);
+    return { ...d, days, overdue, cadence, pendingSamples };
   }).sort((a, b) => (b.days ?? 9999) - (a.days ?? 9999));
 
   const filteredRows = rows.filter((d) => d.name.toLowerCase().includes(search.toLowerCase().trim()));
@@ -1859,6 +1908,11 @@ function DoctorsView({ doctors, visits, role, onAdd, onRemove, onBulkImport }) {
                   {d.hospital || "no hospital set"} · {d.area || "no area"} {d.phone ? `· ${d.phone}` : ""}
                 </div>
                 {d.specialty && <div style={{ fontSize: 11.5, color: "#5B5445", marginTop: 3 }}>{d.specialty}</div>}
+                {d.pendingSamples.length > 0 && (
+                  <div style={{ fontSize: 11, color: "#C17817", marginTop: 3, fontWeight: 500 }}>
+                    Give next visit: {d.pendingSamples.map((s) => s.productName).join(", ")}
+                  </div>
+                )}
               </div>
               <div style={{ textAlign: "right" }}>
                 <div style={{ fontSize: 12, fontWeight: 600, color: d.overdue ? "#B33A3A" : "#4C7A5E" }}>
@@ -1937,7 +1991,7 @@ function RouteView({ clients, doctors, visits }) {
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Today's route</h2>
       <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
-        Orders stops by straight-line distance from you, using each client's last captured GPS. Not real driving directions — use judgement for one-way streets or traffic.
+        Orders stops by straight-line distance from you, using each stop's last captured GPS. Not real driving directions — use judgement for one-way streets or traffic.
       </p>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
@@ -2008,7 +2062,7 @@ function RouteView({ clients, doctors, visits }) {
               </label>
             ))}
             {filteredEntities.length === 0 && (
-              <EmptyState text={entityType === "pharmacy" ? "Add clients in the Clients tab first." : "Add doctors in the Doctors tab first."} />
+              <EmptyState text={entityType === "pharmacy" ? "Add pharmacies in the Pharmacies tab first." : "Add doctors in the Doctors tab first."} />
             )}
           </div>
         </div>
@@ -2024,7 +2078,7 @@ function RouteView({ clients, doctors, visits }) {
       {ordered && (
         <div>
           {ordered.note === "no-location" && <p style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>Capture your location first for a distance-based order — showing selected order as-is.</p>}
-          {ordered.note === "partial" && <p style={{ fontSize: 12, color: "#D9A441", marginBottom: 10 }}>Some clients have no saved location yet (never visited) — they're listed last.</p>}
+          {ordered.note === "partial" && <p style={{ fontSize: 12, color: "#D9A441", marginBottom: 10 }}>Some stops have no saved location yet (never visited) — they're listed last.</p>}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {ordered.route.map((c, i) => (
               <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
@@ -2128,7 +2182,7 @@ function PerformanceView({ visits, monthlyVisitTarget, setMonthlyVisitTarget }) 
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10, marginBottom: 16 }}>
         <StatCard label="Visits this month" value={visitsThisMonth} color="#4C7A5E" icon={<MapPin size={16} />} />
-        <StatCard label="Unique clients seen" value={uniqueClients} color="#C17817" icon={<Users size={16} />} />
+        <StatCard label="Unique contacts seen" value={uniqueClients} color="#C17817" icon={<Users size={16} />} />
         <StatCard label="Avg / week" value={Math.round(visitsThisMonth / Math.max(Math.ceil(dayOfMonth / 7), 1))} color="#6B7280" icon={<Target size={16} />} />
       </div>
 
@@ -2146,7 +2200,7 @@ function PerformanceView({ visits, monthlyVisitTarget, setMonthlyVisitTarget }) 
   );
 }
 
-// ---------- Broadcast View (stock reminder to existing clients) ----------
+// ---------- Broadcast View (stock reminder to existing pharmacies) ----------
 function BroadcastView({ zoned, clients }) {
   const [mode, setMode] = useState("healthy"); // healthy | clearance
   const [selectedProducts, setSelectedProducts] = useState([]);
@@ -2176,7 +2230,7 @@ function BroadcastView({ zoned, clients }) {
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Stock reminder broadcast</h2>
       <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
-        Pulled from your own inventory — pick items you want to remind clients about, then send via your WhatsApp Business broadcast list.
+        Pulled from your own inventory — pick items you want to remind pharmacies about, then send via your WhatsApp Business broadcast list.
       </p>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
@@ -2216,7 +2270,7 @@ function BroadcastView({ zoned, clients }) {
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
         <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Send to</label>
         <select value={selectedTier} onChange={(e) => setSelectedTier(e.target.value)} style={inputStyle}>
-          <option value="all">All clients ({clients.length})</option>
+          <option value="all">All pharmacies ({clients.length})</option>
           <option value="A">Tier A only ({clients.filter((c) => c.tier === "A").length})</option>
           <option value="B">Tier B only ({clients.filter((c) => c.tier === "B").length})</option>
           <option value="C">Tier C only ({clients.filter((c) => c.tier === "C").length})</option>
@@ -2242,7 +2296,7 @@ function BroadcastView({ zoned, clients }) {
                 </a>
               : <span key={c.id} style={{ fontSize: 11.5, padding: "5px 10px", borderRadius: 6, background: "#F0EBE0", color: "#8A8272" }}>{c.name} (no number)</span>
           ))}
-          {targetClients.length === 0 && <EmptyState text="No clients in this tier yet." />}
+          {targetClients.length === 0 && <EmptyState text="No pharmacies in this tier yet." />}
         </div>
       </div>
     </div>
@@ -2277,7 +2331,7 @@ function OutreachView({ dailyTarget, contactedToday, templates, outreachLog, tod
 
   return (
     <div>
-      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>New client outreach</h2>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>New pharmacy outreach</h2>
       <p style={{ fontSize: 13, color: "#8A8272", margin: "0 0 18px" }}>
         Today's progress: <strong style={{ color: contactedToday >= dailyTarget ? "#4C7A5E" : "#1F2A24" }}>{contactedToday} / {dailyTarget}</strong>
         {remaining > 0 ? ` — ${remaining} more to hit today's goal` : " — goal reached, nice work"}
@@ -2607,7 +2661,7 @@ function RepsManagementSection({ onRepsChanged }) {
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
       <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Sales reps</label>
       <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
-        Give each rep their own name and passcode to log in with. Add their Google account email too and they'll get a personal Google Sheet of their own visits, shared automatically. Once added, you can assign pharmacies to them in the Clients tab.
+        Give each rep their own name and passcode to log in with. Add their Google account email too and they'll get a personal Google Sheet of their own visits, shared automatically. Once added, you can assign pharmacies to them in the Pharmacies tab.
       </p>
 
       {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
@@ -2874,7 +2928,7 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
       </div>
 
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
-        <Field label={`Daily new-client outreach goal: ${dailyTarget} contacts/day`}>
+        <Field label={`Daily new-pharmacy outreach goal: ${dailyTarget} contacts/day`}>
           <input type="range" min="1" max="10" value={dailyTarget} onChange={(e) => setDailyTarget(Number(e.target.value))} style={{ width: "100%" }} />
         </Field>
         <p style={{ fontSize: 11.5, color: "#8A8272", marginTop: 6 }}>

@@ -13,6 +13,7 @@ const SCHEMAS = {
   Offers: ["id", "label", "buyQty", "getQty", "expiresAt", "active"],
   PushSubscriptions: ["id", "role", "repName", "endpoint", "p256dh", "auth"],
   Settings: ["key", "value"],
+  Samples: ["id", "doctorName", "productName", "productId", "status", "repName", "visitId", "date"],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];
