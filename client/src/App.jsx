@@ -1817,6 +1817,7 @@ function RouteView({ clients, doctors, visits }) {
   const [entityType, setEntityType] = useState("pharmacy"); // pharmacy | doctor
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState([]);
+  const [showPicker, setShowPicker] = useState(false);
   const [myLoc, setMyLoc] = useState(null);
   const [locating, setLocating] = useState(false);
   const [ordered, setOrdered] = useState(null);
@@ -1900,27 +1901,54 @@ function RouteView({ clients, doctors, visits }) {
         {myLoc && <span className="kb-font-mono" style={{ fontSize: 11, color: "#4C7A5E", alignSelf: "center" }}><Check size={12} style={{ verticalAlign: -1 }} /> location set</span>}
       </div>
 
-      <div style={{ position: "relative", marginBottom: 12 }}>
-        <Search size={15} style={{ position: "absolute", left: 12, top: 10, color: "#8A8272" }} />
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by name or area…"
-          style={{ ...inputStyle, paddingLeft: 34 }}
-        />
-      </div>
+      <button onClick={() => setShowPicker((v) => !v)} style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%",
+        padding: "10px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff",
+        fontSize: 13, fontWeight: 500, marginBottom: 8,
+      }}>
+        <span>{selected.length > 0 ? `${selected.length} selected` : `Select ${entityType === "pharmacy" ? "pharmacies" : "doctors"}…`}</span>
+        <span style={{ color: "#8A8272" }}>{showPicker ? "▲" : "▼"}</span>
+      </button>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
-        {filteredEntities.map((c) => (
-          <label key={c.id} style={{ display: "flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>
-            <input type="checkbox" checked={selected.includes(c.id)} onChange={() => toggle(c.id)} />
-            {c.name} <span style={{ fontSize: 10.5, color: "#8A8272" }}>({c.area || "no area"})</span>
-          </label>
-        ))}
-        {filteredEntities.length === 0 && (
-          <EmptyState text={entityType === "pharmacy" ? "Add clients in the Clients tab first." : "Add doctors in the Doctors tab first."} />
-        )}
-      </div>
+      {selected.length > 0 && !showPicker && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+          {selected.map((id) => {
+            const e = entities.find((x) => x.id === id);
+            if (!e) return null;
+            return (
+              <span key={id} style={{ fontSize: 11.5, padding: "4px 9px", borderRadius: 6, background: "#F0EBE0", color: "#5B5445" }}>
+                {e.name}
+              </span>
+            );
+          })}
+        </div>
+      )}
+
+      {showPicker && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ position: "relative", marginBottom: 8 }}>
+            <Search size={15} style={{ position: "absolute", left: 12, top: 10, color: "#8A8272" }} />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by name or area…"
+              style={{ ...inputStyle, paddingLeft: 34 }}
+            />
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 320, overflowY: "auto" }}>
+            {filteredEntities.map((c) => (
+              <label key={c.id} style={{ display: "flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>
+                <input type="checkbox" checked={selected.includes(c.id)} onChange={() => toggle(c.id)} />
+                {c.name} <span style={{ fontSize: 10.5, color: "#8A8272" }}>({c.area || "no area"})</span>
+              </label>
+            ))}
+            {filteredEntities.length === 0 && (
+              <EmptyState text={entityType === "pharmacy" ? "Add clients in the Clients tab first." : "Add doctors in the Doctors tab first."} />
+            )}
+          </div>
+        </div>
+      )}
 
       <button onClick={optimize} disabled={selected.length === 0} style={{
         padding: "9px 18px", borderRadius: 8, border: "none",
