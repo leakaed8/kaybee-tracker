@@ -154,6 +154,11 @@ function parseOffer(o) {
   };
 }
 
+function parsePunch(p) {
+  const coords = p.coordsLat && p.coordsLng ? { lat: p.coordsLat, lng: p.coordsLng } : null;
+  return { id: p.id, repName: p.repName, type: p.type, time: p.time, coords };
+}
+
 function parseVisit(v) {
   const coords = v.coordsLat && v.coordsLng ? { lat: v.coordsLat, lng: v.coordsLng } : null;
   let mentionedItems = [];
@@ -243,7 +248,7 @@ app.post("/api/push/subscribe", async (req, res) => {
 
 app.get("/api/bootstrap", async (req, res) => {
   try {
-    const [products, visits, clients, doctors, outreachLog, orders, reps, offers, rawSettings, samples] = await Promise.all([
+    const [products, visits, clients, doctors, outreachLog, orders, reps, offers, rawSettings, samples, punchLog] = await Promise.all([
       db.getAllRows("Products"),
       db.getAllRows("Visits"),
       db.getAllRows("Clients"),
@@ -254,6 +259,7 @@ app.get("/api/bootstrap", async (req, res) => {
       db.getAllRows("Offers"),
       db.getSettings(),
       db.getAllRows("Samples"),
+      db.getAllRows("PunchLog"),
     ]);
     res.json({
       products: products.map(parseProduct),
@@ -262,6 +268,7 @@ app.get("/api/bootstrap", async (req, res) => {
       doctors,
       outreachLog: outreachLog.sort((a, b) => new Date(b.date) - new Date(a.date)),
       orders: orders.map(parseOrder).sort((a, b) => new Date(b.date) - new Date(a.date)),
+      punchLog: punchLog.map(parsePunch).sort((a, b) => new Date(b.time) - new Date(a.time)),
       repNames: reps.map((r) => r.name),
       offers: offers.map(parseOffer),
       settings: parseSettings(rawSettings),
@@ -394,6 +401,32 @@ app.delete("/api/visits/:id", async (req, res) => {
     }
     await db.deleteRowById("Visits", req.params.id);
     res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/punch", async (req, res) => {
+  try {
+    if (!req.repName) return res.status(403).json({ error: "Reps only." });
+    const { type, coords } = req.body;
+    if (type !== "in" && type !== "out") return res.status(400).json({ error: "type must be 'in' or 'out'" });
+    const log = await db.getAllRows("PunchLog");
+    const mine = log.filter((p) => p.repName === req.repName).sort((a, b) => new Date(b.time) - new Date(a.time));
+    const currentlyIn = mine.length > 0 && mine[0].type === "in";
+    if (type === "in" && currentlyIn) return res.status(400).json({ error: "Already punched in." });
+    if (type === "out" && !currentlyIn) return res.status(400).json({ error: "Not punched in." });
+    const entry = {
+      id: `pl${crypto.randomUUID()}`,
+      repName: req.repName,
+      type,
+      time: new Date().toISOString(),
+      coordsLat: coords ? coords.lat : "",
+      coordsLng: coords ? coords.lng : "",
+    };
+    await db.appendRow("PunchLog", entry);
+    res.json(entry);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -584,6 +617,19 @@ app.post("/api/reps", requireManager, async (req, res) => {
   }
 });
 
+app.patch("/api/reps/:id", requireManager, async (req, res) => {
+  try {
+    const patch = {};
+    if (req.body.email !== undefined) patch.email = req.body.email.trim();
+    const ok = await db.updateRowById("Reps", req.params.id, patch);
+    if (!ok) return res.status(404).json({ error: "Rep not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/reps/:id/create-export-sheet", requireManager, async (req, res) => {
   try {
     const { email } = req.body;
@@ -591,8 +637,10 @@ app.post("/api/reps/:id/create-export-sheet", requireManager, async (req, res) =
     const reps = await db.getAllRows("Reps");
     const rep = reps.find((r) => r.id === req.params.id);
     if (!rep) return res.status(404).json({ error: "Rep not found" });
+    // Save the email first so it isn't lost if sheet creation below fails.
+    await db.updateRowById("Reps", req.params.id, { email: email.trim() });
     const exportSheetId = await db.createRepExportSheet(rep.name, email.trim());
-    await db.updateRowById("Reps", req.params.id, { email: email.trim(), exportSheetId });
+    await db.updateRowById("Reps", req.params.id, { exportSheetId });
     res.json({ ok: true, exportSheetId });
   } catch (e) {
     console.error(e);
