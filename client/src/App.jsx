@@ -30,6 +30,7 @@ export default function App() {
   const [repNames, setRepNames] = useState([]);
   const [offers, setOffers] = useState([]);
   const [samples, setSamples] = useState([]);
+  const [punchLog, setPunchLog] = useState([]);
   const [settings, setSettings] = useState({
     slowThreshold: 15, repPhone: "", dailyTarget: 3, monthlyVisitTarget: 60, templates: [],
   });
@@ -64,6 +65,7 @@ export default function App() {
       setRepNames(data.repNames || []);
       setOffers(data.offers || []);
       setSamples(data.samples || []);
+      setPunchLog(data.punchLog || []);
       if (!settingsDirtyRef.current) setSettings(data.settings);
       setLoadError("");
     } catch (e) {
@@ -122,6 +124,7 @@ export default function App() {
   const bulkImportProducts = (products) => withSync(() => api.importBulkProducts(products));
   const addVisit = (visit) => withSync(() => api.addVisit(visit));
   const removeVisit = (id) => withSync(() => api.removeVisit(id));
+  const punch = (type, coords) => withSync(() => api.punch(type, coords));
   const createOrder = (order) => withSync(() => api.createOrder(order));
   const addClient = (client) => withSync(() => api.addClient(client));
   const removeClient = (id) => withSync(() => api.removeClient(id));
@@ -233,11 +236,13 @@ export default function App() {
                 products={products}
                 offers={offers}
                 orders={orders}
+                punchLog={punchLog}
                 repName={repName}
                 onAddVisit={addVisit}
                 onRemoveVisit={removeVisit}
                 onCreateOrder={createOrder}
                 onRequestDeleteOrder={requestDeleteOrder}
+                onPunch={punch}
               />
             )}
             {tab === "clients" && (
@@ -268,10 +273,11 @@ export default function App() {
             {tab === "orders" && role === "manager" && (
               <OrdersView orders={orders} onDelete={deleteOrder} onApproveDelete={approveDeleteOrder} onDenyDelete={denyDeleteOrder} />
             )}
-            {tab === "locations" && role === "manager" && <LocationsView visits={visits} />}
+            {tab === "locations" && role === "manager" && <LocationsView visits={visits} punchLog={punchLog} repNames={repNames} />}
             {tab === "performance" && role === "manager" && (
               <PerformanceView
                 visits={visits}
+                repNames={repNames}
                 monthlyVisitTarget={settings.monthlyVisitTarget}
                 setMonthlyVisitTarget={(v) => updateSettingsField({ monthlyVisitTarget: v })}
               />
@@ -543,7 +549,9 @@ function Field({ label, children }) {
 const inputStyle = { width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #E5DFD3", fontSize: 13, background: "#FAF7F2" };
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ visits, clients, doctors, products, offers, orders, repName, onAddVisit, onRemoveVisit, onCreateOrder, onRequestDeleteOrder }) {
+function CheckInView({ visits, clients, doctors, products, offers, orders, punchLog, repName, onAddVisit, onRemoveVisit, onCreateOrder, onRequestDeleteOrder, onPunch }) {
+  const [punching, setPunching] = useState(false);
+  const [punchError, setPunchError] = useState("");
   const [entityType, setEntityType] = useState("pharmacy"); // pharmacy | doctor
   const [client, setClient] = useState("");
   const [notes, setNotes] = useState("");
@@ -581,6 +589,26 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, repNa
     setSampleMenuFor(null);
   };
 
+  const myPunches = punchLog.filter((p) => p.repName === repName).sort((a, b) => new Date(b.time) - new Date(a.time));
+  const lastPunch = myPunches[0] || null;
+  const isPunchedIn = lastPunch?.type === "in";
+
+  const doPunch = (type) => {
+    setPunching(true);
+    setPunchError("");
+    const submit = (coords) => {
+      onPunch(type, coords)
+        .catch((e) => setPunchError(e?.message || "Couldn't record punch."))
+        .finally(() => setPunching(false));
+    };
+    if (!navigator.geolocation) { submit(null); return; }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => submit({ lat: pos.coords.latitude.toFixed(5), lng: pos.coords.longitude.toFixed(5) }),
+      () => submit(null),
+      { timeout: 8000 }
+    );
+  };
+
   const getLocation = () => {
     setLocating(true);
     setLocError("");
@@ -616,6 +644,33 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, repNa
             View my visits sheet
           </a>
         )}
+      </div>
+
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10,
+        background: isPunchedIn ? "#EFF6F1" : "#fff", border: `1px solid ${isPunchedIn ? "#4C7A5E55" : "#E5DFD3"}`, borderRadius: 10, padding: 14, marginBottom: 16,
+      }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>
+            {isPunchedIn ? "Punched in" : "Not punched in"}
+          </div>
+          <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 2 }}>
+            {lastPunch
+              ? `${isPunchedIn ? "Since" : "Last punched out at"} ${new Date(lastPunch.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}`
+              : "Punch in when you start your day"}
+          </div>
+          {punchError && <div style={{ fontSize: 11.5, color: "#B33A3A", marginTop: 4 }}>{punchError}</div>}
+        </div>
+        <button
+          onClick={() => doPunch(isPunchedIn ? "out" : "in")}
+          disabled={punching}
+          style={{
+            padding: "9px 18px", borderRadius: 8, border: "none", fontSize: 13, fontWeight: 500,
+            background: isPunchedIn ? "#B33A3A" : "#1F2A24", color: "#FAF7F2",
+          }}
+        >
+          {punching ? "…" : isPunchedIn ? "Punch out" : "Punch in"}
+        </button>
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
@@ -1133,31 +1188,65 @@ function OrdersView({ orders, onDelete, onApproveDelete, onDenyDelete }) {
   );
 }
 
-// ---------- Locations View (manager, check-in GPS history) ----------
-function LocationsView({ visits }) {
-  const withLocation = visits.filter((v) => v.coords).sort((a, b) => new Date(b.time) - new Date(a.time));
+// ---------- Locations View (manager, check-in GPS history + punch in/out) ----------
+function LocationsView({ visits, punchLog, repNames }) {
+  const [selectedRep, setSelectedRep] = useState("all");
+
+  const visitEvents = visits
+    .filter((v) => v.coords)
+    .map((v) => ({ kind: "visit", id: v.id, repName: v.repName, time: v.time, coords: v.coords, label: v.client }));
+
+  const punchEvents = (punchLog || [])
+    .filter((p) => p.coords)
+    .map((p) => ({ kind: "punch", id: p.id, repName: p.repName, time: p.time, coords: p.coords, label: p.type === "in" ? "Punched in" : "Punched out", punchType: p.type }));
+
+  const allEvents = [...visitEvents, ...punchEvents]
+    .filter((e) => selectedRep === "all" || e.repName === selectedRep)
+    .sort((a, b) => new Date(b.time) - new Date(a.time));
+
+  const shownEvents = allEvents.slice(0, LIST_DISPLAY_CAP);
 
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Check-in locations</h2>
       <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
-        Shows where each visit was captured, based on the GPS a rep recorded at check-in time. This isn't live tracking — a web app can only record location at the moment "Capture GPS location" is tapped.
+        Shows visit check-ins and punch in/out events with the GPS a rep recorded at that moment, most recent first. This isn't live tracking — a web app can only record location at the moment a button is tapped.
       </p>
+
+      <div style={{ marginBottom: 14 }}>
+        <select value={selectedRep} onChange={(e) => setSelectedRep(e.target.value)} style={{ ...inputStyle, maxWidth: 240 }}>
+          <option value="all">All reps</option>
+          {repNames.map((n) => <option key={n} value={n}>{n}</option>)}
+        </select>
+      </div>
+
+      {allEvents.length > LIST_DISPLAY_CAP && (
+        <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>
+          Showing the most recent {LIST_DISPLAY_CAP} of {allEvents.length.toLocaleString()} — pick a rep to narrow the list.
+        </div>
+      )}
+
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {withLocation.map((v) => (
-          <div key={v.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        {shownEvents.map((e) => (
+          <div key={`${e.kind}-${e.id}`} style={{
+            background: e.kind === "punch" ? (e.punchType === "in" ? "#EFF6F1" : "#FBF1EF") : "#fff",
+            border: `1px solid ${e.kind === "punch" ? (e.punchType === "in" ? "#4C7A5E55" : "#B33A3A55") : "#E5DFD3"}`,
+            borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8,
+          }}>
             <div>
-              <div style={{ fontWeight: 600, fontSize: 13.5 }}>{v.client}{v.repName ? ` · ${v.repName}` : ""}</div>
+              <div style={{ fontWeight: 600, fontSize: 13.5 }}>
+                {e.label}{e.repName ? ` · ${e.repName}` : ""}
+              </div>
               <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
-                {new Date(v.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })} · {v.coords.lat}, {v.coords.lng}
+                {new Date(e.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })} · {e.coords.lat}, {e.coords.lng}
               </div>
             </div>
-            <a href={`https://maps.google.com/?q=${v.coords.lat},${v.coords.lng}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: "#4C7A5E", textDecoration: "none", border: "1px solid #4C7A5E33", borderRadius: 6, padding: "6px 10px" }}>
+            <a href={`https://maps.google.com/?q=${e.coords.lat},${e.coords.lng}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: "#4C7A5E", textDecoration: "none", border: "1px solid #4C7A5E33", borderRadius: 6, padding: "6px 10px" }}>
               View on map
             </a>
           </div>
         ))}
-        {withLocation.length === 0 && <EmptyState text="No visits with a captured location yet." />}
+        {allEvents.length === 0 && <EmptyState text="No check-ins or punches with a captured location yet." />}
       </div>
     </div>
   );
@@ -2153,60 +2242,80 @@ function StatCard({ label, value, color, icon }) {
 }
 
 // ---------- Performance View (MedRep targets) ----------
-function PerformanceView({ visits, monthlyVisitTarget, setMonthlyVisitTarget }) {
+function RepPerformanceCard({ title, visits, monthlyVisitTarget }) {
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const dayOfMonth = now.getDate();
-  const visitsThisMonth = visits.filter((v) => new Date(v.time) >= monthStart).length;
+  const monthVisits = visits.filter((v) => new Date(v.time) >= monthStart);
+  const visitsThisMonth = monthVisits.length;
   const pctOfTarget = Math.min(100, Math.round((visitsThisMonth / Math.max(monthlyVisitTarget, 1)) * 100));
   const pctOfMonth = Math.round((dayOfMonth / daysInMonth) * 100);
   const onPace = pctOfTarget >= pctOfMonth;
-  const uniqueClients = new Set(visits.filter((v) => new Date(v.time) >= monthStart).map((v) => v.client.toLowerCase().trim())).size;
+  const uniqueClients = new Set(monthVisits.map((v) => v.client.toLowerCase().trim())).size;
 
   const weeks = {};
-  visits.filter((v) => new Date(v.time) >= monthStart).forEach((v) => {
+  monthVisits.forEach((v) => {
     const wk = Math.ceil(new Date(v.time).getDate() / 7);
     weeks[wk] = (weeks[wk] || 0) + 1;
   });
 
   return (
-    <div>
-      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>MedRep performance</h2>
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
+      <h3 className="kb-font-display" style={{ fontSize: 16, fontWeight: 600, margin: "0 0 12px" }}>{title}</h3>
 
-      <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
-        <Field label="Monthly visit target">
-          <input type="number" min="1" value={monthlyVisitTarget} onChange={(e) => setMonthlyVisitTarget(Number(e.target.value) || 1)} style={{ ...inputStyle, maxWidth: 140 }} />
-        </Field>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+        <span style={{ fontSize: 13, fontWeight: 600 }}>{visitsThisMonth} / {monthlyVisitTarget} visits this month</span>
+        <span style={{ fontSize: 12, color: onPace ? "#4C7A5E" : "#B33A3A", fontWeight: 500 }}>{onPace ? "On pace" : "Behind pace"}</span>
       </div>
-
-      <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-          <span style={{ fontSize: 13, fontWeight: 600 }}>{visitsThisMonth} / {monthlyVisitTarget} visits this month</span>
-          <span style={{ fontSize: 12, color: onPace ? "#4C7A5E" : "#B33A3A", fontWeight: 500 }}>{onPace ? "On pace" : "Behind pace"}</span>
-        </div>
-        <div style={{ height: 8, background: "#F0EBE0", borderRadius: 4, overflow: "hidden", marginBottom: 4 }}>
-          <div style={{ height: "100%", width: `${pctOfTarget}%`, background: onPace ? "#4C7A5E" : "#D9A441", transition: "width .3s" }} />
-        </div>
-        <div className="kb-font-mono" style={{ fontSize: 10.5, color: "#8A8272" }}>Day {dayOfMonth} of {daysInMonth} ({pctOfMonth}% of month elapsed)</div>
+      <div style={{ height: 8, background: "#F0EBE0", borderRadius: 4, overflow: "hidden", marginBottom: 4 }}>
+        <div style={{ height: "100%", width: `${pctOfTarget}%`, background: onPace ? "#4C7A5E" : "#D9A441", transition: "width .3s" }} />
       </div>
+      <div className="kb-font-mono" style={{ fontSize: 10.5, color: "#8A8272", marginBottom: 14 }}>Day {dayOfMonth} of {daysInMonth} ({pctOfMonth}% of month elapsed)</div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10, marginBottom: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 10, marginBottom: 14 }}>
         <StatCard label="Visits this month" value={visitsThisMonth} color="#4C7A5E" icon={<MapPin size={16} />} />
         <StatCard label="Unique contacts seen" value={uniqueClients} color="#C17817" icon={<Users size={16} />} />
         <StatCard label="Avg / week" value={Math.round(visitsThisMonth / Math.max(Math.ceil(dayOfMonth / 7), 1))} color="#6B7280" icon={<Target size={16} />} />
       </div>
 
-      <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 10px", color: "#8A8272" }}>By week this month</h3>
+      <div style={{ fontSize: 12, fontWeight: 600, margin: "0 0 8px", color: "#8A8272" }}>By week this month</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {Object.keys(weeks).length === 0 && <EmptyState text="No visits logged yet this month." />}
         {Object.entries(weeks).sort(([a], [b]) => a - b).map(([wk, count]) => (
-          <div key={wk} style={{ display: "flex", justifyContent: "space-between", background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>
+          <div key={wk} style={{ display: "flex", justifyContent: "space-between", background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "7px 12px", fontSize: 12.5 }}>
             <span>Week {wk}</span>
             <span className="kb-font-mono" style={{ color: "#8A8272" }}>{count} visits</span>
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function PerformanceView({ visits, repNames, monthlyVisitTarget, setMonthlyVisitTarget }) {
+  return (
+    <div>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>MedRep performance</h2>
+
+      <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
+        <Field label="Monthly visit target (per rep)">
+          <input type="number" min="1" value={monthlyVisitTarget} onChange={(e) => setMonthlyVisitTarget(Number(e.target.value) || 1)} style={{ ...inputStyle, maxWidth: 140 }} />
+        </Field>
+      </div>
+
+      <RepPerformanceCard title="All reps combined" visits={visits} monthlyVisitTarget={monthlyVisitTarget} />
+
+      {repNames.map((name) => (
+        <RepPerformanceCard
+          key={name}
+          title={name}
+          visits={visits.filter((v) => v.repName === name)}
+          monthlyVisitTarget={monthlyVisitTarget}
+        />
+      ))}
+
+      {repNames.length === 0 && <EmptyState text="Add sales reps in Settings to see per-rep performance." />}
     </div>
   );
 }
@@ -2617,11 +2726,20 @@ function RepsManagementSection({ onRepsChanged }) {
   const [saving, setSaving] = useState(false);
   const [sheetEmails, setSheetEmails] = useState({}); // per-rep email input for "create visits sheet"
   const [creatingSheetFor, setCreatingSheetFor] = useState(null);
+  const [savingEmailFor, setSavingEmailFor] = useState(null);
+  const [rowErrors, setRowErrors] = useState({}); // per-rep error messages
+  const [rowSaved, setRowSaved] = useState({}); // per-rep "saved" confirmation flash
 
   const load = async () => {
     try {
       const data = await api.getReps();
       setReps(data);
+      // Seed the email inputs from saved data, without clobbering anything the manager is mid-typing.
+      setSheetEmails((prev) => {
+        const next = { ...prev };
+        data.forEach((r) => { if (!(r.id in next)) next[r.id] = r.email || ""; });
+        return next;
+      });
     } catch (e) {
       setError(e.message);
       setReps([]);
@@ -2656,16 +2774,33 @@ function RepsManagementSection({ onRepsChanged }) {
     }
   };
 
+  const saveEmailFor = async (rep) => {
+    const emailToUse = (sheetEmails[rep.id] || "").trim();
+    if (!emailToUse) return;
+    setSavingEmailFor(rep.id);
+    setRowErrors((prev) => ({ ...prev, [rep.id]: "" }));
+    try {
+      await api.updateRep(rep.id, { email: emailToUse });
+      setRowSaved((prev) => ({ ...prev, [rep.id]: true }));
+      setTimeout(() => setRowSaved((prev) => ({ ...prev, [rep.id]: false })), 1500);
+    } catch (e) {
+      setRowErrors((prev) => ({ ...prev, [rep.id]: e.message }));
+    } finally {
+      setSavingEmailFor(null);
+    }
+  };
+
   const createSheetFor = async (rep) => {
-    const emailToUse = sheetEmails[rep.id];
+    const emailToUse = (sheetEmails[rep.id] || "").trim();
     if (!emailToUse) return;
     setCreatingSheetFor(rep.id);
-    setError("");
+    setRowErrors((prev) => ({ ...prev, [rep.id]: "" }));
     try {
-      await api.createRepExportSheet(rep.id, emailToUse.trim());
+      await api.createRepExportSheet(rep.id, emailToUse);
       await load();
     } catch (e) {
-      setError(e.message);
+      setRowErrors((prev) => ({ ...prev, [rep.id]: e.message }));
+      await load(); // the email itself is saved server-side even if sheet creation failed
     } finally {
       setCreatingSheetFor(null);
     }
@@ -2694,20 +2829,30 @@ function RepsManagementSection({ onRepsChanged }) {
                   Visits sheet ({r.email}) →
                 </a>
               ) : (
-                <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-                  <input
-                    value={sheetEmails[r.id] || ""}
-                    onChange={(e) => setSheetEmails((prev) => ({ ...prev, [r.id]: e.target.value }))}
-                    placeholder="Rep's Google email for their visits sheet"
-                    style={{ ...inputStyle, flex: 1, minWidth: 160, fontSize: 11.5, padding: "5px 8px" }}
-                  />
-                  <button
-                    disabled={!sheetEmails[r.id] || creatingSheetFor === r.id}
-                    onClick={() => createSheetFor(r)}
-                    style={{ fontSize: 11.5, padding: "5px 10px", borderRadius: 6, border: "none", background: sheetEmails[r.id] ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2" }}
-                  >
-                    {creatingSheetFor === r.id ? "Creating…" : "Create visits sheet"}
-                  </button>
+                <div style={{ marginTop: 6 }}>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <input
+                      value={sheetEmails[r.id] || ""}
+                      onChange={(e) => setSheetEmails((prev) => ({ ...prev, [r.id]: e.target.value }))}
+                      placeholder="Rep's Google email for their visits sheet"
+                      style={{ ...inputStyle, flex: 1, minWidth: 160, fontSize: 11.5, padding: "5px 8px" }}
+                    />
+                    <button
+                      disabled={!sheetEmails[r.id] || savingEmailFor === r.id}
+                      onClick={() => saveEmailFor(r)}
+                      style={{ fontSize: 11.5, padding: "5px 10px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24" }}
+                    >
+                      {savingEmailFor === r.id ? "Saving…" : rowSaved[r.id] ? "✓ Saved" : "Save"}
+                    </button>
+                    <button
+                      disabled={!sheetEmails[r.id] || creatingSheetFor === r.id}
+                      onClick={() => createSheetFor(r)}
+                      style={{ fontSize: 11.5, padding: "5px 10px", borderRadius: 6, border: "none", background: sheetEmails[r.id] ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2" }}
+                    >
+                      {creatingSheetFor === r.id ? "Creating…" : "Create visits sheet"}
+                    </button>
+                  </div>
+                  {rowErrors[r.id] && <div style={{ fontSize: 11, color: "#B33A3A", marginTop: 4 }}>{rowErrors[r.id]}</div>}
                 </div>
               )}
             </div>
