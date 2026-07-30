@@ -6,7 +6,7 @@ const db = require("./sheetsDb");
 const { importedInventory, defaultTemplates } = require("./seedData");
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "25mb" }));
 
 const PORT = process.env.PORT || 3001;
 const IS_PROD = process.env.NODE_ENV === "production";
@@ -522,7 +522,7 @@ app.delete("/api/offers/:id", requireManager, async (req, res) => {
 
 app.post("/api/clients", async (req, res) => {
   try {
-    const { name, phone, tier, area, assignedRep } = req.body;
+    const { name, phone, tier, area, assignedRep, registrationNumber, address } = req.body;
     if (!name) return res.status(400).json({ error: "name is required" });
     const client = {
       id: `c${crypto.randomUUID()}`,
@@ -531,6 +531,8 @@ app.post("/api/clients", async (req, res) => {
       tier: tier || "B",
       area: area || "",
       assignedRep: assignedRep || "",
+      registrationNumber: registrationNumber || "",
+      address: address || "",
     };
     await db.appendRow("Clients", client);
     res.json(client);
@@ -620,11 +622,10 @@ app.delete("/api/reps/:id", requireManager, async (req, res) => {
   }
 });
 
-app.post("/api/clients/import-bulk", async (req, res) => {
+app.post("/api/clients/import-bulk", requireManager, async (req, res) => {
   try {
-    const { toAdd, toUpdate } = req.body;
+    const { toAdd } = req.body;
     const addList = Array.isArray(toAdd) ? toAdd : [];
-    const updateList = Array.isArray(toUpdate) ? toUpdate : [];
 
     const newClients = addList
       .filter((c) => c.name)
@@ -634,22 +635,13 @@ app.post("/api/clients/import-bulk", async (req, res) => {
         phone: c.phone || "",
         tier: c.tier || "B",
         area: c.area || "",
+        registrationNumber: c.registrationNumber || "",
+        address: c.address || "",
       }));
 
     if (newClients.length > 0) await db.appendRows("Clients", newClients);
 
-    let updatedCount = 0;
-    for (const u of updateList) {
-      if (!u.id) continue;
-      const patch = {};
-      if (u.phone !== undefined) patch.phone = u.phone;
-      if (u.area !== undefined) patch.area = u.area;
-      if (u.tier !== undefined) patch.tier = u.tier;
-      const ok = await db.updateRowById("Clients", u.id, patch);
-      if (ok) updatedCount++;
-    }
-
-    res.json({ ok: true, added: newClients.length, updated: updatedCount });
+    res.json({ ok: true, added: newClients.length });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -668,7 +660,7 @@ app.delete("/api/clients/:id", async (req, res) => {
 
 app.post("/api/doctors", async (req, res) => {
   try {
-    const { name, hospital, area, phone, specialty, tier } = req.body;
+    const { name, hospital, area, phone, specialty, tier, registrationNumber, address } = req.body;
     if (!name) return res.status(400).json({ error: "name is required" });
     const doctor = {
       id: `doc${crypto.randomUUID()}`,
@@ -678,6 +670,8 @@ app.post("/api/doctors", async (req, res) => {
       phone: phone || "",
       specialty: specialty || "",
       tier: tier || "B",
+      registrationNumber: registrationNumber || "",
+      address: address || "",
     };
     await db.appendRow("Doctors", doctor);
     res.json(doctor);
@@ -689,9 +683,8 @@ app.post("/api/doctors", async (req, res) => {
 
 app.post("/api/doctors/import-bulk", requireManager, async (req, res) => {
   try {
-    const { toAdd, toUpdate } = req.body;
+    const { toAdd } = req.body;
     const addList = Array.isArray(toAdd) ? toAdd : [];
-    const updateList = Array.isArray(toUpdate) ? toUpdate : [];
 
     const newDoctors = addList
       .filter((d) => d.name)
@@ -703,23 +696,13 @@ app.post("/api/doctors/import-bulk", requireManager, async (req, res) => {
         phone: d.phone || "",
         specialty: d.specialty || "",
         tier: d.tier || "B",
+        registrationNumber: d.registrationNumber || "",
+        address: d.address || "",
       }));
 
     if (newDoctors.length > 0) await db.appendRows("Doctors", newDoctors);
 
-    let updatedCount = 0;
-    for (const u of updateList) {
-      if (!u.id) continue;
-      const patch = {};
-      if (u.hospital !== undefined) patch.hospital = u.hospital;
-      if (u.area !== undefined) patch.area = u.area;
-      if (u.phone !== undefined) patch.phone = u.phone;
-      if (u.specialty !== undefined) patch.specialty = u.specialty;
-      const ok = await db.updateRowById("Doctors", u.id, patch);
-      if (ok) updatedCount++;
-    }
-
-    res.json({ ok: true, added: newDoctors.length, updated: updatedCount });
+    res.json({ ok: true, added: newDoctors.length });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

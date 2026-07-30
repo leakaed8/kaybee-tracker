@@ -13,6 +13,7 @@ import {
 } from "./helpers.js";
 
 const POLL_INTERVAL_MS = 20000;
+const LIST_DISPLAY_CAP = 200; // cap rendered rows so huge imported lists (30k+) don't freeze the browser — use search to narrow
 
 // ---------- main app ----------
 export default function App() {
@@ -562,7 +563,11 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, repNa
     api.getMyExportSheet().then((data) => setExportSheetId(data.exportSheetId || "")).catch(() => {});
   }, []);
 
-  const nameOptions = entityType === "pharmacy" ? clients : doctors;
+  const nameOptionsSource = entityType === "pharmacy" ? clients : doctors;
+  const nameOptions = (client.trim()
+    ? nameOptionsSource.filter((c) => c.name.toLowerCase().includes(client.toLowerCase().trim()))
+    : nameOptionsSource
+  ).slice(0, 50);
 
   const matchedItem = products.find((p) => p.name.toLowerCase().trim() === itemQuery.toLowerCase().trim());
   const addMentionedItem = () => {
@@ -1158,18 +1163,20 @@ function LocationsView({ visits }) {
   );
 }
 
-// ---------- Excel upload for pharmacies, with duplicate review ----------
+// ---------- Excel upload for pharmacies (add-only, built for very large files) ----------
+const IMPORT_CHUNK_SIZE = 2000;
+
 function ClientExcelImportSection({ existingClients, onImport, onDone }) {
   const [sheetNames, setSheetNames] = useState([]);
   const [selectedSheet, setSelectedSheet] = useState("");
   const [workbook, setWorkbook] = useState(null);
   const [headers, setHeaders] = useState([]);
   const [rows, setRows] = useState([]);
-  const [mapping, setMapping] = useState({ name: "", phone: "", area: "" });
-  const [skipIds, setSkipIds] = useState(new Set());
+  const [mapping, setMapping] = useState({ name: "", phone: "", area: "", address: "", registrationNumber: "" });
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const [importing, setImporting] = useState(false);
+  const [progress, setProgress] = useState(null); // { done, total }
   const fileInputRef = useRef(null);
 
   const readSheet = (wb, sheetName) => {
@@ -1180,6 +1187,8 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
     setHeaders(headerRow);
     setRows(dataRows);
   };
+
+  const resetMapping = () => setMapping({ name: "", phone: "", area: "", address: "", registrationNumber: "" });
 
   const handleFile = (e) => {
     const file = e.target.files[0];
@@ -1195,8 +1204,7 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
         setSheetNames(wb.SheetNames);
         setSelectedSheet(wb.SheetNames[0]);
         readSheet(wb, wb.SheetNames[0]);
-        setMapping({ name: "", phone: "", area: "" });
-        setSkipIds(new Set());
+        resetMapping();
       } catch (err) {
         setError("Couldn't read that file. Make sure it's a valid Excel (.xlsx) file.");
       }
@@ -1207,55 +1215,53 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
   const changeSheet = (name) => {
     setSelectedSheet(name);
     readSheet(workbook, name);
-    setMapping({ name: "", phone: "", area: "" });
-    setSkipIds(new Set());
+    resetMapping();
   };
 
-  const { newClients, updates, unchangedCount } = useMemo(() => {
-    if (!mapping.name) return { newClients: [], updates: [], unchangedCount: 0 };
+  const { newClients, skippedCount } = useMemo(() => {
+    if (!mapping.name) return { newClients: [], skippedCount: 0 };
     const nameIdx = headers.indexOf(mapping.name);
     const phoneIdx = headers.indexOf(mapping.phone);
     const areaIdx = headers.indexOf(mapping.area);
+    const addressIdx = headers.indexOf(mapping.address);
+    const regIdx = headers.indexOf(mapping.registrationNumber);
 
-    const existingByName = new Map(existingClients.map((c) => [c.name.toLowerCase().trim(), c]));
-
+    const existingNames = new Set(existingClients.map((c) => c.name.toLowerCase().trim()));
+    const seenInFile = new Set();
     const fresh = [];
-    const dupes = [];
-    let unchanged = 0;
+    let skipped = 0;
 
     rows.forEach((r) => {
       const name = String(r[nameIdx] ?? "").trim();
       if (!name) return;
-      const phone = phoneIdx >= 0 ? String(r[phoneIdx] ?? "").trim() : "";
-      const area = areaIdx >= 0 ? String(r[areaIdx] ?? "").trim() : "";
-      const existing = existingByName.get(name.toLowerCase().trim());
-      if (!existing) {
-        fresh.push({ name, phone, area });
-      } else if ((existing.phone || "") !== phone || (existing.area || "") !== area) {
-        dupes.push({ existing, incoming: { phone, area } });
-      } else {
-        unchanged++;
-      }
+      const key = name.toLowerCase().trim();
+      if (existingNames.has(key) || seenInFile.has(key)) { skipped++; return; }
+      seenInFile.add(key);
+      fresh.push({
+        name,
+        phone: phoneIdx >= 0 ? String(r[phoneIdx] ?? "").trim() : "",
+        area: areaIdx >= 0 ? String(r[areaIdx] ?? "").trim() : "",
+        address: addressIdx >= 0 ? String(r[addressIdx] ?? "").trim() : "",
+        registrationNumber: regIdx >= 0 ? String(r[regIdx] ?? "").trim() : "",
+      });
     });
 
-    return { newClients: fresh, updates: dupes, unchangedCount: unchanged };
+    return { newClients: fresh, skippedCount: skipped };
   }, [mapping, rows, headers, existingClients]);
-
-  const toggleSkip = (id) => setSkipIds((prev) => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
 
   const doImport = async () => {
     setError("");
     setImporting(true);
+    setProgress({ done: 0, total: newClients.length });
     try {
-      const toUpdate = updates
-        .filter((u) => !skipIds.has(u.existing.id))
-        .map((u) => ({ id: u.existing.id, phone: u.incoming.phone, area: u.incoming.area }));
-      const data = await onImport({ toAdd: newClients, toUpdate });
-      setResult({ added: newClients.length, updated: toUpdate.length });
+      let added = 0;
+      for (let i = 0; i < newClients.length; i += IMPORT_CHUNK_SIZE) {
+        const chunk = newClients.slice(i, i + IMPORT_CHUNK_SIZE);
+        const data = await onImport({ toAdd: chunk });
+        added += data?.added ?? chunk.length;
+        setProgress({ done: Math.min(i + IMPORT_CHUNK_SIZE, newClients.length), total: newClients.length });
+      }
+      setResult({ added, skipped: skippedCount });
       setWorkbook(null);
       setHeaders([]);
       setRows([]);
@@ -1265,6 +1271,7 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
       setError(e.message || "Import failed.");
     } finally {
       setImporting(false);
+      setProgress(null);
     }
   };
 
@@ -1284,7 +1291,7 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
       <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Import pharmacies from Excel</label>
       <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
-        Upload an .xlsx file of pharmacies. New names get added; names that already exist are shown below so you can choose whether to update their info instead of skipping them.
+        Upload an .xlsx file of pharmacies — handles files with tens of thousands of rows. Names that already exist in the system are skipped automatically; only new names get added.
       </p>
 
       <button
@@ -1298,7 +1305,7 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
       {error && <div style={{ fontSize: 12.5, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
       {result && (
         <div style={{ fontSize: 12.5, color: "#4C7A5E", display: "flex", alignItems: "center", gap: 5, marginBottom: 10 }}>
-          <Check size={14} /> Added {result.added}, updated {result.updated}.
+          <Check size={14} /> Added {result.added} new pharmac{result.added === 1 ? "y" : "ies"}{result.skipped > 0 ? `, skipped ${result.skipped} already in the system` : ""}.
         </div>
       )}
 
@@ -1316,36 +1323,17 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
             {fieldSelect("name", "Name column", true)}
             {fieldSelect("phone", "Phone number column", false)}
-            {fieldSelect("area", "Address / area column", false)}
+            {fieldSelect("area", "Area column", false)}
+            {fieldSelect("address", "Address column", false)}
+            {fieldSelect("registrationNumber", "Registration number column", false)}
           </div>
 
           {mapping.name && (
             <div style={{ marginTop: 12 }}>
               <div style={{ fontSize: 12, color: "#5B5445", marginBottom: 10 }}>
                 {newClients.length} new pharmac{newClients.length === 1 ? "y" : "ies"} will be added
-                {updates.length > 0 ? `, ${updates.length} existing pharmac${updates.length === 1 ? "y" : "ies"} have different info in your file` : ""}
-                {unchangedCount > 0 ? `, ${unchangedCount} already match (no changes needed)` : ""}.
+                {skippedCount > 0 ? `, ${skippedCount} already exist and will be skipped` : ""}.
               </div>
-
-              {updates.length > 0 && (
-                <div style={{ marginBottom: 12 }}>
-                  <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 6 }}>Review matched pharmacies — uncheck any you don't want updated:</div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto" }}>
-                    {updates.map((u) => (
-                      <label key={u.existing.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, fontSize: 12 }}>
-                        <input type="checkbox" checked={!skipIds.has(u.existing.id)} onChange={() => toggleSkip(u.existing.id)} style={{ marginTop: 2 }} />
-                        <div>
-                          <div style={{ fontWeight: 600, marginBottom: 2 }}>{u.existing.name}</div>
-                          <div style={{ color: "#8A8272" }}>
-                            phone: {u.existing.phone || "(none)"} → {u.incoming.phone || "(none)"}<br />
-                            area: {u.existing.area || "(none)"} → {u.incoming.area || "(none)"}
-                          </div>
-                        </div>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              )}
 
               {newClients.length > 0 && (
                 <div style={{ overflowX: "auto", marginBottom: 10 }}>
@@ -1371,12 +1359,18 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
                 </div>
               )}
 
+              {progress && (
+                <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>
+                  Importing {progress.done.toLocaleString()} / {progress.total.toLocaleString()}…
+                </div>
+              )}
+
               <button
-                disabled={importing || (newClients.length === 0 && updates.length === 0)}
+                disabled={importing || newClients.length === 0}
                 onClick={doImport}
-                style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: !importing && (newClients.length > 0 || updates.length > 0) ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+                style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: !importing && newClients.length > 0 ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
               >
-                {importing ? "Importing…" : `Import (${newClients.length} new, ${updates.filter((u) => !skipIds.has(u.existing.id)).length} update${updates.filter((u) => !skipIds.has(u.existing.id)).length === 1 ? "" : "s"})`}
+                {importing ? "Importing…" : `Import ${newClients.length} new pharmac${newClients.length === 1 ? "y" : "ies"}`}
               </button>
             </div>
           )}
@@ -1394,6 +1388,8 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
   const [phone, setPhone] = useState("");
   const [tier, setTier] = useState("B");
   const [area, setArea] = useState("");
+  const [address, setAddress] = useState("");
+  const [registrationNumber, setRegistrationNumber] = useState("");
   const [assignedRep, setAssignedRep] = useState("");
   const [search, setSearch] = useState("");
 
@@ -1405,8 +1401,8 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
 
   const addClient = () => {
     if (!name) return;
-    onAdd({ name, phone, tier, area, assignedRep });
-    setName(""); setPhone(""); setArea(""); setTier("B"); setAssignedRep("");
+    onAdd({ name, phone, tier, area, address, registrationNumber, assignedRep });
+    setName(""); setPhone(""); setArea(""); setAddress(""); setRegistrationNumber(""); setTier("B"); setAssignedRep("");
     setShowAdd(false);
   };
 
@@ -1420,6 +1416,7 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
 
   const filteredRows = rows.filter((c) => c.name.toLowerCase().includes(search.toLowerCase().trim()));
   const suggestedFollowUps = rows.filter((c) => c.overdue).slice(0, 5);
+  const shownRows = filteredRows.slice(0, LIST_DISPLAY_CAP);
 
   const tierColor = { A: "#B33A3A", B: "#D9A441", C: "#6B7280" };
 
@@ -1493,6 +1490,8 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
               </select>
             </Field>
             <Field label="Area"><input value={area} onChange={(e) => setArea(e.target.value)} placeholder="e.g. Jbeil" style={inputStyle} /></Field>
+            <Field label="Address (optional)"><input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Full street address" style={inputStyle} /></Field>
+            <Field label="Registration number (optional)"><input value={registrationNumber} onChange={(e) => setRegistrationNumber(e.target.value)} style={inputStyle} /></Field>
             <Field label="Assigned sales rep (optional)">
               <select value={assignedRep} onChange={(e) => setAssignedRep(e.target.value)} style={inputStyle}>
                 <option value="">Unassigned</option>
@@ -1507,8 +1506,13 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
         </div>
       )}
 
+      {filteredRows.length > LIST_DISPLAY_CAP && (
+        <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>
+          Showing {LIST_DISPLAY_CAP} of {filteredRows.length.toLocaleString()} — use search to narrow the list.
+        </div>
+      )}
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {filteredRows.map((c) => (
+        {shownRows.map((c) => (
           <div key={c.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <div>
@@ -1519,6 +1523,7 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
                 <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 3 }}>
                   {c.area || "no area set"} {c.phone ? `· ${c.phone}` : ""}
                 </div>
+                {c.address && <div style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>{c.address}</div>}
                 <div style={{ marginTop: 6 }}>
                   {role === "manager" ? (
                     <select
@@ -1552,18 +1557,18 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
   );
 }
 
-// ---------- Excel upload for doctors, with duplicate review (manager only) ----------
+// ---------- Excel upload for doctors (add-only, built for very large files) ----------
 function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
   const [sheetNames, setSheetNames] = useState([]);
   const [selectedSheet, setSelectedSheet] = useState("");
   const [workbook, setWorkbook] = useState(null);
   const [headers, setHeaders] = useState([]);
   const [rows, setRows] = useState([]);
-  const [mapping, setMapping] = useState({ name: "", hospital: "", area: "", phone: "", specialty: "" });
-  const [skipIds, setSkipIds] = useState(new Set());
+  const [mapping, setMapping] = useState({ name: "", hospital: "", area: "", phone: "", specialty: "", address: "", registrationNumber: "" });
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const [importing, setImporting] = useState(false);
+  const [progress, setProgress] = useState(null); // { done, total }
   const fileInputRef = useRef(null);
 
   const readSheet = (wb, sheetName) => {
@@ -1574,6 +1579,8 @@ function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
     setHeaders(headerRow);
     setRows(dataRows);
   };
+
+  const resetMapping = () => setMapping({ name: "", hospital: "", area: "", phone: "", specialty: "", address: "", registrationNumber: "" });
 
   const handleFile = (e) => {
     const file = e.target.files[0];
@@ -1589,8 +1596,7 @@ function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
         setSheetNames(wb.SheetNames);
         setSelectedSheet(wb.SheetNames[0]);
         readSheet(wb, wb.SheetNames[0]);
-        setMapping({ name: "", hospital: "", area: "", phone: "", specialty: "" });
-        setSkipIds(new Set());
+        resetMapping();
       } catch (err) {
         setError("Couldn't read that file. Make sure it's a valid Excel (.xlsx) file.");
       }
@@ -1601,56 +1607,57 @@ function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
   const changeSheet = (name) => {
     setSelectedSheet(name);
     readSheet(workbook, name);
-    setMapping({ name: "", hospital: "", area: "", phone: "", specialty: "" });
-    setSkipIds(new Set());
+    resetMapping();
   };
 
-  const { newDoctors, updates } = useMemo(() => {
-    if (!mapping.name) return { newDoctors: [], updates: [] };
+  const { newDoctors, skippedCount } = useMemo(() => {
+    if (!mapping.name) return { newDoctors: [], skippedCount: 0 };
     const nameIdx = headers.indexOf(mapping.name);
     const hospitalIdx = headers.indexOf(mapping.hospital);
     const areaIdx = headers.indexOf(mapping.area);
     const phoneIdx = headers.indexOf(mapping.phone);
     const specialtyIdx = headers.indexOf(mapping.specialty);
+    const addressIdx = headers.indexOf(mapping.address);
+    const regIdx = headers.indexOf(mapping.registrationNumber);
 
-    const existingByName = new Map(existingDoctors.map((d) => [d.name.toLowerCase().trim(), d]));
-
+    const existingNames = new Set(existingDoctors.map((d) => d.name.toLowerCase().trim()));
+    const seenInFile = new Set();
     const fresh = [];
-    const dupes = [];
+    let skipped = 0;
 
     rows.forEach((r) => {
       const name = String(r[nameIdx] ?? "").trim();
       if (!name) return;
-      const hospital = hospitalIdx >= 0 ? String(r[hospitalIdx] ?? "").trim() : "";
-      const area = areaIdx >= 0 ? String(r[areaIdx] ?? "").trim() : "";
-      const phone = phoneIdx >= 0 ? String(r[phoneIdx] ?? "").trim() : "";
-      const specialty = specialtyIdx >= 0 ? String(r[specialtyIdx] ?? "").trim() : "";
-      const existing = existingByName.get(name.toLowerCase().trim());
-      if (!existing) {
-        fresh.push({ name, hospital, area, phone, specialty });
-      } else if ((existing.hospital || "") !== hospital || (existing.area || "") !== area || (existing.phone || "") !== phone || (existing.specialty || "") !== specialty) {
-        dupes.push({ existing, incoming: { hospital, area, phone, specialty } });
-      }
+      const key = name.toLowerCase().trim();
+      if (existingNames.has(key) || seenInFile.has(key)) { skipped++; return; }
+      seenInFile.add(key);
+      fresh.push({
+        name,
+        hospital: hospitalIdx >= 0 ? String(r[hospitalIdx] ?? "").trim() : "",
+        area: areaIdx >= 0 ? String(r[areaIdx] ?? "").trim() : "",
+        phone: phoneIdx >= 0 ? String(r[phoneIdx] ?? "").trim() : "",
+        specialty: specialtyIdx >= 0 ? String(r[specialtyIdx] ?? "").trim() : "",
+        address: addressIdx >= 0 ? String(r[addressIdx] ?? "").trim() : "",
+        registrationNumber: regIdx >= 0 ? String(r[regIdx] ?? "").trim() : "",
+      });
     });
 
-    return { newDoctors: fresh, updates: dupes };
+    return { newDoctors: fresh, skippedCount: skipped };
   }, [mapping, rows, headers, existingDoctors]);
-
-  const toggleSkip = (id) => setSkipIds((prev) => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
 
   const doImport = async () => {
     setError("");
     setImporting(true);
+    setProgress({ done: 0, total: newDoctors.length });
     try {
-      const toUpdate = updates
-        .filter((u) => !skipIds.has(u.existing.id))
-        .map((u) => ({ id: u.existing.id, ...u.incoming }));
-      await onImport({ toAdd: newDoctors, toUpdate });
-      setResult({ added: newDoctors.length, updated: toUpdate.length });
+      let added = 0;
+      for (let i = 0; i < newDoctors.length; i += IMPORT_CHUNK_SIZE) {
+        const chunk = newDoctors.slice(i, i + IMPORT_CHUNK_SIZE);
+        const data = await onImport({ toAdd: chunk });
+        added += data?.added ?? chunk.length;
+        setProgress({ done: Math.min(i + IMPORT_CHUNK_SIZE, newDoctors.length), total: newDoctors.length });
+      }
+      setResult({ added, skipped: skippedCount });
       setWorkbook(null);
       setHeaders([]);
       setRows([]);
@@ -1660,6 +1667,7 @@ function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
       setError(e.message || "Import failed.");
     } finally {
       setImporting(false);
+      setProgress(null);
     }
   };
 
@@ -1679,7 +1687,7 @@ function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
       <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Import doctors from Excel</label>
       <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
-        Upload an .xlsx file of doctors. New names get added; names that already exist are shown below so you can choose whether to update their info.
+        Upload an .xlsx file of doctors — handles files with tens of thousands of rows. Names that already exist in the system are skipped automatically; only new names get added.
       </p>
 
       <button
@@ -1693,7 +1701,7 @@ function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
       {error && <div style={{ fontSize: 12.5, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
       {result && (
         <div style={{ fontSize: 12.5, color: "#4C7A5E", display: "flex", alignItems: "center", gap: 5, marginBottom: 10 }}>
-          <Check size={14} /> Added {result.added}, updated {result.updated}.
+          <Check size={14} /> Added {result.added} new doctor{result.added === 1 ? "" : "s"}{result.skipped > 0 ? `, skipped ${result.skipped} already in the system` : ""}.
         </div>
       )}
 
@@ -1714,36 +1722,16 @@ function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
             {fieldSelect("area", "Area column", false)}
             {fieldSelect("phone", "Phone column", false)}
             {fieldSelect("specialty", "Specialty column", false)}
+            {fieldSelect("address", "Address column", false)}
+            {fieldSelect("registrationNumber", "Registration number column", false)}
           </div>
 
           {mapping.name && (
             <div style={{ marginTop: 12 }}>
               <div style={{ fontSize: 12, color: "#5B5445", marginBottom: 10 }}>
                 {newDoctors.length} new doctor{newDoctors.length === 1 ? "" : "s"} will be added
-                {updates.length > 0 ? `, ${updates.length} existing doctor${updates.length === 1 ? "" : "s"} have different info in your file` : ""}.
+                {skippedCount > 0 ? `, ${skippedCount} already exist and will be skipped` : ""}.
               </div>
-
-              {updates.length > 0 && (
-                <div style={{ marginBottom: 12 }}>
-                  <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 6 }}>Review matched doctors — uncheck any you don't want updated:</div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto" }}>
-                    {updates.map((u) => (
-                      <label key={u.existing.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, fontSize: 12 }}>
-                        <input type="checkbox" checked={!skipIds.has(u.existing.id)} onChange={() => toggleSkip(u.existing.id)} style={{ marginTop: 2 }} />
-                        <div>
-                          <div style={{ fontWeight: 600, marginBottom: 2 }}>{u.existing.name}</div>
-                          <div style={{ color: "#8A8272" }}>
-                            hospital: {u.existing.hospital || "(none)"} → {u.incoming.hospital || "(none)"}<br />
-                            area: {u.existing.area || "(none)"} → {u.incoming.area || "(none)"}<br />
-                            phone: {u.existing.phone || "(none)"} → {u.incoming.phone || "(none)"}<br />
-                            specialty: {u.existing.specialty || "(none)"} → {u.incoming.specialty || "(none)"}
-                          </div>
-                        </div>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              )}
 
               {newDoctors.length > 0 && (
                 <div style={{ overflowX: "auto", marginBottom: 10 }}>
@@ -1771,12 +1759,18 @@ function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
                 </div>
               )}
 
+              {progress && (
+                <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>
+                  Importing {progress.done.toLocaleString()} / {progress.total.toLocaleString()}…
+                </div>
+              )}
+
               <button
-                disabled={importing || (newDoctors.length === 0 && updates.length === 0)}
+                disabled={importing || newDoctors.length === 0}
                 onClick={doImport}
-                style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: !importing && (newDoctors.length > 0 || updates.length > 0) ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+                style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: !importing && newDoctors.length > 0 ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
               >
-                {importing ? "Importing…" : `Import (${newDoctors.length} new, ${updates.filter((u) => !skipIds.has(u.existing.id)).length} updates)`}
+                {importing ? "Importing…" : `Import ${newDoctors.length} new doctor${newDoctors.length === 1 ? "" : "s"}`}
               </button>
             </div>
           )}
@@ -1796,6 +1790,8 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
   const [phone, setPhone] = useState("");
   const [specialty, setSpecialty] = useState("");
   const [tier, setTier] = useState("B");
+  const [address, setAddress] = useState("");
+  const [registrationNumber, setRegistrationNumber] = useState("");
   const [search, setSearch] = useState("");
 
   const lastVisitFor = (doctorName) => {
@@ -1816,8 +1812,8 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
 
   const addDoctor = () => {
     if (!name) return;
-    onAdd({ name, hospital, area, phone, specialty, tier });
-    setName(""); setHospital(""); setArea(""); setPhone(""); setSpecialty(""); setTier("B");
+    onAdd({ name, hospital, area, phone, specialty, tier, address, registrationNumber });
+    setName(""); setHospital(""); setArea(""); setPhone(""); setSpecialty(""); setTier("B"); setAddress(""); setRegistrationNumber("");
     setShowAdd(false);
   };
 
@@ -1831,6 +1827,7 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
   }).sort((a, b) => (b.days ?? 9999) - (a.days ?? 9999));
 
   const filteredRows = rows.filter((d) => d.name.toLowerCase().includes(search.toLowerCase().trim()));
+  const shownRows = filteredRows.slice(0, LIST_DISPLAY_CAP);
   const tierColor = { A: "#B33A3A", B: "#D9A441", C: "#6B7280" };
 
   return (
@@ -1887,6 +1884,8 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
                 <option value="C">C — low priority, visit every 60d</option>
               </select>
             </Field>
+            <Field label="Address (optional)"><input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Full street address" style={inputStyle} /></Field>
+            <Field label="Registration number (optional)"><input value={registrationNumber} onChange={(e) => setRegistrationNumber(e.target.value)} style={inputStyle} /></Field>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button disabled={!name} onClick={addDoctor} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>Add doctor</button>
@@ -1895,8 +1894,13 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
         </div>
       )}
 
+      {filteredRows.length > LIST_DISPLAY_CAP && (
+        <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>
+          Showing {LIST_DISPLAY_CAP} of {filteredRows.length.toLocaleString()} — use search to narrow the list.
+        </div>
+      )}
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {filteredRows.map((d) => (
+        {shownRows.map((d) => (
           <div key={d.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <div>
@@ -1907,6 +1911,7 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
                 <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 3 }}>
                   {d.hospital || "no hospital set"} · {d.area || "no area"} {d.phone ? `· ${d.phone}` : ""}
                 </div>
+                {d.address && <div style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>{d.address}</div>}
                 {d.specialty && <div style={{ fontSize: 11.5, color: "#5B5445", marginTop: 3 }}>{d.specialty}</div>}
                 {d.pendingSamples.length > 0 && (
                   <div style={{ fontSize: 11, color: "#C17817", marginTop: 3, fontWeight: 500 }}>
@@ -1944,6 +1949,7 @@ function RouteView({ clients, doctors, visits }) {
   const filteredEntities = entities.filter((e) =>
     e.name.toLowerCase().includes(search.toLowerCase().trim()) || (e.area || "").toLowerCase().includes(search.toLowerCase().trim())
   );
+  const shownEntities = filteredEntities.slice(0, LIST_DISPLAY_CAP);
 
   const changeEntityType = (t) => { setEntityType(t); setSelected([]); setOrdered(null); };
 
@@ -2054,8 +2060,13 @@ function RouteView({ clients, doctors, visits }) {
             />
           </div>
 
+          {filteredEntities.length > LIST_DISPLAY_CAP && (
+            <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 6 }}>
+              Showing {LIST_DISPLAY_CAP} of {filteredEntities.length.toLocaleString()} — narrow your search to see more.
+            </div>
+          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 320, overflowY: "auto" }}>
-            {filteredEntities.map((c) => (
+            {shownEntities.map((c) => (
               <label key={c.id} style={{ display: "flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>
                 <input type="checkbox" checked={selected.includes(c.id)} onChange={() => toggle(c.id)} />
                 {c.name} <span style={{ fontSize: 10.5, color: "#8A8272" }}>({c.area || "no area"})</span>
@@ -2287,8 +2298,11 @@ function BroadcastView({ zoned, clients }) {
 
       <div>
         <h3 style={{ fontSize: 13, fontWeight: 600, margin: "0 0 8px", color: "#8A8272" }}>Recipients ({targetClients.length})</h3>
+        {targetClients.length > LIST_DISPLAY_CAP && (
+          <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 6 }}>Showing first {LIST_DISPLAY_CAP} of {targetClients.length.toLocaleString()}.</div>
+        )}
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {targetClients.map((c) => (
+          {targetClients.slice(0, LIST_DISPLAY_CAP).map((c) => (
             c.phone
               ? <a key={c.id} href={`https://wa.me/${c.phone.replace(/\D/g, "")}?text=${encodeURIComponent(message)}`} target="_blank" rel="noreferrer"
                   style={{ fontSize: 11.5, padding: "5px 10px", borderRadius: 6, background: "#4C7A5E1A", color: "#4C7A5E", textDecoration: "none" }}>

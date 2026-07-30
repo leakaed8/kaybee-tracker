@@ -5,8 +5,8 @@ const SHEET_ID = process.env.SHEET_ID;
 const SCHEMAS = {
   Products: ["id", "name", "category", "expiry", "qty", "sold90", "description", "price"],
   Visits: ["id", "client", "notes", "coordsLat", "coordsLng", "time", "repName", "itemsMentioned"],
-  Clients: ["id", "name", "phone", "tier", "area", "assignedRep"],
-  Doctors: ["id", "name", "hospital", "area", "phone", "specialty", "tier"],
+  Clients: ["id", "name", "phone", "tier", "area", "assignedRep", "registrationNumber", "address"],
+  Doctors: ["id", "name", "hospital", "area", "phone", "specialty", "tier", "registrationNumber", "address"],
   OutreachLog: ["id", "name", "date", "templateIndex"],
   Orders: ["id", "clientName", "visitId", "repName", "date", "items", "total", "status"],
   Reps: ["id", "name", "passcode", "email", "exportSheetId"],
@@ -190,18 +190,23 @@ async function appendRow(tab, obj) {
   });
 }
 
+const APPEND_CHUNK_SIZE = 2000;
+
 async function appendRows(tab, objects) {
   await ensureSheets();
   if (objects.length === 0) return;
   const sheets = getSheets();
   const headers = SCHEMAS[tab];
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
-    range: `${tab}!A1`,
-    valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: { values: objects.map((o) => objectToRow(headers, o)) },
-  });
+  for (let i = 0; i < objects.length; i += APPEND_CHUNK_SIZE) {
+    const chunk = objects.slice(i, i + APPEND_CHUNK_SIZE);
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: `${tab}!A1`,
+      valueInputOption: "RAW",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { values: chunk.map((o) => objectToRow(headers, o)) },
+    });
+  }
 }
 
 async function updateRowById(tab, id, patch) {
