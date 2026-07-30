@@ -798,9 +798,20 @@ app.patch("/api/settings", async (req, res) => {
 });
 
 const clientDist = path.join(__dirname, "..", "client", "dist");
-app.use(express.static(clientDist));
+app.use(express.static(clientDist, {
+  setHeaders: (res, filePath) => {
+    // index.html must always be re-checked so phones/PWAs don't get stuck on an
+    // old build referencing JS/CSS file names that no longer exist after a deploy.
+    if (filePath.endsWith("index.html")) {
+      res.setHeader("Cache-Control", "no-cache");
+    } else {
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    }
+  },
+}));
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) return res.status(404).json({ error: "not found" });
+  res.setHeader("Cache-Control", "no-cache");
   res.sendFile(path.join(clientDist, "index.html"));
 });
 
