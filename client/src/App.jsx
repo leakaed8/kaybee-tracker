@@ -239,7 +239,6 @@ export default function App() {
                 punchLog={punchLog}
                 repName={repName}
                 onAddVisit={addVisit}
-                onRemoveVisit={removeVisit}
                 onCreateOrder={createOrder}
                 onRequestDeleteOrder={requestDeleteOrder}
                 onPunch={punch}
@@ -273,7 +272,7 @@ export default function App() {
             {tab === "orders" && role === "manager" && (
               <OrdersView orders={orders} onDelete={deleteOrder} onApproveDelete={approveDeleteOrder} onDenyDelete={denyDeleteOrder} />
             )}
-            {tab === "locations" && role === "manager" && <LocationsView visits={visits} punchLog={punchLog} repNames={repNames} />}
+            {tab === "locations" && role === "manager" && <LocationsView visits={visits} punchLog={punchLog} repNames={repNames} onRemoveVisit={removeVisit} />}
             {tab === "performance" && role === "manager" && (
               <PerformanceView
                 visits={visits}
@@ -549,7 +548,7 @@ function Field({ label, children }) {
 const inputStyle = { width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #E5DFD3", fontSize: 13, background: "#FAF7F2" };
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ visits, clients, doctors, products, offers, orders, punchLog, repName, onAddVisit, onRemoveVisit, onCreateOrder, onRequestDeleteOrder, onPunch }) {
+function CheckInView({ visits, clients, doctors, products, offers, orders, punchLog, repName, onAddVisit, onCreateOrder, onRequestDeleteOrder, onPunch }) {
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
   const [entityType, setEntityType] = useState("pharmacy"); // pharmacy | doctor
@@ -561,7 +560,6 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
   const [lastVisit, setLastVisit] = useState(null);
   const [showOrderPrompt, setShowOrderPrompt] = useState(false);
   const [showOrderBuilder, setShowOrderBuilder] = useState(false);
-  const [confirmVisitId, setConfirmVisitId] = useState(null);
   const [exportSheetId, setExportSheetId] = useState("");
   const [mentionedItems, setMentionedItems] = useState([]);
   const [itemQuery, setItemQuery] = useState("");
@@ -831,19 +829,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
           <div key={v.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
               <span style={{ fontWeight: 600, fontSize: 13.5 }}>{v.client}</span>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>{new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span>
-                {confirmVisitId === v.id ? (
-                  <>
-                    <button onClick={() => { onRemoveVisit(v.id); setConfirmVisitId(null); }} style={{ fontSize: 11, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "3px 8px" }}>Yes</button>
-                    <button onClick={() => setConfirmVisitId(null)} style={{ fontSize: 11, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "3px 8px" }}>Cancel</button>
-                  </>
-                ) : (
-                  <button onClick={() => setConfirmVisitId(v.id)} title="Delete" style={{ background: "none", border: "none", color: "#B7AF9E", padding: 2 }}>
-                    <X size={14} />
-                  </button>
-                )}
-              </div>
+              <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>{new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span>
             </div>
             {v.notes && <div style={{ fontSize: 12.5, color: "#5B5445", marginTop: 4 }}>{v.notes}</div>}
             {v.mentionedItems && v.mentionedItems.length > 0 && (
@@ -1189,12 +1175,12 @@ function OrdersView({ orders, onDelete, onApproveDelete, onDenyDelete }) {
 }
 
 // ---------- Locations View (manager, check-in GPS history + punch in/out) ----------
-function LocationsView({ visits, punchLog, repNames }) {
+function LocationsView({ visits, punchLog, repNames, onRemoveVisit }) {
   const [selectedRep, setSelectedRep] = useState("all");
+  const [confirmId, setConfirmId] = useState(null);
 
   const visitEvents = visits
-    .filter((v) => v.coords)
-    .map((v) => ({ kind: "visit", id: v.id, repName: v.repName, time: v.time, coords: v.coords, label: v.client }));
+    .map((v) => ({ kind: "visit", id: v.id, repName: v.repName, time: v.time, coords: v.coords || null, label: v.client }));
 
   const punchEvents = (punchLog || [])
     .filter((p) => p.coords)
@@ -1206,11 +1192,13 @@ function LocationsView({ visits, punchLog, repNames }) {
 
   const shownEvents = allEvents.slice(0, LIST_DISPLAY_CAP);
 
+  const doDelete = (id) => { onRemoveVisit(id); setConfirmId(null); };
+
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Check-in locations</h2>
       <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
-        Shows visit check-ins and punch in/out events with the GPS a rep recorded at that moment, most recent first. This isn't live tracking — a web app can only record location at the moment a button is tapped.
+        Shows visit check-ins and punch in/out events, most recent first, with the GPS a rep recorded at that moment where available. This isn't live tracking — a web app can only record location at the moment a button is tapped. You can delete a mistaken visit here.
       </p>
 
       <div style={{ marginBottom: 14 }}>
@@ -1238,15 +1226,32 @@ function LocationsView({ visits, punchLog, repNames }) {
                 {e.label}{e.repName ? ` · ${e.repName}` : ""}
               </div>
               <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
-                {new Date(e.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })} · {e.coords.lat}, {e.coords.lng}
+                {new Date(e.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                {e.coords ? ` · ${e.coords.lat}, ${e.coords.lng}` : " · no GPS captured"}
               </div>
             </div>
-            <a href={`https://maps.google.com/?q=${e.coords.lat},${e.coords.lng}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: "#4C7A5E", textDecoration: "none", border: "1px solid #4C7A5E33", borderRadius: 6, padding: "6px 10px" }}>
-              View on map
-            </a>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              {e.coords && (
+                <a href={`https://maps.google.com/?q=${e.coords.lat},${e.coords.lng}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: "#4C7A5E", textDecoration: "none", border: "1px solid #4C7A5E33", borderRadius: 6, padding: "6px 10px" }}>
+                  View on map
+                </a>
+              )}
+              {e.kind === "visit" && (
+                confirmId === e.id ? (
+                  <>
+                    <button onClick={() => doDelete(e.id)} style={{ fontSize: 11.5, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}>Yes</button>
+                    <button onClick={() => setConfirmId(null)} style={{ fontSize: 11.5, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Cancel</button>
+                  </>
+                ) : (
+                  <button onClick={() => setConfirmId(e.id)} title="Delete visit" style={{ background: "none", border: "none", color: "#B7AF9E", padding: 4 }}>
+                    <X size={14} />
+                  </button>
+                )
+              )}
+            </div>
           </div>
         ))}
-        {allEvents.length === 0 && <EmptyState text="No check-ins or punches with a captured location yet." />}
+        {allEvents.length === 0 && <EmptyState text="No check-ins or punches yet." />}
       </div>
     </div>
   );
