@@ -6,6 +6,7 @@ import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
   TrendingDown, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
   Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar, Search, BookOpen,
+  GraduationCap,
 } from "lucide-react";
 import { api } from "./api.js";
 import {
@@ -15,6 +16,11 @@ import {
   DRUG_NUTRIENT_DATA, CONDITION_TALKING_POINTS, SPECIALTY_TALKING_POINTS,
   BCOMPLEX_INFO, DIABETES_SUPPLEMENT_INTERACTIONS, TALKING_POINTS_NOTES,
 } from "./repKnowledge.js";
+import {
+  TRAINING_INTRO, DIABETES_LANDSCAPE, MODULE1_MINDSET, COLOR_ENERGIES, PHYSICIAN_TYPES,
+  ADOPTION_STYLES, CALL_FRAMEWORK, MOM_STRATEGY, APACT_EXAMPLES, VALUE_PROPOSITION,
+  POST_CALL_ANALYSIS, LEAG_PHILOSOPHY,
+} from "./repTraining.js";
 
 const POLL_INTERVAL_MS = 20000;
 const LIST_DISPLAY_CAP = 200; // cap rendered rows so huge imported lists (30k+) don't freeze the browser — use search to narrow
@@ -197,6 +203,7 @@ export default function App() {
         <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />
         <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />
         <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />
+        <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />
         {role === "rep" && <TabBtn active={tab === "checkin"} onClick={() => setTab("checkin")} icon={<MapPin size={15} />} label="Check-In" />}
         {role === "rep" && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
         {role === "manager" && <TabBtn active={tab === "dashboard"} onClick={() => setTab("dashboard")} icon={<LayoutDashboard size={15} />} label="Dashboard" />}
@@ -273,6 +280,7 @@ export default function App() {
               />
             )}
             {tab === "knowledge" && <KnowledgeView />}
+            {tab === "training" && <TrainingView />}
             {tab === "route" && role === "rep" && <RouteView clients={clients} doctors={doctors} visits={visits} />}
             {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} visits={visits} />}
             {tab === "orders" && role === "manager" && (
@@ -2213,6 +2221,303 @@ function KnowledgeView() {
             <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: "#7A5B2E", lineHeight: 1.6 }}>
               {TALKING_POINTS_NOTES.map((n, i) => <li key={i}>{n}</li>)}
             </ul>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Training View ----------
+function TrainingView() {
+  const [section, setSection] = useState("overview"); // overview | mindset | profiling | framework | objections | value | growth
+
+  const sectionBtn = (key, label) => (
+    <button onClick={() => setSection(key)} style={{
+      padding: "8px 12px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12, fontWeight: 500, whiteSpace: "nowrap",
+      background: section === key ? "#1F2A24" : "#fff", color: section === key ? "#FAF7F2" : "#1F2A24",
+    }}>
+      {label}
+    </button>
+  );
+
+  const card = (children, key) => (
+    <div key={key} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
+      {children}
+    </div>
+  );
+
+  return (
+    <div>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Rep training course</h2>
+      <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
+        Internal Training Manual: Transitioning to Medical Representative for SITAVITAE PLUS.
+      </p>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", overflowX: "auto" }}>
+        {sectionBtn("overview", "Overview")}
+        {sectionBtn("mindset", "Customer-Centric Mindset")}
+        {sectionBtn("profiling", "Behavioral Profiling")}
+        {sectionBtn("framework", "6-Step Call Framework")}
+        {sectionBtn("objections", "Objection Handling")}
+        {sectionBtn("value", "Product Value")}
+        {sectionBtn("growth", "Post-Call & Growth")}
+      </div>
+
+      {section === "overview" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {card(
+            <>
+              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>{TRAINING_INTRO.title}</div>
+              {TRAINING_INTRO.paragraphs.map((p, i) => (
+                <div key={i} style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6, marginBottom: 8 }}>{p}</div>
+              ))}
+            </>,
+            "intro"
+          )}
+          {card(
+            <>
+              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 6 }}>{DIABETES_LANDSCAPE.title}</div>
+              <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6, marginBottom: 10 }}>{DIABETES_LANDSCAPE.intro}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {DIABETES_LANDSCAPE.stats.map((s, i) => (
+                  <div key={i} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
+                    <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 3 }}>{s.label}</div>
+                    <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.5 }}>{s.value}</div>
+                  </div>
+                ))}
+              </div>
+            </>,
+            "landscape"
+          )}
+        </div>
+      )}
+
+      {section === "mindset" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {card(
+            <>
+              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 6 }}>{MODULE1_MINDSET.title}</div>
+              <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6 }}>{MODULE1_MINDSET.intro}</div>
+            </>,
+            "m1-intro"
+          )}
+          {card(
+            <>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Needs, Wants, and Demands</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {MODULE1_MINDSET.needsWantsDemands.map((n) => (
+                  <div key={n.term} style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+                    <strong>{n.term}:</strong> <span style={{ color: "#5B5445" }}>{n.detail}</span>
+                  </div>
+                ))}
+              </div>
+            </>,
+            "nwd"
+          )}
+          {card(
+            <>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Avoiding "Marketing Myopia"</div>
+              <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6 }}>{MODULE1_MINDSET.marketingMyopia}</div>
+            </>,
+            "myopia"
+          )}
+          {card(
+            <>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>Physician Needs Analysis</div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ textAlign: "left", color: "#8A8272" }}>
+                      <th style={{ padding: "4px 8px" }}>Clinical needs (patient-focused)</th>
+                      <th style={{ padding: "4px 8px" }}>Personal needs (physician-focused)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {MODULE1_MINDSET.physicianNeeds.map((r, i) => (
+                      <tr key={i} style={{ borderTop: "1px solid #E5DFD3" }}>
+                        <td style={{ padding: "6px 8px", color: "#5B5445" }}>{r.clinical}</td>
+                        <td style={{ padding: "6px 8px", color: "#5B5445" }}>{r.personal}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>,
+            "needs-table"
+          )}
+        </div>
+      )}
+
+      {section === "profiling" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {card(
+            <>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>The Four Color Energies</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {COLOR_ENERGIES.map((c) => (
+                  <div key={c.name} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
+                    <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 3 }}>{c.name}</div>
+                    <div style={{ fontSize: 12, color: "#5B5445", lineHeight: 1.5, marginBottom: 2 }}>{c.traits}</div>
+                    <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 2 }}>Fear: {c.fear}</div>
+                    <div style={{ fontSize: 12, color: "#4C7A5E" }}>Strategy: {c.strategy}</div>
+                  </div>
+                ))}
+              </div>
+            </>,
+            "colors"
+          )}
+          {card(
+            <>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Physician Classifications</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {PHYSICIAN_TYPES.map((p) => (
+                  <div key={p.type} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
+                    <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 3 }}>{p.type}</div>
+                    <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 4 }}>{p.description}</div>
+                    <div style={{ fontSize: 12, color: "#5B5445", lineHeight: 1.5 }}><strong>Strategy:</strong> {p.strategy}</div>
+                  </div>
+                ))}
+              </div>
+            </>,
+            "types"
+          )}
+          {card(
+            <>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Adoption Styles</div>
+              <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6 }}>{ADOPTION_STYLES}</div>
+            </>,
+            "adoption"
+          )}
+        </div>
+      )}
+
+      {section === "framework" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {CALL_FRAMEWORK.map((f) => (
+            <div key={f.step} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14, display: "flex", gap: 12 }}>
+              <div style={{
+                flexShrink: 0, width: 26, height: 26, borderRadius: "50%", background: "#1F2A24", color: "#FAF7F2",
+                display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12.5, fontWeight: 700,
+              }}>
+                {f.step}
+              </div>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>{f.title}</div>
+                <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6 }}>{f.detail}</div>
+              </div>
+            </div>
+          ))}
+          {card(
+            <>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>{MOM_STRATEGY.title}</div>
+              <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6, marginBottom: 10 }}>{MOM_STRATEGY.intro}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {MOM_STRATEGY.steps.map((s, i) => (
+                  <div key={i} style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+                    <strong>{s.step}:</strong> <span style={{ color: "#5B5445" }}>{s.detail}</span>
+                  </div>
+                ))}
+              </div>
+            </>,
+            "mom"
+          )}
+        </div>
+      )}
+
+      {section === "objections" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 4px" }}>
+            Use the APACT model: Acknowledge, Probe, Answer, Confirm, Transmit.
+          </p>
+          {APACT_EXAMPLES.map((ex, i) => (
+            <div key={i} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>{ex.concern}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ fontSize: 12.5, lineHeight: 1.5 }}><strong style={{ color: "#4C7A5E" }}>Acknowledge:</strong> <span style={{ color: "#5B5445" }}>{ex.acknowledge}</span></div>
+                <div style={{ fontSize: 12.5, lineHeight: 1.5 }}><strong style={{ color: "#4C7A5E" }}>Probe:</strong> <span style={{ color: "#5B5445" }}>{ex.probe}</span></div>
+                <div style={{ fontSize: 12.5, lineHeight: 1.5 }}><strong style={{ color: "#4C7A5E" }}>Answer:</strong> <span style={{ color: "#5B5445" }}>{ex.answer}</span></div>
+                <div style={{ fontSize: 12.5, lineHeight: 1.5 }}><strong style={{ color: "#4C7A5E" }}>Confirm:</strong> <span style={{ color: "#5B5445" }}>{ex.confirm}</span></div>
+                <div style={{ fontSize: 12.5, lineHeight: 1.5 }}><strong style={{ color: "#4C7A5E" }}>Transmit:</strong> <span style={{ color: "#5B5445" }}>{ex.transmit}</span></div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {section === "value" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {card(
+            <>
+              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 6 }}>{VALUE_PROPOSITION.title}</div>
+              <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6, marginBottom: 10 }}>{VALUE_PROPOSITION.clinicalIntro}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {VALUE_PROPOSITION.triggers.map((t) => (
+                  <div key={t.name} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
+                    <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 3 }}>{t.name}</div>
+                    <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.5 }}>{t.detail}</div>
+                  </div>
+                ))}
+              </div>
+            </>,
+            "triggers"
+          )}
+          {card(
+            <>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Value Differentiation</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {VALUE_PROPOSITION.differentiation.map((d) => (
+                  <div key={d.name} style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+                    <strong>{d.name}:</strong> <span style={{ color: "#5B5445" }}>{d.detail}</span>
+                  </div>
+                ))}
+              </div>
+            </>,
+            "diff"
+          )}
+          {card(
+            <>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>Daily Treatment Cost breakdown</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {VALUE_PROPOSITION.priceBreakdown.map((r, i) => (
+                  <div key={i} style={{ fontSize: 12.5, lineHeight: 1.5, display: "flex", justifyContent: "space-between", gap: 12 }}>
+                    <span style={{ color: "#8A8272" }}>{r.label}</span>
+                    <span style={{ color: "#5B5445", fontWeight: 500, textAlign: "right" }}>{r.value}</span>
+                  </div>
+                ))}
+              </div>
+            </>,
+            "price"
+          )}
+        </div>
+      )}
+
+      {section === "growth" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {card(
+            <>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>{POST_CALL_ANALYSIS.title}</div>
+              <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6, marginBottom: 10 }}>{POST_CALL_ANALYSIS.intro}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {POST_CALL_ANALYSIS.items.map((it) => (
+                  <div key={it.label} style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+                    <strong>{it.label}:</strong> <span style={{ color: "#5B5445" }}>{it.detail}</span>
+                  </div>
+                ))}
+              </div>
+            </>,
+            "postcall"
+          )}
+          <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 10, padding: 14 }}>
+            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8, color: "#7A5B2E" }}>{LEAG_PHILOSOPHY.title}</div>
+            <div style={{ fontSize: 12.5, color: "#7A5B2E", lineHeight: 1.6, marginBottom: 10 }}>{LEAG_PHILOSOPHY.intro}</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {LEAG_PHILOSOPHY.pillars.map((p) => (
+                <div key={p.letter} style={{ fontSize: 12.5, lineHeight: 1.5, color: "#7A5B2E" }}>
+                  <strong>{p.letter} — {p.word}:</strong> {p.detail}
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}
