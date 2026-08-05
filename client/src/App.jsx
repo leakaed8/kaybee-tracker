@@ -1920,7 +1920,16 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
     return { ...d, days, overdue, cadence, pendingSamples };
   }).sort((a, b) => (b.days ?? 9999) - (a.days ?? 9999));
 
-  const filteredRows = rows.filter((d) => d.name.toLowerCase().includes(search.toLowerCase().trim()));
+  const filteredRows = rows.filter((d) => {
+    const q = search.toLowerCase().trim();
+    if (!q) return true;
+    return (
+      d.name.toLowerCase().includes(q) ||
+      (d.specialty || "").toLowerCase().includes(q) ||
+      (d.area || "").toLowerCase().includes(q) ||
+      (d.hospital || "").toLowerCase().includes(q)
+    );
+  });
   const shownRows = filteredRows.slice(0, LIST_DISPLAY_CAP);
   const tierColor = { A: "#B33A3A", B: "#D9A441", C: "#6B7280" };
 
@@ -1958,7 +1967,7 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search doctors by name…"
+          placeholder="Search by name, specialty, area, or hospital…"
           style={{ ...inputStyle, paddingLeft: 34 }}
         />
       </div>
