@@ -873,4 +873,14 @@ if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   setInterval(checkExpiryAndOverdueAlerts, ALERT_CHECK_INTERVAL_MS);
 }
 
+// Render's free tier sleeps after ~15 minutes with no inbound traffic. A self
+// request through the public URL (not localhost) counts as real traffic and
+// resets that timer, keeping the service warm without any external pinger.
+const SELF_PING_URL = process.env.RENDER_EXTERNAL_URL;
+if (SELF_PING_URL) {
+  setInterval(() => {
+    fetch(`${SELF_PING_URL}/api/health`).catch(() => {});
+  }, 10 * 60 * 1000);
+}
+
 app.listen(PORT, () => console.log(`KayBee Tracker server listening on port ${PORT}`));
