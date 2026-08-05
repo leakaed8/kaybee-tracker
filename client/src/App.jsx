@@ -5,12 +5,16 @@ import autoTable from "jspdf-autotable";
 import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
   TrendingDown, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
-  Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar, Search,
+  Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar, Search, BookOpen,
 } from "lucide-react";
 import { api } from "./api.js";
 import {
   daysUntil, fmtDate, turnoverPct, zoneFor, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
 } from "./helpers.js";
+import {
+  DRUG_NUTRIENT_DATA, CONDITION_TALKING_POINTS, SPECIALTY_TALKING_POINTS,
+  BCOMPLEX_INFO, DIABETES_SUPPLEMENT_INTERACTIONS, TALKING_POINTS_NOTES,
+} from "./repKnowledge.js";
 
 const POLL_INTERVAL_MS = 20000;
 const LIST_DISPLAY_CAP = 200; // cap rendered rows so huge imported lists (30k+) don't freeze the browser — use search to narrow
@@ -192,6 +196,7 @@ export default function App() {
         <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />
         <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />
         <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />
+        <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />
         {role === "rep" && <TabBtn active={tab === "checkin"} onClick={() => setTab("checkin")} icon={<MapPin size={15} />} label="Check-In" />}
         {role === "rep" && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
         {role === "manager" && <TabBtn active={tab === "dashboard"} onClick={() => setTab("dashboard")} icon={<LayoutDashboard size={15} />} label="Dashboard" />}
@@ -267,6 +272,7 @@ export default function App() {
                 onBulkImport={bulkImportDoctors}
               />
             )}
+            {tab === "knowledge" && <KnowledgeView />}
             {tab === "route" && role === "rep" && <RouteView clients={clients} doctors={doctors} visits={visits} />}
             {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} visits={visits} />}
             {tab === "orders" && role === "manager" && (
@@ -1508,7 +1514,11 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
     return { ...c, days, overdue, cadence };
   }).sort((a, b) => (b.days ?? 9999) - (a.days ?? 9999));
 
-  const filteredRows = rows.filter((c) => c.name.toLowerCase().includes(search.toLowerCase().trim()));
+  const filteredRows = rows.filter((c) => {
+    const q = search.toLowerCase().trim();
+    if (!q) return true;
+    return c.name.toLowerCase().includes(q) || (c.area || "").toLowerCase().includes(q);
+  });
   const suggestedFollowUps = rows.filter((c) => c.overdue).slice(0, 5);
   const shownRows = filteredRows.slice(0, LIST_DISPLAY_CAP);
 
@@ -1548,7 +1558,7 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search pharmacies by name…"
+          placeholder="Search pharmacies by name or area…"
           style={{ ...inputStyle, paddingLeft: 34 }}
         />
       </div>
@@ -2034,6 +2044,178 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
         ))}
         {filteredRows.length === 0 && <EmptyState text={search ? "No doctors match your search." : "No doctors added yet."} />}
       </div>
+    </div>
+  );
+}
+
+// ---------- Knowledge View (rep reference: talking points + drug/nutrient depletion) ----------
+function KnowledgeView() {
+  const [section, setSection] = useState("specialty"); // specialty | condition | drugs | reference
+  const [search, setSearch] = useState("");
+  const q = search.toLowerCase().trim();
+
+  const filteredSpecialty = SPECIALTY_TALKING_POINTS.map((s) => ({
+    ...s,
+    topics: s.topics.filter((t) =>
+      !q || s.specialty.toLowerCase().includes(q) || t.topic.toLowerCase().includes(q) || t.text.toLowerCase().includes(q)
+    ),
+  })).filter((s) => s.topics.length > 0 || s.specialty.toLowerCase().includes(q));
+
+  const filteredCondition = CONDITION_TALKING_POINTS.filter((c) =>
+    !q || c.condition.toLowerCase().includes(q) || c.items.some((i) => i.toLowerCase().includes(q))
+  );
+
+  const filteredDrugs = DRUG_NUTRIENT_DATA.filter((d) =>
+    !q ||
+    d.category.toLowerCase().includes(q) ||
+    d.depletions.toLowerCase().includes(q) ||
+    d.suggested.toLowerCase().includes(q) ||
+    d.interactions.toLowerCase().includes(q)
+  );
+
+  const sectionBtn = (key, label) => (
+    <button onClick={() => setSection(key)} style={{
+      flex: 1, padding: "8px 12px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12, fontWeight: 500,
+      background: section === key ? "#1F2A24" : "#fff", color: section === key ? "#FAF7F2" : "#1F2A24",
+    }}>
+      {label}
+    </button>
+  );
+
+  return (
+    <div>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Rep knowledge base</h2>
+      <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
+        Reference material to prep before a visit — what to mention by specialty or condition, and how common medications affect nutrient levels. Not tied to any specific doctor record.
+      </p>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+        {sectionBtn("specialty", "By Specialty")}
+        {sectionBtn("condition", "By Condition")}
+        {sectionBtn("drugs", "Drug & Nutrient Depletion")}
+        {sectionBtn("reference", "Reference Tables")}
+      </div>
+
+      {section !== "reference" && (
+        <div style={{ position: "relative", marginBottom: 16 }}>
+          <Search size={15} style={{ position: "absolute", left: 12, top: 10, color: "#8A8272" }} />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search…"
+            style={{ ...inputStyle, paddingLeft: 34 }}
+          />
+        </div>
+      )}
+
+      {section === "specialty" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {filteredSpecialty.map((s) => (
+            <div key={s.specialty} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
+              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>{s.specialty}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {s.topics.map((t, i) => (
+                  <div key={i} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
+                    <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 3 }}>{t.topic}</div>
+                    <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.5 }}>{t.text}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+          {filteredSpecialty.length === 0 && <EmptyState text="No specialty matches your search." />}
+        </div>
+      )}
+
+      {section === "condition" && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 10 }}>
+          {filteredCondition.map((c) => (
+            <div key={c.condition} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>{c.condition}</div>
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: "#5B5445", lineHeight: 1.6 }}>
+                {c.items.map((it, i) => <li key={i}>{it}</li>)}
+              </ul>
+            </div>
+          ))}
+          {filteredCondition.length === 0 && <EmptyState text="No condition matches your search." />}
+        </div>
+      )}
+
+      {section === "drugs" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {filteredDrugs.map((d) => (
+            <div key={d.category} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
+              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 6 }}>{d.category}</div>
+              {d.description && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 8, lineHeight: 1.5 }}>{d.description}</div>}
+              {d.depletions && (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: "#B33A3A" }}>Nutrient depletion</div>
+                  <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.5 }}>{d.depletions}</div>
+                </div>
+              )}
+              {d.suggested && (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: "#4C7A5E" }}>Suggested supplementation</div>
+                  <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.5 }}>{d.suggested}</div>
+                </div>
+              )}
+              {d.interactions && (
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: "#C17817" }}>Potential interactions — use caution</div>
+                  <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.5 }}>{d.interactions}</div>
+                </div>
+              )}
+            </div>
+          ))}
+          {filteredDrugs.length === 0 && <EmptyState text="No drug class matches your search." />}
+        </div>
+      )}
+
+      {section === "reference" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
+            <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>B-Complex components</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {BCOMPLEX_INFO.map((b) => (
+                <div key={b.vitamin} style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+                  <strong>{b.vitamin}:</strong> <span style={{ color: "#5B5445" }}>{b.note}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
+            <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>Supplement effects on blood glucose (diabetes)</div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ textAlign: "left", color: "#8A8272" }}>
+                    <th style={{ padding: "4px 8px" }}>Supplement</th>
+                    <th style={{ padding: "4px 8px" }}>Effect on blood glucose</th>
+                    <th style={{ padding: "4px 8px" }}>Interaction with antidiabetic drugs</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {DIABETES_SUPPLEMENT_INTERACTIONS.map((r) => (
+                    <tr key={r.supplement} style={{ borderTop: "1px solid #E5DFD3" }}>
+                      <td style={{ padding: "6px 8px", fontWeight: 600 }}>{r.supplement}</td>
+                      <td style={{ padding: "6px 8px", color: "#5B5445" }}>{r.glucoseEffect}</td>
+                      <td style={{ padding: "6px 8px", color: "#5B5445" }}>{r.antidiabeticInteraction}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 10, padding: 14 }}>
+            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8, color: "#7A5B2E" }}>Notes</div>
+            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: "#7A5B2E", lineHeight: 1.6 }}>
+              {TALKING_POINTS_NOTES.map((n, i) => <li key={i}>{n}</li>)}
+            </ul>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
