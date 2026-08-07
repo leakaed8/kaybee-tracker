@@ -1005,18 +1005,16 @@ if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   setInterval(checkExpiryAndOverdueAlerts, ALERT_CHECK_INTERVAL_MS);
 }
 
-// ---------- Monthly "must-sell" Telegram digest ----------
-// A product qualifies until real sales-history data is loaded: it must be
-// near expiry (red or yellow zone) AND selling slower than the slow-mover
-// threshold already used elsewhere in the app. Manager approves via an
-// inline Telegram button before anything goes out to reps.
-
-function zoneKeyFor(product) {
-  const dLeft = daysUntilFromToday(product.expiry);
-  if (dLeft <= 182) return "red";
-  if (dLeft <= 365) return "yellow";
-  return "green";
-}
+// ---------- Monthly Telegram digest: Pick up vs Stress to sell ----------
+// Two focused, actionable lists instead of one long wall of text (a single
+// list mixing everything was too big for reps to actually read):
+//   - Pick up: expires within 3 months — pharmacies won't take these, so
+//     the move is to collect the stock back, not push more sales.
+//   - Stress to sell: expires within a year AND moving slowly — still
+//     sellable, but needs proactive pushing before it becomes a pick-up item.
+// The manager approves via inline buttons before anything reaches reps; both
+// the manager's and each rep's message stay short, with buttons to drill
+// into either list's detail on demand.
 
 function turnoverPctFor(product) {
   const qty = Number(product.qty) || 0;
@@ -1025,11 +1023,9 @@ function turnoverPctFor(product) {
   return Math.round((sold90 / qty) * 100);
 }
 
-// Projects whether current stock will clear before the item expires — catches
-// "danger items" ahead of time, even ones sitting in the green zone today,
-// rather than waiting until they age into red/yellow. Mirrors isAtRisk in
-// client/src/helpers.js; uses last-90-days sales as a stand-in for "this
-// year's movement" until real multi-year history is wired in.
+// Projects whether current stock will clear before the item expires. Mirrors
+// isAtRisk in client/src/helpers.js; uses last-90-days sales as a stand-in
+// for "this year's movement" until real multi-year history is wired in.
 function isAtRiskFor(product, daysLeft) {
   if (daysLeft <= 0) return false;
   const qty = Number(product.qty) || 0;
@@ -1044,41 +1040,67 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-async function computeMustSellList() {
-  const [products, rawSettings] = await Promise.all([db.getAllRows("Products"), db.getSettings()]);
+const PICKUP_WINDOW_DAYS = 90; // 3 months
+const STRESS_WINDOW_DAYS = 365; // 1 year
+
+async function computeDigestLists(rawSettings) {
+  const products = await db.getAllRows("Products");
   const slowThreshold = rawSettings.slowThreshold !== undefined ? Number(rawSettings.slowThreshold) : 15;
-  return products
-    .filter((p) => p.expiry)
-    .map((p) => {
-      const daysLeft = daysUntilFromToday(p.expiry);
-      return {
-        id: p.id, name: p.name, qty: Number(p.qty) || 0, expiry: p.expiry,
-        daysLeft, turnover: turnoverPctFor(p), zone: zoneKeyFor(p), atRisk: isAtRiskFor(p, daysLeft),
-      };
-    })
-    .filter((p) => ((p.zone === "red" || p.zone === "yellow") && p.turnover < slowThreshold) || p.atRisk)
-    .sort((a, b) => a.daysLeft - b.daysLeft);
-}
 
-function formatDigestMessage(items) {
-  if (items.length === 0) {
-    return "No must-sell items this month — nothing is near-expiry, slow-moving, or at risk of not selling through right now.";
+  const pickup = [];
+  const stress = [];
+  for (const p of products) {
+    if (!p.expiry) continue;
+    const daysLeft = daysUntilFromToday(p.expiry);
+    if (daysLeft < 0) continue; // already expired — nothing left to pick up or push
+    const item = { id: p.id, name: p.name, qty: Number(p.qty) || 0, expiry: p.expiry, daysLeft, turnover: turnoverPctFor(p) };
+    if (daysLeft <= PICKUP_WINDOW_DAYS) {
+      pickup.push(item);
+    } else if (daysLeft <= STRESS_WINDOW_DAYS && (turnoverPctFor(p) < slowThreshold || isAtRiskFor(p, daysLeft))) {
+      stress.push(item);
+    }
   }
-  const lines = items.slice(0, 30).map((it) => {
-    const riskTag = it.atRisk ? ` ⚠ won't sell through in time (${it.zone} zone)` : "";
-    return `• <b>${escapeHtml(it.name)}</b> — ${it.qty} units, ${it.daysLeft}d to expiry, ${it.turnover}% turnover/90d${riskTag}`;
-  });
-  const more = items.length > 30 ? `\n…and ${items.length - 30} more.` : "";
-  return `📋 <b>This month's focus list</b> (${items.length} item${items.length === 1 ? "" : "s"})\n\n${lines.join("\n")}${more}`;
+  pickup.sort((a, b) => a.daysLeft - b.daysLeft);
+  stress.sort((a, b) => a.daysLeft - b.daysLeft);
+  return { pickup, stress };
 }
 
-async function dispatchDigestToReps(items) {
+function formatSummaryMessage({ pickup, stress }) {
+  if (pickup.length === 0 && stress.length === 0) {
+    return "No items to flag this month — nothing is near enough to expiry or slow enough to need action.";
+  }
+  return (
+    `📋 <b>This month's focus</b>\n\n` +
+    `📦 <b>${pickup.length}</b> item${pickup.length === 1 ? "" : "s"} to pick up from pharmacies (expiring within 3 months)\n` +
+    `📣 <b>${stress.length}</b> item${stress.length === 1 ? "" : "s"} to stress-sell (expiring within a year, moving slowly)\n\n` +
+    `Tap a list below for details.`
+  );
+}
+
+function formatCategoryDetail(items, title) {
+  if (items.length === 0) return `${title}: nothing to show.`;
+  const lines = items.slice(0, 40).map((it) =>
+    `• <b>${escapeHtml(it.name)}</b> — ${it.qty} units, ${it.daysLeft}d to expiry, ${it.turnover}% turnover/90d`
+  );
+  const more = items.length > 40 ? `\n…and ${items.length - 40} more.` : "";
+  return `${title} (${items.length})\n\n${lines.join("\n")}${more}`;
+}
+
+function categoryButtons(digestId, { pickup, stress }) {
+  return [
+    { text: `📦 Pick up (${pickup.length})`, callback_data: `pickup:${digestId}` },
+    { text: `📣 Stress to sell (${stress.length})`, callback_data: `stress:${digestId}` },
+  ];
+}
+
+async function dispatchDigestToReps(digestId, lists) {
   const reps = await db.getAllRows("Reps");
-  const message = formatDigestMessage(items);
+  const message = formatSummaryMessage(lists);
+  const replyMarkup = { inline_keyboard: [categoryButtons(digestId, lists)] };
   for (const rep of reps) {
     if (!rep.telegramChatId) continue;
     try {
-      await telegram.sendMessage(rep.telegramChatId, message);
+      await telegram.sendMessage(rep.telegramChatId, message, replyMarkup);
     } catch (e) {
       console.error(`failed to send monthly digest to rep ${rep.name}`, e);
     }
@@ -1086,31 +1108,35 @@ async function dispatchDigestToReps(items) {
 }
 
 async function runMonthlyDigest(month) {
-  const items = await computeMustSellList();
+  const settings = await db.getSettings();
+  const lists = await computeDigestLists(settings);
   const digest = {
     id: `dg${crypto.randomUUID()}`,
     month,
     status: "pending",
-    payload: JSON.stringify(items),
+    payload: JSON.stringify(lists),
     createdAt: new Date().toISOString(),
   };
   await db.appendRow("MonthlyDigests", digest);
 
-  const settings = await db.getSettings();
   if (!settings.managerTelegramChatId) {
     console.warn("Monthly digest computed but no manager Telegram is linked yet — nothing sent.");
     return;
   }
-  if (items.length === 0) {
-    await telegram.sendMessage(settings.managerTelegramChatId, formatDigestMessage(items));
+  const summary = formatSummaryMessage(lists);
+  if (lists.pickup.length === 0 && lists.stress.length === 0) {
+    await telegram.sendMessage(settings.managerTelegramChatId, summary);
     await db.updateRowById("MonthlyDigests", digest.id, { status: "skipped" });
     return;
   }
-  await telegram.sendMessage(settings.managerTelegramChatId, formatDigestMessage(items), {
-    inline_keyboard: [[
-      { text: "✅ Approve — send to reps", callback_data: `approve:${digest.id}` },
-      { text: "Skip this month", callback_data: `skip:${digest.id}` },
-    ]],
+  await telegram.sendMessage(settings.managerTelegramChatId, summary, {
+    inline_keyboard: [
+      categoryButtons(digest.id, lists),
+      [
+        { text: "✅ Approve — send to reps", callback_data: `approve:${digest.id}` },
+        { text: "Skip this month", callback_data: `skip:${digest.id}` },
+      ],
+    ],
   });
 }
 
@@ -1120,10 +1146,20 @@ async function handleDigestCallback(callbackQuery) {
   const digests = await db.getAllRows("MonthlyDigests");
   const digest = digests.find((d) => d.id === digestId);
   if (!digest) { await telegram.answerCallbackQuery(id, "This digest is no longer available."); return; }
+
+  const lists = JSON.parse(digest.payload || '{"pickup":[],"stress":[]}');
+
+  if (action === "pickup" || action === "stress") {
+    await telegram.answerCallbackQuery(id, "Here's the list");
+    const title = action === "pickup" ? "📦 Pick up from pharmacies" : "📣 Stress to sell";
+    if (message?.chat?.id) await telegram.sendMessage(message.chat.id, formatCategoryDetail(lists[action], title));
+    return;
+  }
+
   if (digest.status !== "pending") { await telegram.answerCallbackQuery(id, `Already ${digest.status}.`); return; }
 
   if (action === "approve") {
-    await dispatchDigestToReps(JSON.parse(digest.payload || "[]"));
+    await dispatchDigestToReps(digest.id, lists);
     await db.updateRowById("MonthlyDigests", digest.id, { status: "approved" });
     await telegram.answerCallbackQuery(id, "Sent to reps!");
     if (message?.chat?.id) await telegram.sendMessage(message.chat.id, "✅ Approved — sent to all linked reps.");
