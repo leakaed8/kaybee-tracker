@@ -1,5 +1,16 @@
+// A plain "YYYY-MM-DD" string should mean the same calendar day no matter who
+// views it. `new Date("YYYY-MM-DD")` parses that as UTC midnight, and every
+// display/comparison method that follows (toLocaleDateString, setHours, ...)
+// converts to the VIEWER's local timezone — so anyone west of UTC sees it
+// roll back a day (e.g. "2026-09-01" reads as "31 Aug 2026"). Building the
+// date directly from its Y/M/D parts sidesteps that UTC round-trip entirely.
+const parseDateOnly = (dateStr) => {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, d);
+};
+
 export const daysUntil = (dateStr) => {
-  const d = new Date(dateStr);
+  const d = parseDateOnly(dateStr);
   const now = new Date();
   d.setHours(0, 0, 0, 0);
   now.setHours(0, 0, 0, 0);
@@ -7,7 +18,7 @@ export const daysUntil = (dateStr) => {
 };
 
 export const fmtDate = (dateStr) => {
-  const d = new Date(dateStr);
+  const d = parseDateOnly(dateStr);
   return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 };
 

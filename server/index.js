@@ -921,12 +921,16 @@ app.get("*", (req, res) => {
   res.sendFile(path.join(clientDist, "index.html"));
 });
 
+// See the matching comment in client/src/helpers.js — a plain "YYYY-MM-DD"
+// string must not round-trip through UTC before being compared, or it can
+// shift a day depending on the server process's local timezone.
 function daysUntilFromToday(dateStr) {
-  const d = new Date(dateStr);
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
   const now = new Date();
-  d.setHours(0, 0, 0, 0);
+  date.setHours(0, 0, 0, 0);
   now.setHours(0, 0, 0, 0);
-  return Math.round((d - now) / 86400000);
+  return Math.round((date - now) / 86400000);
 }
 
 const TIER_CADENCE_DAYS = { A: 14, B: 30, C: 60 };
