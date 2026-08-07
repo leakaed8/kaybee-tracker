@@ -729,14 +729,14 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
 
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
         <button onClick={() => { setEntityType("pharmacy"); setClient(""); }} style={{
-          flex: 1, padding: "8px 14px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12.5, fontWeight: 500,
-          background: entityType === "pharmacy" ? "#1F2A24" : "#fff", color: entityType === "pharmacy" ? "#FAF7F2" : "#1F2A24",
+          flex: 1, padding: "8px 14px", borderRadius: 8, border: entityType === "pharmacy" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+          background: entityType === "pharmacy" ? "#4C7A5E" : "#fff", color: entityType === "pharmacy" ? "#FAF7F2" : "#1F2A24",
         }}>
           Pharmacy
         </button>
         <button onClick={() => { setEntityType("doctor"); setClient(""); }} style={{
-          flex: 1, padding: "8px 14px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12.5, fontWeight: 500,
-          background: entityType === "doctor" ? "#1F2A24" : "#fff", color: entityType === "doctor" ? "#FAF7F2" : "#1F2A24",
+          flex: 1, padding: "8px 14px", borderRadius: 8, border: entityType === "doctor" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+          background: entityType === "doctor" ? "#4C7A5E" : "#fff", color: entityType === "doctor" ? "#FAF7F2" : "#1F2A24",
         }}>
           Doctor
         </button>
@@ -2174,8 +2174,8 @@ function KnowledgeView() {
 
   const sectionBtn = (key, label) => (
     <button onClick={() => setSection(key)} style={{
-      flex: 1, padding: "8px 12px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12, fontWeight: 500,
-      background: section === key ? "#1F2A24" : "#fff", color: section === key ? "#FAF7F2" : "#1F2A24",
+      flex: 1, padding: "8px 12px", borderRadius: 8, border: section === key ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12, fontWeight: 500,
+      background: section === key ? "#4C7A5E" : "#fff", color: section === key ? "#FAF7F2" : "#1F2A24",
     }}>
       {label}
     </button>
@@ -2325,8 +2325,8 @@ function TrainingView() {
 
   const sectionBtn = (key, label) => (
     <button onClick={() => setSection(key)} style={{
-      padding: "8px 12px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12, fontWeight: 500, whiteSpace: "nowrap",
-      background: section === key ? "#1F2A24" : "#fff", color: section === key ? "#FAF7F2" : "#1F2A24",
+      padding: "8px 12px", borderRadius: 8, border: section === key ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12, fontWeight: 500, whiteSpace: "nowrap",
+      background: section === key ? "#4C7A5E" : "#fff", color: section === key ? "#FAF7F2" : "#1F2A24",
     }}>
       {label}
     </button>
@@ -2683,14 +2683,14 @@ function RouteView({ clients, doctors, visits }) {
 
       <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
         <button onClick={() => changeEntityType("pharmacy")} style={{
-          flex: 1, padding: "8px 14px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12.5, fontWeight: 500,
-          background: entityType === "pharmacy" ? "#1F2A24" : "#fff", color: entityType === "pharmacy" ? "#FAF7F2" : "#1F2A24",
+          flex: 1, padding: "8px 14px", borderRadius: 8, border: entityType === "pharmacy" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+          background: entityType === "pharmacy" ? "#4C7A5E" : "#fff", color: entityType === "pharmacy" ? "#FAF7F2" : "#1F2A24",
         }}>
           Pharmacies
         </button>
         <button onClick={() => changeEntityType("doctor")} style={{
-          flex: 1, padding: "8px 14px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12.5, fontWeight: 500,
-          background: entityType === "doctor" ? "#1F2A24" : "#fff", color: entityType === "doctor" ? "#FAF7F2" : "#1F2A24",
+          flex: 1, padding: "8px 14px", borderRadius: 8, border: entityType === "doctor" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+          background: entityType === "doctor" ? "#4C7A5E" : "#fff", color: entityType === "doctor" ? "#FAF7F2" : "#1F2A24",
         }}>
           Doctors
         </button>
@@ -3152,14 +3152,14 @@ function BroadcastView({ zoned, clients }) {
 
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
         <button onClick={() => changeMode("healthy")} style={{
-          flex: 1, padding: "8px 14px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12.5, fontWeight: 500,
-          background: mode === "healthy" ? "#1F2A24" : "#fff", color: mode === "healthy" ? "#FAF7F2" : "#1F2A24",
+          flex: 1, padding: "8px 14px", borderRadius: 8, border: mode === "healthy" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+          background: mode === "healthy" ? "#4C7A5E" : "#fff", color: mode === "healthy" ? "#FAF7F2" : "#1F2A24",
         }}>
           Promote healthy stock
         </button>
         <button onClick={() => changeMode("clearance")} style={{
-          flex: 1, padding: "8px 14px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12.5, fontWeight: 500,
-          background: mode === "clearance" ? "#1F2A24" : "#fff", color: mode === "clearance" ? "#FAF7F2" : "#1F2A24",
+          flex: 1, padding: "8px 14px", borderRadius: 8, border: mode === "clearance" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+          background: mode === "clearance" ? "#4C7A5E" : "#fff", color: mode === "clearance" ? "#FAF7F2" : "#1F2A24",
         }}>
           Push near-expiry / slow movers
         </button>
