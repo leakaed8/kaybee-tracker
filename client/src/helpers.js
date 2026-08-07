@@ -65,6 +65,8 @@ export const computeLeadScore = ({ tier, days, cadence, revenue = 0, engagement 
   return Math.max(0, Math.min(100, tierPoints + urgencyPoints + revenuePoints + engagementPoints));
 };
 
+const MONTH_ABBR = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+
 // Handles the three shapes a spreadsheet cell can hand back: a JS Date (xlsx
 // parses formatted date cells this way), an Excel serial day number (cells
 // that hold a date but aren't formatted as one), or a plain text date string.
@@ -78,7 +80,22 @@ export const parseExcelCellDate = (value) => {
     if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
   }
   if (typeof value === "string" && value.trim()) {
-    const d = new Date(value.trim());
+    const text = value.trim();
+    // A cell formatted as "mmm-yy" (e.g. "Sep-26" for an expiry sheet) can come
+    // back as that literal text after an export/re-import round trip. JS's
+    // native Date parser misreads the 2-digit year as a day-of-month in a
+    // bogus year ("Sep-26" -> 26 Sep 2001), so handle month+year text
+    // explicitly before falling back to the generic parser below.
+    const monthYear = text.match(/^([A-Za-z]{3,9})[\s-]+(\d{2,4})$/);
+    if (monthYear) {
+      const month = MONTH_ABBR[monthYear[1].slice(0, 3).toLowerCase()];
+      if (month !== undefined) {
+        let year = Number(monthYear[2]);
+        if (year < 100) year += year < 80 ? 2000 : 1900;
+        return new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
+      }
+    }
+    const d = new Date(text);
     if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
   }
   return null;
