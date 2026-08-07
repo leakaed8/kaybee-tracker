@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { api } from "./api.js";
 import {
-  daysUntil, fmtDate, turnoverPct, zoneFor, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
+  daysUntil, fmtDate, turnoverPct, zoneFor, isSlowMover, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
   computeLeadScore,
 } from "./helpers.js";
 import {
@@ -50,7 +50,6 @@ export default function App() {
     slowThreshold: 15, repPhone: "", dailyTarget: 3, monthlyVisitTarget: 60, monthlyRevenueTarget: 10000, templates: [],
   });
   const [loaded, setLoaded] = useState(false);
-  const [showAddProduct, setShowAddProduct] = useState(false);
   const [syncStatus, setSyncStatus] = useState("");
   const [loadError, setLoadError] = useState("");
 
@@ -133,7 +132,6 @@ export default function App() {
   const todayStr = new Date().toISOString().slice(0, 10);
   const contactedToday = outreachLog.filter((o) => o.date === todayStr).length;
 
-  const addProduct = (prod) => withSync(() => api.addProduct(prod));
   const removeProduct = (id) => withSync(() => api.removeProduct(id));
   const loadImportedInventory = () => withSync(() => api.importSampleInventory());
   const bulkImportProducts = (products) => withSync(() => api.importBulkProducts(products));
@@ -157,7 +155,7 @@ export default function App() {
   const toggleOfferActive = (id, active) => withSync(() => api.updateOffer(id, { active }));
   const removeOffer = (id) => withSync(() => api.removeOffer(id));
 
-  const zoned = products.map((p) => ({ ...p, zone: zoneFor(p, role, settings.slowThreshold) }));
+  const zoned = products.map((p) => ({ ...p, zone: zoneFor(p), slowMover: isSlowMover(p, settings.slowThreshold) }));
   const sorted = [...zoned].sort((a, b) => daysUntil(a.expiry) - daysUntil(b.expiry));
 
   if (authState === "checking") {
@@ -239,9 +237,6 @@ export default function App() {
                 sorted={sorted}
                 slowThreshold={settings.slowThreshold}
                 repPhone={settings.repPhone}
-                showAddProduct={showAddProduct}
-                setShowAddProduct={setShowAddProduct}
-                onAdd={(prod) => { addProduct(prod); setShowAddProduct(false); }}
                 onRemove={removeProduct}
               />
             )}
@@ -399,48 +394,55 @@ function TabBtn({ active, onClick, icon, label }) {
 }
 
 // ---------- Expiry View ----------
-function ExpiryView({ role, sorted, slowThreshold, repPhone, showAddProduct, setShowAddProduct, onAdd, onRemove }) {
-  const zoneCounts = sorted.reduce((acc, p) => { acc[p.zone.key] = (acc[p.zone.key] || 0) + 1; return acc; }, {});
+const EXPIRY_ZONES = [
+  { key: "red", label: "Red zone", sub: "Expires within 6 months", color: "#B33A3A" },
+  { key: "yellow", label: "Yellow zone", sub: "Expires within a year", color: "#D9A441" },
+  { key: "green", label: "Green zone", sub: "More than a year out", color: "#4C7A5E" },
+];
+
+function ExpiryView({ role, sorted, slowThreshold, repPhone, onRemove }) {
+  const [activeZone, setActiveZone] = useState("red");
+
+  const counts = { red: 0, yellow: 0, green: 0 };
+  sorted.forEach((p) => { counts[p.zone.key] = (counts[p.zone.key] || 0) + 1; });
+  const shown = sorted.filter((p) => p.zone.key === activeZone);
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 18, flexWrap: "wrap", gap: 10 }}>
-        <div>
-          <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>
-            {role === "rep" ? "What needs clearing this month" : "Shelf-life overview"}
-          </h2>
-          <p style={{ fontSize: 13, color: "#8A8272", margin: "4px 0 0" }}>
-            {role === "rep" ? "Alarm window: 30 days" : "Alarm window: 6–12 months out"} · slow-mover threshold {slowThreshold}% turnover/90d
-          </p>
-        </div>
-        <button onClick={() => setShowAddProduct((v) => !v)} style={{
-          display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
-          background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500,
-        }}>
-          <Plus size={15} /> Add product
-        </button>
+      <div style={{ marginBottom: 18 }}>
+        <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>
+          {role === "rep" ? "What needs clearing this month" : "Shelf-life overview"}
+        </h2>
+        <p style={{ fontSize: 13, color: "#8A8272", margin: "4px 0 0" }}>
+          Tap a zone to see its items · slow-mover threshold {slowThreshold}% turnover/90d
+        </p>
       </div>
 
-      {showAddProduct && <AddProductForm onAdd={onAdd} onCancel={() => setShowAddProduct(false)} />}
-
-      <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
-        {Object.entries(zoneCounts).map(([key, count]) => {
-          const sample = sorted.find((p) => p.zone.key === key);
+      <div style={{ display: "flex", gap: 10, marginBottom: 18, flexWrap: "wrap" }}>
+        {EXPIRY_ZONES.map((z) => {
+          const active = activeZone === z.key;
           return (
-            <div key={key} style={{ display: "flex", alignItems: "center", gap: 6, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "6px 12px" }}>
-              <span style={{ width: 8, height: 8, borderRadius: "50%", background: sample.zone.color, display: "inline-block" }} />
-              <span style={{ fontSize: 12.5, fontWeight: 500 }}>{sample.zone.label}</span>
-              <span className="kb-font-mono" style={{ fontSize: 12, color: "#8A8272" }}>{count}</span>
-            </div>
+            <button key={z.key} onClick={() => setActiveZone(z.key)} style={{
+              flex: 1, minWidth: 150, textAlign: "left", padding: "12px 14px", borderRadius: 10,
+              border: active ? `1px solid ${z.color}` : "1px solid #1F2A24",
+              background: active ? z.color : "#fff", color: active ? "#FAF7F2" : "#1F2A24",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: active ? "#FAF7F2" : z.color, display: "inline-block" }} />
+                <span style={{ fontSize: 13, fontWeight: 600 }}>{z.label}</span>
+              </div>
+              <div style={{ fontSize: 11, opacity: 0.85 }}>{z.sub}</div>
+              <div className="kb-font-mono" style={{ fontSize: 20, fontWeight: 700, marginTop: 4 }}>{counts[z.key] || 0}</div>
+            </button>
           );
         })}
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {sorted.map((p) => (
+        {shown.map((p) => (
           <ProductRow key={p.id} product={p} repPhone={repPhone} onRemove={() => onRemove(p.id)} />
         ))}
-        {sorted.length === 0 && <EmptyState text="No products yet. Add your first one above." />}
+        {shown.length === 0 && <EmptyState text="No products in this zone." />}
       </div>
     </div>
   );
@@ -467,9 +469,11 @@ function ProductRow({ product, repPhone, onRemove }) {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 11, fontWeight: 600, padding: "4px 9px", borderRadius: 6, background: `${product.zone.color}1A`, color: product.zone.color }}>
-            {product.zone.label}
-          </span>
+          {product.slowMover && (
+            <span style={{ fontSize: 11, fontWeight: 600, padding: "4px 9px", borderRadius: 6, background: "#6B72801A", color: "#6B7280" }}>
+              Slow mover
+            </span>
+          )}
           <button onClick={() => setShowConfirm(true)} title="Remove" style={{ background: "none", border: "none", color: "#B7AF9E", padding: 2 }}>
             <X size={15} />
           </button>
@@ -485,7 +489,7 @@ function ProductRow({ product, repPhone, onRemove }) {
           <span><Clock size={11} style={{ verticalAlign: -1 }} /> {dLeft >= 0 ? `${dLeft}d left` : `expired ${Math.abs(dLeft)}d ago`}</span>
           <span><TrendingDown size={11} style={{ verticalAlign: -1 }} /> {turnover}% turnover/90d</span>
         </div>
-        {(product.zone.key === "urgent" || product.zone.key === "slow") && waLink && (
+        {(product.zone.key === "red" || product.slowMover) && waLink && (
           <a href={waLink} target="_blank" rel="noreferrer" style={{
             display: "flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 500,
             color: "#4C7A5E", textDecoration: "none", padding: "5px 10px", border: "1px solid #4C7A5E33", borderRadius: 6,
@@ -504,59 +508,6 @@ function ProductRow({ product, repPhone, onRemove }) {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function AddProductForm({ onAdd, onCancel }) {
-  const [name, setName] = useState("");
-  const [category, setCategory] = useState("Supplement");
-  const [expiry, setExpiry] = useState("");
-  const [qty, setQty] = useState("");
-  const [sold90, setSold90] = useState("");
-  const [description, setDescription] = useState("");
-  const [price, setPrice] = useState("");
-
-  const canSubmit = name && expiry && qty !== "" && sold90 !== "";
-
-  return (
-    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-        <Field label="Product name">
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Vitamin C 1000mg" style={inputStyle} />
-        </Field>
-        <Field label="Category">
-          <select value={category} onChange={(e) => setCategory(e.target.value)} style={inputStyle}>
-            {["Supplement", "Vitamin", "Herbal", "Beauty", "OTC"].map((c) => <option key={c}>{c}</option>)}
-          </select>
-        </Field>
-        <Field label="Expiry date">
-          <input type="date" value={expiry} onChange={(e) => setExpiry(e.target.value)} style={inputStyle} />
-        </Field>
-        <Field label="Units in stock">
-          <input type="number" min="0" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="0" style={inputStyle} />
-        </Field>
-        <Field label="Units sold, last 90 days">
-          <input type="number" min="0" value={sold90} onChange={(e) => setSold90(e.target.value)} placeholder="0" style={inputStyle} />
-        </Field>
-        <Field label="Price (optional)">
-          <input type="number" min="0" step="0.01" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="0.00" style={inputStyle} />
-        </Field>
-      </div>
-      <div style={{ marginBottom: 10 }}>
-        <Field label="Description (optional)">
-          <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} placeholder="Key benefits, real product info…" style={{ ...inputStyle, resize: "vertical" }} />
-        </Field>
-      </div>
-      <div style={{ display: "flex", gap: 8 }}>
-        <button
-          disabled={!canSubmit}
-          onClick={() => onAdd({ name, category, expiry, qty: Number(qty), sold90: Number(sold90), price: Number(price) || 0, description: description || undefined })}
-          style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: canSubmit ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
-          Add product
-        </button>
-        <button onClick={onCancel} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>Cancel</button>
-      </div>
     </div>
   );
 }
@@ -2789,9 +2740,9 @@ function RouteView({ clients, doctors, visits }) {
 }
 
 function DashboardView({ zoned, visits }) {
-  const urgent = zoned.filter((p) => p.zone.key === "urgent");
-  const slow = zoned.filter((p) => p.zone.key === "slow");
-  const watch = zoned.filter((p) => p.zone.key === "watch" || p.zone.key === "watch2");
+  const urgent = zoned.filter((p) => p.zone.key === "red");
+  const slow = zoned.filter((p) => p.slowMover);
+  const watch = zoned.filter((p) => p.zone.key === "yellow");
 
   return (
     <div>
@@ -3125,8 +3076,8 @@ function BroadcastView({ zoned, clients }) {
   const [copied, setCopied] = useState(false);
 
   const pool = mode === "healthy"
-    ? zoned.filter((p) => p.zone.key === "ok").slice(0, 20)
-    : zoned.filter((p) => ["urgent", "soon", "watch", "watch2", "slow"].includes(p.zone.key)).slice(0, 20);
+    ? zoned.filter((p) => p.zone.key === "green" && !p.slowMover).slice(0, 20)
+    : zoned.filter((p) => p.zone.key !== "green" || p.slowMover).slice(0, 20);
 
   const changeMode = (m) => { setMode(m); setSelectedProducts([]); };
   const toggleProduct = (id) => setSelectedProducts((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));

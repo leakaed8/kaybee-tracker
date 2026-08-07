@@ -16,20 +16,17 @@ export const turnoverPct = (sold90, qty) => {
   return Math.round((sold90 / qty) * 100);
 };
 
-export const zoneFor = (product, role, slowThreshold) => {
+// Three-bucket expiry zone, same for every role: red (<=6mo), yellow
+// (6-12mo), green (>1yr out). Slow-moving stock is tracked separately via
+// isSlowMover — it's an orthogonal signal (sales velocity), not a 4th zone.
+export const zoneFor = (product) => {
   const dLeft = daysUntil(product.expiry);
-  const turnover = turnoverPct(product.sold90, product.qty);
-  const isSlow = turnover < slowThreshold;
-  if (role === "rep") {
-    if (dLeft <= 30) return { key: "urgent", label: "Urgent — act now", color: "#B33A3A" };
-    if (dLeft <= 90) return { key: "soon", label: "Approaching", color: "#D9A441" };
-    return isSlow ? { key: "slow", label: "Slow mover", color: "#6B7280" } : { key: "ok", label: "Healthy", color: "#4C7A5E" };
-  }
-  if (dLeft <= 30) return { key: "urgent", label: "Urgent — act now", color: "#B33A3A" };
-  if (dLeft <= 180 && dLeft > 30) return { key: "watch", label: "Plan ahead (6–12mo)", color: "#D9A441" };
-  if (dLeft <= 365 && dLeft > 180) return { key: "watch2", label: "On the radar", color: "#C17817" };
-  return isSlow ? { key: "slow", label: "Slow mover", color: "#6B7280" } : { key: "ok", label: "Healthy", color: "#4C7A5E" };
+  if (dLeft <= 182) return { key: "red", label: "Red zone", sub: "Expires within 6 months", color: "#B33A3A" };
+  if (dLeft <= 365) return { key: "yellow", label: "Yellow zone", sub: "Expires within a year", color: "#D9A441" };
+  return { key: "green", label: "Green zone", sub: "More than a year out", color: "#4C7A5E" };
 };
+
+export const isSlowMover = (product, slowThreshold) => turnoverPct(product.sold90, product.qty) < slowThreshold;
 
 export const lifecyclePct = (product) => {
   const totalDays = 730;
