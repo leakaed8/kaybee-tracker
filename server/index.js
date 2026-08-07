@@ -112,6 +112,7 @@ const DEFAULT_SETTINGS = {
   repPhone: "",
   dailyTarget: 3,
   monthlyVisitTarget: 60,
+  monthlyRevenueTarget: 10000,
   templates: defaultTemplates,
 };
 
@@ -122,8 +123,30 @@ function parseSettings(raw) {
     dailyTarget: raw.dailyTarget !== undefined ? Number(raw.dailyTarget) : DEFAULT_SETTINGS.dailyTarget,
     monthlyVisitTarget:
       raw.monthlyVisitTarget !== undefined ? Number(raw.monthlyVisitTarget) : DEFAULT_SETTINGS.monthlyVisitTarget,
+    monthlyRevenueTarget:
+      raw.monthlyRevenueTarget !== undefined ? Number(raw.monthlyRevenueTarget) : DEFAULT_SETTINGS.monthlyRevenueTarget,
     templates: raw.templates ? JSON.parse(raw.templates) : DEFAULT_SETTINGS.templates,
   };
+}
+
+// Lightweight keyword tagger for visit notes — no external API, runs at save
+// time so the manager's objection-themes chart has real data instead of a
+// placeholder. First matching theme wins; empty string means no match.
+const OBJECTION_KEYWORDS = [
+  { tag: "Price / margin", words: ["price", "expensive", "cost", "margin", "discount", "cheaper", "afford"] },
+  { tag: "Slow delivery", words: ["delivery", "late", "delay", "shipment", "arrived late", "backorder"] },
+  { tag: "Competitor stocking", words: ["competitor", "already stocks", "other brand", "other supplier", "switched to"] },
+  { tag: "Shelf space", words: ["shelf space", "no space", "shelf", "display space"] },
+  { tag: "Payment terms", words: ["payment", "credit", "invoice", "payment terms", "due date", "overdue payment"] },
+  { tag: "Side effects", words: ["side effect", "tolerability", "adverse"] },
+  { tag: "Efficacy concerns", words: ["efficacy", "not effective", "doesn't work", "not working", "bioequivalence"] },
+];
+
+function classifyObjection(notes) {
+  if (!notes) return "";
+  const text = notes.toLowerCase();
+  const hit = OBJECTION_KEYWORDS.find(({ words }) => words.some((w) => text.includes(w)));
+  return hit ? hit.tag : "";
 }
 
 function parseProduct(p) {
@@ -165,7 +188,10 @@ function parseVisit(v) {
   if (v.itemsMentioned) {
     try { mentionedItems = JSON.parse(v.itemsMentioned); } catch { mentionedItems = []; }
   }
-  return { id: v.id, client: v.client, notes: v.notes, coords, time: v.time, repName: v.repName || "", mentionedItems };
+  return {
+    id: v.id, client: v.client, notes: v.notes, coords, time: v.time, repName: v.repName || "",
+    mentionedItems, objectionTag: v.objectionTag || "",
+  };
 }
 
 function visitToRow(v) {
@@ -178,6 +204,7 @@ function visitToRow(v) {
     time: v.time,
     repName: v.repName || "",
     itemsMentioned: v.mentionedItems && v.mentionedItems.length ? JSON.stringify(v.mentionedItems) : "",
+    objectionTag: v.objectionTag || "",
   };
 }
 
@@ -363,6 +390,7 @@ app.post("/api/visits", async (req, res) => {
       time: new Date().toISOString(),
       repName: req.repName || "",
       mentionedItems: Array.isArray(mentionedItems) ? mentionedItems : [],
+      objectionTag: classifyObjection(notes),
     };
     const row = visitToRow(visit);
     await db.appendRow("Visits", row);

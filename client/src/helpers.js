@@ -53,6 +53,18 @@ export const daysSince = (dateStr) => {
   return Math.round((new Date() - new Date(dateStr)) / 86400000);
 };
 
+// Composite 0-100 priority score for pharmacies/doctors — higher means visit
+// them sooner. Combines tier weight, how overdue they are relative to their
+// cadence, and revenue/engagement history so reps can triage a long list.
+export const computeLeadScore = ({ tier, days, cadence, revenue = 0, engagement = 0 }) => {
+  const tierPoints = { A: 40, B: 25, C: 12 }[tier] ?? 20;
+  const overdueRatio = days === null ? 1.5 : Math.min(2, days / Math.max(cadence, 1));
+  const urgencyPoints = Math.min(35, Math.round(overdueRatio * 20));
+  const revenuePoints = Math.min(15, Math.round(revenue / 200));
+  const engagementPoints = Math.min(10, Math.round(engagement * 5));
+  return Math.max(0, Math.min(100, tierPoints + urgencyPoints + revenuePoints + engagementPoints));
+};
+
 // Handles the three shapes a spreadsheet cell can hand back: a JS Date (xlsx
 // parses formatted date cells this way), an Excel serial day number (cells
 // that hold a date but aren't formatted as one), or a plain text date string.

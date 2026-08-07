@@ -3,14 +3,19 @@ import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import {
+  LineChart, Line, BarChart, Bar, RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend,
+} from "recharts";
+import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
-  TrendingDown, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
-  Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar, Search, BookOpen,
+  TrendingDown, TrendingUp, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
+  Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar as RadarIcon, Search, BookOpen,
   GraduationCap,
 } from "lucide-react";
 import { api } from "./api.js";
 import {
   daysUntil, fmtDate, turnoverPct, zoneFor, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
+  computeLeadScore,
 } from "./helpers.js";
 import {
   DRUG_NUTRIENT_DATA, CONDITION_TALKING_POINTS, SPECIALTY_TALKING_POINTS,
@@ -42,7 +47,7 @@ export default function App() {
   const [samples, setSamples] = useState([]);
   const [punchLog, setPunchLog] = useState([]);
   const [settings, setSettings] = useState({
-    slowThreshold: 15, repPhone: "", dailyTarget: 3, monthlyVisitTarget: 60, templates: [],
+    slowThreshold: 15, repPhone: "", dailyTarget: 3, monthlyVisitTarget: 60, monthlyRevenueTarget: 10000, templates: [],
   });
   const [loaded, setLoaded] = useState(false);
   const [showAddProduct, setShowAddProduct] = useState(false);
@@ -211,7 +216,7 @@ export default function App() {
         {role === "manager" && <TabBtn active={tab === "outreach"} onClick={() => setTab("outreach")} icon={<MessageCircle size={15} />} label="Outreach" />}
         {role === "manager" && <TabBtn active={tab === "broadcast"} onClick={() => setTab("broadcast")} icon={<Megaphone size={15} />} label="Broadcast" />}
         {role === "manager" && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
-        {role === "manager" && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<Radar size={15} />} label="Locations" />}
+        {role === "manager" && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<RadarIcon size={15} />} label="Locations" />}
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
       </nav>
 
@@ -260,6 +265,7 @@ export default function App() {
               <ClientsView
                 clients={clients}
                 visits={visits}
+                orders={orders}
                 role={role}
                 repNames={repNames}
                 onAdd={addClient}
@@ -290,9 +296,14 @@ export default function App() {
             {tab === "performance" && role === "manager" && (
               <PerformanceView
                 visits={visits}
+                orders={orders}
+                clients={clients}
+                doctors={doctors}
                 repNames={repNames}
                 monthlyVisitTarget={settings.monthlyVisitTarget}
                 setMonthlyVisitTarget={(v) => updateSettingsField({ monthlyVisitTarget: v })}
+                monthlyRevenueTarget={settings.monthlyRevenueTarget}
+                setMonthlyRevenueTarget={(v) => updateSettingsField({ monthlyRevenueTarget: v })}
               />
             )}
             {tab === "outreach" && role === "manager" && (
@@ -578,10 +589,41 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
   const [mentionedItems, setMentionedItems] = useState([]);
   const [itemQuery, setItemQuery] = useState("");
   const [sampleMenuFor, setSampleMenuFor] = useState(null);
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef(null);
 
   useEffect(() => {
     api.getMyExportSheet().then((data) => setExportSheetId(data.exportSheetId || "")).catch(() => {});
   }, []);
+
+  const SpeechRecognitionClass = typeof window !== "undefined" ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
+
+  const toggleDictation = () => {
+    if (!SpeechRecognitionClass) return;
+    if (listening) {
+      recognitionRef.current?.stop();
+      return;
+    }
+    const recognition = new SpeechRecognitionClass();
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.continuous = true;
+    recognition.onresult = (e) => {
+      const transcript = Array.from(e.results).map((r) => r[0].transcript).join(" ");
+      setNotes((prev) => (prev ? `${prev} ${transcript}` : transcript));
+    };
+    recognition.onerror = () => setListening(false);
+    recognition.onend = () => setListening(false);
+    recognitionRef.current = recognition;
+    recognition.start();
+    setListening(true);
+  };
+
+  const NOTE_TEMPLATES = [
+    "No stock issues", "Requested pricing follow-up", "Price objection raised",
+    "Competitor product in use", "Out of office, reschedule", "Placed reorder",
+  ];
+  const appendTemplate = (t) => setNotes((prev) => (prev ? `${prev}. ${t}` : t));
 
   const nameOptionsSource = entityType === "pharmacy" ? clients : doctors;
   const nameOptions = (client.trim()
@@ -714,7 +756,41 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
           </datalist>
         </Field>
         <Field label="Visit notes">
-          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="What was discussed, orders taken, objections…" rows={3} style={{ ...inputStyle, marginBottom: 10, resize: "vertical" }} />
+          <div style={{ position: "relative" }}>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="What was discussed, orders taken, objections…"
+              rows={3}
+              style={{ ...inputStyle, marginBottom: 8, resize: "vertical", paddingRight: 40 }}
+            />
+            {SpeechRecognitionClass && (
+              <button
+                type="button"
+                onClick={toggleDictation}
+                title={listening ? "Stop dictation" : "Dictate notes"}
+                style={{
+                  position: "absolute", top: 6, right: 6, width: 28, height: 28, borderRadius: 6,
+                  border: "1px solid #E5DFD3", background: listening ? "#B33A3A" : "#fff",
+                  color: listening ? "#FAF7F2" : "#5B5445", fontSize: 13, lineHeight: 1,
+                }}
+              >
+                🎙
+              </button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+            {NOTE_TEMPLATES.map((t) => (
+              <button
+                type="button"
+                key={t}
+                onClick={() => appendTemplate(t)}
+                style={{ fontSize: 11, padding: "4px 9px", borderRadius: 12, border: "1px solid #E5DFD3", background: "#FAF7F2", color: "#5B5445" }}
+              >
+                + {t}
+              </button>
+            ))}
+          </div>
         </Field>
 
         {entityType === "doctor" && (
@@ -1489,7 +1565,7 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
 }
 
 // ---------- Pharmacies View (tiering + follow-up nudges) ----------
-function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkImport, onAssignRep }) {
+function ClientsView({ clients, visits, orders, role, repNames, onAdd, onRemove, onBulkImport, onAssignRep }) {
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [name, setName] = useState("");
@@ -1514,12 +1590,18 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
     setShowAdd(false);
   };
 
+  const revenueFor = (clientName) => (orders || [])
+    .filter((o) => o.clientName.toLowerCase().trim() === clientName.toLowerCase().trim())
+    .reduce((sum, o) => sum + (Number(o.total) || 0), 0);
+
   const rows = clients.map((c) => {
     const lv = lastVisitFor(c.name);
     const days = lv ? daysSince(lv.time) : null;
     const cadence = TIER_CADENCE[c.tier] || 30;
     const overdue = days === null || days > cadence;
-    return { ...c, days, overdue, cadence };
+    const revenue = revenueFor(c.name);
+    const leadScore = computeLeadScore({ tier: c.tier, days, cadence, revenue });
+    return { ...c, days, overdue, cadence, revenue, leadScore };
   }).sort((a, b) => (b.days ?? 9999) - (a.days ?? 9999));
 
   const filteredRows = rows.filter((c) => {
@@ -1531,6 +1613,7 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
   const shownRows = filteredRows.slice(0, LIST_DISPLAY_CAP);
 
   const tierColor = { A: "#B33A3A", B: "#D9A441", C: "#6B7280" };
+  const scoreColor = (s) => (s >= 65 ? "#B33A3A" : s >= 40 ? "#C17817" : "#6B7280");
 
   return (
     <div>
@@ -1631,9 +1714,12 @@ function ClientsView({ clients, visits, role, repNames, onAdd, onRemove, onBulkI
                 <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
                   <span style={{ fontWeight: 600, fontSize: 13.5 }}>{c.name}</span>
                   <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 7px", borderRadius: 5, background: `${tierColor[c.tier]}1A`, color: tierColor[c.tier] }}>Tier {c.tier}</span>
+                  <span title="Priority score — tier, overdue-ness, and order history combined" style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 7px", borderRadius: 5, background: `${scoreColor(c.leadScore)}1A`, color: scoreColor(c.leadScore) }}>
+                    Priority {c.leadScore}
+                  </span>
                 </div>
                 <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 3 }}>
-                  {c.area || "no area set"} {c.phone ? `· ${c.phone}` : ""}
+                  {c.area || "no area set"} {c.phone ? `· ${c.phone}` : ""} {c.revenue > 0 ? `· $${c.revenue.toLocaleString()} orders` : ""}
                 </div>
                 {c.address && <div style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>{c.address}</div>}
                 <div style={{ marginTop: 6 }}>
@@ -1935,7 +2021,8 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
     const cadence = TIER_CADENCE[d.tier] || 30;
     const overdue = days === null || days > cadence;
     const pendingSamples = pendingSamplesFor(d.name);
-    return { ...d, days, overdue, cadence, pendingSamples };
+    const leadScore = computeLeadScore({ tier: d.tier, days, cadence, engagement: pendingSamples.length });
+    return { ...d, days, overdue, cadence, pendingSamples, leadScore };
   }).sort((a, b) => (b.days ?? 9999) - (a.days ?? 9999));
 
   const filteredRows = rows.filter((d) => {
@@ -1950,6 +2037,7 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
   });
   const shownRows = filteredRows.slice(0, LIST_DISPLAY_CAP);
   const tierColor = { A: "#B33A3A", B: "#D9A441", C: "#6B7280" };
+  const scoreColor = (s) => (s >= 65 ? "#B33A3A" : s >= 40 ? "#C17817" : "#6B7280");
 
   return (
     <div>
@@ -2028,6 +2116,9 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
                 <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
                   <span style={{ fontWeight: 600, fontSize: 13.5 }}>{d.name}</span>
                   <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 7px", borderRadius: 5, background: `${tierColor[d.tier]}1A`, color: tierColor[d.tier] }}>Tier {d.tier}</span>
+                  <span title="Priority score — tier, overdue-ness, and sample engagement combined" style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 7px", borderRadius: 5, background: `${scoreColor(d.leadScore)}1A`, color: scoreColor(d.leadScore) }}>
+                    Priority {d.leadScore}
+                  </span>
                 </div>
                 <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 3 }}>
                   {d.hospital || "no hospital set"} · {d.area || "no area"} {d.phone ? `· ${d.phone}` : ""}
@@ -2742,8 +2833,25 @@ function StatCard({ label, value, color, icon }) {
   );
 }
 
-// ---------- Performance View (MedRep targets) ----------
-function RepPerformanceCard({ title, visits, monthlyVisitTarget }) {
+// ---------- Performance View (MedRep targets + manager charts) ----------
+const CHART_COLORS = ["#C17817", "#4C7A5E", "#B33A3A", "#6B7280", "#D9A441", "#8A8272"];
+
+function accountStatusList(clients, doctors, visits) {
+  const lastVisitFor = (name) => {
+    const matches = visits.filter((v) => v.client.toLowerCase().trim() === name.toLowerCase().trim());
+    if (matches.length === 0) return null;
+    return matches.reduce((latest, v) => (new Date(v.time) > new Date(latest.time) ? v : latest), matches[0]);
+  };
+  return [...clients, ...doctors].map((a) => {
+    const lv = lastVisitFor(a.name);
+    const days = lv ? daysSince(lv.time) : null;
+    const cadence = TIER_CADENCE[a.tier] || 30;
+    const overdue = days === null || days > cadence;
+    return { ...a, days, overdue, cadence };
+  });
+}
+
+function RepPerformanceCard({ title, visits, monthlyVisitTarget, orders = [], monthlyRevenueTarget = 0, clients = [], repNameFilter = null }) {
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
@@ -2760,6 +2868,30 @@ function RepPerformanceCard({ title, visits, monthlyVisitTarget }) {
     const wk = Math.ceil(new Date(v.time).getDate() / 7);
     weeks[wk] = (weeks[wk] || 0) + 1;
   });
+
+  const monthOrders = orders.filter((o) => new Date(o.date) >= monthStart);
+  const revenueThisMonth = monthOrders.reduce((s, o) => s + (Number(o.total) || 0), 0);
+  const revenuePct = Math.min(100, Math.round((revenueThisMonth / Math.max(monthlyRevenueTarget, 1)) * 100));
+  const convertedVisits = monthVisits.filter((v) => monthOrders.some((o) => o.visitId === v.id)).length;
+  const conversionRate = visitsThisMonth ? Math.round((convertedVisits / visitsThisMonth) * 100) : 0;
+
+  const relevantClients = repNameFilter ? clients.filter((c) => c.assignedRep === repNameFilter) : clients;
+  const visitedNames = new Set(monthVisits.map((v) => v.client.toLowerCase().trim()));
+  const coveragePct = relevantClients.length
+    ? Math.round((relevantClients.filter((c) => visitedNames.has(c.name.toLowerCase().trim())).length / relevantClients.length) * 100)
+    : null;
+
+  const lastVisitFor = (name) => {
+    const matches = visits.filter((v) => v.client.toLowerCase().trim() === name.toLowerCase().trim());
+    if (matches.length === 0) return null;
+    return matches.reduce((latest, v) => (new Date(v.time) > new Date(latest.time) ? v : latest), matches[0]);
+  };
+  const overdueCount = relevantClients.filter((c) => {
+    const lv = lastVisitFor(c.name);
+    const days = lv ? daysSince(lv.time) : null;
+    const cadence = TIER_CADENCE[c.tier] || 30;
+    return days === null || days > cadence;
+  }).length;
 
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
@@ -2778,6 +2910,13 @@ function RepPerformanceCard({ title, visits, monthlyVisitTarget }) {
         <StatCard label="Visits this month" value={visitsThisMonth} color="#4C7A5E" icon={<MapPin size={16} />} />
         <StatCard label="Unique contacts seen" value={uniqueClients} color="#C17817" icon={<Users size={16} />} />
         <StatCard label="Avg / week" value={Math.round(visitsThisMonth / Math.max(Math.ceil(dayOfMonth / 7), 1))} color="#6B7280" icon={<Target size={16} />} />
+        <StatCard label="Revenue this month" value={`$${revenueThisMonth.toLocaleString()}`} color="#4C7A5E" icon={<TrendingUp size={16} />} />
+        <StatCard label="Conversion rate" value={`${conversionRate}%`} color="#C17817" icon={<Target size={16} />} />
+        {coveragePct !== null && <StatCard label="Territory coverage" value={`${coveragePct}%`} color="#D9A441" icon={<MapPin size={16} />} />}
+        <StatCard label="Overdue follow-ups" value={overdueCount} color={overdueCount > 3 ? "#B33A3A" : "#6B7280"} icon={<Clock size={16} />} />
+      </div>
+      <div className="kb-font-mono" style={{ fontSize: 10.5, color: "#8A8272", marginBottom: 14 }}>
+        {revenuePct}% of ${monthlyRevenueTarget.toLocaleString()} revenue target
       </div>
 
       <div style={{ fontSize: 12, fontWeight: 600, margin: "0 0 8px", color: "#8A8272" }}>By week this month</div>
@@ -2794,18 +2933,105 @@ function RepPerformanceCard({ title, visits, monthlyVisitTarget }) {
   );
 }
 
-function PerformanceView({ visits, repNames, monthlyVisitTarget, setMonthlyVisitTarget }) {
+function PerformanceView({ visits, orders, clients, doctors, repNames, monthlyVisitTarget, setMonthlyVisitTarget, monthlyRevenueTarget, setMonthlyRevenueTarget }) {
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  const accountsWithStatus = accountStatusList(clients, doctors, visits);
+  const totalOverdue = accountsWithStatus.filter((a) => a.overdue).length;
+  const avgCoverage = accountsWithStatus.length
+    ? Math.round((accountsWithStatus.filter((a) => !a.overdue).length / accountsWithStatus.length) * 100)
+    : 0;
+
+  const tierCompliance = ["A", "B", "C"].map((tier) => {
+    const inTier = accountsWithStatus.filter((a) => a.tier === tier);
+    const total = Math.max(inTier.length, 1);
+    const onTime = inTier.filter((a) => !a.overdue).length;
+    return {
+      tier: `Tier ${tier} (${TIER_CADENCE[tier]}d)`,
+      onTime: Math.round((onTime / total) * 100),
+      overdue: Math.round(((inTier.length - onTime) / total) * 100),
+    };
+  });
+
+  const revenueThisMonthTotal = orders.filter((o) => new Date(o.date) >= monthStart).reduce((s, o) => s + (Number(o.total) || 0), 0);
+  const revenueTargetTotal = monthlyRevenueTarget * Math.max(repNames.length, 1);
+
+  const MONTHS_BACK = 6;
+  const monthCols = Array.from({ length: MONTHS_BACK }, (_, i) => {
+    const d = new Date(now.getFullYear(), now.getMonth() - (MONTHS_BACK - 1 - i), 1);
+    return { year: d.getFullYear(), month: d.getMonth(), label: d.toLocaleDateString("en-GB", { month: "short" }) };
+  });
+  const revenueTrend = monthCols.map(({ year, month, label }) => {
+    const row = { month: label };
+    repNames.forEach((name) => {
+      row[name] = orders
+        .filter((o) => o.repName === name && new Date(o.date).getFullYear() === year && new Date(o.date).getMonth() === month)
+        .reduce((s, o) => s + (Number(o.total) || 0), 0);
+    });
+    return row;
+  });
+
+  const objectionTally = {};
+  visits.forEach((v) => { if (v.objectionTag) objectionTally[v.objectionTag] = (objectionTally[v.objectionTag] || 0) + 1; });
+  const objectionData = Object.entries(objectionTally).map(([theme, count]) => ({ theme, count })).sort((a, b) => b.count - a.count);
+  const topObjection = objectionData[0];
+
+  const radarMetrics = ["Visits vs target", "Revenue vs target", "Conversion rate", "Coverage", "Follow-up discipline"];
+  const radarData = radarMetrics.map((metric) => {
+    const row = { metric };
+    repNames.forEach((name) => {
+      const repVisits = visits.filter((v) => v.repName === name);
+      const monthVisits = repVisits.filter((v) => new Date(v.time) >= monthStart);
+      const repOrders = orders.filter((o) => o.repName === name && new Date(o.date) >= monthStart);
+      const repRevenue = repOrders.reduce((s, o) => s + (Number(o.total) || 0), 0);
+      const convertedVisits = monthVisits.filter((v) => repOrders.some((o) => o.visitId === v.id)).length;
+      const conversionRate = monthVisits.length ? convertedVisits / monthVisits.length : 0;
+      const repClients = clients.filter((c) => c.assignedRep === name);
+      const visitedClientNames = new Set(monthVisits.map((v) => v.client.toLowerCase().trim()));
+      const coverage = repClients.length
+        ? repClients.filter((c) => visitedClientNames.has(c.name.toLowerCase().trim())).length / repClients.length
+        : 0;
+      const repOverdue = accountsWithStatus.filter((a) => a.assignedRep === name && a.overdue).length;
+      let val = 0;
+      if (metric === "Visits vs target") val = Math.min(1, monthVisits.length / Math.max(monthlyVisitTarget, 1));
+      if (metric === "Revenue vs target") val = Math.min(1, repRevenue / Math.max(monthlyRevenueTarget, 1));
+      if (metric === "Conversion rate") val = conversionRate;
+      if (metric === "Coverage") val = coverage;
+      if (metric === "Follow-up discipline") val = Math.max(0, 1 - repOverdue / 10);
+      row[name] = Math.round(val * 100);
+    });
+    return row;
+  });
+
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>MedRep performance</h2>
 
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
-        <Field label="Monthly visit target (per rep)">
-          <input type="number" min="1" value={monthlyVisitTarget} onChange={(e) => setMonthlyVisitTarget(Number(e.target.value) || 1)} style={{ ...inputStyle, maxWidth: 140 }} />
-        </Field>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
+          <Field label="Monthly visit target (per rep)">
+            <input type="number" min="1" value={monthlyVisitTarget} onChange={(e) => setMonthlyVisitTarget(Number(e.target.value) || 1)} style={inputStyle} />
+          </Field>
+          <Field label="Monthly revenue target (per rep, $)">
+            <input type="number" min="0" value={monthlyRevenueTarget} onChange={(e) => setMonthlyRevenueTarget(Number(e.target.value) || 0)} style={inputStyle} />
+          </Field>
+        </div>
       </div>
 
-      <RepPerformanceCard title="All reps combined" visits={visits} monthlyVisitTarget={monthlyVisitTarget} />
+      {repNames.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 20 }}>
+          <StatCard label="Revenue this month" value={`$${revenueThisMonthTotal.toLocaleString()}`}
+            color="#4C7A5E" icon={<TrendingUp size={16} />} />
+          <StatCard label="Team follow-up compliance" value={`${avgCoverage}%`} color="#D9A441" icon={<MapPin size={16} />} />
+          <StatCard label="Overdue follow-ups" value={totalOverdue} color="#B33A3A" icon={<Clock size={16} />} />
+          <StatCard label="Top objection" value={topObjection ? topObjection.theme : "None logged"}
+            color="#1F2A24" icon={<MessageCircle size={16} />} />
+        </div>
+      )}
+
+      <RepPerformanceCard title="All reps combined" visits={visits} monthlyVisitTarget={monthlyVisitTarget}
+        orders={orders} monthlyRevenueTarget={revenueTargetTotal} clients={clients} />
 
       {repNames.map((name) => (
         <RepPerformanceCard
@@ -2813,10 +3039,80 @@ function PerformanceView({ visits, repNames, monthlyVisitTarget, setMonthlyVisit
           title={name}
           visits={visits.filter((v) => v.repName === name)}
           monthlyVisitTarget={monthlyVisitTarget}
+          orders={orders.filter((o) => o.repName === name)}
+          monthlyRevenueTarget={monthlyRevenueTarget}
+          clients={clients}
+          repNameFilter={name}
         />
       ))}
 
       {repNames.length === 0 && <EmptyState text="Add sales reps in Settings to see per-rep performance." />}
+
+      {repNames.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))", gap: 16, marginTop: 8 }}>
+          <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16 }}>
+            <h4 className="kb-font-display" style={{ fontSize: 14, fontWeight: 600, margin: "0 0 12px" }}>Revenue trend (6 months)</h4>
+            <ResponsiveContainer width="100%" height={220}>
+              <LineChart data={revenueTrend}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#E5DFD3" />
+                <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} />
+                <Tooltip />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                {repNames.map((name, i) => (
+                  <Line key={name} type="monotone" dataKey={name} stroke={CHART_COLORS[i % CHART_COLORS.length]} strokeWidth={2} dot={{ r: 3 }} />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16 }}>
+            <h4 className="kb-font-display" style={{ fontSize: 14, fontWeight: 600, margin: "0 0 12px" }}>Follow-up discipline by tier</h4>
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={tierCompliance} layout="vertical">
+                <CartesianGrid strokeDasharray="3 3" stroke="#E5DFD3" />
+                <XAxis type="number" tick={{ fontSize: 11 }} unit="%" />
+                <YAxis dataKey="tier" type="category" width={100} tick={{ fontSize: 10.5 }} />
+                <Tooltip />
+                <Bar dataKey="onTime" stackId="a" fill="#4C7A5E" name="On time %" />
+                <Bar dataKey="overdue" stackId="a" fill="#B33A3A" name="Overdue %" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16 }}>
+            <h4 className="kb-font-display" style={{ fontSize: 14, fontWeight: 600, margin: "0 0 12px" }}>Rep comparison (normalized)</h4>
+            <ResponsiveContainer width="100%" height={240}>
+              <RadarChart data={radarData}>
+                <PolarGrid stroke="#E5DFD3" />
+                <PolarAngleAxis dataKey="metric" tick={{ fontSize: 9.5 }} />
+                <PolarRadiusAxis angle={30} domain={[0, 100]} tick={{ fontSize: 9 }} />
+                {repNames.map((name, i) => (
+                  <Radar key={name} name={name} dataKey={name} stroke={CHART_COLORS[i % CHART_COLORS.length]} fill={CHART_COLORS[i % CHART_COLORS.length]} fillOpacity={0.25} />
+                ))}
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+              </RadarChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16 }}>
+            <h4 className="kb-font-display" style={{ fontSize: 14, fontWeight: 600, margin: "0 0 6px" }}>Objection themes</h4>
+            <div style={{ fontSize: 11, color: "#8A8272", marginBottom: 6 }}>Auto-tagged from visit notes at save time</div>
+            {objectionData.length === 0 ? (
+              <EmptyState text="No objections tagged yet — they'll appear here as reps log visit notes." />
+            ) : (
+              <ResponsiveContainer width="100%" height={220}>
+                <PieChart>
+                  <Pie data={objectionData} dataKey="count" nameKey="theme" cx="50%" cy="50%" outerRadius={80} label={{ fontSize: 10.5 }}>
+                    {objectionData.map((entry, i) => <Cell key={entry.theme} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
+                  </Pie>
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
