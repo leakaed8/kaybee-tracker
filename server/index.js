@@ -711,6 +711,22 @@ app.get("/api/telegram/status", requireManager, async (req, res) => {
   }
 });
 
+app.post("/api/telegram/send-digest-now", requireManager, async (req, res) => {
+  try {
+    if (!telegram.isConfigured()) return res.status(400).json({ error: "Telegram isn't configured on the server yet." });
+    const settings = await db.getSettings();
+    if (!settings.managerTelegramChatId) return res.status(400).json({ error: "Link your own Telegram first." });
+    const now = new Date();
+    const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    await runMonthlyDigest(thisMonth);
+    await db.setSettings({ lastMonthlyDigestMonth: thisMonth });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/reps/:id/telegram-link-code", requireManager, async (req, res) => {
   try {
     if (!telegram.isConfigured()) return res.status(400).json({ error: "Telegram isn't configured on the server yet." });

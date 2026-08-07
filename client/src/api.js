@@ -48,6 +48,7 @@ export const api = {
   logOutreach: (entry) => request("/outreach-log", { method: "POST", body: JSON.stringify(entry) }),
   updateSettings: (patch) => request("/settings", { method: "PATCH", body: JSON.stringify(patch) }),
   getTelegramStatus: () => request("/telegram/status"),
+  sendTelegramDigestNow: () => request("/telegram/send-digest-now", { method: "POST" }),
   getRepTelegramLinkCode: (id) => request(`/reps/${id}/telegram-link-code`, { method: "POST" }),
   getManagerTelegramLinkCode: () => request("/settings/telegram-link-code", { method: "POST" }),
 };

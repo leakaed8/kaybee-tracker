@@ -3759,6 +3759,8 @@ function ManagerTelegramLinkSection() {
   const [linking, setLinking] = useState(false);
   const [linkInfo, setLinkInfo] = useState(null);
   const [error, setError] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
 
   useEffect(() => { api.getTelegramStatus().then(setStatus).catch(() => setStatus({ configured: false })); }, []);
 
@@ -3775,18 +3777,40 @@ function ManagerTelegramLinkSection() {
     }
   };
 
+  const sendNow = async () => {
+    setSending(true);
+    setError("");
+    setSent(false);
+    try {
+      await api.sendTelegramDigestNow();
+      setSent(true);
+      setTimeout(() => setSent(false), 4000);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSending(false);
+    }
+  };
+
   if (!status?.configured) return null;
 
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
       <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Manager Telegram alerts</label>
       <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
-        Once linked, the monthly must-sell digest (near-expiry + slow-moving stock) arrives here first with Approve / Skip buttons — nothing reaches reps until you approve it.
+        This automatically runs on the 1st of each month, but you can send it now too, e.g. to test the flow. Either way, it arrives here first with Approve / Skip buttons — nothing reaches reps until you approve it.
       </p>
       {status.managerLinked ? (
-        <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 5, background: "#4C7A5E1A", color: "#4C7A5E" }}>
-          ✓ Linked
-        </span>
+        <div>
+          <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 5, background: "#4C7A5E1A", color: "#4C7A5E" }}>
+            ✓ Linked
+          </span>
+          <div style={{ marginTop: 10 }}>
+            <button onClick={sendNow} disabled={sending} style={{ fontSize: 12.5, padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2" }}>
+              {sending ? "Sending…" : sent ? "✓ Sent to your Telegram" : "Send this month's digest now"}
+            </button>
+          </div>
+        </div>
       ) : linkInfo ? (
         <div style={{ fontSize: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
           Open this link on your phone and tap Start:
