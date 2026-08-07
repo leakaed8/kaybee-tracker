@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { api } from "./api.js";
 import {
-  daysUntil, fmtDate, turnoverPct, zoneFor, isSlowMover, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
+  daysUntil, fmtDate, turnoverPct, zoneFor, isSlowMover, isAtRisk, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
   computeLeadScore,
 } from "./helpers.js";
 import {
@@ -155,7 +155,7 @@ export default function App() {
   const toggleOfferActive = (id, active) => withSync(() => api.updateOffer(id, { active }));
   const removeOffer = (id) => withSync(() => api.removeOffer(id));
 
-  const zoned = products.map((p) => ({ ...p, zone: zoneFor(p), slowMover: isSlowMover(p, settings.slowThreshold) }));
+  const zoned = products.map((p) => ({ ...p, zone: zoneFor(p), slowMover: isSlowMover(p, settings.slowThreshold), atRisk: isAtRisk(p) }));
   const sorted = [...zoned].sort((a, b) => daysUntil(a.expiry) - daysUntil(b.expiry));
 
   if (authState === "checking") {
@@ -468,7 +468,12 @@ function ProductRow({ product, repPhone, onRemove }) {
             {product.category} · {product.qty} units · expires {fmtDate(product.expiry)}{product.price ? ` · price ${product.price.toFixed(2)}` : ""}
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          {product.atRisk && (
+            <span title="Projected to not sell through before it expires, at current velocity" style={{ fontSize: 11, fontWeight: 600, padding: "4px 9px", borderRadius: 6, background: "#C178171A", color: "#C17817" }}>
+              ⚠ At risk
+            </span>
+          )}
           {product.slowMover && (
             <span style={{ fontSize: 11, fontWeight: 600, padding: "4px 9px", borderRadius: 6, background: "#6B72801A", color: "#6B7280" }}>
               Slow mover
@@ -489,7 +494,7 @@ function ProductRow({ product, repPhone, onRemove }) {
           <span><Clock size={11} style={{ verticalAlign: -1 }} /> {dLeft >= 0 ? `${dLeft}d left` : `expired ${Math.abs(dLeft)}d ago`}</span>
           <span><TrendingDown size={11} style={{ verticalAlign: -1 }} /> {turnover}% turnover/90d</span>
         </div>
-        {(product.zone.key === "red" || product.slowMover) && waLink && (
+        {(product.zone.key === "red" || product.slowMover || product.atRisk) && waLink && (
           <a href={waLink} target="_blank" rel="noreferrer" style={{
             display: "flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 500,
             color: "#4C7A5E", textDecoration: "none", padding: "5px 10px", border: "1px solid #4C7A5E33", borderRadius: 6,
@@ -2743,6 +2748,7 @@ function DashboardView({ zoned, visits }) {
   const urgent = zoned.filter((p) => p.zone.key === "red");
   const slow = zoned.filter((p) => p.slowMover);
   const watch = zoned.filter((p) => p.zone.key === "yellow");
+  const atRisk = zoned.filter((p) => p.atRisk);
 
   return (
     <div>
@@ -2751,6 +2757,7 @@ function DashboardView({ zoned, visits }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10, marginBottom: 24 }}>
         <StatCard label="Urgent expiry" value={urgent.length} color="#B33A3A" icon={<AlertTriangle size={16} />} />
         <StatCard label="Plan-ahead window" value={watch.length} color="#D9A441" icon={<Clock size={16} />} />
+        <StatCard label="At risk of not selling through" value={atRisk.length} color="#C17817" icon={<AlertTriangle size={16} />} />
         <StatCard label="Slow movers" value={slow.length} color="#6B7280" icon={<TrendingDown size={16} />} />
         <StatCard label="Visits logged" value={visits.length} color="#4C7A5E" icon={<MapPin size={16} />} />
       </div>

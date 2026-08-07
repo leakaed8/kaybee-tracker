@@ -39,6 +39,24 @@ export const zoneFor = (product) => {
 
 export const isSlowMover = (product, slowThreshold) => turnoverPct(product.sold90, product.qty) < slowThreshold;
 
+// Projects whether current stock will clear before the item expires — an
+// early-warning signal independent of the red/yellow/green calendar zones,
+// since a product can look "safe" (green, >1yr out) today and still be
+// mathematically doomed to expire unsold if it's moving too slowly for how
+// much is left. Uses the last-90-days sales rate as a stand-in for "this
+// year's movement" until real multi-year history is wired in — swap that
+// input out once it's available, the rest of the projection stays the same.
+export const isAtRisk = (product) => {
+  const dLeft = daysUntil(product.expiry);
+  if (dLeft <= 0) return false;
+  const qty = Number(product.qty) || 0;
+  if (qty <= 0) return false;
+  const monthlyMovement = (Number(product.sold90) || 0) / 3;
+  const monthsToSellThrough = monthlyMovement > 0 ? qty / monthlyMovement : Infinity;
+  const monthsUntilExpiry = dLeft / 30.44;
+  return monthsToSellThrough > monthsUntilExpiry;
+};
+
 export const lifecyclePct = (product) => {
   const totalDays = 730;
   const dLeft = daysUntil(product.expiry);

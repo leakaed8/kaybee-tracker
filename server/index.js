@@ -1009,6 +1009,21 @@ function turnoverPctFor(product) {
   return Math.round((sold90 / qty) * 100);
 }
 
+// Projects whether current stock will clear before the item expires — catches
+// "danger items" ahead of time, even ones sitting in the green zone today,
+// rather than waiting until they age into red/yellow. Mirrors isAtRisk in
+// client/src/helpers.js; uses last-90-days sales as a stand-in for "this
+// year's movement" until real multi-year history is wired in.
+function isAtRiskFor(product, daysLeft) {
+  if (daysLeft <= 0) return false;
+  const qty = Number(product.qty) || 0;
+  if (qty <= 0) return false;
+  const monthlyMovement = (Number(product.sold90) || 0) / 3;
+  const monthsToSellThrough = monthlyMovement > 0 ? qty / monthlyMovement : Infinity;
+  const monthsUntilExpiry = daysLeft / 30.44;
+  return monthsToSellThrough > monthsUntilExpiry;
+}
+
 function escapeHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -1018,21 +1033,25 @@ async function computeMustSellList() {
   const slowThreshold = rawSettings.slowThreshold !== undefined ? Number(rawSettings.slowThreshold) : 15;
   return products
     .filter((p) => p.expiry)
-    .map((p) => ({
-      id: p.id, name: p.name, qty: Number(p.qty) || 0, expiry: p.expiry,
-      daysLeft: daysUntilFromToday(p.expiry), turnover: turnoverPctFor(p), zone: zoneKeyFor(p),
-    }))
-    .filter((p) => (p.zone === "red" || p.zone === "yellow") && p.turnover < slowThreshold)
+    .map((p) => {
+      const daysLeft = daysUntilFromToday(p.expiry);
+      return {
+        id: p.id, name: p.name, qty: Number(p.qty) || 0, expiry: p.expiry,
+        daysLeft, turnover: turnoverPctFor(p), zone: zoneKeyFor(p), atRisk: isAtRiskFor(p, daysLeft),
+      };
+    })
+    .filter((p) => ((p.zone === "red" || p.zone === "yellow") && p.turnover < slowThreshold) || p.atRisk)
     .sort((a, b) => a.daysLeft - b.daysLeft);
 }
 
 function formatDigestMessage(items) {
   if (items.length === 0) {
-    return "No must-sell items this month — nothing is both near-expiry and slow-moving right now.";
+    return "No must-sell items this month — nothing is near-expiry, slow-moving, or at risk of not selling through right now.";
   }
-  const lines = items.slice(0, 30).map((it) =>
-    `• <b>${escapeHtml(it.name)}</b> — ${it.qty} units, ${it.daysLeft}d to expiry, ${it.turnover}% turnover/90d`
-  );
+  const lines = items.slice(0, 30).map((it) => {
+    const riskTag = it.atRisk ? ` ⚠ won't sell through in time (${it.zone} zone)` : "";
+    return `• <b>${escapeHtml(it.name)}</b> — ${it.qty} units, ${it.daysLeft}d to expiry, ${it.turnover}% turnover/90d${riskTag}`;
+  });
   const more = items.length > 30 ? `\n…and ${items.length - 30} more.` : "";
   return `📋 <b>This month's focus list</b> (${items.length} item${items.length === 1 ? "" : "s"})\n\n${lines.join("\n")}${more}`;
 }
