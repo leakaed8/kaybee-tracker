@@ -15,6 +15,7 @@ const SCHEMAS = {
   Settings: ["key", "value"],
   Samples: ["id", "doctorName", "productName", "productId", "status", "repName", "visitId", "date"],
   PunchLog: ["id", "repName", "type", "time", "coordsLat", "coordsLng"],
+  StockMovement: ["id", "productName", "year", "month", "qty"],
   MonthlyDigests: ["id", "month", "status", "payload", "createdAt"],
 };
 

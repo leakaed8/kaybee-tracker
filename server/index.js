@@ -419,6 +419,57 @@ app.post("/api/products/import-bulk", async (req, res) => {
   }
 });
 
+// ---------- Stock movement (multi-year monthly sales history) ----------
+// Past years lock once imported so they can't be silently overwritten; the
+// current year never locks since it's uploaded incrementally as the year
+// progresses.
+app.get("/api/stock-movement/status", requireManager, async (req, res) => {
+  try {
+    const settings = await db.getSettings();
+    const lockedYears = settings.stockMovementLockedYears ? JSON.parse(settings.stockMovementLockedYears) : [];
+    const rows = await db.getAllRows("StockMovement");
+    const countByYear = {};
+    rows.forEach((r) => { countByYear[r.year] = (countByYear[r.year] || 0) + 1; });
+    res.json({ lockedYears, countByYear });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/stock-movement/import", requireManager, async (req, res) => {
+  try {
+    const { year, rows } = req.body;
+    const yearNum = Number(year);
+    if (!yearNum || !Array.isArray(rows)) return res.status(400).json({ error: "year and rows are required" });
+    const currentYear = new Date().getFullYear();
+    const settings = await db.getSettings();
+    const lockedYears = settings.stockMovementLockedYears ? JSON.parse(settings.stockMovementLockedYears) : [];
+    if (yearNum !== currentYear && lockedYears.includes(yearNum)) {
+      return res.status(400).json({ error: `${yearNum} is already imported and locked.` });
+    }
+    const cleanRows = rows
+      .filter((r) => r.productName && r.month)
+      .map((r) => ({
+        id: `sm${crypto.randomUUID()}`,
+        productName: String(r.productName).trim(),
+        year: yearNum,
+        month: Number(r.month),
+        qty: Number(r.qty) || 0,
+      }));
+    const existing = await db.getAllRows("StockMovement");
+    const kept = existing.filter((r) => Number(r.year) !== yearNum);
+    await db.replaceAllRows("StockMovement", [...kept, ...cleanRows]);
+    if (yearNum !== currentYear && !lockedYears.includes(yearNum)) {
+      await db.setSettings({ stockMovementLockedYears: JSON.stringify([...lockedYears, yearNum]) });
+    }
+    res.json({ ok: true, count: cleanRows.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/visits", async (req, res) => {
   try {
     const { client, notes, coords, mentionedItems } = req.body;

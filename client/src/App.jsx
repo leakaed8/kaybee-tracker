@@ -133,7 +133,6 @@ export default function App() {
   const contactedToday = outreachLog.filter((o) => o.date === todayStr).length;
 
   const removeProduct = (id) => withSync(() => api.removeProduct(id));
-  const loadImportedInventory = () => withSync(() => api.importSampleInventory());
   const bulkImportProducts = (products) => withSync(() => api.importBulkProducts(products));
   const addVisit = (visit) => withSync(() => api.addVisit(visit));
   const removeVisit = (id) => withSync(() => api.removeVisit(id));
@@ -319,7 +318,6 @@ export default function App() {
                 repPhone={settings.repPhone} setRepPhone={(v) => updateSettingsField({ repPhone: v })}
                 dailyTarget={settings.dailyTarget} setDailyTarget={(v) => updateSettingsField({ dailyTarget: v })}
                 templates={settings.templates} setTemplates={(v) => updateSettingsField({ templates: v })}
-                loadImportedInventory={loadImportedInventory}
                 onBulkImport={bulkImportProducts}
                 productCount={products.length}
                 onRepsChanged={refresh}
@@ -397,15 +395,22 @@ function TabBtn({ active, onClick, icon, label }) {
 const EXPIRY_ZONES = [
   { key: "red", label: "Red zone", sub: "Expires within 6 months", color: "#B33A3A" },
   { key: "yellow", label: "Yellow zone", sub: "Expires within a year", color: "#D9A441" },
-  { key: "green", label: "Green zone", sub: "More than a year out", color: "#4C7A5E" },
+  { key: "green", label: "PUSH SALES", sub: "Slow movers, more than a year out", color: "#4C7A5E" },
 ];
+
+// The PUSH SALES tab isn't "everything more than a year out" — a healthy,
+// fast-moving item that far from expiry doesn't need action. It's
+// specifically green-zone items that are also slow-moving or at risk of not
+// selling through, since those are the ones worth proactively pushing now,
+// before they age into yellow/red.
+const isPushSales = (p) => p.zone.key === "green" && (p.slowMover || p.atRisk);
 
 function ExpiryView({ role, sorted, slowThreshold, repPhone, onRemove }) {
   const [activeZone, setActiveZone] = useState("red");
 
-  const counts = { red: 0, yellow: 0, green: 0 };
-  sorted.forEach((p) => { counts[p.zone.key] = (counts[p.zone.key] || 0) + 1; });
-  const shown = sorted.filter((p) => p.zone.key === activeZone);
+  const visibleFor = (key) => (key === "green" ? sorted.filter(isPushSales) : sorted.filter((p) => p.zone.key === key));
+  const counts = { red: visibleFor("red").length, yellow: visibleFor("yellow").length, green: visibleFor("green").length };
+  const shown = visibleFor(activeZone);
 
   return (
     <div>
@@ -3948,18 +3953,159 @@ function PushNotificationSetup() {
   );
 }
 
-// ---------- Settings ----------
-function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, loadImportedInventory, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer }) {
-  const [showImportConfirm, setShowImportConfirm] = useState(false);
-  const [imported, setImported] = useState(false);
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-  const doImport = () => {
-    loadImportedInventory();
-    setShowImportConfirm(false);
-    setImported(true);
-    setTimeout(() => setImported(false), 2500);
+// ---------- Stock movement (multi-year monthly sales history for the manager) ----------
+function StockMovementImportSection() {
+  const [status, setStatus] = useState(null); // { lockedYears, countByYear }
+  const [activeYear, setActiveYear] = useState(null);
+  const [headers, setHeaders] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [nameCol, setNameCol] = useState("");
+  const [monthCols, setMonthCols] = useState({}); // { Jan: "header", ... }
+  const [importing, setImporting] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+  const fileInputRef = useRef(null);
+
+  const currentYear = new Date().getFullYear();
+  const years = [];
+  for (let y = 2020; y <= currentYear; y++) years.push(y);
+
+  const load = () => api.getStockMovementStatus().then(setStatus).catch((e) => setError(e.message));
+  useEffect(() => { load(); }, []);
+
+  const startUpload = (year) => {
+    setActiveYear(year);
+    setHeaders([]); setRows([]); setNameCol(""); setMonthCols({}); setError(""); setResult(null);
   };
 
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setError(""); setResult(null);
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: "array", cellDates: true });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+        const headerRow = (json[0] || []).map((h, i) => (h === "" ? `Column ${i + 1}` : String(h)));
+        const dataRows = json.slice(1).filter((r) => r.some((cell) => cell !== ""));
+        setHeaders(headerRow);
+        setRows(dataRows);
+      } catch (err) {
+        setError("Couldn't read that file. Make sure it's a valid Excel (.xlsx) file.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const canImport = nameCol && Object.values(monthCols).some(Boolean) && rows.length > 0;
+
+  const doImport = async () => {
+    const nameIdx = headers.indexOf(nameCol);
+    const monthIdxs = MONTH_NAMES.map((m, i) => ({ month: i + 1, idx: headers.indexOf(monthCols[m]) })).filter((x) => x.idx >= 0);
+    const out = [];
+    rows.forEach((r) => {
+      const productName = String(r[nameIdx] ?? "").trim();
+      if (!productName) return;
+      monthIdxs.forEach(({ month, idx }) => {
+        const qty = Number(r[idx]);
+        if (!isNaN(qty) && r[idx] !== "") out.push({ productName, month, qty });
+      });
+    });
+    setImporting(true); setError("");
+    try {
+      const res = await api.importStockMovement(activeYear, out);
+      setResult({ year: activeYear, count: res.count });
+      setActiveYear(null);
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Stock movement</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Upload monthly sales history, one year at a time, to power real slow-mover analysis instead of the current 90-day approximation. Past years lock once imported so they can't be overwritten by accident — {currentYear} stays open since you'll update it as the year goes.
+      </p>
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
+      {result && (
+        <div style={{ fontSize: 12.5, color: "#4C7A5E", marginBottom: 10, display: "flex", alignItems: "center", gap: 5 }}>
+          <Check size={14} /> Imported {result.count} monthly records for {result.year}.
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: activeYear ? 14 : 0 }}>
+        {years.map((y) => {
+          const isCurrent = y === currentYear;
+          const isLocked = !isCurrent && status?.lockedYears?.includes(y);
+          const count = status?.countByYear?.[y] || 0;
+          return (
+            <div key={y} style={{ border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px", minWidth: 110 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{y}</div>
+              {isLocked ? (
+                <div style={{ fontSize: 11, color: "#6B7280" }}>🔒 Locked · {count} rows</div>
+              ) : (
+                <button onClick={() => startUpload(y)} style={{ fontSize: 11.5, padding: "4px 9px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24" }}>
+                  {count > 0 ? `Update (${count} rows)` : "Upload"}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {activeYear && (
+        <div style={{ marginTop: 14, padding: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Uploading {activeYear}</div>
+          <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ fontSize: 12.5, marginBottom: 10 }} />
+          {headers.length > 0 && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+                <Field label="Product name column">
+                  <select value={nameCol} onChange={(e) => setNameCol(e.target.value)} style={inputStyle}>
+                    <option value="">Select…</option>
+                    {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+                  </select>
+                </Field>
+              </div>
+              <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 6 }}>
+                Map each month to a column (leave blank if that month isn't in this file):
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(100px,1fr))", gap: 8, marginBottom: 10 }}>
+                {MONTH_NAMES.map((m) => (
+                  <Field key={m} label={m}>
+                    <select value={monthCols[m] || ""} onChange={(e) => setMonthCols((prev) => ({ ...prev, [m]: e.target.value }))} style={{ ...inputStyle, fontSize: 11.5, padding: "5px 6px" }}>
+                      <option value="">—</option>
+                      {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+                    </select>
+                  </Field>
+                ))}
+              </div>
+              <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 10 }}>{rows.length.toLocaleString()} rows detected in the file.</div>
+            </>
+          )}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button disabled={!canImport || importing} onClick={doImport} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: canImport ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+              {importing ? "Importing…" : `Import ${activeYear}`}
+            </button>
+            <button onClick={() => setActiveYear(null)} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Settings ----------
+function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer }) {
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Settings</h2>
@@ -3976,32 +4122,7 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
 
       {role === "manager" && <ExcelImportSection onImport={onBulkImport} productCount={productCount} />}
 
-      {role === "manager" && (
-        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
-          <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Sample inventory import</label>
-          <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
-            Loads 124 batches pulled from <strong>INVENTORY EXPIRY AND MOVEMENT</strong> (STOCK tab) on Jul 26, 2026 — each expiry batch as its own row. 90-day sales are matched where available; items without a match show 0 and are treated as slow-movers until you update them. This replaces the current product list in this app ({productCount} items now).
-          </p>
-          {!showImportConfirm && !imported && (
-            <button onClick={() => setShowImportConfirm(true)} style={{
-              display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
-              background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500,
-            }}>
-              <Download size={15} /> Import 124 batches
-            </button>
-          )}
-          {showImportConfirm && (
-            <div style={{ padding: 10, background: "#FBF3E8", borderRadius: 8 }}>
-              <p style={{ fontSize: 12.5, color: "#7A5B2E", marginBottom: 8 }}>This replaces all {productCount} current products. Continue?</p>
-              <div style={{ display: "flex", gap: 6 }}>
-                <button onClick={doImport} style={{ fontSize: 12, background: "#C17817", color: "#fff", border: "none", borderRadius: 6, padding: "6px 12px" }}>Yes, import</button>
-                <button onClick={() => setShowImportConfirm(false)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 12px" }}>Cancel</button>
-              </div>
-            </div>
-          )}
-          {imported && <div style={{ fontSize: 12.5, color: "#4C7A5E", display: "flex", alignItems: "center", gap: 5 }}><Check size={14} /> Imported 124 batches.</div>}
-        </div>
-      )}
+      {role === "manager" && <StockMovementImportSection />}
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
         <Field label={`Slow-mover threshold: flag if turnover falls below ${slowThreshold}% of stock sold per 90 days`}>
           <input type="range" min="5" max="40" value={slowThreshold} onChange={(e) => setSlowThreshold(Number(e.target.value))} style={{ width: "100%" }} />
