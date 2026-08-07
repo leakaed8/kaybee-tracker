@@ -918,6 +918,61 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
       <div style={{ marginTop: 20 }}>
         <PushNotificationSetup />
       </div>
+      <div style={{ marginTop: 12 }}>
+        <RepTelegramLinkSection />
+      </div>
+    </div>
+  );
+}
+
+function RepTelegramLinkSection() {
+  const [status, setStatus] = useState(null);
+  const [linking, setLinking] = useState(false);
+  const [linkInfo, setLinkInfo] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => { api.getTelegramStatus().then(setStatus).catch(() => setStatus({ configured: false })); }, []);
+
+  const generateLink = async () => {
+    setLinking(true);
+    setError("");
+    try {
+      const { code, botUsername } = await api.getMyTelegramLinkCode();
+      setLinkInfo({ code, botUsername });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLinking(false);
+    }
+  };
+
+  if (!status?.configured) return null;
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Telegram alerts</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Link your Telegram to get the monthly focus list — what to pick up from pharmacies and what to push sales on — once your manager approves it.
+      </p>
+      {status.repLinked ? (
+        <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 5, background: "#4C7A5E1A", color: "#4C7A5E" }}>
+          ✓ Linked
+        </span>
+      ) : linkInfo ? (
+        <div style={{ fontSize: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
+          Tap to open Telegram and hit Start:
+          <div style={{ marginTop: 4 }}>
+            <a className="kb-font-mono" href={`https://t.me/${linkInfo.botUsername}?start=${linkInfo.code}`} target="_blank" rel="noreferrer" style={{ wordBreak: "break-all", color: "#4C7A5E" }}>
+              https://t.me/{linkInfo.botUsername}?start={linkInfo.code}
+            </a>
+          </div>
+        </div>
+      ) : (
+        <button onClick={generateLink} disabled={linking} style={{ fontSize: 12.5, padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24" }}>
+          {linking ? "Generating…" : "Link my Telegram"}
+        </button>
+      )}
+      {error && <div style={{ fontSize: 11.5, color: "#B33A3A", marginTop: 6 }}>{error}</div>}
     </div>
   );
 }
@@ -3813,9 +3868,11 @@ function ManagerTelegramLinkSection() {
         </div>
       ) : linkInfo ? (
         <div style={{ fontSize: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
-          Open this link on your phone and tap Start:
-          <div className="kb-font-mono" style={{ marginTop: 4, wordBreak: "break-all" }}>
-            https://t.me/{linkInfo.botUsername}?start={linkInfo.code}
+          Tap to open Telegram and hit Start:
+          <div style={{ marginTop: 4 }}>
+            <a className="kb-font-mono" href={`https://t.me/${linkInfo.botUsername}?start=${linkInfo.code}`} target="_blank" rel="noreferrer" style={{ wordBreak: "break-all", color: "#4C7A5E" }}>
+              https://t.me/{linkInfo.botUsername}?start={linkInfo.code}
+            </a>
           </div>
         </div>
       ) : (

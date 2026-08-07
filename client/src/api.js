@@ -49,6 +49,7 @@ export const api = {
   updateSettings: (patch) => request("/settings", { method: "PATCH", body: JSON.stringify(patch) }),
   getTelegramStatus: () => request("/telegram/status"),
   sendTelegramDigestNow: () => request("/telegram/send-digest-now", { method: "POST" }),
+  getMyTelegramLinkCode: () => request("/reps/me/telegram-link-code", { method: "POST" }),
   getRepTelegramLinkCode: (id) => request(`/reps/${id}/telegram-link-code`, { method: "POST" }),
   getManagerTelegramLinkCode: () => request("/settings/telegram-link-code", { method: "POST" }),
 };

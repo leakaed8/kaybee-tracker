@@ -696,15 +696,39 @@ app.patch("/api/reps/:id", requireManager, async (req, res) => {
   }
 });
 
-app.get("/api/telegram/status", requireManager, async (req, res) => {
+// No requireManager here — reps need to check their own link status too.
+// Nothing returned is sensitive: a boolean or two and the bot's public username.
+app.get("/api/telegram/status", async (req, res) => {
   try {
     const configured = telegram.isConfigured();
-    const settings = configured ? await db.getSettings() : {};
-    res.json({
-      configured,
-      botUsername: telegramBotUsername || "",
-      managerLinked: Boolean(settings.managerTelegramChatId),
-    });
+    if (!configured) return res.json({ configured: false });
+    const settings = await db.getSettings();
+    const result = { configured, botUsername: telegramBotUsername || "", managerLinked: Boolean(settings.managerTelegramChatId) };
+    if (req.repName) {
+      const reps = await db.getAllRows("Reps");
+      const rep = reps.find((r) => r.name === req.repName);
+      result.repLinked = Boolean(rep?.telegramChatId);
+    }
+    res.json(result);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Lets a rep generate their own link code, unlike the manager-only
+// /api/reps/:id/telegram-link-code — a rep doesn't have (and shouldn't need)
+// their own Reps row's internal id.
+app.post("/api/reps/me/telegram-link-code", async (req, res) => {
+  try {
+    if (!req.repName) return res.status(403).json({ error: "Reps only." });
+    if (!telegram.isConfigured()) return res.status(400).json({ error: "Telegram isn't configured on the server yet." });
+    const reps = await db.getAllRows("Reps");
+    const rep = reps.find((r) => r.name === req.repName);
+    if (!rep) return res.status(404).json({ error: "Rep not found" });
+    const code = crypto.randomBytes(4).toString("hex");
+    await db.updateRowById("Reps", rep.id, { telegramLinkCode: code });
+    res.json({ code, botUsername: telegramBotUsername });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
