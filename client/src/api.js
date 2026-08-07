@@ -47,4 +47,7 @@ export const api = {
   savePushSubscription: (subscription) => request("/push/subscribe", { method: "POST", body: JSON.stringify({ subscription }) }),
   logOutreach: (entry) => request("/outreach-log", { method: "POST", body: JSON.stringify(entry) }),
   updateSettings: (patch) => request("/settings", { method: "PATCH", body: JSON.stringify(patch) }),
+  getTelegramStatus: () => request("/telegram/status"),
+  getRepTelegramLinkCode: (id) => request(`/reps/${id}/telegram-link-code`, { method: "POST" }),
+  getManagerTelegramLinkCode: () => request("/settings/telegram-link-code", { method: "POST" }),
 };

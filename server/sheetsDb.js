@@ -9,12 +9,13 @@ const SCHEMAS = {
   Doctors: ["id", "name", "hospital", "area", "phone", "specialty", "tier", "registrationNumber", "address"],
   OutreachLog: ["id", "name", "date", "templateIndex"],
   Orders: ["id", "clientName", "visitId", "repName", "date", "items", "total", "status"],
-  Reps: ["id", "name", "passcode", "email", "exportSheetId"],
+  Reps: ["id", "name", "passcode", "email", "exportSheetId", "telegramChatId", "telegramLinkCode"],
   Offers: ["id", "label", "buyQty", "getQty", "expiresAt", "active"],
   PushSubscriptions: ["id", "role", "repName", "endpoint", "p256dh", "auth"],
   Settings: ["key", "value"],
   Samples: ["id", "doctorName", "productName", "productId", "status", "repName", "visitId", "date"],
   PunchLog: ["id", "repName", "type", "time", "coordsLat", "coordsLng"],
+  MonthlyDigests: ["id", "month", "status", "payload", "createdAt"],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];

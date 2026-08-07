@@ -3,10 +3,17 @@ const crypto = require("crypto");
 const express = require("express");
 const webpush = require("web-push");
 const db = require("./sheetsDb");
+const telegram = require("./telegram");
 const { importedInventory, defaultTemplates } = require("./seedData");
 
 const app = express();
 app.use(express.json({ limit: "25mb" }));
+
+// Regenerated on every boot and handed to Telegram via setWebhook — Telegram
+// echoes it back on every webhook call so we can reject anything that isn't
+// genuinely from Telegram, without needing to persist a secret anywhere.
+const TELEGRAM_WEBHOOK_SECRET = crypto.randomUUID();
+let telegramBotUsername = "";
 
 const PORT = process.env.PORT || 3001;
 const IS_PROD = process.env.NODE_ENV === "production";
@@ -242,6 +249,40 @@ app.post("/api/login", async (req, res) => {
 app.post("/api/logout", (req, res) => {
   setSessionCookie(res, "", 0);
   res.json({ ok: true });
+});
+
+// Telegram calls this directly (no session cookie), so it must sit before the
+// auth gate below. The secret-token header is how we confirm a request is
+// genuinely from Telegram and not someone guessing the URL.
+app.post("/api/telegram/webhook", async (req, res) => {
+  res.sendStatus(200); // ack immediately; Telegram retries on anything else
+  if (req.get("X-Telegram-Bot-Api-Secret-Token") !== TELEGRAM_WEBHOOK_SECRET) return;
+  try {
+    const update = req.body || {};
+    if (update.message?.text?.startsWith("/start")) {
+      const code = update.message.text.split(" ")[1];
+      const chatId = String(update.message.chat.id);
+      if (!code) return;
+      const reps = await db.getAllRows("Reps");
+      const rep = reps.find((r) => r.telegramLinkCode === code);
+      if (rep) {
+        await db.updateRowById("Reps", rep.id, { telegramChatId: chatId });
+        await telegram.sendMessage(chatId, `You're linked, ${rep.name}! You'll get your monthly focus list here.`);
+        return;
+      }
+      const settings = await db.getSettings();
+      if (settings.managerTelegramLinkCode === code) {
+        await db.setSettings({ managerTelegramChatId: chatId });
+        await telegram.sendMessage(chatId, "Manager account linked! You'll get the monthly digest here for approval before it goes to reps.");
+        return;
+      }
+      await telegram.sendMessage(chatId, "That link code wasn't recognized — generate a new one from Settings and try again.");
+    } else if (update.callback_query) {
+      await handleDigestCallback(update.callback_query);
+    }
+  } catch (e) {
+    console.error("telegram webhook error", e);
+  }
 });
 
 app.use("/api", requireAuth);
@@ -613,7 +654,10 @@ app.patch("/api/clients/:id", requireManager, async (req, res) => {
 app.get("/api/reps", requireManager, async (req, res) => {
   try {
     const reps = await db.getAllRows("Reps");
-    res.json(reps.map((r) => ({ id: r.id, name: r.name, passcode: r.passcode, email: r.email || "", exportSheetId: r.exportSheetId || "" })));
+    res.json(reps.map((r) => ({
+      id: r.id, name: r.name, passcode: r.passcode, email: r.email || "", exportSheetId: r.exportSheetId || "",
+      telegramLinked: Boolean(r.telegramChatId),
+    })));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -646,6 +690,46 @@ app.patch("/api/reps/:id", requireManager, async (req, res) => {
     const ok = await db.updateRowById("Reps", req.params.id, patch);
     if (!ok) return res.status(404).json({ error: "Rep not found" });
     res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/telegram/status", requireManager, async (req, res) => {
+  try {
+    const configured = telegram.isConfigured();
+    const settings = configured ? await db.getSettings() : {};
+    res.json({
+      configured,
+      botUsername: telegramBotUsername || "",
+      managerLinked: Boolean(settings.managerTelegramChatId),
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/reps/:id/telegram-link-code", requireManager, async (req, res) => {
+  try {
+    if (!telegram.isConfigured()) return res.status(400).json({ error: "Telegram isn't configured on the server yet." });
+    const code = crypto.randomBytes(4).toString("hex");
+    const ok = await db.updateRowById("Reps", req.params.id, { telegramLinkCode: code });
+    if (!ok) return res.status(404).json({ error: "Rep not found" });
+    res.json({ code, botUsername: telegramBotUsername });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/settings/telegram-link-code", requireManager, async (req, res) => {
+  try {
+    if (!telegram.isConfigured()) return res.status(400).json({ error: "Telegram isn't configured on the server yet." });
+    const code = crypto.randomBytes(4).toString("hex");
+    await db.setSettings({ managerTelegramLinkCode: code });
+    res.json({ code, botUsername: telegramBotUsername });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -899,6 +983,143 @@ const ALERT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   checkExpiryAndOverdueAlerts();
   setInterval(checkExpiryAndOverdueAlerts, ALERT_CHECK_INTERVAL_MS);
+}
+
+// ---------- Monthly "must-sell" Telegram digest ----------
+// A product qualifies until real sales-history data is loaded: it must be
+// near expiry (red or yellow zone) AND selling slower than the slow-mover
+// threshold already used elsewhere in the app. Manager approves via an
+// inline Telegram button before anything goes out to reps.
+
+function zoneKeyFor(product) {
+  const dLeft = daysUntilFromToday(product.expiry);
+  if (dLeft <= 182) return "red";
+  if (dLeft <= 365) return "yellow";
+  return "green";
+}
+
+function turnoverPctFor(product) {
+  const qty = Number(product.qty) || 0;
+  const sold90 = Number(product.sold90) || 0;
+  if (qty <= 0) return 0;
+  return Math.round((sold90 / qty) * 100);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+async function computeMustSellList() {
+  const [products, rawSettings] = await Promise.all([db.getAllRows("Products"), db.getSettings()]);
+  const slowThreshold = rawSettings.slowThreshold !== undefined ? Number(rawSettings.slowThreshold) : 15;
+  return products
+    .filter((p) => p.expiry)
+    .map((p) => ({
+      id: p.id, name: p.name, qty: Number(p.qty) || 0, expiry: p.expiry,
+      daysLeft: daysUntilFromToday(p.expiry), turnover: turnoverPctFor(p), zone: zoneKeyFor(p),
+    }))
+    .filter((p) => (p.zone === "red" || p.zone === "yellow") && p.turnover < slowThreshold)
+    .sort((a, b) => a.daysLeft - b.daysLeft);
+}
+
+function formatDigestMessage(items) {
+  if (items.length === 0) {
+    return "No must-sell items this month — nothing is both near-expiry and slow-moving right now.";
+  }
+  const lines = items.slice(0, 30).map((it) =>
+    `• <b>${escapeHtml(it.name)}</b> — ${it.qty} units, ${it.daysLeft}d to expiry, ${it.turnover}% turnover/90d`
+  );
+  const more = items.length > 30 ? `\n…and ${items.length - 30} more.` : "";
+  return `📋 <b>This month's focus list</b> (${items.length} item${items.length === 1 ? "" : "s"})\n\n${lines.join("\n")}${more}`;
+}
+
+async function dispatchDigestToReps(items) {
+  const reps = await db.getAllRows("Reps");
+  const message = formatDigestMessage(items);
+  for (const rep of reps) {
+    if (!rep.telegramChatId) continue;
+    try {
+      await telegram.sendMessage(rep.telegramChatId, message);
+    } catch (e) {
+      console.error(`failed to send monthly digest to rep ${rep.name}`, e);
+    }
+  }
+}
+
+async function runMonthlyDigest(month) {
+  const items = await computeMustSellList();
+  const digest = {
+    id: `dg${crypto.randomUUID()}`,
+    month,
+    status: "pending",
+    payload: JSON.stringify(items),
+    createdAt: new Date().toISOString(),
+  };
+  await db.appendRow("MonthlyDigests", digest);
+
+  const settings = await db.getSettings();
+  if (!settings.managerTelegramChatId) {
+    console.warn("Monthly digest computed but no manager Telegram is linked yet — nothing sent.");
+    return;
+  }
+  if (items.length === 0) {
+    await telegram.sendMessage(settings.managerTelegramChatId, formatDigestMessage(items));
+    await db.updateRowById("MonthlyDigests", digest.id, { status: "skipped" });
+    return;
+  }
+  await telegram.sendMessage(settings.managerTelegramChatId, formatDigestMessage(items), {
+    inline_keyboard: [[
+      { text: "✅ Approve — send to reps", callback_data: `approve:${digest.id}` },
+      { text: "Skip this month", callback_data: `skip:${digest.id}` },
+    ]],
+  });
+}
+
+async function handleDigestCallback(callbackQuery) {
+  const { id, data, message } = callbackQuery;
+  const [action, digestId] = (data || "").split(":");
+  const digests = await db.getAllRows("MonthlyDigests");
+  const digest = digests.find((d) => d.id === digestId);
+  if (!digest) { await telegram.answerCallbackQuery(id, "This digest is no longer available."); return; }
+  if (digest.status !== "pending") { await telegram.answerCallbackQuery(id, `Already ${digest.status}.`); return; }
+
+  if (action === "approve") {
+    await dispatchDigestToReps(JSON.parse(digest.payload || "[]"));
+    await db.updateRowById("MonthlyDigests", digest.id, { status: "approved" });
+    await telegram.answerCallbackQuery(id, "Sent to reps!");
+    if (message?.chat?.id) await telegram.sendMessage(message.chat.id, "✅ Approved — sent to all linked reps.");
+  } else if (action === "skip") {
+    await db.updateRowById("MonthlyDigests", digest.id, { status: "skipped" });
+    await telegram.answerCallbackQuery(id, "Skipped this month.");
+    if (message?.chat?.id) await telegram.sendMessage(message.chat.id, "Skipped — nothing sent to reps this month.");
+  }
+}
+
+const MONTHLY_DIGEST_DAY = 1; // runs on the 1st of each month, at most once
+async function checkMonthlyDigest() {
+  if (!telegram.isConfigured()) return;
+  try {
+    const now = new Date();
+    if (now.getDate() !== MONTHLY_DIGEST_DAY) return;
+    const settings = await db.getSettings();
+    const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    if (settings.lastMonthlyDigestMonth === thisMonth) return;
+    await runMonthlyDigest(thisMonth);
+    await db.setSettings({ lastMonthlyDigestMonth: thisMonth });
+  } catch (e) {
+    console.error("checkMonthlyDigest failed", e);
+  }
+}
+
+const MONTHLY_DIGEST_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+if (telegram.isConfigured()) {
+  checkMonthlyDigest();
+  setInterval(checkMonthlyDigest, MONTHLY_DIGEST_CHECK_INTERVAL_MS);
+  telegram.getMe().then((me) => { telegramBotUsername = me.username; }).catch((e) => console.error("telegram getMe failed", e));
+  if (process.env.RENDER_EXTERNAL_URL) {
+    telegram.setWebhook(`${process.env.RENDER_EXTERNAL_URL}/api/telegram/webhook`, TELEGRAM_WEBHOOK_SECRET)
+      .catch((e) => console.error("telegram setWebhook failed", e));
+  }
 }
 
 // Render's free tier sleeps after ~15 minutes with no inbound traffic. A self

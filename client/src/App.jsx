@@ -3477,6 +3477,23 @@ function RepsManagementSection({ onRepsChanged }) {
   const [savingEmailFor, setSavingEmailFor] = useState(null);
   const [rowErrors, setRowErrors] = useState({}); // per-rep error messages
   const [rowSaved, setRowSaved] = useState({}); // per-rep "saved" confirmation flash
+  const [telegramStatus, setTelegramStatus] = useState(null);
+  const [telegramLinkFor, setTelegramLinkFor] = useState({}); // rep id -> { code, botUsername }
+  const [telegramLinking, setTelegramLinking] = useState(null);
+
+  useEffect(() => { api.getTelegramStatus().then(setTelegramStatus).catch(() => setTelegramStatus({ configured: false })); }, []);
+
+  const generateTelegramLink = async (rep) => {
+    setTelegramLinking(rep.id);
+    try {
+      const { code, botUsername } = await api.getRepTelegramLinkCode(rep.id);
+      setTelegramLinkFor((prev) => ({ ...prev, [rep.id]: { code, botUsername } }));
+    } catch (e) {
+      setRowErrors((prev) => ({ ...prev, [rep.id]: e.message }));
+    } finally {
+      setTelegramLinking(null);
+    }
+  };
 
   const load = async () => {
     try {
@@ -3603,6 +3620,31 @@ function RepsManagementSection({ onRepsChanged }) {
                   {rowErrors[r.id] && <div style={{ fontSize: 11, color: "#B33A3A", marginTop: 4 }}>{rowErrors[r.id]}</div>}
                 </div>
               )}
+
+              {telegramStatus?.configured && (
+                <div style={{ marginTop: 6 }}>
+                  {r.telegramLinked ? (
+                    <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 7px", borderRadius: 5, background: "#4C7A5E1A", color: "#4C7A5E" }}>
+                      ✓ Telegram linked
+                    </span>
+                  ) : telegramLinkFor[r.id] ? (
+                    <div style={{ fontSize: 11.5, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 6, padding: 8 }}>
+                      Send {r.name} this link — they open it and tap Start in Telegram:
+                      <div className="kb-font-mono" style={{ marginTop: 4, wordBreak: "break-all" }}>
+                        https://t.me/{telegramLinkFor[r.id].botUsername}?start={telegramLinkFor[r.id].code}
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => generateTelegramLink(r)}
+                      disabled={telegramLinking === r.id}
+                      style={{ fontSize: 11, padding: "4px 9px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445" }}
+                    >
+                      {telegramLinking === r.id ? "Generating…" : "Link Telegram"}
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -3705,6 +3747,56 @@ function urlBase64ToUint8Array(base64String) {
   return outputArray;
 }
 
+function ManagerTelegramLinkSection() {
+  const [status, setStatus] = useState(null);
+  const [linking, setLinking] = useState(false);
+  const [linkInfo, setLinkInfo] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => { api.getTelegramStatus().then(setStatus).catch(() => setStatus({ configured: false })); }, []);
+
+  const generateLink = async () => {
+    setLinking(true);
+    setError("");
+    try {
+      const { code, botUsername } = await api.getManagerTelegramLinkCode();
+      setLinkInfo({ code, botUsername });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLinking(false);
+    }
+  };
+
+  if (!status?.configured) return null;
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Manager Telegram alerts</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Once linked, the monthly must-sell digest (near-expiry + slow-moving stock) arrives here first with Approve / Skip buttons — nothing reaches reps until you approve it.
+      </p>
+      {status.managerLinked ? (
+        <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 5, background: "#4C7A5E1A", color: "#4C7A5E" }}>
+          ✓ Linked
+        </span>
+      ) : linkInfo ? (
+        <div style={{ fontSize: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
+          Open this link on your phone and tap Start:
+          <div className="kb-font-mono" style={{ marginTop: 4, wordBreak: "break-all" }}>
+            https://t.me/{linkInfo.botUsername}?start={linkInfo.code}
+          </div>
+        </div>
+      ) : (
+        <button onClick={generateLink} disabled={linking} style={{ fontSize: 12.5, padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24" }}>
+          {linking ? "Generating…" : "Link my Telegram"}
+        </button>
+      )}
+      {error && <div style={{ fontSize: 11.5, color: "#B33A3A", marginTop: 6 }}>{error}</div>}
+    </div>
+  );
+}
+
 function PushNotificationSetup() {
   const [status, setStatus] = useState("idle"); // idle | unsupported | subscribing | subscribed | denied | error
   const [error, setError] = useState("");
@@ -3785,6 +3877,8 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Settings</h2>
 
       <PushNotificationSetup />
+
+      {role === "manager" && <ManagerTelegramLinkSection />}
 
       {role === "manager" && <RepsManagementSection onRepsChanged={onRepsChanged} />}
 
