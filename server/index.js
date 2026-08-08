@@ -338,22 +338,22 @@ app.post("/api/push/subscribe", async (req, res) => {
   }
 });
 
+const BOOTSTRAP_TABS = ["Products", "Visits", "Clients", "Doctors", "OutreachLog", "Orders", "Reps", "Offers", "Samples", "PunchLog", "StockMovement"];
+
 app.get("/api/bootstrap", async (req, res) => {
   try {
-    const [products, visits, clients, doctors, outreachLog, orders, reps, offers, rawSettings, samples, punchLog, stockMovement] = await Promise.all([
-      db.getAllRows("Products"),
-      db.getAllRows("Visits"),
-      db.getAllRows("Clients"),
-      db.getAllRows("Doctors"),
-      db.getAllRows("OutreachLog"),
-      db.getAllRows("Orders"),
-      db.getAllRows("Reps"),
-      db.getAllRows("Offers"),
+    // One batched Sheets API request for all 11 tabs, instead of 11 separate
+    // ones — this endpoint gets polled every 20s per open session, so the
+    // request-count savings compound fast and are the main defense against
+    // "Read requests per minute" quota errors.
+    const [batch, rawSettings] = await Promise.all([
+      db.getAllRowsBatch(BOOTSTRAP_TABS),
       db.getSettings(),
-      db.getAllRows("Samples"),
-      db.getAllRows("PunchLog"),
-      db.getAllRows("StockMovement"),
     ]);
+    const {
+      Products: products, Visits: visits, Clients: clients, Doctors: doctors, OutreachLog: outreachLog,
+      Orders: orders, Reps: reps, Offers: offers, Samples: samples, PunchLog: punchLog, StockMovement: stockMovement,
+    } = batch;
     const movementIndex = buildMovementIndex(stockMovement);
     res.json({
       products: products.map((p) => ({ ...parseProduct(p), avgMonthlyMovement: avgMonthlyMovementFor(p.name, movementIndex) })),

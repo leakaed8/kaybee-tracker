@@ -180,6 +180,34 @@ async function getAllRows(tab) {
     .filter((r) => r.id !== "" && r.id !== undefined);
 }
 
+// Fetches multiple id-keyed tabs in a single Sheets API request instead of
+// one request per tab — the biggest lever against "Read requests per
+// minute" quota errors, since the polled /api/bootstrap endpoint used to
+// cost 12 separate requests every 20 seconds, per open session. Not for
+// Settings (key/value shape, no "id" column to filter on).
+async function getAllRowsBatch(tabs) {
+  await ensureSheets();
+  const sheets = getSheets();
+  const ranges = tabs.map((tab) => {
+    const headers = SCHEMAS[tab];
+    return `${tab}!A2:${String.fromCharCode(64 + headers.length)}`;
+  });
+  const res = await sheets.spreadsheets.values.batchGet({
+    spreadsheetId: SHEET_ID,
+    ranges,
+  });
+  const valueRanges = res.data.valueRanges || [];
+  const result = {};
+  tabs.forEach((tab, i) => {
+    const headers = SCHEMAS[tab];
+    const rows = valueRanges[i]?.values || [];
+    result[tab] = rows
+      .map((row, idx) => ({ ...rowToObject(headers, row), _row: idx + 2 }))
+      .filter((r) => r.id !== "" && r.id !== undefined);
+  });
+  return result;
+}
+
 async function appendRow(tab, obj) {
   await ensureSheets();
   const sheets = getSheets();
@@ -333,6 +361,7 @@ async function setSettings(patch) {
 module.exports = {
   ensureSheets,
   getAllRows,
+  getAllRowsBatch,
   appendRow,
   appendRows,
   updateRowById,
