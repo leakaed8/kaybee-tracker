@@ -1682,6 +1682,35 @@ function ClientsView({ clients, visits, orders, role, repNames, onAdd, onRemove,
 
       {role === "manager" && showImport && <ClientExcelImportSection existingClients={clients} onImport={onBulkImport} onDone={() => setShowImport(false)} />}
 
+      {showAdd && (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+            <Field label="Pharmacy name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Pharmacie Al Nour" style={inputStyle} /></Field>
+            <Field label="WhatsApp number"><input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+961 xx xxx xxx" style={inputStyle} /></Field>
+            <Field label="Tier">
+              <select value={tier} onChange={(e) => setTier(e.target.value)} style={inputStyle}>
+                <option value="A">A — high value, visit every 14d</option>
+                <option value="B">B — standard, visit every 30d</option>
+                <option value="C">C — low priority, visit every 60d</option>
+              </select>
+            </Field>
+            <Field label="Area"><input value={area} onChange={(e) => setArea(e.target.value)} placeholder="e.g. Jbeil" style={inputStyle} /></Field>
+            <Field label="Address (optional)"><input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Full street address" style={inputStyle} /></Field>
+            <Field label="Registration number (optional)"><input value={registrationNumber} onChange={(e) => setRegistrationNumber(e.target.value)} style={inputStyle} /></Field>
+            <Field label="Assigned sales rep (optional)">
+              <select value={assignedRep} onChange={(e) => setAssignedRep(e.target.value)} style={inputStyle}>
+                <option value="">Unassigned</option>
+                {repNames.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </Field>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button disabled={!name} onClick={addClient} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>Add pharmacy</button>
+            <button onClick={() => setShowAdd(false)} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
       <div style={{ position: "relative", marginBottom: 14 }}>
         <Search size={15} style={{ position: "absolute", left: 12, top: 10, color: "#8A8272" }} />
         <input
@@ -1709,35 +1738,6 @@ function ClientsView({ clients, visits, orders, role, repNames, onAdd, onRemove,
                 )}
               </div>
             ))}
-          </div>
-        </div>
-      )}
-
-      {showAdd && (
-        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-            <Field label="Pharmacy name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Pharmacie Al Nour" style={inputStyle} /></Field>
-            <Field label="WhatsApp number"><input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+961 xx xxx xxx" style={inputStyle} /></Field>
-            <Field label="Tier">
-              <select value={tier} onChange={(e) => setTier(e.target.value)} style={inputStyle}>
-                <option value="A">A — high value, visit every 14d</option>
-                <option value="B">B — standard, visit every 30d</option>
-                <option value="C">C — low priority, visit every 60d</option>
-              </select>
-            </Field>
-            <Field label="Area"><input value={area} onChange={(e) => setArea(e.target.value)} placeholder="e.g. Jbeil" style={inputStyle} /></Field>
-            <Field label="Address (optional)"><input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Full street address" style={inputStyle} /></Field>
-            <Field label="Registration number (optional)"><input value={registrationNumber} onChange={(e) => setRegistrationNumber(e.target.value)} style={inputStyle} /></Field>
-            <Field label="Assigned sales rep (optional)">
-              <select value={assignedRep} onChange={(e) => setAssignedRep(e.target.value)} style={inputStyle}>
-                <option value="">Unassigned</option>
-                {repNames.map((n) => <option key={n} value={n}>{n}</option>)}
-              </select>
-            </Field>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button disabled={!name} onClick={addClient} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>Add pharmacy</button>
-            <button onClick={() => setShowAdd(false)} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>Cancel</button>
           </div>
         </div>
       )}
@@ -2113,16 +2113,6 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
 
       {role === "manager" && showImport && <DoctorExcelImportSection existingDoctors={doctors} onImport={onBulkImport} onDone={() => setShowImport(false)} />}
 
-      <div style={{ position: "relative", marginBottom: 14 }}>
-        <Search size={15} style={{ position: "absolute", left: 12, top: 10, color: "#8A8272" }} />
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by doctor name, specialty, area, hospital, or phone…"
-          style={{ ...inputStyle, paddingLeft: 34 }}
-        />
-      </div>
-
       {showAdd && (
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
@@ -2147,6 +2137,16 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
           </div>
         </div>
       )}
+
+      <div style={{ position: "relative", marginBottom: 14 }}>
+        <Search size={15} style={{ position: "absolute", left: 12, top: 10, color: "#8A8272" }} />
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search by doctor name, specialty, area, hospital, or phone…"
+          style={{ ...inputStyle, paddingLeft: 34 }}
+        />
+      </div>
 
       {filteredRows.length > LIST_DISPLAY_CAP && (
         <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>
