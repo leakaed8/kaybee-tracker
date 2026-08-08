@@ -337,25 +337,35 @@ async function setSettings(patch) {
   const existingRows = await getAllRowsRaw("Settings");
   const keyIndex = new Map(existingRows.map((row, i) => [row[0], i + 2]));
 
+  // Batched into at most 2 requests total (one batchUpdate for existing
+  // keys, one append for new ones) instead of one request per key — a patch
+  // with many keys (e.g. many overdue alerts firing in the same run) must
+  // not turn into that many sequential Sheets API calls.
+  const updates = [];
+  const appends = [];
   for (const [key, value] of Object.entries(patch)) {
     const serialized = typeof value === "string" ? value : JSON.stringify(value);
     if (keyIndex.has(key)) {
       const rowNum = keyIndex.get(key);
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID,
-        range: `Settings!A${rowNum}:B${rowNum}`,
-        valueInputOption: "RAW",
-        requestBody: { values: [[key, serialized]] },
-      });
+      updates.push({ range: `Settings!A${rowNum}:B${rowNum}`, values: [[key, serialized]] });
     } else {
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: SHEET_ID,
-        range: "Settings!A1",
-        valueInputOption: "RAW",
-        insertDataOption: "INSERT_ROWS",
-        requestBody: { values: [[key, serialized]] },
-      });
+      appends.push([key, serialized]);
     }
+  }
+  if (updates.length) {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      requestBody: { valueInputOption: "RAW", data: updates },
+    });
+  }
+  if (appends.length) {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: "Settings!A1",
+      valueInputOption: "RAW",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { values: appends },
+    });
   }
 }
 

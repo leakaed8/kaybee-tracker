@@ -46,21 +46,24 @@ async function sendPushToSubscriptions(subs, payload) {
   });
 }
 
-async function notifyManagers(payload) {
+// `subs`, when passed in, skips the PushSubscriptions read — callers looping
+// over many items (e.g. the overdue-clients check) should fetch it once and
+// pass it to every call instead of re-reading the sheet per item.
+async function notifyManagers(payload, subs) {
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
   try {
-    const subs = await db.getAllRows("PushSubscriptions");
-    await sendPushToSubscriptions(subs.filter((s) => s.role === "manager"), payload);
+    const allSubs = subs || (await db.getAllRows("PushSubscriptions"));
+    await sendPushToSubscriptions(allSubs.filter((s) => s.role === "manager"), payload);
   } catch (e) {
     console.error("notifyManagers failed", e);
   }
 }
 
-async function notifyRep(repName, payload) {
+async function notifyRep(repName, payload, subs) {
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY || !repName) return;
   try {
-    const subs = await db.getAllRows("PushSubscriptions");
-    await sendPushToSubscriptions(subs.filter((s) => s.role === "rep" && s.repName === repName), payload);
+    const allSubs = subs || (await db.getAllRows("PushSubscriptions"));
+    await sendPushToSubscriptions(allSubs.filter((s) => s.role === "rep" && s.repName === repName), payload);
   } catch (e) {
     console.error("notifyRep failed", e);
   }
@@ -1121,11 +1124,12 @@ const TIER_CADENCE_DAYS = { A: 14, B: 30, C: 60 };
 async function checkExpiryAndOverdueAlerts() {
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
   try {
-    const [products, clients, visits, rawSettings] = await Promise.all([
+    const [products, clients, visits, rawSettings, subs] = await Promise.all([
       db.getAllRows("Products"),
       db.getAllRows("Clients"),
       db.getAllRows("Visits"),
       db.getSettings(),
+      db.getAllRows("PushSubscriptions"),
     ]);
     const newlySent = {};
 
@@ -1135,26 +1139,30 @@ async function checkExpiryAndOverdueAlerts() {
       if (dLeft <= 30) {
         const key = `alert_expiry_${p.id}`;
         if (!rawSettings[key]) {
-          await notifyManagers({ title: "Product expiring soon", body: `${p.name} — ${dLeft}d left`, url: "/" });
+          await notifyManagers({ title: "Product expiring soon", body: `${p.name} — ${dLeft}d left`, url: "/" }, subs);
           newlySent[key] = "sent";
         }
       }
     }
 
+    // A client only becomes "overdue" once it has had a first visit AND has
+    // a rep assigned — a freshly bulk-imported list (never visited, often
+    // not yet assigned) must not immediately flood everyone with alerts.
     for (const c of clients) {
+      if (!c.assignedRep) continue;
       const matches = visits.filter((v) => v.client.toLowerCase().trim() === c.name.toLowerCase().trim());
       const lastVisit = matches.length
         ? matches.reduce((a, b) => (new Date(b.time) > new Date(a.time) ? b : a), matches[0])
         : null;
-      const daysSinceVisit = lastVisit ? Math.round((Date.now() - new Date(lastVisit.time)) / 86400000) : null;
+      if (!lastVisit) continue;
+      const daysSinceVisit = Math.round((Date.now() - new Date(lastVisit.time)) / 86400000);
       const cadence = TIER_CADENCE_DAYS[c.tier] || 30;
-      const overdue = daysSinceVisit === null || daysSinceVisit > cadence;
-      if (overdue) {
+      if (daysSinceVisit > cadence) {
         const key = `alert_overdue_${c.id}`;
         if (!rawSettings[key]) {
           const payload = { title: "Client overdue for a visit", body: `${c.name} hasn't been visited in a while`, url: "/" };
-          await notifyManagers(payload);
-          if (c.assignedRep) await notifyRep(c.assignedRep, payload);
+          await notifyManagers(payload, subs);
+          await notifyRep(c.assignedRep, payload, subs);
           newlySent[key] = "sent";
         }
       }
