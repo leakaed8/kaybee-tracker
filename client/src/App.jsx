@@ -1635,7 +1635,7 @@ function ClientsView({ clients, visits, orders, role, repNames, onAdd, onRemove,
     const revenue = revenueFor(c.name);
     const leadScore = computeLeadScore({ tier: c.tier, days, cadence, revenue });
     return { ...c, days, overdue, cadence, revenue, leadScore };
-  }).sort((a, b) => (b.days ?? 9999) - (a.days ?? 9999));
+  }).sort((a, b) => b.leadScore - a.leadScore);
 
   const q = search.toLowerCase().trim();
   const filteredRows = q ? rows.filter((c) =>
@@ -1644,6 +1644,9 @@ function ClientsView({ clients, visits, orders, role, repNames, onAdd, onRemove,
     (c.phone || "").toLowerCase().includes(q) ||
     (c.registrationNumber || "").toLowerCase().includes(q)
   ) : [];
+  // Same priority score shown on every card below — highest-priority overdue
+  // pharmacies first, not just "whoever happens to have the most raw days
+  // since their last visit" (that ignored tier and order history entirely).
   const suggestedFollowUps = rows.filter((c) => c.overdue).slice(0, 5);
   const shownRows = filteredRows.slice(0, LIST_DISPLAY_CAP);
 
@@ -1691,11 +1694,14 @@ function ClientsView({ clients, visits, orders, role, repNames, onAdd, onRemove,
 
       {suggestedFollowUps.length > 0 && (
         <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 10, padding: 16, marginBottom: 18 }}>
-          <h3 style={{ fontSize: 13.5, fontWeight: 600, margin: "0 0 10px", color: "#7A5B2E" }}>Suggested follow-ups</h3>
+          <h3 style={{ fontSize: 13.5, fontWeight: 600, margin: "0 0 2px", color: "#7A5B2E" }}>Suggested follow-ups</h3>
+          <p style={{ fontSize: 11, color: "#9C8659", margin: "0 0 10px" }}>
+            The 5 overdue pharmacies with the highest priority score — same score shown on each card below (tier + overdue-ness + order history).
+          </p>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {suggestedFollowUps.map((c) => (
               <div key={c.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#fff", border: "1px solid #E9C88A", borderRadius: 8, padding: "8px 12px", fontSize: 12.5 }}>
-                <span><strong>{c.name}</strong> — {c.days === null ? "never visited" : `${c.days}d since visit`} (cadence {c.cadence}d)</span>
+                <span><strong>{c.name}</strong> — priority {c.leadScore} · {c.days === null ? "never visited" : `${c.days}d since visit`} (cadence {c.cadence}d)</span>
                 {c.phone && (
                   <a href={`https://wa.me/${c.phone.replace(/\D/g, "")}`} target="_blank" rel="noreferrer" style={{ fontSize: 11.5, color: "#4C7A5E", textDecoration: "none" }}>
                     WhatsApp
@@ -2063,7 +2069,7 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
     const pendingSamples = pendingSamplesFor(d.name);
     const leadScore = computeLeadScore({ tier: d.tier, days, cadence, engagement: pendingSamples.length });
     return { ...d, days, overdue, cadence, pendingSamples, leadScore };
-  }).sort((a, b) => (b.days ?? 9999) - (a.days ?? 9999));
+  }).sort((a, b) => b.leadScore - a.leadScore);
 
   const q = search.toLowerCase().trim();
   const filteredRows = q ? rows.filter((d) =>
