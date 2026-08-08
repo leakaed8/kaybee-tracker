@@ -1369,6 +1369,19 @@ function LocationsView({ visits, punchLog, repNames, onRemoveVisit }) {
 // ---------- Excel upload for pharmacies (add-only, built for very large files) ----------
 const IMPORT_CHUNK_SIZE = 2000;
 
+// Retries a single chunk write on transient failures (network blips, a
+// momentary Sheets API rate-limit) instead of letting one hiccup abort the
+// whole multi-thousand-row import.
+async function importChunkWithRetry(fn, attempt = 1) {
+  try {
+    return await fn();
+  } catch (e) {
+    if (attempt >= 3) throw e;
+    await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+    return importChunkWithRetry(fn, attempt + 1);
+  }
+}
+
 function ClientExcelImportSection({ existingClients, onImport, onDone }) {
   const [sheetNames, setSheetNames] = useState([]);
   const [selectedSheet, setSelectedSheet] = useState("");
@@ -1460,10 +1473,11 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
       let added = 0;
       for (let i = 0; i < newClients.length; i += IMPORT_CHUNK_SIZE) {
         const chunk = newClients.slice(i, i + IMPORT_CHUNK_SIZE);
-        const data = await onImport({ toAdd: chunk });
+        const data = await importChunkWithRetry(() => api.importClientsBulk({ toAdd: chunk }));
         added += data?.added ?? chunk.length;
         setProgress({ done: Math.min(i + IMPORT_CHUNK_SIZE, newClients.length), total: newClients.length });
       }
+      await onImport({ toAdd: [] }); // one refresh now that every chunk is in, instead of one per chunk
       setResult({ added, skipped: skippedCount });
       setWorkbook(null);
       setHeaders([]);
@@ -1471,7 +1485,7 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
       setSheetNames([]);
       if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (e) {
-      setError(e.message || "Import failed.");
+      setError(e.message || "Import failed. Whatever made it in before this error is already saved — reopen the file and re-import to pick up where it left off (already-added names get skipped automatically).");
     } finally {
       setImporting(false);
       setProgress(null);
@@ -1623,11 +1637,13 @@ function ClientsView({ clients, visits, orders, role, repNames, onAdd, onRemove,
     return { ...c, days, overdue, cadence, revenue, leadScore };
   }).sort((a, b) => (b.days ?? 9999) - (a.days ?? 9999));
 
-  const filteredRows = rows.filter((c) => {
-    const q = search.toLowerCase().trim();
-    if (!q) return true;
-    return c.name.toLowerCase().includes(q) || (c.area || "").toLowerCase().includes(q);
-  });
+  const q = search.toLowerCase().trim();
+  const filteredRows = q ? rows.filter((c) =>
+    c.name.toLowerCase().includes(q) ||
+    (c.area || "").toLowerCase().includes(q) ||
+    (c.phone || "").toLowerCase().includes(q) ||
+    (c.registrationNumber || "").toLowerCase().includes(q)
+  ) : [];
   const suggestedFollowUps = rows.filter((c) => c.overdue).slice(0, 5);
   const shownRows = filteredRows.slice(0, LIST_DISPLAY_CAP);
 
@@ -1668,7 +1684,7 @@ function ClientsView({ clients, visits, orders, role, repNames, onAdd, onRemove,
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search pharmacies by name or area…"
+          placeholder="Search by pharmacy name, area, phone, or registration number…"
           style={{ ...inputStyle, paddingLeft: 34 }}
         />
       </div>
@@ -1768,7 +1784,11 @@ function ClientsView({ clients, visits, orders, role, repNames, onAdd, onRemove,
             <button onClick={() => onRemove(c.id)} style={{ marginTop: 6, background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
           </div>
         ))}
-        {filteredRows.length === 0 && <EmptyState text={search ? "No pharmacies match your search." : "No pharmacies added yet."} />}
+        {!q && clients.length > 0 && (
+          <EmptyState text={`Search above to find a pharmacy — ${clients.length.toLocaleString()} in the system.`} />
+        )}
+        {q && filteredRows.length === 0 && <EmptyState text="No pharmacies match your search." />}
+        {!q && clients.length === 0 && <EmptyState text="No pharmacies added yet." />}
       </div>
     </div>
   );
@@ -1870,10 +1890,11 @@ function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
       let added = 0;
       for (let i = 0; i < newDoctors.length; i += IMPORT_CHUNK_SIZE) {
         const chunk = newDoctors.slice(i, i + IMPORT_CHUNK_SIZE);
-        const data = await onImport({ toAdd: chunk });
+        const data = await importChunkWithRetry(() => api.importDoctorsBulk({ toAdd: chunk }));
         added += data?.added ?? chunk.length;
         setProgress({ done: Math.min(i + IMPORT_CHUNK_SIZE, newDoctors.length), total: newDoctors.length });
       }
+      await onImport({ toAdd: [] }); // one refresh now that every chunk is in, instead of one per chunk
       setResult({ added, skipped: skippedCount });
       setWorkbook(null);
       setHeaders([]);
@@ -1881,7 +1902,7 @@ function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
       setSheetNames([]);
       if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (e) {
-      setError(e.message || "Import failed.");
+      setError(e.message || "Import failed. Whatever made it in before this error is already saved — reopen the file and re-import to pick up where it left off (already-added names get skipped automatically).");
     } finally {
       setImporting(false);
       setProgress(null);
@@ -2044,16 +2065,15 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
     return { ...d, days, overdue, cadence, pendingSamples, leadScore };
   }).sort((a, b) => (b.days ?? 9999) - (a.days ?? 9999));
 
-  const filteredRows = rows.filter((d) => {
-    const q = search.toLowerCase().trim();
-    if (!q) return true;
-    return (
-      d.name.toLowerCase().includes(q) ||
-      (d.specialty || "").toLowerCase().includes(q) ||
-      (d.area || "").toLowerCase().includes(q) ||
-      (d.hospital || "").toLowerCase().includes(q)
-    );
-  });
+  const q = search.toLowerCase().trim();
+  const filteredRows = q ? rows.filter((d) =>
+    d.name.toLowerCase().includes(q) ||
+    (d.specialty || "").toLowerCase().includes(q) ||
+    (d.area || "").toLowerCase().includes(q) ||
+    (d.hospital || "").toLowerCase().includes(q) ||
+    (d.phone || "").toLowerCase().includes(q) ||
+    (d.registrationNumber || "").toLowerCase().includes(q)
+  ) : [];
   const shownRows = filteredRows.slice(0, LIST_DISPLAY_CAP);
   const tierColor = { A: "#B33A3A", B: "#D9A441", C: "#6B7280" };
   const scoreColor = (s) => (s >= 65 ? "#B33A3A" : s >= 40 ? "#C17817" : "#6B7280");
@@ -2092,7 +2112,7 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by name, specialty, area, or hospital…"
+          placeholder="Search by doctor name, specialty, area, hospital, or phone…"
           style={{ ...inputStyle, paddingLeft: 34 }}
         />
       </div>
@@ -2160,7 +2180,11 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
             <button onClick={() => onRemove(d.id)} style={{ marginTop: 6, background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
           </div>
         ))}
-        {filteredRows.length === 0 && <EmptyState text={search ? "No doctors match your search." : "No doctors added yet."} />}
+        {!q && doctors.length > 0 && (
+          <EmptyState text={`Search above to find a doctor — ${doctors.length.toLocaleString()} in the system.`} />
+        )}
+        {q && filteredRows.length === 0 && <EmptyState text="No doctors match your search." />}
+        {!q && doctors.length === 0 && <EmptyState text="No doctors added yet." />}
       </div>
     </div>
   );
