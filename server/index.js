@@ -340,34 +340,51 @@ app.post("/api/push/subscribe", async (req, res) => {
 
 const BOOTSTRAP_TABS = ["Products", "Visits", "Clients", "Doctors", "OutreachLog", "Orders", "Reps", "Offers", "Samples", "PunchLog", "StockMovement"];
 
+// Google's Sheets API "read requests per minute PER USER" quota (60) is fixed
+// and not adjustable — and since this whole app authenticates as one shared
+// service account, that limit is split across every rep and manager
+// combined, not per person. Batching (above) cut this endpoint from 11
+// requests to 2; this cache cuts it further by letting concurrent sessions
+// polling within the same few seconds share one Sheets read instead of each
+// firing their own. Any write path passes ?fresh=true to skip the cache, so
+// a manager who just added something always sees it immediately.
+let bootstrapCache = null; // { data, timestamp }
+const BOOTSTRAP_CACHE_TTL_MS = 8000;
+
+async function buildBootstrapPayload() {
+  const [batch, rawSettings] = await Promise.all([
+    db.getAllRowsBatch(BOOTSTRAP_TABS),
+    db.getSettings(),
+  ]);
+  const {
+    Products: products, Visits: visits, Clients: clients, Doctors: doctors, OutreachLog: outreachLog,
+    Orders: orders, Reps: reps, Offers: offers, Samples: samples, PunchLog: punchLog, StockMovement: stockMovement,
+  } = batch;
+  const movementIndex = buildMovementIndex(stockMovement);
+  return {
+    products: products.map((p) => ({ ...parseProduct(p), avgMonthlyMovement: avgMonthlyMovementFor(p.name, movementIndex) })),
+    visits: visits.map(parseVisit).sort((a, b) => new Date(b.time) - new Date(a.time)),
+    clients,
+    doctors,
+    outreachLog: outreachLog.sort((a, b) => new Date(b.date) - new Date(a.date)),
+    orders: orders.map(parseOrder).sort((a, b) => new Date(b.date) - new Date(a.date)),
+    punchLog: punchLog.map(parsePunch).sort((a, b) => new Date(b.time) - new Date(a.time)),
+    repNames: reps.map((r) => r.name),
+    offers: offers.map(parseOffer),
+    settings: parseSettings(rawSettings),
+    samples: samples.sort((a, b) => new Date(b.date) - new Date(a.date)),
+  };
+}
+
 app.get("/api/bootstrap", async (req, res) => {
   try {
-    // One batched Sheets API request for all 11 tabs, instead of 11 separate
-    // ones — this endpoint gets polled every 20s per open session, so the
-    // request-count savings compound fast and are the main defense against
-    // "Read requests per minute" quota errors.
-    const [batch, rawSettings] = await Promise.all([
-      db.getAllRowsBatch(BOOTSTRAP_TABS),
-      db.getSettings(),
-    ]);
-    const {
-      Products: products, Visits: visits, Clients: clients, Doctors: doctors, OutreachLog: outreachLog,
-      Orders: orders, Reps: reps, Offers: offers, Samples: samples, PunchLog: punchLog, StockMovement: stockMovement,
-    } = batch;
-    const movementIndex = buildMovementIndex(stockMovement);
-    res.json({
-      products: products.map((p) => ({ ...parseProduct(p), avgMonthlyMovement: avgMonthlyMovementFor(p.name, movementIndex) })),
-      visits: visits.map(parseVisit).sort((a, b) => new Date(b.time) - new Date(a.time)),
-      clients,
-      doctors,
-      outreachLog: outreachLog.sort((a, b) => new Date(b.date) - new Date(a.date)),
-      orders: orders.map(parseOrder).sort((a, b) => new Date(b.date) - new Date(a.date)),
-      punchLog: punchLog.map(parsePunch).sort((a, b) => new Date(b.time) - new Date(a.time)),
-      repNames: reps.map((r) => r.name),
-      offers: offers.map(parseOffer),
-      settings: parseSettings(rawSettings),
-      samples: samples.sort((a, b) => new Date(b.date) - new Date(a.date)),
-    });
+    const wantsFresh = req.query.fresh === "true";
+    if (!wantsFresh && bootstrapCache && Date.now() - bootstrapCache.timestamp < BOOTSTRAP_CACHE_TTL_MS) {
+      return res.json(bootstrapCache.data);
+    }
+    const data = await buildBootstrapPayload();
+    bootstrapCache = { data, timestamp: Date.now() };
+    res.json(data);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

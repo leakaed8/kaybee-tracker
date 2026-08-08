@@ -27,7 +27,7 @@ import {
   POST_CALL_ANALYSIS, LEAG_PHILOSOPHY,
 } from "./repTraining.js";
 
-const POLL_INTERVAL_MS = 20000;
+const POLL_INTERVAL_MS = 30000; // Sheets API's per-user read quota is fixed and shared across every session — keep this conservative
 const LIST_DISPLAY_CAP = 200; // cap rendered rows so huge imported lists (30k+) don't freeze the browser — use search to narrow
 
 // ---------- main app ----------
@@ -67,9 +67,9 @@ export default function App() {
     setAuthState("out");
   };
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (opts) => {
     try {
-      const data = await api.bootstrap();
+      const data = await api.bootstrap(opts);
       setProducts(data.products);
       setVisits(data.visits);
       setClients(data.clients);
@@ -100,7 +100,7 @@ export default function App() {
     setSyncStatus("saving");
     try {
       const result = await fn();
-      await refresh();
+      await refresh({ fresh: true }); // skip the cache — the person who just wrote should see it immediately
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus(""), 1200);
       return result;

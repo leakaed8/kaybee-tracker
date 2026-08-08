@@ -14,7 +14,7 @@ export const api = {
   login: (passcode) => request("/login", { method: "POST", body: JSON.stringify({ passcode }) }),
   logout: () => request("/logout", { method: "POST" }),
   getSession: () => request("/session"),
-  bootstrap: () => request("/bootstrap"),
+  bootstrap: (opts) => request(opts?.fresh ? "/bootstrap?fresh=true" : "/bootstrap"),
   addProduct: (product) => request("/products", { method: "POST", body: JSON.stringify(product) }),
   removeProduct: (id) => request(`/products/${id}`, { method: "DELETE" }),
   importSampleInventory: () => request("/products/import-sample", { method: "POST" }),
