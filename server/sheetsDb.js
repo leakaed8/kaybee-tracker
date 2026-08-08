@@ -17,6 +17,7 @@ const SCHEMAS = {
   PunchLog: ["id", "repName", "type", "time", "coordsLat", "coordsLng"],
   StockMovement: ["id", "productName", "year", "month", "qty"],
   MonthlyDigests: ["id", "month", "status", "payload", "createdAt"],
+  FollowUps: ["id", "entityName", "entityType", "repName", "dueDate", "status", "visitId", "createdAt"],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];

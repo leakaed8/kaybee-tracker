@@ -405,6 +405,14 @@ const EXPIRY_ZONES = [
 // before they age into yellow/red.
 const isPushSales = (p) => p.zone.key === "green" && (p.slowMover || p.atRisk);
 
+const FOLLOWUP_PRESETS = [
+  { key: "2d", label: "In 2 days" },
+  { key: "3d", label: "In 3 days" },
+  { key: "1w", label: "In 1 week" },
+  { key: "2w", label: "In 2 weeks" },
+  { key: "1m", label: "In 1 month" },
+];
+
 function ExpiryView({ role, sorted, slowThreshold, repPhone, onRemove }) {
   const [activeZone, setActiveZone] = useState("red");
 
@@ -549,6 +557,9 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
   const [lastVisit, setLastVisit] = useState(null);
   const [showOrderPrompt, setShowOrderPrompt] = useState(false);
   const [showOrderBuilder, setShowOrderBuilder] = useState(false);
+  const [followUpStatus, setFollowUpStatus] = useState(null); // null | "set" | "skipped"
+  const [followUpSaving, setFollowUpSaving] = useState(false);
+  const [followUpError, setFollowUpError] = useState("");
   const [exportSheetId, setExportSheetId] = useState("");
   const [mentionedItems, setMentionedItems] = useState([]);
   const [itemQuery, setItemQuery] = useState("");
@@ -649,6 +660,26 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
     setShowOrderPrompt(true);
     setShowOrderBuilder(false);
+    setFollowUpStatus(null);
+    setFollowUpError("");
+  };
+
+  const scheduleFollowUp = async (presetKey) => {
+    setFollowUpSaving(true);
+    setFollowUpError("");
+    try {
+      await api.scheduleFollowUp({
+        entityName: lastVisit.client,
+        entityType,
+        presetKey,
+        visitId: lastVisit.id,
+      });
+      setFollowUpStatus("set");
+    } catch (e) {
+      setFollowUpError(e?.message || "Couldn't schedule follow-up.");
+    } finally {
+      setFollowUpSaving(false);
+    }
   };
 
   const todayVisits = visits.filter((v) => v.repName === repName && new Date(v.time).toDateString() === new Date().toDateString());
@@ -875,6 +906,39 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
           onCreateOrder={onCreateOrder}
           onDone={() => { setShowOrderBuilder(false); setShowOrderPrompt(false); }}
         />
+      )}
+
+      {lastVisit && followUpStatus === null && (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+          <div style={{ fontSize: 13.5, marginBottom: 10 }}>
+            Schedule a follow-up for <strong>{lastVisit.client}</strong>?
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {FOLLOWUP_PRESETS.map((p) => (
+              <button
+                key={p.key}
+                disabled={followUpSaving}
+                onClick={() => scheduleFollowUp(p.key)}
+                style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
+              >
+                {p.label}
+              </button>
+            ))}
+            <button
+              disabled={followUpSaving}
+              onClick={() => setFollowUpStatus("skipped")}
+              style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}
+            >
+              No follow-up needed
+            </button>
+          </div>
+          {followUpError && <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 8 }}>{followUpError}</div>}
+        </div>
+      )}
+      {followUpStatus === "set" && lastVisit && (
+        <div style={{ fontSize: 12.5, color: "#4C7A5E", marginBottom: 20 }}>
+          <Check size={12} style={{ verticalAlign: -1 }} /> Follow-up scheduled for {lastVisit.client} — you'll get a Telegram reminder when it's due.
+        </div>
       )}
 
       <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 10px", color: "#8A8272" }}>Today's visits ({todayVisits.length})</h3>

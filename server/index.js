@@ -15,6 +15,14 @@ app.use(express.json({ limit: "25mb" }));
 const TELEGRAM_WEBHOOK_SECRET = crypto.randomUUID();
 let telegramBotUsername = "";
 
+const FOLLOWUP_PRESETS = {
+  "2d": { label: "in 2 days", days: 2 },
+  "3d": { label: "in 3 days", days: 3 },
+  "1w": { label: "in 1 week", days: 7 },
+  "2w": { label: "in 2 weeks", days: 14 },
+  "1m": { label: "in 1 month", days: 30 },
+};
+
 const PORT = process.env.PORT || 3001;
 const IS_PROD = process.env.NODE_ENV === "production";
 const SESSION_SECRET = process.env.SESSION_SECRET || "kaybee-tracker-default-secret-change-me";
@@ -302,7 +310,12 @@ app.post("/api/telegram/webhook", async (req, res) => {
       }
       await telegram.sendMessage(chatId, "That link code wasn't recognized — generate a new one from Settings and try again.");
     } else if (update.callback_query) {
-      await handleDigestCallback(update.callback_query);
+      const data = update.callback_query.data || "";
+      if (data.startsWith("fu")) {
+        await handleFollowUpCallback(update.callback_query);
+      } else {
+        await handleDigestCallback(update.callback_query);
+      }
     }
   } catch (e) {
     console.error("telegram webhook error", e);
@@ -338,7 +351,7 @@ app.post("/api/push/subscribe", async (req, res) => {
   }
 });
 
-const BOOTSTRAP_TABS = ["Products", "Visits", "Clients", "Doctors", "OutreachLog", "Orders", "Reps", "Offers", "Samples", "PunchLog", "StockMovement"];
+const BOOTSTRAP_TABS = ["Products", "Visits", "Clients", "Doctors", "OutreachLog", "Orders", "Reps", "Offers", "Samples", "PunchLog", "StockMovement", "FollowUps"];
 
 // Google's Sheets API "read requests per minute PER USER" quota (60) is fixed
 // and not adjustable — and since this whole app authenticates as one shared
@@ -359,6 +372,7 @@ async function buildBootstrapPayload() {
   const {
     Products: products, Visits: visits, Clients: clients, Doctors: doctors, OutreachLog: outreachLog,
     Orders: orders, Reps: reps, Offers: offers, Samples: samples, PunchLog: punchLog, StockMovement: stockMovement,
+    FollowUps: followUps,
   } = batch;
   const movementIndex = buildMovementIndex(stockMovement);
   return {
@@ -373,6 +387,7 @@ async function buildBootstrapPayload() {
     offers: offers.map(parseOffer),
     settings: parseSettings(rawSettings),
     samples: samples.sort((a, b) => new Date(b.date) - new Date(a.date)),
+    followUps: followUps.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate)),
   };
 }
 
@@ -548,6 +563,32 @@ app.post("/api/visits", async (req, res) => {
       }));
     if (sampleRows.length) await db.appendRows("Samples", sampleRows);
     res.json(visit);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/followups", async (req, res) => {
+  try {
+    if (!req.repName) return res.status(403).json({ error: "Only reps can schedule follow-ups." });
+    const { entityName, entityType, presetKey, visitId } = req.body;
+    const preset = FOLLOWUP_PRESETS[presetKey];
+    if (!entityName || !entityType || !preset) {
+      return res.status(400).json({ error: "entityName, entityType and a valid presetKey are required" });
+    }
+    const followUp = {
+      id: `fu${crypto.randomUUID()}`,
+      entityName,
+      entityType,
+      repName: req.repName,
+      dueDate: addDaysToTodayStr(preset.days),
+      status: "pending",
+      visitId: visitId || "",
+      createdAt: new Date().toISOString(),
+    };
+    await db.appendRow("FollowUps", followUp);
+    res.json(followUp);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -1067,6 +1108,14 @@ function daysUntilFromToday(dateStr) {
   return Math.round((date - now) / 86400000);
 }
 
+// Same local-date-components approach as above, applied in reverse: builds a
+// "YYYY-MM-DD" string N days from today without a UTC round-trip.
+function addDaysToTodayStr(days) {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 const TIER_CADENCE_DAYS = { A: 14, B: 30, C: 60 };
 
 async function checkExpiryAndOverdueAlerts() {
@@ -1308,9 +1357,180 @@ async function checkMonthlyDigest() {
 }
 
 const MONTHLY_DIGEST_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+
+// --- Visit follow-ups ---------------------------------------------------
+// A rep can schedule a follow-up (2d/3d/1w/2w/1m from now) right after
+// logging a visit. When the due date arrives, the owning rep gets a
+// Telegram reminder with buttons to reschedule again (same presets) or stop
+// entirely. Each rep only ever sees their own follow-ups' reminders — the
+// reminder is sent to that rep's own linked Telegram chat, never anyone
+// else's — matching the existing per-rep data isolation.
+
+function followUpButtons(followUpId) {
+  return [
+    [
+      { text: "In 2 days", callback_data: `fu2d:${followUpId}` },
+      { text: "In 3 days", callback_data: `fu3d:${followUpId}` },
+    ],
+    [
+      { text: "In 1 week", callback_data: `fu1w:${followUpId}` },
+      { text: "In 2 weeks", callback_data: `fu2w:${followUpId}` },
+      { text: "In 1 month", callback_data: `fu1m:${followUpId}` },
+    ],
+    [{ text: "🚫 Not interested — stop", callback_data: `fustop:${followUpId}` }],
+  ];
+}
+
+async function checkFollowUpReminders() {
+  if (!telegram.isConfigured()) return;
+  try {
+    const [followUps, reps] = await Promise.all([db.getAllRows("FollowUps"), db.getAllRows("Reps")]);
+    const due = followUps.filter((f) => f.status === "pending" && daysUntilFromToday(f.dueDate) <= 0);
+    for (const f of due) {
+      const rep = reps.find((r) => r.name === f.repName);
+      if (!rep?.telegramChatId) continue;
+      try {
+        await telegram.sendMessage(
+          rep.telegramChatId,
+          `🔔 Follow-up time: visit <b>${escapeHtml(f.entityName)}</b> today.\n\nAfter your visit, when should the next follow-up be?`,
+          { inline_keyboard: followUpButtons(f.id) }
+        );
+        await db.updateRowById("FollowUps", f.id, { status: "reminded" });
+      } catch (e) {
+        console.error(`failed to send follow-up reminder for ${f.entityName}`, e);
+      }
+    }
+  } catch (e) {
+    console.error("checkFollowUpReminders failed", e);
+  }
+}
+
+async function handleFollowUpCallback(callbackQuery) {
+  const { id, data, message } = callbackQuery;
+  const [action, followUpId] = (data || "").split(":");
+  const followUps = await db.getAllRows("FollowUps");
+  const followUp = followUps.find((f) => f.id === followUpId);
+  if (!followUp) { await telegram.answerCallbackQuery(id, "This follow-up is no longer available."); return; }
+
+  if (action === "fustop") {
+    await db.updateRowById("FollowUps", followUp.id, { status: "stopped" });
+    await telegram.answerCallbackQuery(id, "Got it — no more follow-ups.");
+    if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `Marked ${followUp.entityName} as no longer interested. No more reminders.`);
+    return;
+  }
+
+  const preset = FOLLOWUP_PRESETS[action.replace(/^fu/, "")];
+  if (!preset) { await telegram.answerCallbackQuery(id, "Unknown action."); return; }
+
+  await db.updateRowById("FollowUps", followUp.id, { status: "done" });
+  const nextFollowUp = {
+    id: `fu${crypto.randomUUID()}`,
+    entityName: followUp.entityName,
+    entityType: followUp.entityType,
+    repName: followUp.repName,
+    dueDate: addDaysToTodayStr(preset.days),
+    status: "pending",
+    visitId: followUp.visitId,
+    createdAt: new Date().toISOString(),
+  };
+  await db.appendRow("FollowUps", nextFollowUp);
+  await telegram.answerCallbackQuery(id, `Rescheduled ${preset.label}.`);
+  if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `Follow-up with ${followUp.entityName} rescheduled ${preset.label}.`);
+}
+
+const FOLLOWUP_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+
+// --- Monthly visits + follow-ups summary ---------------------------------
+// Separate from the must-sell digest above (different topic, different
+// audience emphasis): each rep gets their own activity stats, and the
+// manager gets a full team rollup. All the source data is fetched once
+// up front and the per-rep stats are computed in-memory, rather than
+// looping a Sheets read per rep, to stay well under the fixed 60
+// reads/minute quota shared by the whole team.
+async function runMonthlyVisitsSummary(month) {
+  const [visits, orders, followUps, reps, settings] = await Promise.all([
+    db.getAllRows("Visits"),
+    db.getAllRows("Orders"),
+    db.getAllRows("FollowUps"),
+    db.getAllRows("Reps"),
+    db.getSettings(),
+  ]);
+
+  const [y, m] = month.split("-").map(Number);
+  const inMonth = (dateStr) => {
+    const d = new Date(dateStr);
+    return d.getFullYear() === y && d.getMonth() + 1 === m;
+  };
+
+  const statsByRep = {};
+  for (const rep of reps) {
+    const repVisits = visits.filter((v) => v.repName === rep.name && inMonth(v.time));
+    const repOrders = orders.filter((o) => o.repName === rep.name && inMonth(o.date));
+    const repFollowUps = followUps.filter((f) => f.repName === rep.name && inMonth(f.createdAt));
+    statsByRep[rep.name] = {
+      visits: repVisits.length,
+      orders: repOrders.length,
+      orderValue: repOrders.reduce((sum, o) => sum + (Number(o.total) || 0), 0),
+      followUpsScheduled: repFollowUps.length,
+      followUpsStopped: followUps.filter((f) => f.repName === rep.name && f.status === "stopped" && inMonth(f.createdAt)).length,
+      followUpsPending: followUps.filter((f) => f.repName === rep.name && (f.status === "pending" || f.status === "reminded")).length,
+    };
+  }
+
+  for (const rep of reps) {
+    if (!rep.telegramChatId) continue;
+    const s = statsByRep[rep.name];
+    const msg =
+      `📊 <b>Your ${month} summary</b>\n\n` +
+      `Visits logged: <b>${s.visits}</b>\n` +
+      `Orders placed: <b>${s.orders}</b> (${s.orderValue.toLocaleString()})\n` +
+      `Follow-ups scheduled: <b>${s.followUpsScheduled}</b>\n` +
+      `Follow-ups stopped: <b>${s.followUpsStopped}</b>\n` +
+      `Follow-ups still pending: <b>${s.followUpsPending}</b>`;
+    try {
+      await telegram.sendMessage(rep.telegramChatId, msg);
+    } catch (e) {
+      console.error(`failed to send monthly visits summary to rep ${rep.name}`, e);
+    }
+  }
+
+  if (settings.managerTelegramChatId) {
+    const lines = reps.map((rep) => {
+      const s = statsByRep[rep.name];
+      return `• <b>${escapeHtml(rep.name)}</b> — ${s.visits} visits, ${s.orders} orders (${s.orderValue.toLocaleString()}), ${s.followUpsScheduled} follow-ups (${s.followUpsPending} pending)`;
+    });
+    const teamMsg = `📊 <b>Team ${month} summary</b>\n\n${lines.join("\n") || "No reps linked yet."}`;
+    try {
+      await telegram.sendMessage(settings.managerTelegramChatId, teamMsg);
+    } catch (e) {
+      console.error("failed to send monthly team summary to manager", e);
+    }
+  }
+}
+
+const MONTHLY_VISITS_SUMMARY_DAY = 1; // same day as the must-sell digest, separate message
+async function checkMonthlyVisitsSummary() {
+  if (!telegram.isConfigured()) return;
+  try {
+    const now = new Date();
+    if (now.getDate() !== MONTHLY_VISITS_SUMMARY_DAY) return;
+    const settings = await db.getSettings();
+    const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    if (settings.lastMonthlyVisitsSummaryMonth === thisMonth) return;
+    await runMonthlyVisitsSummary(thisMonth);
+    await db.setSettings({ lastMonthlyVisitsSummaryMonth: thisMonth });
+  } catch (e) {
+    console.error("checkMonthlyVisitsSummary failed", e);
+  }
+}
+
 if (telegram.isConfigured()) {
   checkMonthlyDigest();
+  checkFollowUpReminders();
+  checkMonthlyVisitsSummary();
   setInterval(checkMonthlyDigest, MONTHLY_DIGEST_CHECK_INTERVAL_MS);
+  setInterval(checkFollowUpReminders, FOLLOWUP_CHECK_INTERVAL_MS);
+  setInterval(checkMonthlyVisitsSummary, MONTHLY_DIGEST_CHECK_INTERVAL_MS);
   telegram.getMe().then((me) => { telegramBotUsername = me.username; }).catch((e) => console.error("telegram getMe failed", e));
   if (process.env.RENDER_EXTERNAL_URL) {
     telegram.setWebhook(`${process.env.RENDER_EXTERNAL_URL}/api/telegram/webhook`, TELEGRAM_WEBHOOK_SECRET)

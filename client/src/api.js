@@ -54,4 +54,5 @@ export const api = {
   importStockMovement: (year, rows) => request("/stock-movement/import", { method: "POST", body: JSON.stringify({ year, rows }) }),
   getRepTelegramLinkCode: (id) => request(`/reps/${id}/telegram-link-code`, { method: "POST" }),
   getManagerTelegramLinkCode: () => request("/settings/telegram-link-code", { method: "POST" }),
+  scheduleFollowUp: (followUp) => request("/followups", { method: "POST", body: JSON.stringify(followUp) }),
 };
