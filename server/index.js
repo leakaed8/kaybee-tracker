@@ -160,6 +160,30 @@ function parseProduct(p) {
   return { ...p, qty: Number(p.qty) || 0, sold90: Number(p.sold90) || 0, price: Number(p.price) || 0 };
 }
 
+// Maps a normalized product name to its real average monthly movement,
+// computed from however many months of StockMovement data have been
+// uploaded so far (missing years just mean fewer months in the average,
+// not zero — a product with only 2023+2025 data still gets a real average
+// across those 24 months, it just doesn't include 2022/2024).
+function buildMovementIndex(rows) {
+  const index = new Map();
+  rows.forEach((r) => {
+    const key = String(r.productName || "").trim().toLowerCase();
+    if (!key) return;
+    const entry = index.get(key) || { total: 0, count: 0 };
+    entry.total += Number(r.qty) || 0;
+    entry.count += 1;
+    index.set(key, entry);
+  });
+  return index;
+}
+
+function avgMonthlyMovementFor(name, movementIndex) {
+  const entry = movementIndex.get(String(name || "").trim().toLowerCase());
+  if (!entry || entry.count === 0) return null;
+  return entry.total / entry.count;
+}
+
 function parseOrder(o) {
   return {
     id: o.id,
@@ -316,7 +340,7 @@ app.post("/api/push/subscribe", async (req, res) => {
 
 app.get("/api/bootstrap", async (req, res) => {
   try {
-    const [products, visits, clients, doctors, outreachLog, orders, reps, offers, rawSettings, samples, punchLog] = await Promise.all([
+    const [products, visits, clients, doctors, outreachLog, orders, reps, offers, rawSettings, samples, punchLog, stockMovement] = await Promise.all([
       db.getAllRows("Products"),
       db.getAllRows("Visits"),
       db.getAllRows("Clients"),
@@ -328,9 +352,11 @@ app.get("/api/bootstrap", async (req, res) => {
       db.getSettings(),
       db.getAllRows("Samples"),
       db.getAllRows("PunchLog"),
+      db.getAllRows("StockMovement"),
     ]);
+    const movementIndex = buildMovementIndex(stockMovement);
     res.json({
-      products: products.map(parseProduct),
+      products: products.map((p) => ({ ...parseProduct(p), avgMonthlyMovement: avgMonthlyMovementFor(p.name, movementIndex) })),
       visits: visits.map(parseVisit).sort((a, b) => new Date(b.time) - new Date(a.time)),
       clients,
       doctors,
@@ -1091,21 +1117,22 @@ if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
 // the manager's and each rep's message stay short, with buttons to drill
 // into either list's detail on demand.
 
-function turnoverPctFor(product) {
+// Prefers the real average from uploaded StockMovement history; falls back
+// to the 90-day-sales proxy for any product with no matching movement data.
+function turnoverPctFor(product, avgMonthlyMovement) {
   const qty = Number(product.qty) || 0;
-  const sold90 = Number(product.sold90) || 0;
   if (qty <= 0) return 0;
-  return Math.round((sold90 / qty) * 100);
+  const sold90Equivalent = avgMonthlyMovement != null ? avgMonthlyMovement * 3 : Number(product.sold90) || 0;
+  return Math.round((sold90Equivalent / qty) * 100);
 }
 
 // Projects whether current stock will clear before the item expires. Mirrors
-// isAtRisk in client/src/helpers.js; uses last-90-days sales as a stand-in
-// for "this year's movement" until real multi-year history is wired in.
-function isAtRiskFor(product, daysLeft) {
+// isAtRisk in client/src/helpers.js.
+function isAtRiskFor(product, daysLeft, avgMonthlyMovement) {
   if (daysLeft <= 0) return false;
   const qty = Number(product.qty) || 0;
   if (qty <= 0) return false;
-  const monthlyMovement = (Number(product.sold90) || 0) / 3;
+  const monthlyMovement = avgMonthlyMovement != null ? avgMonthlyMovement : (Number(product.sold90) || 0) / 3;
   const monthsToSellThrough = monthlyMovement > 0 ? qty / monthlyMovement : Infinity;
   const monthsUntilExpiry = daysLeft / 30.44;
   return monthsToSellThrough > monthsUntilExpiry;
@@ -1119,7 +1146,8 @@ const PICKUP_WINDOW_DAYS = 90; // 3 months
 const STRESS_WINDOW_DAYS = 365; // 1 year
 
 async function computeDigestLists(rawSettings) {
-  const products = await db.getAllRows("Products");
+  const [products, movementRows] = await Promise.all([db.getAllRows("Products"), db.getAllRows("StockMovement")]);
+  const movementIndex = buildMovementIndex(movementRows);
   const slowThreshold = rawSettings.slowThreshold !== undefined ? Number(rawSettings.slowThreshold) : 15;
 
   const pickup = [];
@@ -1128,10 +1156,11 @@ async function computeDigestLists(rawSettings) {
     if (!p.expiry) continue;
     const daysLeft = daysUntilFromToday(p.expiry);
     if (daysLeft < 0) continue; // already expired — nothing left to pick up or push
-    const item = { id: p.id, name: p.name, qty: Number(p.qty) || 0, expiry: p.expiry, daysLeft, turnover: turnoverPctFor(p) };
+    const avgMovement = avgMonthlyMovementFor(p.name, movementIndex);
+    const item = { id: p.id, name: p.name, qty: Number(p.qty) || 0, expiry: p.expiry, daysLeft, turnover: turnoverPctFor(p, avgMovement) };
     if (daysLeft <= PICKUP_WINDOW_DAYS) {
       pickup.push(item);
-    } else if (daysLeft <= STRESS_WINDOW_DAYS && (turnoverPctFor(p) < slowThreshold || isAtRiskFor(p, daysLeft))) {
+    } else if (daysLeft <= STRESS_WINDOW_DAYS && (turnoverPctFor(p, avgMovement) < slowThreshold || isAtRiskFor(p, daysLeft, avgMovement))) {
       stress.push(item);
     }
   }

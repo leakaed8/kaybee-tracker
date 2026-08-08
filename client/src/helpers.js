@@ -37,21 +37,26 @@ export const zoneFor = (product) => {
   return { key: "green", label: "Green zone", sub: "More than a year out", color: "#4C7A5E" };
 };
 
-export const isSlowMover = (product, slowThreshold) => turnoverPct(product.sold90, product.qty) < slowThreshold;
+// Once real Stock Movement history exists for a product (avgMonthlyMovement,
+// attached server-side in /api/bootstrap by matching product name against
+// uploaded monthly data), it replaces the 90-day-sales proxy everywhere
+// movement matters — turnover%, slow-mover, and at-risk all read from here.
+export const effectiveSold90 = (product) =>
+  product.avgMonthlyMovement != null ? product.avgMonthlyMovement * 3 : Number(product.sold90) || 0;
+
+export const isSlowMover = (product, slowThreshold) => turnoverPct(effectiveSold90(product), product.qty) < slowThreshold;
 
 // Projects whether current stock will clear before the item expires — an
 // early-warning signal independent of the red/yellow/green calendar zones,
 // since a product can look "safe" (green, >1yr out) today and still be
 // mathematically doomed to expire unsold if it's moving too slowly for how
-// much is left. Uses the last-90-days sales rate as a stand-in for "this
-// year's movement" until real multi-year history is wired in — swap that
-// input out once it's available, the rest of the projection stays the same.
+// much is left.
 export const isAtRisk = (product) => {
   const dLeft = daysUntil(product.expiry);
   if (dLeft <= 0) return false;
   const qty = Number(product.qty) || 0;
   if (qty <= 0) return false;
-  const monthlyMovement = (Number(product.sold90) || 0) / 3;
+  const monthlyMovement = product.avgMonthlyMovement != null ? product.avgMonthlyMovement : (Number(product.sold90) || 0) / 3;
   const monthsToSellThrough = monthlyMovement > 0 ? qty / monthlyMovement : Infinity;
   const monthsUntilExpiry = dLeft / 30.44;
   return monthsToSellThrough > monthsUntilExpiry;

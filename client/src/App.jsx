@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { api } from "./api.js";
 import {
-  daysUntil, fmtDate, turnoverPct, zoneFor, isSlowMover, isAtRisk, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
+  daysUntil, fmtDate, turnoverPct, zoneFor, isSlowMover, isAtRisk, effectiveSold90, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
   computeLeadScore,
 } from "./helpers.js";
 import {
@@ -455,7 +455,8 @@ function ExpiryView({ role, sorted, slowThreshold, repPhone, onRemove }) {
 
 function ProductRow({ product, repPhone, onRemove }) {
   const dLeft = daysUntil(product.expiry);
-  const turnover = turnoverPct(product.sold90, product.qty);
+  const turnover = turnoverPct(effectiveSold90(product), product.qty);
+  const hasRealMovement = product.avgMonthlyMovement != null;
   const pct = lifecyclePct(product);
   const [showConfirm, setShowConfirm] = useState(false);
 
@@ -497,7 +498,9 @@ function ProductRow({ product, repPhone, onRemove }) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
         <div className="kb-font-mono" style={{ fontSize: 11.5, color: "#8A8272", display: "flex", gap: 14 }}>
           <span><Clock size={11} style={{ verticalAlign: -1 }} /> {dLeft >= 0 ? `${dLeft}d left` : `expired ${Math.abs(dLeft)}d ago`}</span>
-          <span><TrendingDown size={11} style={{ verticalAlign: -1 }} /> {turnover}% turnover/90d</span>
+          <span title={hasRealMovement ? "Based on uploaded monthly sales history" : "Based on last 90 days only — upload Stock Movement history for a real figure"}>
+            <TrendingDown size={11} style={{ verticalAlign: -1 }} /> {turnover}% turnover/90d {hasRealMovement ? "(history)" : "(90d est.)"}
+          </span>
         </div>
         {(product.zone.key === "red" || product.slowMover || product.atRisk) && waLink && (
           <a href={waLink} target="_blank" rel="noreferrer" style={{
@@ -4128,7 +4131,7 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
           <input type="range" min="5" max="40" value={slowThreshold} onChange={(e) => setSlowThreshold(Number(e.target.value))} style={{ width: "100%" }} />
         </Field>
         <p style={{ fontSize: 11.5, color: "#8A8272", marginTop: 6 }}>
-          Formula: (units sold in last 90 days ÷ units in stock) × 100. Below this % is flagged slow-moving, regardless of expiry date.
+          Formula: (average monthly movement × 3 ÷ units in stock) × 100. Uses real Stock Movement history where uploaded, otherwise falls back to the last 90 days of sales. Below this % is flagged slow-moving, regardless of expiry date.
         </p>
       </div>
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
