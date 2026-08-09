@@ -903,6 +903,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
           visitId={lastVisit.id}
           products={products}
           offers={offers}
+          orders={orders}
           onCreateOrder={onCreateOrder}
           onDone={() => { setShowOrderBuilder(false); setShowOrderPrompt(false); }}
         />
@@ -1050,7 +1051,13 @@ function RepTelegramLinkSection() {
 }
 
 // ---------- Proforma invoice PDF ----------
-function downloadOrderPdf(order) {
+// stockWarnings: items whose requested qty exceeded stock and got capped at
+// save time — printed as a flagged section so the manager sees it even
+// though the rep saw the on-screen ⚠ and moved on. Each warning also lists
+// any other pharmacies with recent orders for the same product, since
+// Products.qty isn't live-decremented per order — two reps could both see
+// "40 in stock" and both order against it, and this is how that surfaces.
+function downloadOrderPdf(order, stockWarnings = []) {
   const doc = new jsPDF();
   doc.setFontSize(16);
   doc.text("KayBee Pharma — Proforma Invoice", 14, 18);
@@ -1068,11 +1075,38 @@ function downloadOrderPdf(order) {
     ]),
     foot: [["", "", "Total", Number(order.total).toFixed(2)]],
   });
+
+  if (stockWarnings.length > 0) {
+    let y = (doc.lastAutoTable?.finalY || 60) + 12;
+    doc.setTextColor(179, 58, 58);
+    doc.setFontSize(12);
+    doc.text("Stock warning — for Head of Med Reps", 14, y);
+    y += 7;
+    doc.setFontSize(9.5);
+    doc.setTextColor(90, 40, 40);
+    stockWarnings.forEach((w) => {
+      const lines = [
+        `${w.productName}: pharmacy ordered ${w.requestedQty}, only ${w.cappedQty} in stock — order saved at ${w.cappedQty} (max available).`,
+        w.cappedQty > 0
+          ? `All remaining stock of this item has been allocated to ${order.clientName}.`
+          : `No stock was available — this item was removed from the order entirely.`,
+        `DOUBLE CHECK if any other pharmacies have also ordered this item:`,
+        ...(w.otherOrders.length > 0
+          ? w.otherOrders.map((o) => `  - ${o.clientName} — ${o.qty} units on ${new Date(o.date).toLocaleDateString("en-GB")}`)
+          : [`  - No other recent orders of this item found in the app — confirm manually since stock may already be committed elsewhere.`]),
+      ];
+      const wrapped = doc.splitTextToSize(lines.join("\n"), 180);
+      doc.text(wrapped, 14, y);
+      y += wrapped.length * 5 + 6;
+    });
+    doc.setTextColor(0, 0, 0);
+  }
+
   doc.save(`order-${order.clientName.replace(/\s+/g, "_")}-${order.date.slice(0, 10)}.pdf`);
 }
 
 // ---------- Order Builder (used from Check-In) ----------
-function OrderBuilder({ clientName, visitId, products, offers, onCreateOrder, onDone }) {
+function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateOrder, onDone }) {
   const [productQuery, setProductQuery] = useState("");
   const [qty, setQty] = useState("");
   const [items, setItems] = useState([]);
@@ -1145,15 +1179,44 @@ function OrderBuilder({ clientName, visitId, products, offers, onCreateOrder, on
     setError("");
     setSaving(true);
     try {
+      // An item ordered above what's in stock gets saved at the max
+      // available instead — the on-screen ⚠ already told the rep, this is
+      // the point where it actually gets enforced rather than just shown.
+      const stockWarnings = [];
+      const finalItems = [];
+      for (const it of items) {
+        if (it.isFree || it.qty <= it.availableQty) {
+          finalItems.push(it);
+          continue;
+        }
+        const cappedQty = Math.max(0, it.availableQty);
+        const otherOrders = (orders || [])
+          .filter((o) => o.clientName !== clientName && (o.items || []).some((oi) => oi.productId === it.productId))
+          .sort((a, b) => new Date(b.date) - new Date(a.date))
+          .slice(0, 5)
+          .map((o) => ({
+            clientName: o.clientName,
+            qty: o.items.find((oi) => oi.productId === it.productId)?.qty || 0,
+            date: o.date,
+          }));
+        stockWarnings.push({ productName: it.name, requestedQty: it.qty, cappedQty, otherOrders });
+        if (cappedQty > 0) finalItems.push({ ...it, qty: cappedQty });
+      }
+      if (finalItems.length === 0) {
+        setError("None of the items in this order have stock available.");
+        setSaving(false);
+        return;
+      }
+      const finalTotal = finalItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
       const payload = {
         clientName,
         visitId,
-        items: items.map(({ productId, name, qty, unitPrice, isFree, originalPrice }) => ({
+        items: finalItems.map(({ productId, name, qty, unitPrice, isFree, originalPrice }) => ({
           productId, name, qty, unitPrice, isFree: !!isFree, originalPrice: originalPrice || 0,
         })),
       };
       const created = await onCreateOrder(payload);
-      downloadOrderPdf(created || { ...payload, date: new Date().toISOString(), total });
+      downloadOrderPdf(created || { ...payload, date: new Date().toISOString(), total: finalTotal }, stockWarnings);
       onDone();
     } catch (e) {
       setError(e.message || "Couldn't save the order.");
