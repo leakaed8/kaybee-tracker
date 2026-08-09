@@ -531,6 +531,43 @@ app.post("/api/stock-movement/import", requireManager, async (req, res) => {
   }
 });
 
+// ---------- Pharmacy sales ledger (drives the Telegram "pick up" list) ----
+// A snapshot of which pharmacy holds how many units of which expiry-dated
+// batch — net of any returns — computed client-side from an exported sales
+// ledger and uploaded here as a full replacement each time (not additive
+// like Stock Movement, since each export is already the full picture as of
+// now).
+app.get("/api/pharmacy-sales/status", requireManager, async (req, res) => {
+  try {
+    const rows = await db.getAllRows("PharmacySales");
+    res.json({ rowCount: rows.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/pharmacy-sales/import", requireManager, async (req, res) => {
+  try {
+    const { rows } = req.body;
+    if (!Array.isArray(rows)) return res.status(400).json({ error: "rows is required" });
+    const cleanRows = rows
+      .filter((r) => r.productName && r.pharmacyName && r.expiry)
+      .map((r) => ({
+        id: `ps${crypto.randomUUID()}`,
+        productName: String(r.productName).trim(),
+        pharmacyName: String(r.pharmacyName).trim(),
+        expiry: r.expiry,
+        qty: Number(r.qty) || 0,
+      }));
+    await db.replaceAllRows("PharmacySales", cleanRows);
+    res.json({ ok: true, count: cleanRows.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/visits", async (req, res) => {
   try {
     const { client, notes, coords, mentionedItems } = req.body;
@@ -1216,67 +1253,100 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-const PICKUP_WINDOW_DAYS = 90; // 3 months
+const PICKUP_WINDOW_DAYS = 90; // 3 months out
+const PICKUP_GRACE_DAYS = -30; // still surface a batch briefly after it expires
 const STRESS_WINDOW_DAYS = 365; // 1 year
 
+// Pick-up items come from the uploaded PharmacySales ledger — real sales of
+// specific expiry-dated batches to specific pharmacies — not from KayBee's
+// own warehouse stock. That's the point: it tells a rep exactly which
+// pharmacy is sitting on stock that's about to expire, not just that some
+// SKU somewhere is expiring soon. Matched against Clients by name (trimmed,
+// case-insensitive) to find the assignedRep; unmatched names still show up
+// for the manager but can't be routed to a specific rep.
 async function computeDigestLists(rawSettings) {
-  const [products, movementRows] = await Promise.all([db.getAllRows("Products"), db.getAllRows("StockMovement")]);
+  const [products, movementRows, pharmacySales, clients] = await Promise.all([
+    db.getAllRows("Products"),
+    db.getAllRows("StockMovement"),
+    db.getAllRows("PharmacySales"),
+    db.getAllRows("Clients"),
+  ]);
   const movementIndex = buildMovementIndex(movementRows);
   const slowThreshold = rawSettings.slowThreshold !== undefined ? Number(rawSettings.slowThreshold) : 15;
+  const clientIndex = new Map(clients.map((c) => [String(c.name || "").trim().toLowerCase(), c]));
 
   const pickup = [];
+  for (const row of pharmacySales) {
+    if (!row.expiry) continue;
+    const daysLeft = daysUntilFromToday(row.expiry);
+    if (daysLeft < PICKUP_GRACE_DAYS || daysLeft > PICKUP_WINDOW_DAYS) continue;
+    const client = clientIndex.get(String(row.pharmacyName || "").trim().toLowerCase());
+    pickup.push({
+      id: row.id,
+      productName: row.productName,
+      pharmacyName: row.pharmacyName,
+      qty: Number(row.qty) || 0,
+      expiry: row.expiry,
+      daysLeft,
+      assignedRep: client?.assignedRep || null,
+    });
+  }
+  pickup.sort((a, b) => a.daysLeft - b.daysLeft);
+
   const stress = [];
   for (const p of products) {
     if (!p.expiry) continue;
     const daysLeft = daysUntilFromToday(p.expiry);
-    if (daysLeft < 0) continue; // already expired — nothing left to pick up or push
+    if (daysLeft < 0) continue; // already expired — nothing left to push
     const avgMovement = avgMonthlyMovementFor(p.name, movementIndex);
-    const item = { id: p.id, name: p.name, qty: Number(p.qty) || 0, expiry: p.expiry, daysLeft, turnover: turnoverPctFor(p, avgMovement) };
-    if (daysLeft <= PICKUP_WINDOW_DAYS) {
-      pickup.push(item);
-    } else if (daysLeft <= STRESS_WINDOW_DAYS && (turnoverPctFor(p, avgMovement) < slowThreshold || isAtRiskFor(p, daysLeft, avgMovement))) {
-      stress.push(item);
+    if (daysLeft <= STRESS_WINDOW_DAYS && (turnoverPctFor(p, avgMovement) < slowThreshold || isAtRiskFor(p, daysLeft, avgMovement))) {
+      stress.push({ id: p.id, name: p.name, qty: Number(p.qty) || 0, expiry: p.expiry, daysLeft, turnover: turnoverPctFor(p, avgMovement) });
     }
   }
-  pickup.sort((a, b) => a.daysLeft - b.daysLeft);
   stress.sort((a, b) => a.daysLeft - b.daysLeft);
   return { pickup, stress };
 }
 
-function formatSummaryMessage({ pickup, stress }) {
-  if (pickup.length === 0 && stress.length === 0) {
+// forRepName narrows the pick-up count to that rep's own assigned
+// pharmacies; omit it (manager view) to count every pick-up item.
+function formatSummaryMessage({ pickup, stress }, forRepName) {
+  const pickupCount = forRepName ? pickup.filter((it) => it.assignedRep === forRepName).length : pickup.length;
+  if (pickupCount === 0 && stress.length === 0) {
     return "No items to flag this month — nothing is near enough to expiry or slow enough to need action.";
   }
   return (
     `📋 <b>This month's focus</b>\n\n` +
-    `📦 <b>${pickup.length}</b> item${pickup.length === 1 ? "" : "s"} to pick up from pharmacies (expiring within 3 months)\n` +
+    `📦 <b>${pickupCount}</b> item${pickupCount === 1 ? "" : "s"} to pick up from pharmacies (expiring within 3 months)\n` +
     `📣 <b>${stress.length}</b> item${stress.length === 1 ? "" : "s"} to stress-sell (expiring within a year, moving slowly)\n\n` +
     `Tap a list below for details.`
   );
 }
 
-function formatCategoryDetail(items, title) {
+function formatCategoryDetail(items, title, isPickup) {
   if (items.length === 0) return `${title}: nothing to show.`;
   const lines = items.slice(0, 40).map((it) =>
-    `• <b>${escapeHtml(it.name)}</b> — ${it.qty} units, ${it.daysLeft}d to expiry, ${it.turnover}% turnover/90d`
+    isPickup
+      ? `• <b>${escapeHtml(it.productName)}</b> — ${it.qty} units at <b>${escapeHtml(it.pharmacyName)}</b>, ${it.daysLeft}d to expiry`
+      : `• <b>${escapeHtml(it.name)}</b> — ${it.qty} units, ${it.daysLeft}d to expiry, ${it.turnover}% turnover/90d`
   );
   const more = items.length > 40 ? `\n…and ${items.length - 40} more.` : "";
   return `${title} (${items.length})\n\n${lines.join("\n")}${more}`;
 }
 
-function categoryButtons(digestId, { pickup, stress }) {
+function categoryButtons(digestId, { pickup, stress }, forRepName) {
+  const pickupCount = forRepName ? pickup.filter((it) => it.assignedRep === forRepName).length : pickup.length;
   return [
-    { text: `📦 Pick up (${pickup.length})`, callback_data: `pickup:${digestId}` },
+    { text: `📦 Pick up (${pickupCount})`, callback_data: `pickup:${digestId}` },
     { text: `📣 Stress to sell (${stress.length})`, callback_data: `stress:${digestId}` },
   ];
 }
 
 async function dispatchDigestToReps(digestId, lists) {
   const reps = await db.getAllRows("Reps");
-  const message = formatSummaryMessage(lists);
-  const replyMarkup = { inline_keyboard: [categoryButtons(digestId, lists)] };
   for (const rep of reps) {
     if (!rep.telegramChatId) continue;
+    const message = formatSummaryMessage(lists, rep.name);
+    const replyMarkup = { inline_keyboard: [categoryButtons(digestId, lists, rep.name)] };
     try {
       await telegram.sendMessage(rep.telegramChatId, message, replyMarkup);
     } catch (e) {
@@ -1318,6 +1388,18 @@ async function runMonthlyDigest(month) {
   });
 }
 
+// Looks up who's tapping a button so pick-up drill-downs can be scoped to
+// that person: the manager sees every pharmacy, a rep sees only their own.
+async function resolveTelegramRequester(chatId) {
+  if (!chatId) return null;
+  const [reps, settings] = await Promise.all([db.getAllRows("Reps"), db.getSettings()]);
+  if (settings.managerTelegramChatId && String(settings.managerTelegramChatId) === String(chatId)) {
+    return { role: "manager" };
+  }
+  const rep = reps.find((r) => String(r.telegramChatId) === String(chatId));
+  return rep ? { role: "rep", repName: rep.name } : null;
+}
+
 async function handleDigestCallback(callbackQuery) {
   const { id, data, message } = callbackQuery;
   const [action, digestId] = (data || "").split(":");
@@ -1330,7 +1412,14 @@ async function handleDigestCallback(callbackQuery) {
   if (action === "pickup" || action === "stress") {
     await telegram.answerCallbackQuery(id, "Here's the list");
     const title = action === "pickup" ? "📦 Pick up from pharmacies" : "📣 Stress to sell";
-    if (message?.chat?.id) await telegram.sendMessage(message.chat.id, formatCategoryDetail(lists[action], title));
+    if (message?.chat?.id) {
+      let items = lists[action];
+      if (action === "pickup") {
+        const requester = await resolveTelegramRequester(message.chat.id);
+        if (requester?.role === "rep") items = items.filter((it) => it.assignedRep === requester.repName);
+      }
+      await telegram.sendMessage(message.chat.id, formatCategoryDetail(items, title, action === "pickup"));
+    }
     return;
   }
 

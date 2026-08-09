@@ -18,6 +18,7 @@ const SCHEMAS = {
   StockMovement: ["id", "productName", "year", "month", "qty"],
   MonthlyDigests: ["id", "month", "status", "payload", "createdAt"],
   FollowUps: ["id", "entityName", "entityType", "repName", "dueDate", "status", "visitId", "createdAt"],
+  PharmacySales: ["id", "productName", "pharmacyName", "expiry", "qty"],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];

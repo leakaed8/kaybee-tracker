@@ -4201,6 +4201,167 @@ function StockMovementImportSection() {
   );
 }
 
+const guessColumn = (headers, candidates) =>
+  headers.find((h) => candidates.includes(h.trim().toLowerCase())) || "";
+
+// Powers the Telegram "pick up" list: instead of guessing from KayBee's own
+// warehouse stock, this reads an actual sales ledger (product + which
+// pharmacy it was sold to + that batch's expiry date) so the message can
+// tell a rep exactly which pharmacy to visit. Net units still with each
+// pharmacy = sold (Type "IV") minus any returns (Type "CR") — purchases and
+// warehouse-only transfers are ignored since they never reached a pharmacy.
+function PharmacyPickupImportSection() {
+  const [status, setStatus] = useState(null); // { rowCount }
+  const [headers, setHeaders] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [typeCol, setTypeCol] = useState("");
+  const [nameCol, setNameCol] = useState("");
+  const [pharmacyCol, setPharmacyCol] = useState("");
+  const [qtyCol, setQtyCol] = useState("");
+  const [expiryCol, setExpiryCol] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+
+  const load = () => api.getPharmacySalesStatus().then(setStatus).catch((e) => setError(e.message));
+  useEffect(() => { load(); }, []);
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setError(""); setResult(null);
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: "array", cellDates: true });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+        const headerRow = (json[0] || []).map((h, i) => (h === "" ? `Column ${i + 1}` : String(h)));
+        const dataRows = json.slice(1).filter((r) => r.some((cell) => cell !== ""));
+        setHeaders(headerRow);
+        setRows(dataRows);
+        setTypeCol(guessColumn(headerRow, ["type"]));
+        setNameCol(guessColumn(headerRow, ["description", "product", "product name", "item"]));
+        setPharmacyCol(guessColumn(headerRow, ["third", "pharmacy", "customer", "client"]));
+        setQtyCol(guessColumn(headerRow, ["quantity", "qty"]));
+        setExpiryCol(guessColumn(headerRow, ["expiry", "expiration", "expiry date"]));
+      } catch (err) {
+        setError("Couldn't read that file. Make sure it's a valid Excel file.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const canImport = typeCol && nameCol && pharmacyCol && qtyCol && expiryCol && rows.length > 0;
+
+  const doImport = async () => {
+    const typeIdx = headers.indexOf(typeCol);
+    const nameIdx = headers.indexOf(nameCol);
+    const pharmacyIdx = headers.indexOf(pharmacyCol);
+    const qtyIdx = headers.indexOf(qtyCol);
+    const expiryIdx = headers.indexOf(expiryCol);
+
+    const totals = new Map();
+    rows.forEach((r) => {
+      const type = String(r[typeIdx] ?? "").trim().toUpperCase();
+      if (!["IV", "CR"].includes(type)) return; // skip purchases (PU) and warehouse-only transfers (DE)
+      const productName = String(r[nameIdx] ?? "").trim();
+      const pharmacyName = String(r[pharmacyIdx] ?? "").trim();
+      if (!productName || !pharmacyName) return;
+      const expiry = parseExcelCellDate(r[expiryIdx]);
+      if (!expiry) return;
+      const rawQty = Number(r[qtyIdx]);
+      if (isNaN(rawQty)) return;
+      // IV rows are already negative (units left the warehouse) so -rawQty
+      // adds the sold amount; CR rows are positive (units came back) so
+      // -rawQty subtracts the return — same formula covers both.
+      const key = `${productName}::${pharmacyName}::${expiry}`;
+      const existing = totals.get(key) || { productName, pharmacyName, expiry, qty: 0 };
+      existing.qty -= rawQty;
+      totals.set(key, existing);
+    });
+
+    const out = [];
+    totals.forEach(({ productName, pharmacyName, expiry, qty }) => {
+      if (qty <= 0) return;
+      out.push({ productName, pharmacyName, expiry, qty: Math.round(qty) });
+    });
+
+    setImporting(true); setError("");
+    try {
+      const res = await api.importPharmacySales(out);
+      setResult({ count: res.count });
+      setHeaders([]); setRows([]);
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Pharmacy pick-up list source</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Upload your sales ledger (product, which pharmacy it was sold to, and that batch's expiry date). The monthly Telegram "pick up" list is built from this — items whose sold batch expires within about 3 months — so each rep is told exactly which of their pharmacies to visit, not just which product is expiring somewhere. Re-uploading replaces the whole list with the new export.
+      </p>
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
+      {result && (
+        <div style={{ fontSize: 12.5, color: "#4C7A5E", marginBottom: 10, display: "flex", alignItems: "center", gap: 5 }}>
+          <Check size={14} /> Imported {result.count} pharmacy/batch records.
+        </div>
+      )}
+      <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 10 }}>
+        {status ? `Currently loaded: ${status.rowCount.toLocaleString()} pharmacy/batch records.` : "Loading current status…"}
+      </div>
+
+      <input type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ fontSize: 12.5, marginBottom: 10 }} />
+      {headers.length > 0 && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(160px,1fr))", gap: 10, marginBottom: 10 }}>
+            <Field label="Transaction type column">
+              <select value={typeCol} onChange={(e) => setTypeCol(e.target.value)} style={inputStyle}>
+                <option value="">Select…</option>
+                {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </Field>
+            <Field label="Product name column">
+              <select value={nameCol} onChange={(e) => setNameCol(e.target.value)} style={inputStyle}>
+                <option value="">Select…</option>
+                {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </Field>
+            <Field label="Pharmacy name column">
+              <select value={pharmacyCol} onChange={(e) => setPharmacyCol(e.target.value)} style={inputStyle}>
+                <option value="">Select…</option>
+                {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </Field>
+            <Field label="Quantity column">
+              <select value={qtyCol} onChange={(e) => setQtyCol(e.target.value)} style={inputStyle}>
+                <option value="">Select…</option>
+                {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </Field>
+            <Field label="Expiry date column">
+              <select value={expiryCol} onChange={(e) => setExpiryCol(e.target.value)} style={inputStyle}>
+                <option value="">Select…</option>
+                {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </Field>
+          </div>
+          <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 10 }}>{rows.length.toLocaleString()} rows detected in the file.</div>
+        </>
+      )}
+      <button disabled={!canImport || importing} onClick={doImport} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: canImport ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+        {importing ? "Importing…" : "Import pick-up list"}
+      </button>
+    </div>
+  );
+}
+
 // ---------- Settings ----------
 function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer }) {
   return (
@@ -4220,6 +4381,8 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
       {role === "manager" && <ExcelImportSection onImport={onBulkImport} productCount={productCount} />}
 
       {role === "manager" && <StockMovementImportSection />}
+
+      {role === "manager" && <PharmacyPickupImportSection />}
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
         <Field label={`Slow-mover threshold: flag if turnover falls below ${slowThreshold}% of stock sold per 90 days`}>
           <input type="range" min="5" max="40" value={slowThreshold} onChange={(e) => setSlowThreshold(Number(e.target.value))} style={{ width: "100%" }} />

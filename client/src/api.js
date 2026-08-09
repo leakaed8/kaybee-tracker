@@ -55,4 +55,6 @@ export const api = {
   getRepTelegramLinkCode: (id) => request(`/reps/${id}/telegram-link-code`, { method: "POST" }),
   getManagerTelegramLinkCode: () => request("/settings/telegram-link-code", { method: "POST" }),
   scheduleFollowUp: (followUp) => request("/followups", { method: "POST", body: JSON.stringify(followUp) }),
+  getPharmacySalesStatus: () => request("/pharmacy-sales/status"),
+  importPharmacySales: (rows) => request("/pharmacy-sales/import", { method: "POST", body: JSON.stringify({ rows }) }),
 };
