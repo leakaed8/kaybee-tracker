@@ -556,8 +556,12 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
   const [locating, setLocating] = useState(false);
   const [locError, setLocError] = useState("");
   const [lastVisit, setLastVisit] = useState(null);
-  const [showOrderPrompt, setShowOrderPrompt] = useState(false);
-  const [showOrderBuilder, setShowOrderBuilder] = useState(false);
+  // The visit-logging flow is one step at a time instead of one long
+  // scrolling page: checkin -> orderPrompt -> order (only if "yes") ->
+  // followup -> done. Punch in/out and the reference lists below (today's
+  // visits, recent orders) sit outside this flow since they aren't part of
+  // logging any one specific visit.
+  const [step, setStep] = useState("checkin");
   const [followUpStatus, setFollowUpStatus] = useState(null); // null | "set" | "skipped"
   const [followUpSaving, setFollowUpSaving] = useState(false);
   const [followUpError, setFollowUpError] = useState("");
@@ -665,15 +669,25 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     );
   };
 
+  const [visitError, setVisitError] = useState("");
+  const [saving, setSaving] = useState(false);
+
   const submit = async () => {
-    const visitClient = client;
-    const created = await onAddVisit({ client, notes, coords, mentionedItems });
-    setLastVisit(created || { client: visitClient });
-    setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
-    setShowOrderPrompt(true);
-    setShowOrderBuilder(false);
-    setFollowUpStatus(null);
-    setFollowUpError("");
+    setVisitError("");
+    setSaving(true);
+    try {
+      const visitClient = client;
+      const created = await onAddVisit({ client, notes, coords, mentionedItems });
+      setLastVisit(created || { client: visitClient });
+      setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
+      setFollowUpStatus(null);
+      setFollowUpError("");
+      setStep("orderPrompt");
+    } catch (e) {
+      setVisitError(e?.message || "Couldn't save the visit.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const scheduleFollowUp = async (presetKey) => {
@@ -687,11 +701,32 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
         visitId: lastVisit.id,
       });
       setFollowUpStatus("set");
+      setStep("done");
     } catch (e) {
       setFollowUpError(e?.message || "Couldn't schedule follow-up.");
     } finally {
       setFollowUpSaving(false);
     }
+  };
+
+  const skipFollowUp = () => {
+    setFollowUpStatus("skipped");
+    setStep("done");
+  };
+
+  const startNewVisit = () => {
+    setLastVisit(null);
+    setFollowUpStatus(null);
+    setFollowUpError("");
+    setVisitError("");
+    setStep("checkin");
+  };
+
+  const STEP_INFO = {
+    checkin: { n: 1, title: "Log the visit" },
+    orderPrompt: { n: 2, title: "Did they place an order?" },
+    order: { n: 3, title: "Order details" },
+    followup: { n: 4, title: "Schedule a follow-up" },
   };
 
   const todayVisits = visits.filter((v) => v.repName === repName && new Date(v.time).toDateString() === new Date().toDateString());
@@ -734,187 +769,206 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
         </button>
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-        <button onClick={() => { setEntityType("pharmacy"); setClient(""); }} style={{
-          flex: 1, padding: "8px 14px", borderRadius: 8, border: entityType === "pharmacy" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
-          background: entityType === "pharmacy" ? "#4C7A5E" : "#fff", color: entityType === "pharmacy" ? "#FAF7F2" : "#1F2A24",
-        }}>
-          Pharmacy
-        </button>
-        <button onClick={() => { setEntityType("doctor"); setClient(""); }} style={{
-          flex: 1, padding: "8px 14px", borderRadius: 8, border: entityType === "doctor" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
-          background: entityType === "doctor" ? "#4C7A5E" : "#fff", color: entityType === "doctor" ? "#FAF7F2" : "#1F2A24",
-        }}>
-          Doctor
-        </button>
-      </div>
-
-      <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
-        <Field label={entityType === "pharmacy" ? "Pharmacy name" : "Doctor name"}>
-          <input
-            value={client}
-            onChange={(e) => setClient(e.target.value)}
-            placeholder={entityType === "pharmacy" ? "e.g. Pharmacie Al Nour" : "e.g. Dr. Nour Khalil"}
-            list="checkin-client-options"
-            style={{ ...inputStyle, marginBottom: 10 }}
-          />
-          <datalist id="checkin-client-options">
-            {nameOptions.map((c) => <option key={c.id} value={c.name} />)}
-          </datalist>
-        </Field>
-        {otherRepWarning && (
-          <div style={{ background: "#FBF0F0", border: "1px solid #E5B8B0", color: "#7A3B3B", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 10, fontWeight: 500 }}>
-            ⚠ {client} is assigned to <strong>{otherRepWarning}</strong> — you're about to visit another rep's pharmacy.
+      {step !== "done" && (
+        <>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "#8A8272" }}>Step {STEP_INFO[step].n} of 4</span>
+            <span style={{ fontSize: 14, fontWeight: 600 }}>{STEP_INFO[step].title}</span>
           </div>
-        )}
-        <Field label="Visit notes">
-          <div style={{ position: "relative" }}>
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="What was discussed, orders taken, objections…"
-              rows={3}
-              style={{ ...inputStyle, marginBottom: 8, resize: "vertical", paddingRight: 40 }}
-            />
-            {SpeechRecognitionClass && (
-              <button
-                type="button"
-                onClick={toggleDictation}
-                title={listening ? "Stop dictation" : "Dictate notes"}
-                style={{
-                  position: "absolute", top: 6, right: 6, width: 28, height: 28, borderRadius: 6,
-                  border: "1px solid #E5DFD3", background: listening ? "#B33A3A" : "#fff",
-                  color: listening ? "#FAF7F2" : "#5B5445", fontSize: 13, lineHeight: 1,
-                }}
-              >
-                🎙
-              </button>
-            )}
-          </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
-            {NOTE_TEMPLATES.map((t) => (
-              <button
-                type="button"
-                key={t}
-                onClick={() => appendTemplate(t)}
-                style={{ fontSize: 11, padding: "4px 9px", borderRadius: 12, border: "1px solid #E5DFD3", background: "#FAF7F2", color: "#5B5445" }}
-              >
-                + {t}
-              </button>
+          <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
+            {["checkin", "orderPrompt", "order", "followup"].map((s) => (
+              <div key={s} style={{ flex: 1, height: 4, borderRadius: 2, background: STEP_INFO[s].n <= STEP_INFO[step].n ? "#4C7A5E" : "#E5DFD3" }} />
             ))}
           </div>
-        </Field>
+        </>
+      )}
 
-        {entityType === "doctor" && (
-          <Field label="Items mentioned during visit">
-            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+      {step === "checkin" && (
+        <>
+          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            <button onClick={() => { setEntityType("pharmacy"); setClient(""); }} style={{
+              flex: 1, padding: "8px 14px", borderRadius: 8, border: entityType === "pharmacy" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+              background: entityType === "pharmacy" ? "#4C7A5E" : "#fff", color: entityType === "pharmacy" ? "#FAF7F2" : "#1F2A24",
+            }}>
+              Pharmacy
+            </button>
+            <button onClick={() => { setEntityType("doctor"); setClient(""); }} style={{
+              flex: 1, padding: "8px 14px", borderRadius: 8, border: entityType === "doctor" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+              background: entityType === "doctor" ? "#4C7A5E" : "#fff", color: entityType === "doctor" ? "#FAF7F2" : "#1F2A24",
+            }}>
+              Doctor
+            </button>
+          </div>
+
+          <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+            <Field label={entityType === "pharmacy" ? "Pharmacy name" : "Doctor name"}>
               <input
-                value={itemQuery}
-                onChange={(e) => setItemQuery(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addMentionedItem(); } }}
-                placeholder="Search product…"
-                list="checkin-item-options"
-                style={{ ...inputStyle, flex: 1 }}
+                value={client}
+                onChange={(e) => setClient(e.target.value)}
+                placeholder={entityType === "pharmacy" ? "e.g. Pharmacie Al Nour" : "e.g. Dr. Nour Khalil"}
+                list="checkin-client-options"
+                style={{ ...inputStyle, marginBottom: 10 }}
               />
-              <datalist id="checkin-item-options">
-                {products.map((p) => <option key={p.id} value={p.name} />)}
+              <datalist id="checkin-client-options">
+                {nameOptions.map((c) => <option key={c.id} value={c.name} />)}
               </datalist>
-              <button
-                type="button"
-                onClick={addMentionedItem}
-                disabled={!matchedItem}
-                style={{
-                  padding: "8px 14px", borderRadius: 8, border: "none", whiteSpace: "nowrap",
-                  background: matchedItem ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
-                }}
-              >
-                Add item
-              </button>
-            </div>
-            {mentionedItems.length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
-                {mentionedItems.map((it) => (
-                  <div key={it.productId} style={{
-                    display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, fontSize: 12,
-                    background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 10, padding: "6px 8px 6px 10px",
-                  }}>
-                    <span style={{ fontWeight: 500 }}>{it.name}</span>
-
-                    {it.sampleStatus === "gave" && (
-                      <span style={{ fontSize: 10.5, color: "#4C7A5E", fontWeight: 600 }}>✓ Sample given</span>
-                    )}
-                    {it.sampleStatus === "next_visit" && (
-                      <span style={{ fontSize: 10.5, color: "#C17817", fontWeight: 600 }}>→ Give next visit</span>
-                    )}
-
-                    {sampleMenuFor === it.productId ? (
-                      <div style={{ display: "flex", gap: 4 }}>
-                        <button type="button" onClick={() => setSampleStatus(it.productId, "gave")} style={{ fontSize: 10.5, border: "none", background: "#4C7A5E", color: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
-                          Gave
-                        </button>
-                        <button type="button" onClick={() => setSampleStatus(it.productId, "next_visit")} style={{ fontSize: 10.5, border: "none", background: "#C17817", color: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
-                          Give next visit
-                        </button>
-                        <button type="button" onClick={() => setSampleMenuFor(null)} style={{ fontSize: 10.5, border: "1px solid #E5DFD3", background: "#fff", borderRadius: 5, padding: "3px 8px" }}>
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <button type="button" onClick={() => setSampleMenuFor(it.productId)} style={{ fontSize: 10.5, border: "1px solid #D8D2C4", background: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
-                        {it.sampleStatus ? "Change" : "Sample"}
-                      </button>
-                    )}
-
-                    <button
-                      type="button"
-                      onClick={() => removeMentionedItem(it.productId)}
-                      style={{ border: "none", background: "none", cursor: "pointer", display: "flex", padding: 2, marginLeft: "auto", color: "#8A8272" }}
-                      aria-label={`Remove ${it.name}`}
-                    >
-                      <X size={12} />
-                    </button>
-                  </div>
-                ))}
+            </Field>
+            {otherRepWarning && (
+              <div style={{ background: "#FBF0F0", border: "1px solid #E5B8B0", color: "#7A3B3B", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 10, fontWeight: 500 }}>
+                ⚠ {client} is assigned to <strong>{otherRepWarning}</strong> — you're about to visit another rep's pharmacy.
               </div>
             )}
-          </Field>
-        )}
+            <Field label="Visit notes">
+              <div style={{ position: "relative" }}>
+                <textarea
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="What was discussed, orders taken, objections…"
+                  rows={3}
+                  style={{ ...inputStyle, marginBottom: 8, resize: "vertical", paddingRight: 40 }}
+                />
+                {SpeechRecognitionClass && (
+                  <button
+                    type="button"
+                    onClick={toggleDictation}
+                    title={listening ? "Stop dictation" : "Dictate notes"}
+                    style={{
+                      position: "absolute", top: 6, right: 6, width: 28, height: 28, borderRadius: 6,
+                      border: "1px solid #E5DFD3", background: listening ? "#B33A3A" : "#fff",
+                      color: listening ? "#FAF7F2" : "#5B5445", fontSize: 13, lineHeight: 1,
+                    }}
+                  >
+                    🎙
+                  </button>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                {NOTE_TEMPLATES.map((t) => (
+                  <button
+                    type="button"
+                    key={t}
+                    onClick={() => appendTemplate(t)}
+                    style={{ fontSize: 11, padding: "4px 9px", borderRadius: 12, border: "1px solid #E5DFD3", background: "#FAF7F2", color: "#5B5445" }}
+                  >
+                    + {t}
+                  </button>
+                ))}
+              </div>
+            </Field>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-          <button onClick={getLocation} disabled={locating} style={{
-            display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
-            border: "1px solid #E5DFD3", background: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
-          }}>
-            {locating ? <Loader2 size={14} className="spin" /> : <MapPin size={14} />}
-            {locating ? "Locating…" : coords ? "Update location" : "Capture GPS location"}
-          </button>
-          {coords && <span className="kb-font-mono" style={{ fontSize: 11.5, color: "#4C7A5E" }}><Check size={12} style={{ verticalAlign: -1 }} /> {coords.lat}, {coords.lng}</span>}
-        </div>
-        {locError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{locError}</div>}
+            {entityType === "doctor" && (
+              <Field label="Items mentioned during visit">
+                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                  <input
+                    value={itemQuery}
+                    onChange={(e) => setItemQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addMentionedItem(); } }}
+                    placeholder="Search product…"
+                    list="checkin-item-options"
+                    style={{ ...inputStyle, flex: 1 }}
+                  />
+                  <datalist id="checkin-item-options">
+                    {products.map((p) => <option key={p.id} value={p.name} />)}
+                  </datalist>
+                  <button
+                    type="button"
+                    onClick={addMentionedItem}
+                    disabled={!matchedItem}
+                    style={{
+                      padding: "8px 14px", borderRadius: 8, border: "none", whiteSpace: "nowrap",
+                      background: matchedItem ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
+                    }}
+                  >
+                    Add item
+                  </button>
+                </div>
+                {mentionedItems.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+                    {mentionedItems.map((it) => (
+                      <div key={it.productId} style={{
+                        display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, fontSize: 12,
+                        background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 10, padding: "6px 8px 6px 10px",
+                      }}>
+                        <span style={{ fontWeight: 500 }}>{it.name}</span>
 
-        <button disabled={!client} onClick={submit} style={{
-          padding: "9px 18px", borderRadius: 8, border: "none",
-          background: client ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500,
-        }}>
-          Save visit
-        </button>
-      </div>
+                        {it.sampleStatus === "gave" && (
+                          <span style={{ fontSize: 10.5, color: "#4C7A5E", fontWeight: 600 }}>✓ Sample given</span>
+                        )}
+                        {it.sampleStatus === "next_visit" && (
+                          <span style={{ fontSize: 10.5, color: "#C17817", fontWeight: 600 }}>→ Give next visit</span>
+                        )}
 
-      {showOrderPrompt && lastVisit && !showOrderBuilder && (
+                        {sampleMenuFor === it.productId ? (
+                          <div style={{ display: "flex", gap: 4 }}>
+                            <button type="button" onClick={() => setSampleStatus(it.productId, "gave")} style={{ fontSize: 10.5, border: "none", background: "#4C7A5E", color: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
+                              Gave
+                            </button>
+                            <button type="button" onClick={() => setSampleStatus(it.productId, "next_visit")} style={{ fontSize: 10.5, border: "none", background: "#C17817", color: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
+                              Give next visit
+                            </button>
+                            <button type="button" onClick={() => setSampleMenuFor(null)} style={{ fontSize: 10.5, border: "1px solid #E5DFD3", background: "#fff", borderRadius: 5, padding: "3px 8px" }}>
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button type="button" onClick={() => setSampleMenuFor(it.productId)} style={{ fontSize: 10.5, border: "1px solid #D8D2C4", background: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
+                            {it.sampleStatus ? "Change" : "Sample"}
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => removeMentionedItem(it.productId)}
+                          style={{ border: "none", background: "none", cursor: "pointer", display: "flex", padding: 2, marginLeft: "auto", color: "#8A8272" }}
+                          aria-label={`Remove ${it.name}`}
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Field>
+            )}
+
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+              <button onClick={getLocation} disabled={locating} style={{
+                display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
+                border: "1px solid #E5DFD3", background: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
+              }}>
+                {locating ? <Loader2 size={14} className="spin" /> : <MapPin size={14} />}
+                {locating ? "Locating…" : coords ? "Update location" : "Capture GPS location"}
+              </button>
+              {coords && <span className="kb-font-mono" style={{ fontSize: 11.5, color: "#4C7A5E" }}><Check size={12} style={{ verticalAlign: -1 }} /> {coords.lat}, {coords.lng}</span>}
+            </div>
+            {locError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{locError}</div>}
+            {visitError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{visitError}</div>}
+
+            <button disabled={!client || saving} onClick={submit} style={{
+              padding: "9px 18px", borderRadius: 8, border: "none",
+              background: client && !saving ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500,
+            }}>
+              {saving ? "Saving…" : "Save visit & continue"}
+            </button>
+          </div>
+        </>
+      )}
+
+      {step === "orderPrompt" && lastVisit && (
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
           <span style={{ fontSize: 13.5 }}>Did <strong>{lastVisit.client}</strong> place an order?</span>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => setShowOrderBuilder(true)} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+            <button onClick={() => setStep("order")} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
               Yes, add order
             </button>
-            <button onClick={() => setShowOrderPrompt(false)} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
+            <button onClick={() => setStep("followup")} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
               No
             </button>
           </div>
         </div>
       )}
 
-      {showOrderBuilder && lastVisit && (
+      {step === "order" && lastVisit && (
         <OrderBuilder
           clientName={lastVisit.client}
           visitId={lastVisit.id}
@@ -922,11 +976,11 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
           offers={offers}
           orders={orders}
           onCreateOrder={onCreateOrder}
-          onDone={() => { setShowOrderBuilder(false); setShowOrderPrompt(false); }}
+          onDone={() => setStep("followup")}
         />
       )}
 
-      {lastVisit && followUpStatus === null && (
+      {step === "followup" && lastVisit && (
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
           <div style={{ fontSize: 13.5, marginBottom: 10 }}>
             Schedule a follow-up for <strong>{lastVisit.client}</strong>?
@@ -944,7 +998,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
             ))}
             <button
               disabled={followUpSaving}
-              onClick={() => setFollowUpStatus("skipped")}
+              onClick={skipFollowUp}
               style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}
             >
               No follow-up needed
@@ -953,9 +1007,20 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
           {followUpError && <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 8 }}>{followUpError}</div>}
         </div>
       )}
-      {followUpStatus === "set" && lastVisit && (
-        <div style={{ fontSize: 12.5, color: "#4C7A5E", marginBottom: 20 }}>
-          <Check size={12} style={{ verticalAlign: -1 }} /> Follow-up scheduled for {lastVisit.client} — you'll get a Telegram reminder when it's due.
+
+      {step === "done" && lastVisit && (
+        <div style={{ background: "#fff", border: "1px solid #4C7A5E55", borderRadius: 10, padding: 20, marginBottom: 20, textAlign: "center" }}>
+          <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6, color: "#4C7A5E" }}>
+            <Check size={16} style={{ verticalAlign: -2 }} /> Visit logged for {lastVisit.client}
+          </div>
+          <div style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 16 }}>
+            {followUpStatus === "set"
+              ? "Follow-up scheduled — you'll get a Telegram reminder when it's due."
+              : "No follow-up scheduled for this visit."}
+          </div>
+          <button onClick={startNewVisit} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
+            Log another visit
+          </button>
         </div>
       )}
 
@@ -1083,14 +1148,15 @@ function downloadOrderPdf(order, stockWarnings = []) {
   doc.text(`Date: ${new Date(order.date).toLocaleDateString("en-GB")}`, 14, 34);
   autoTable(doc, {
     startY: 42,
-    head: [["Item", "Qty", "Unit Price", "Line Total"]],
+    head: [["Item", "Qty", "Expiry", "Unit Price", "Line Total"]],
     body: order.items.map((it) => [
       it.name + (it.isFree ? " (FREE)" : ""),
       String(it.qty),
+      it.expiry ? fmtDate(it.expiry) : "-",
       it.isFree ? "FREE" : Number(it.unitPrice).toFixed(2),
       it.isFree ? "0.00" : (it.qty * it.unitPrice).toFixed(2),
     ]),
-    foot: [["", "", "Total", Number(order.total).toFixed(2)]],
+    foot: [["", "", "", "Total", Number(order.total).toFixed(2)]],
   });
 
   if (stockWarnings.length > 0) {
@@ -1123,6 +1189,13 @@ function downloadOrderPdf(order, stockWarnings = []) {
 }
 
 // ---------- Order Builder (used from Check-In) ----------
+// Each Products row is its own batch — the same item name can appear more
+// than once with a different expiry/qty. Including both in the searchable
+// label is what lets a rep pick the specific batch to sell from (rather
+// than silently getting whichever row happens to be first), so the oldest
+// stock actually gets offered to pharmacies first.
+const batchLabel = (p) => `${p.name} — exp ${fmtDate(p.expiry)} (${p.qty} in stock)`;
+
 function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateOrder, onDone }) {
   const [productQuery, setProductQuery] = useState("");
   const [qty, setQty] = useState("");
@@ -1133,11 +1206,11 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
   const [applyingOfferId, setApplyingOfferId] = useState(null);
   const [freeProductQuery, setFreeProductQuery] = useState("");
 
-  const matchedProduct = products.find((p) => p.name.toLowerCase().trim() === productQuery.toLowerCase().trim());
+  const matchedProduct = products.find((p) => batchLabel(p) === productQuery.trim());
 
   const addItem = () => {
     setError("");
-    if (!matchedProduct) { setError("Pick a product from the list."); return; }
+    if (!matchedProduct) { setError("Pick a product batch from the list."); return; }
     const q = Number(qty);
     if (!q || q <= 0) { setError("Enter a quantity greater than 0."); return; }
     setItems((prev) => [...prev, {
@@ -1146,6 +1219,7 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
       qty: q,
       unitPrice: matchedProduct.price || 0,
       availableQty: matchedProduct.qty,
+      expiry: matchedProduct.expiry,
       isFree: false,
     }]);
     setProductQuery("");
@@ -1172,7 +1246,7 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
     o.active && (!o.expiresAt || o.expiresAt >= todayStr) && regularQty >= o.buyQty && !appliedOfferIds.has(o.id)
   );
   const eligibleFreeProducts = products.filter((p) => p.qty > 0 && p.price > 0 && p.price <= weightedAvgPrice);
-  const matchedFreeProduct = eligibleFreeProducts.find((p) => p.name.toLowerCase().trim() === freeProductQuery.toLowerCase().trim());
+  const matchedFreeProduct = eligibleFreeProducts.find((p) => batchLabel(p) === freeProductQuery.trim());
 
   const applyOffer = (offer) => {
     if (!matchedFreeProduct) return;
@@ -1183,6 +1257,7 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
       unitPrice: 0,
       originalPrice: matchedFreeProduct.price,
       availableQty: matchedFreeProduct.qty,
+      expiry: matchedFreeProduct.expiry,
       isFree: true,
       viaOfferId: offer.id,
     }]);
@@ -1228,8 +1303,8 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
       const payload = {
         clientName,
         visitId,
-        items: finalItems.map(({ productId, name, qty, unitPrice, isFree, originalPrice }) => ({
-          productId, name, qty, unitPrice, isFree: !!isFree, originalPrice: originalPrice || 0,
+        items: finalItems.map(({ productId, name, qty, unitPrice, isFree, originalPrice, expiry }) => ({
+          productId, name, qty, unitPrice, isFree: !!isFree, originalPrice: originalPrice || 0, expiry: expiry || "",
         })),
       };
       const created = await onCreateOrder(payload);
@@ -1251,12 +1326,12 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
           <input
             value={productQuery}
             onChange={(e) => setProductQuery(e.target.value)}
-            placeholder="Search product…"
+            placeholder="Search product — pick the batch by expiry…"
             list="order-product-options"
             style={inputStyle}
           />
           <datalist id="order-product-options">
-            {products.map((p) => <option key={p.id} value={p.name} />)}
+            {products.map((p) => <option key={p.id} value={batchLabel(p)} />)}
           </datalist>
         </div>
         <input type="number" min="1" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Qty" style={{ ...inputStyle, flex: 1, minWidth: 80 }} />
@@ -1267,7 +1342,7 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
 
       {matchedProduct && (
         <div style={{ fontSize: 11.5, color: matchedProduct.qty > 0 ? "#4C7A5E" : "#B33A3A", marginBottom: 8 }}>
-          {matchedProduct.qty > 0 ? `${matchedProduct.qty} in stock` : "Out of stock"} · price {matchedProduct.price ? matchedProduct.price.toFixed(2) : "not set"}
+          {matchedProduct.qty > 0 ? `${matchedProduct.qty} in stock` : "Out of stock"} · expires {fmtDate(matchedProduct.expiry)} · price {matchedProduct.price ? matchedProduct.price.toFixed(2) : "not set"}
         </div>
       )}
 
@@ -1295,12 +1370,12 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
             <input
               value={freeProductQuery}
               onChange={(e) => setFreeProductQuery(e.target.value)}
-              placeholder="Search eligible items…"
+              placeholder="Search eligible items — pick the batch by expiry…"
               list="free-item-options"
               style={inputStyle}
             />
             <datalist id="free-item-options">
-              {eligibleFreeProducts.map((p) => <option key={p.id} value={p.name} />)}
+              {eligibleFreeProducts.map((p) => <option key={p.id} value={batchLabel(p)} />)}
             </datalist>
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
               <button
@@ -1330,6 +1405,7 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
                   <th style={{ padding: "4px 6px" }}>Item</th>
                   <th style={{ padding: "4px 6px" }}>Qty</th>
                   <th style={{ padding: "4px 6px" }}>Stock</th>
+                  <th style={{ padding: "4px 6px" }}>Expiry</th>
                   <th style={{ padding: "4px 6px" }}>Unit price</th>
                   <th style={{ padding: "4px 6px" }}>Total</th>
                   <th></th>
@@ -1345,6 +1421,7 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
                     <td style={{ padding: "4px 6px", color: it.qty > it.availableQty ? "#B33A3A" : "#4C7A5E" }}>
                       {it.availableQty}{it.qty > it.availableQty ? " ⚠" : ""}
                     </td>
+                    <td className="kb-font-mono" style={{ padding: "4px 6px" }}>{it.expiry ? fmtDate(it.expiry) : "-"}</td>
                     <td style={{ padding: "4px 6px" }}>{it.isFree ? "FREE" : it.unitPrice.toFixed(2)}</td>
                     <td style={{ padding: "4px 6px" }}>{it.isFree ? "0.00" : (it.qty * it.unitPrice).toFixed(2)}</td>
                     <td style={{ padding: "4px 6px" }}>

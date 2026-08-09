@@ -708,6 +708,7 @@ app.post("/api/orders", async (req, res) => {
       unitPrice: Number(it.unitPrice) || 0,
       isFree: !!it.isFree,
       originalPrice: Number(it.originalPrice) || 0,
+      expiry: it.expiry || "",
     }));
     const total = cleanItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
     const order = {
