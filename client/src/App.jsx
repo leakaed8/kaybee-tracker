@@ -10,7 +10,7 @@ import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
   TrendingDown, TrendingUp, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
   Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar as RadarIcon, Search, BookOpen,
-  GraduationCap,
+  GraduationCap, Boxes,
 } from "lucide-react";
 import { api } from "./api.js";
 import {
@@ -202,11 +202,12 @@ export default function App() {
 
       <nav style={{ display: "flex", gap: 4, padding: "12px 24px 0", borderBottom: "1px solid #E5DFD3", overflowX: "auto" }}>
         <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />
+        {role === "rep" && <TabBtn active={tab === "checkin"} onClick={() => setTab("checkin")} icon={<MapPin size={15} />} label="Check-In" />}
+        <TabBtn active={tab === "stock"} onClick={() => setTab("stock")} icon={<Boxes size={15} />} label="Stock" />
         <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />
         <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />
         <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />
         <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />
-        {role === "rep" && <TabBtn active={tab === "checkin"} onClick={() => setTab("checkin")} icon={<MapPin size={15} />} label="Check-In" />}
         {role === "rep" && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
         {role === "manager" && <TabBtn active={tab === "dashboard"} onClick={() => setTab("dashboard")} icon={<LayoutDashboard size={15} />} label="Dashboard" />}
         {role === "manager" && <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<Target size={15} />} label="Performance" />}
@@ -255,6 +256,7 @@ export default function App() {
                 onPunch={punch}
               />
             )}
+            {tab === "stock" && <StockView products={sorted} />}
             {tab === "clients" && (
               <ClientsView
                 clients={clients}
@@ -528,6 +530,90 @@ function ProductRow({ product, repPhone, onRemove }) {
             <button onClick={onRemove} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "5px 10px" }}>Remove</button>
             <button onClick={() => setShowConfirm(false)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "5px 10px" }}>Cancel</button>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Stock View (rep + manager quick availability lookup) ----------
+// Same product data as Expiry Alerts, shown as a flat searchable list
+// instead of red/yellow/green zones — for "is this even in stock" checks
+// that don't need the full expiry-urgency framing, e.g. while on a call
+// with a pharmacy and not going through the order flow at all.
+function StockView({ products }) {
+  const [search, setSearch] = useState("");
+  const [category, setCategory] = useState("all");
+
+  const categories = Array.from(new Set(products.map((p) => p.category).filter(Boolean))).sort();
+
+  const q = search.toLowerCase().trim();
+  const filtered = products
+    .filter((p) => category === "all" || p.category === category)
+    .filter((p) => !q || p.name.toLowerCase().includes(q))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const shown = filtered.slice(0, LIST_DISPLAY_CAP);
+
+  return (
+    <div>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Stock</h2>
+      <p style={{ fontSize: 13, color: "#8A8272", margin: "0 0 16px" }}>
+        Quick lookup of what's in stock right now — handy even when you're not placing an order.
+      </p>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+        <div style={{ position: "relative", flex: 2, minWidth: 200 }}>
+          <Search size={15} style={{ position: "absolute", left: 12, top: 10, color: "#8A8272" }} />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search by product name…"
+            style={{ ...inputStyle, paddingLeft: 34 }}
+          />
+        </div>
+        <select value={category} onChange={(e) => setCategory(e.target.value)} style={{ ...inputStyle, flex: 1, minWidth: 160 }}>
+          <option value="all">All categories</option>
+          {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </div>
+
+      <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>
+        {filtered.length} item{filtered.length === 1 ? "" : "s"}{category !== "all" ? ` in ${category}` : ""}{q ? ` matching "${search}"` : ""}
+      </div>
+
+      {shown.length > 0 ? (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ textAlign: "left", color: "#8A8272", fontSize: 11.5 }}>
+                <th style={{ padding: "6px 8px" }}>Item</th>
+                <th style={{ padding: "6px 8px" }}>Category</th>
+                <th style={{ padding: "6px 8px" }}>Qty</th>
+                <th style={{ padding: "6px 8px" }}>Price</th>
+                <th style={{ padding: "6px 8px" }}>Expiry</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((p) => (
+                <tr key={p.id} style={{ borderTop: "1px solid #E5DFD3" }}>
+                  <td style={{ padding: "6px 8px", fontWeight: 500 }}>{p.name}</td>
+                  <td style={{ padding: "6px 8px", color: "#8A8272" }}>{p.category || "-"}</td>
+                  <td style={{ padding: "6px 8px", fontWeight: 600, color: p.qty > 0 ? "#4C7A5E" : "#B33A3A" }}>
+                    {p.qty > 0 ? p.qty : "Out of stock"}
+                  </td>
+                  <td style={{ padding: "6px 8px" }}>{p.price ? p.price.toFixed(2) : "-"}</td>
+                  <td className="kb-font-mono" style={{ padding: "6px 8px", color: p.zone?.color || "#8A8272" }}>{fmtDate(p.expiry)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <EmptyState text="No products match." />
+      )}
+      {filtered.length > LIST_DISPLAY_CAP && (
+        <div style={{ fontSize: 12, color: "#8A8272", marginTop: 10 }}>
+          Showing the first {LIST_DISPLAY_CAP} of {filtered.length.toLocaleString()} — narrow your search to see more.
         </div>
       )}
     </div>
