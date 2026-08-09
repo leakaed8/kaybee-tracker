@@ -261,6 +261,7 @@ export default function App() {
                 visits={visits}
                 orders={orders}
                 role={role}
+                repName={repName}
                 repNames={repNames}
                 onAdd={addClient}
                 onRemove={removeClient}
@@ -606,6 +607,17 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     : nameOptionsSource
   ).slice(0, 50);
 
+  // Pharmacies are auto-assigned to whichever rep logs their first visit.
+  // If this one already belongs to someone else, flag it before the rep
+  // submits — visiting another rep's pharmacy is sometimes legitimate
+  // (covering, shared territory) but should never happen silently.
+  const matchedClient = entityType === "pharmacy"
+    ? clients.find((c) => c.name.toLowerCase().trim() === client.toLowerCase().trim())
+    : null;
+  const otherRepWarning = matchedClient && matchedClient.assignedRep && matchedClient.assignedRep !== repName
+    ? matchedClient.assignedRep
+    : null;
+
   const matchedItem = products.find((p) => p.name.toLowerCase().trim() === itemQuery.toLowerCase().trim());
   const addMentionedItem = () => {
     if (!matchedItem || mentionedItems.some((it) => it.productId === matchedItem.id)) return;
@@ -750,6 +762,11 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
             {nameOptions.map((c) => <option key={c.id} value={c.name} />)}
           </datalist>
         </Field>
+        {otherRepWarning && (
+          <div style={{ background: "#FBF0F0", border: "1px solid #E5B8B0", color: "#7A3B3B", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 10, fontWeight: 500 }}>
+            ⚠ {client} is assigned to <strong>{otherRepWarning}</strong> — you're about to visit another rep's pharmacy.
+          </div>
+        )}
         <Field label="Visit notes">
           <div style={{ position: "relative" }}>
             <textarea
@@ -1725,7 +1742,7 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
 }
 
 // ---------- Pharmacies View (tiering + follow-up nudges) ----------
-function ClientsView({ clients, visits, orders, role, repNames, onAdd, onRemove, onBulkImport, onAssignRep }) {
+function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep }) {
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [name, setName] = useState("");
@@ -1824,12 +1841,18 @@ function ClientsView({ clients, visits, orders, role, repNames, onAdd, onRemove,
             <Field label="Area"><input value={area} onChange={(e) => setArea(e.target.value)} placeholder="e.g. Jbeil" style={inputStyle} /></Field>
             <Field label="Address (optional)"><input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Full street address" style={inputStyle} /></Field>
             <Field label="Registration number (optional)"><input value={registrationNumber} onChange={(e) => setRegistrationNumber(e.target.value)} style={inputStyle} /></Field>
-            <Field label="Assigned sales rep (optional)">
-              <select value={assignedRep} onChange={(e) => setAssignedRep(e.target.value)} style={inputStyle}>
-                <option value="">Unassigned</option>
-                {repNames.map((n) => <option key={n} value={n}>{n}</option>)}
-              </select>
-            </Field>
+            {role === "manager" ? (
+              <Field label="Assigned sales rep (optional)">
+                <select value={assignedRep} onChange={(e) => setAssignedRep(e.target.value)} style={inputStyle}>
+                  <option value="">Unassigned</option>
+                  {repNames.map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </Field>
+            ) : (
+              <Field label="Assigned sales rep">
+                <div style={{ ...inputStyle, background: "#FAF7F2", color: "#5B5445" }}>{repName} (you)</div>
+              </Field>
+            )}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button disabled={!name} onClick={addClient} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>Add pharmacy</button>

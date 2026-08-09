@@ -589,6 +589,30 @@ app.post("/api/visits", async (req, res) => {
       const rep = reps.find((r) => r.name === req.repName);
       if (rep?.exportSheetId) await db.appendToRepExportSheet(rep.exportSheetId, row);
     }
+
+    // A pharmacy visited with no assigned rep yet gets claimed by whoever
+    // just logged the first visit to it — "anything made there gets
+    // assigned to that user." If it's already assigned to someone else,
+    // leave the assignment alone but flag it so both the rep (in the
+    // response) and the manager (via push) know this crosses territories.
+    let assignedRepWarning = null;
+    if (req.repName) {
+      const allClients = await db.getAllRows("Clients");
+      const matchedClient = allClients.find((c) => c.name.toLowerCase().trim() === client.toLowerCase().trim());
+      if (matchedClient) {
+        if (!matchedClient.assignedRep) {
+          await db.updateRowById("Clients", matchedClient.id, { assignedRep: req.repName });
+        } else if (matchedClient.assignedRep !== req.repName) {
+          assignedRepWarning = matchedClient.assignedRep;
+          notifyManagers({
+            title: "Cross-rep pharmacy visit",
+            body: `${req.repName} visited ${matchedClient.name}, which is assigned to ${matchedClient.assignedRep}`,
+            url: "/",
+          });
+        }
+      }
+    }
+
     const sampleRows = visit.mentionedItems
       .filter((it) => it.sampleStatus === "gave" || it.sampleStatus === "next_visit")
       .map((it) => ({
@@ -602,7 +626,7 @@ app.post("/api/visits", async (req, res) => {
         date: visit.time,
       }));
     if (sampleRows.length) await db.appendRows("Samples", sampleRows);
-    res.json(visit);
+    res.json({ ...visit, assignedRepWarning });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -795,13 +819,17 @@ app.post("/api/clients", async (req, res) => {
   try {
     const { name, phone, tier, area, assignedRep, registrationNumber, address } = req.body;
     if (!name) return res.status(400).json({ error: "name is required" });
+    // A rep adding a pharmacy always gets it assigned to themselves — they
+    // aren't shown the picker (only managers are), so anything they send
+    // here is ignored in favor of their own logged-in identity.
+    const resolvedAssignedRep = req.repName ? req.repName : (assignedRep || "");
     const client = {
       id: `c${crypto.randomUUID()}`,
       name,
       phone: phone || "",
       tier: tier || "B",
       area: area || "",
-      assignedRep: assignedRep || "",
+      assignedRep: resolvedAssignedRep,
       registrationNumber: registrationNumber || "",
       address: address || "",
     };
