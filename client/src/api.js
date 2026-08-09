@@ -52,6 +52,7 @@ export const api = {
   getMyTelegramLinkCode: () => request("/reps/me/telegram-link-code", { method: "POST" }),
   getStockMovementStatus: () => request("/stock-movement/status"),
   importStockMovement: (year, rows) => request("/stock-movement/import", { method: "POST", body: JSON.stringify({ year, rows }) }),
+  unlockStockMovementYear: (year) => request("/stock-movement/unlock", { method: "POST", body: JSON.stringify({ year }) }),
   getRepTelegramLinkCode: (id) => request(`/reps/${id}/telegram-link-code`, { method: "POST" }),
   getManagerTelegramLinkCode: () => request("/settings/telegram-link-code", { method: "POST" }),
   scheduleFollowUp: (followUp) => request("/followups", { method: "POST", body: JSON.stringify(followUp) }),

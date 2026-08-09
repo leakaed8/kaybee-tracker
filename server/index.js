@@ -531,6 +531,24 @@ app.post("/api/stock-movement/import", requireManager, async (req, res) => {
   }
 });
 
+// A locked year can be deliberately reopened (e.g. the wrong file was
+// uploaded, or corrected data arrived later) — this only removes the lock so
+// the next import for that year is allowed through; it doesn't touch the
+// data already stored, which the next import will fully replace as usual.
+app.post("/api/stock-movement/unlock", requireManager, async (req, res) => {
+  try {
+    const yearNum = Number(req.body.year);
+    if (!yearNum) return res.status(400).json({ error: "year is required" });
+    const settings = await db.getSettings();
+    const lockedYears = settings.stockMovementLockedYears ? JSON.parse(settings.stockMovementLockedYears) : [];
+    await db.setSettings({ stockMovementLockedYears: JSON.stringify(lockedYears.filter((y) => y !== yearNum)) });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---------- Pharmacy sales ledger (drives the Telegram "pick up" list) ----
 // A snapshot of which pharmacy holds how many units of which expiry-dated
 // batch — net of any returns — computed client-side from an exported sales

@@ -4312,6 +4312,8 @@ function StockMovementImportSection() {
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
+  const [unlockConfirmYear, setUnlockConfirmYear] = useState(null);
+  const [unlocking, setUnlocking] = useState(false);
   const fileInputRef = useRef(null);
 
   const currentYear = new Date().getFullYear();
@@ -4348,6 +4350,20 @@ function StockMovementImportSection() {
     reader.readAsArrayBuffer(file);
   };
 
+  const doUnlock = async (year) => {
+    setUnlocking(true);
+    setError("");
+    try {
+      await api.unlockStockMovementYear(year);
+      setUnlockConfirmYear(null);
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setUnlocking(false);
+    }
+  };
+
   const canImport = nameCol && Object.values(monthCols).some(Boolean) && rows.length > 0;
 
   const doImport = async () => {
@@ -4379,7 +4395,7 @@ function StockMovementImportSection() {
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
       <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Stock movement</label>
       <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
-        Upload monthly sales history, one year at a time, to power real slow-mover analysis instead of the current 90-day approximation. Past years lock once imported so they can't be overwritten by accident — {currentYear} stays open since you'll update it as the year goes.
+        Upload monthly sales history, one year at a time, to power real slow-mover analysis instead of the current 90-day approximation. Past years lock once imported so they can't be overwritten by accident — {currentYear} stays open since you'll update it as the year goes. Locked a year by mistake, or need to re-upload a correction? Use "Unlock" on that year's card.
       </p>
       {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
       {result && (
@@ -4397,7 +4413,24 @@ function StockMovementImportSection() {
             <div key={y} style={{ border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px", minWidth: 110 }}>
               <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{y}</div>
               {isLocked ? (
-                <div style={{ fontSize: 11, color: "#6B7280" }}>🔒 Locked · {count} rows</div>
+                unlockConfirmYear === y ? (
+                  <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 10, color: "#B33A3A" }}>Unlock {y}?</span>
+                    <button onClick={() => doUnlock(y)} disabled={unlocking} style={{ fontSize: 10.5, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 5, padding: "3px 7px" }}>
+                      {unlocking ? "…" : "Yes"}
+                    </button>
+                    <button onClick={() => setUnlockConfirmYear(null)} style={{ fontSize: 10.5, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 5, padding: "3px 7px" }}>
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <div>
+                    <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 4 }}>🔒 Locked · {count} rows</div>
+                    <button onClick={() => setUnlockConfirmYear(y)} style={{ fontSize: 10.5, padding: "3px 8px", borderRadius: 6, border: "1px solid #E5B8B0", background: "#fff", color: "#B33A3A" }}>
+                      Unlock
+                    </button>
+                  </div>
+                )
               ) : (
                 <button onClick={() => startUpload(y)} style={{ fontSize: 11.5, padding: "4px 9px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24" }}>
                   {count > 0 ? `Update (${count} rows)` : "Upload"}
