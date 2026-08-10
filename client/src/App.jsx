@@ -2132,7 +2132,12 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
                 {c.overdue && <div style={{ fontSize: 10.5, color: "#B33A3A" }}>overdue (cadence {c.cadence}d)</div>}
               </div>
             </div>
-            <button onClick={() => onRemove(c.id)} style={{ marginTop: 6, background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
+            <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 6 }}>
+              <a href={mapsLinkFor(c)} target="_blank" rel="noreferrer" style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#4C7A5E", textDecoration: "none" }}>
+                <MapPin size={11} /> Get directions
+              </a>
+              <button onClick={() => onRemove(c.id)} style={{ background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
+            </div>
           </div>
         ))}
         {!q && clients.length > 0 && (
@@ -2559,7 +2564,12 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
                 {d.overdue && <div style={{ fontSize: 10.5, color: "#B33A3A" }}>overdue (cadence {d.cadence}d)</div>}
               </div>
             </div>
-            <button onClick={() => onRemove(d.id)} style={{ marginTop: 6, background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
+            <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 6 }}>
+              <a href={mapsLinkFor(d)} target="_blank" rel="noreferrer" style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#4C7A5E", textDecoration: "none" }}>
+                <MapPin size={11} /> Get directions
+              </a>
+              <button onClick={() => onRemove(d.id)} style={{ background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
+            </div>
           </div>
         ))}
         {!q && doctors.length > 0 && (
@@ -3059,8 +3069,12 @@ function RouteView({ clients, doctors, visits }) {
 
   const changeEntityType = (t) => { setEntityType(t); setSelected([]); setOrdered(null); };
 
-  const lastCoordsFor = (clientName) => {
-    const matches = visits.filter((v) => v.client.toLowerCase().trim() === clientName.toLowerCase().trim() && v.coords);
+  // Prefers the pharmacy/doctor's own saved location (GPS capture or
+  // geocoded address) — falls back to wherever the last visit happened to
+  // be logged from, for entries added before that existed.
+  const coordsFor = (entity) => {
+    if (entity.coordsLat && entity.coordsLng) return { lat: entity.coordsLat, lng: entity.coordsLng };
+    const matches = visits.filter((v) => v.client.toLowerCase().trim() === entity.name.toLowerCase().trim() && v.coords);
     if (matches.length === 0) return null;
     const latest = matches.reduce((a, b) => (new Date(b.time) > new Date(a.time) ? b : a), matches[0]);
     return latest.coords;
@@ -3079,7 +3093,7 @@ function RouteView({ clients, doctors, visits }) {
 
   const optimize = () => {
     const stops = selected.map((id) => entities.find((c) => c.id === id)).filter(Boolean).map((c) => {
-      const coords = lastCoordsFor(c.name);
+      const coords = coordsFor(c);
       return { ...c, coords: coords ? { lat: parseFloat(coords.lat), lng: parseFloat(coords.lng) } : null };
     });
     const withCoords = stops.filter((s) => s.coords);
@@ -3195,15 +3209,31 @@ function RouteView({ clients, doctors, visits }) {
       {ordered && (
         <div>
           {ordered.note === "no-location" && <p style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>Capture your location first for a distance-based order — showing selected order as-is.</p>}
-          {ordered.note === "partial" && <p style={{ fontSize: 12, color: "#D9A441", marginBottom: 10 }}>Some stops have no saved location yet (never visited) — they're listed last.</p>}
+          {ordered.note === "partial" && <p style={{ fontSize: 12, color: "#D9A441", marginBottom: 10 }}>Some stops have no saved location yet (never visited, no address, no GPS) — they're listed last.</p>}
+          {fullRouteMapsLink(ordered.route, myLoc) && (
+            <a
+              href={fullRouteMapsLink(ordered.route, myLoc)}
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 14, padding: "9px 16px",
+                borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500, textDecoration: "none",
+              }}
+            >
+              <MapPin size={14} /> Open full route in Google Maps
+            </a>
+          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {ordered.route.map((c, i) => (
               <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
                 <span className="kb-font-mono" style={{ fontSize: 13, fontWeight: 600, color: "#C17817", width: 20 }}>{i + 1}</span>
-                <div>
+                <div style={{ flex: 1 }}>
                   <div style={{ fontSize: 13, fontWeight: 600 }}>{c.name}</div>
                   <div style={{ fontSize: 11, color: "#8A8272" }}>{c.area || "no area"}{!c.coords && " · no saved location"}</div>
                 </div>
+                <a href={mapsLinkFor(c)} target="_blank" rel="noreferrer" style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#4C7A5E", textDecoration: "none", whiteSpace: "nowrap" }}>
+                  <MapPin size={11} /> Directions
+                </a>
               </div>
             ))}
           </div>
@@ -4544,6 +4574,35 @@ function StockMovementImportSection() {
       )}
     </div>
   );
+}
+
+// Opens Google Maps (app on mobile, web on desktop) instead of an embedded
+// custom map — it gets real turn-by-turn navigation and search for free,
+// which a from-scratch map view wouldn't do without a lot more work.
+// Prefers saved coordinates (GPS capture or geocoded address); falls back
+// to a text search on name/area if neither exists yet.
+function mapsLinkFor(entity) {
+  if (entity.coordsLat && entity.coordsLng) {
+    return `https://www.google.com/maps/search/?api=1&query=${entity.coordsLat},${entity.coordsLng}`;
+  }
+  const query = entity.address || `${entity.name}${entity.area ? `, ${entity.area}` : ""}, Lebanon`;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+}
+
+// A single link that opens the whole optimized route as real turn-by-turn
+// directions in Google Maps, in order — starting from the rep's captured
+// location when available, otherwise from the first stop.
+function fullRouteMapsLink(route, myLoc) {
+  const points = route.filter((s) => s.coords).map((s) => `${s.coords.lat},${s.coords.lng}`);
+  if (points.length === 0) return null;
+  const origin = myLoc ? `${myLoc.lat},${myLoc.lng}` : points[0];
+  const remaining = myLoc ? points : points.slice(1);
+  if (remaining.length === 0) return null;
+  const destination = remaining[remaining.length - 1];
+  const waypoints = remaining.slice(0, -1);
+  const params = new URLSearchParams({ api: "1", origin, destination });
+  if (waypoints.length > 0) params.set("waypoints", waypoints.join("|"));
+  return `https://www.google.com/maps/dir/?${params.toString()}`;
 }
 
 const guessColumn = (headers, candidates) =>
