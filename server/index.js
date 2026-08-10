@@ -607,6 +607,13 @@ app.post("/api/visits", async (req, res) => {
   try {
     const { client, notes, coords, mentionedItems } = req.body;
     if (!client) return res.status(400).json({ error: "client is required" });
+    // Enforced server-side too, not just disabled in the UI — a visit with
+    // no location proves nothing about whether the rep was actually there.
+    // (The Telegram "Sign in" follow-up flow creates visits through a
+    // separate internal path, not this route, so it's unaffected.)
+    if (!coords || !coords.lat || !coords.lng) {
+      return res.status(400).json({ error: "GPS location is required to log a visit." });
+    }
     const visit = {
       id: `v${crypto.randomUUID()}`,
       client,

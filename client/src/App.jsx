@@ -1086,16 +1086,17 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
                 border: "1px solid #E5DFD3", background: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
               }}>
                 {locating ? <Loader2 size={14} className="spin" /> : <MapPin size={14} />}
-                {locating ? "Locating…" : coords ? "Update location" : "Capture GPS location"}
+                {locating ? "Locating…" : coords ? "Update location" : "Capture GPS location (required)"}
               </button>
               {coords && <span className="kb-font-mono" style={{ fontSize: 11.5, color: "#4C7A5E" }}><Check size={12} style={{ verticalAlign: -1 }} /> {coords.lat}, {coords.lng}</span>}
             </div>
             {locError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{locError}</div>}
             {visitError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{visitError}</div>}
+            {!coords && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>Capture your GPS location before saving — this is how a visit gets confirmed as real.</div>}
 
-            <button disabled={!client || saving} onClick={submit} style={{
+            <button disabled={!client || !coords || saving} onClick={submit} style={{
               padding: "9px 18px", borderRadius: 8, border: "none",
-              background: client && !saving ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500,
+              background: client && coords && !saving ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500,
             }}>
               {saving ? "Saving…" : "Save visit & continue"}
             </button>
