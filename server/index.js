@@ -838,10 +838,10 @@ app.post("/api/clients", async (req, res) => {
   try {
     const { name, phone, tier, area, assignedRep, registrationNumber, address } = req.body;
     if (!name) return res.status(400).json({ error: "name is required" });
-    // A rep adding a pharmacy always gets it assigned to themselves — they
-    // aren't shown the picker (only managers are), so anything they send
-    // here is ignored in favor of their own logged-in identity.
     const resolvedAssignedRep = req.repName ? req.repName : (assignedRep || "");
+
+    const coords = await geocodeAddress(address);
+
     const client = {
       id: `c${crypto.randomUUID()}`,
       name,
@@ -851,6 +851,8 @@ app.post("/api/clients", async (req, res) => {
       assignedRep: resolvedAssignedRep,
       registrationNumber: registrationNumber || "",
       address: address || "",
+      coordsLat: coords ? coords.lat : "",
+      coordsLng: coords ? coords.lng : "",
     };
     await db.appendRow("Clients", client);
     res.json(client);
