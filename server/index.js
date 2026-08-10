@@ -853,11 +853,13 @@ app.delete("/api/offers/:id", requireManager, async (req, res) => {
 
 app.post("/api/clients", async (req, res) => {
   try {
-    const { name, phone, tier, area, assignedRep, registrationNumber, address } = req.body;
+    const { name, phone, tier, area, assignedRep, registrationNumber, address, coordsLat, coordsLng } = req.body;
     if (!name) return res.status(400).json({ error: "name is required" });
     const resolvedAssignedRep = req.repName ? req.repName : (assignedRep || "");
 
-    const coords = await geocodeAddress(address);
+    // A GPS fix taken on-site is more accurate than geocoding a typed
+    // address, so it wins whenever the rep captured one.
+    const coords = coordsLat && coordsLng ? { lat: coordsLat, lng: coordsLng } : await geocodeAddress(address);
 
     const client = {
       id: `c${crypto.randomUUID()}`,
@@ -1095,8 +1097,9 @@ app.delete("/api/clients/:id", async (req, res) => {
 
 app.post("/api/doctors", async (req, res) => {
   try {
-    const { name, hospital, area, phone, specialty, tier, registrationNumber, address } = req.body;
+    const { name, hospital, area, phone, specialty, tier, registrationNumber, address, coordsLat, coordsLng } = req.body;
     if (!name) return res.status(400).json({ error: "name is required" });
+    const coords = coordsLat && coordsLng ? { lat: coordsLat, lng: coordsLng } : await geocodeAddress(address);
     const doctor = {
       id: `doc${crypto.randomUUID()}`,
       name,
@@ -1107,6 +1110,8 @@ app.post("/api/doctors", async (req, res) => {
       tier: tier || "B",
       registrationNumber: registrationNumber || "",
       address: address || "",
+      coordsLat: coords ? coords.lat : "",
+      coordsLng: coords ? coords.lng : "",
     };
     await db.appendRow("Doctors", doctor);
     res.json(doctor);

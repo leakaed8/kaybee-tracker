@@ -1916,6 +1916,9 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
   const [registrationNumber, setRegistrationNumber] = useState("");
   const [assignedRep, setAssignedRep] = useState("");
   const [search, setSearch] = useState("");
+  const [coords, setCoords] = useState(null);
+  const [locating, setLocating] = useState(false);
+  const [locError, setLocError] = useState("");
 
   const lastVisitFor = (clientName) => {
     const matches = visits.filter((v) => v.client.toLowerCase().trim() === clientName.toLowerCase().trim());
@@ -1923,10 +1926,28 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
     return matches.reduce((latest, v) => (new Date(v.time) > new Date(latest.time) ? v : latest), matches[0]);
   };
 
+  // Same navigator.geolocation pattern used for Punch In / Check-In — a GPS
+  // fix taken while standing at the pharmacy is more accurate than
+  // geocoding whatever gets typed into the address field.
+  const getLocation = () => {
+    setLocating(true);
+    setLocError("");
+    if (!navigator.geolocation) {
+      setLocError("Location not available on this device/browser.");
+      setLocating(false);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => { setCoords({ lat: pos.coords.latitude.toFixed(5), lng: pos.coords.longitude.toFixed(5) }); setLocating(false); },
+      () => { setLocError("Couldn't get location. Check permissions."); setLocating(false); },
+      { timeout: 8000 }
+    );
+  };
+
   const addClient = () => {
     if (!name) return;
-    onAdd({ name, phone, tier, area, address, registrationNumber, assignedRep });
-    setName(""); setPhone(""); setArea(""); setAddress(""); setRegistrationNumber(""); setTier("B"); setAssignedRep("");
+    onAdd({ name, phone, tier, area, address, registrationNumber, assignedRep, coordsLat: coords?.lat || "", coordsLng: coords?.lng || "" });
+    setName(""); setPhone(""); setArea(""); setAddress(""); setRegistrationNumber(""); setTier("B"); setAssignedRep(""); setCoords(null); setLocError("");
     setShowAdd(false);
   };
 
@@ -2017,6 +2038,17 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
               </Field>
             )}
           </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+            <button type="button" onClick={getLocation} disabled={locating} style={{
+              display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
+              border: "1px solid #E5DFD3", background: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
+            }}>
+              {locating ? <Loader2 size={14} className="spin" /> : <MapPin size={14} />}
+              {locating ? "Locating…" : coords ? "Update GPS location" : "Capture GPS location (optional, more accurate than the address above)"}
+            </button>
+            {coords && <span className="kb-font-mono" style={{ fontSize: 11.5, color: "#4C7A5E" }}><Check size={12} style={{ verticalAlign: -1 }} /> {coords.lat}, {coords.lng}</span>}
+          </div>
+          {locError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{locError}</div>}
           <div style={{ display: "flex", gap: 8 }}>
             <button disabled={!name} onClick={addClient} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>Add pharmacy</button>
             <button onClick={() => setShowAdd(false)} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>Cancel</button>
@@ -2350,11 +2382,31 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
   const [address, setAddress] = useState("");
   const [registrationNumber, setRegistrationNumber] = useState("");
   const [search, setSearch] = useState("");
+  const [coords, setCoords] = useState(null);
+  const [locating, setLocating] = useState(false);
+  const [locError, setLocError] = useState("");
 
   const lastVisitFor = (doctorName) => {
     const matches = visits.filter((v) => v.client.toLowerCase().trim() === doctorName.toLowerCase().trim());
     if (matches.length === 0) return null;
     return matches.reduce((latest, v) => (new Date(v.time) > new Date(latest.time) ? v : latest), matches[0]);
+  };
+
+  // Same navigator.geolocation pattern used for Punch In / Check-In / Add
+  // Pharmacy — a GPS fix taken on-site beats geocoding a typed address.
+  const getLocation = () => {
+    setLocating(true);
+    setLocError("");
+    if (!navigator.geolocation) {
+      setLocError("Location not available on this device/browser.");
+      setLocating(false);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => { setCoords({ lat: pos.coords.latitude.toFixed(5), lng: pos.coords.longitude.toFixed(5) }); setLocating(false); },
+      () => { setLocError("Couldn't get location. Check permissions."); setLocating(false); },
+      { timeout: 8000 }
+    );
   };
 
   const pendingSamplesFor = (doctorName) => {
@@ -2369,8 +2421,8 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
 
   const addDoctor = () => {
     if (!name) return;
-    onAdd({ name, hospital, area, phone, specialty, tier, address, registrationNumber });
-    setName(""); setHospital(""); setArea(""); setPhone(""); setSpecialty(""); setTier("B"); setAddress(""); setRegistrationNumber("");
+    onAdd({ name, hospital, area, phone, specialty, tier, address, registrationNumber, coordsLat: coords?.lat || "", coordsLng: coords?.lng || "" });
+    setName(""); setHospital(""); setArea(""); setPhone(""); setSpecialty(""); setTier("B"); setAddress(""); setRegistrationNumber(""); setCoords(null); setLocError("");
     setShowAdd(false);
   };
 
@@ -2444,6 +2496,17 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
             <Field label="Address (optional)"><input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Full street address" style={inputStyle} /></Field>
             <Field label="Registration number (optional)"><input value={registrationNumber} onChange={(e) => setRegistrationNumber(e.target.value)} style={inputStyle} /></Field>
           </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+            <button type="button" onClick={getLocation} disabled={locating} style={{
+              display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
+              border: "1px solid #E5DFD3", background: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
+            }}>
+              {locating ? <Loader2 size={14} className="spin" /> : <MapPin size={14} />}
+              {locating ? "Locating…" : coords ? "Update GPS location" : "Capture GPS location (optional, more accurate than the address above)"}
+            </button>
+            {coords && <span className="kb-font-mono" style={{ fontSize: 11.5, color: "#4C7A5E" }}><Check size={12} style={{ verticalAlign: -1 }} /> {coords.lat}, {coords.lng}</span>}
+          </div>
+          {locError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{locError}</div>}
           <div style={{ display: "flex", gap: 8 }}>
             <button disabled={!name} onClick={addDoctor} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>Add doctor</button>
             <button onClick={() => setShowAdd(false)} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>Cancel</button>
