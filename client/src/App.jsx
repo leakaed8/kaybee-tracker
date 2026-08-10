@@ -169,6 +169,13 @@ export default function App() {
     return <LoginView onSuccess={(r, rn) => { setRole(r); setRepName(rn || ""); setAuthState("in"); }} />;
   }
 
+  const punchedInToday = punchLog.some(
+    (p) => p.repName === repName && p.type === "in" && new Date(p.time).toDateString() === new Date().toDateString()
+  );
+  if (loaded && role === "rep" && !punchedInToday) {
+    return <PunchInGate repName={repName} onPunch={punch} onLogout={logout} />;
+  }
+
   return (
     <div style={{ minHeight: "100vh", background: "#FAF7F2", fontFamily: "'IBM Plex Sans', system-ui, sans-serif", color: "#1F2A24" }}>
       <style>{`
@@ -378,6 +385,55 @@ function LoginView({ onSuccess }) {
           {loading ? "Checking…" : "Continue"}
         </button>
       </form>
+    </div>
+  );
+}
+
+// Blocks the entire app behind a full-screen punch-in prompt for a rep who
+// hasn't punched in yet today — no header, no nav, nothing else reachable —
+// so the first thing that happens every day is a punch-in, not something a
+// rep can scroll past or forget.
+function PunchInGate({ repName, onPunch, onLogout }) {
+  const [punching, setPunching] = useState(false);
+  const [error, setError] = useState("");
+
+  const doPunchIn = () => {
+    setPunching(true);
+    setError("");
+    const submit = (coords) => {
+      onPunch("in", coords)
+        .catch((e) => setError(e?.message || "Couldn't record punch. Try again."))
+        .finally(() => setPunching(false));
+    };
+    if (!navigator.geolocation) { submit(null); return; }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => submit({ lat: pos.coords.latitude.toFixed(5), lng: pos.coords.longitude.toFixed(5) }),
+      () => submit(null),
+      { timeout: 8000 }
+    );
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#FAF7F2", fontFamily: "'IBM Plex Sans', system-ui, sans-serif", padding: 16 }}>
+      <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 14, padding: 32, width: "100%", maxWidth: 340, textAlign: "center" }}>
+        <div className="kb-font-display" style={{ fontSize: 21, fontWeight: 600, marginBottom: 8 }}>
+          Hi {repName || "there"} 👋
+        </div>
+        <p style={{ fontSize: 13.5, color: "#8A8272", marginBottom: 24 }}>
+          Punch in to start your day — this unlocks the rest of the app.
+        </p>
+        <button
+          onClick={doPunchIn}
+          disabled={punching}
+          style={{ width: "100%", padding: "14px 18px", borderRadius: 10, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 15, fontWeight: 600 }}
+        >
+          {punching ? "Punching in…" : "Punch in"}
+        </button>
+        {error && <div style={{ fontSize: 12.5, color: "#B33A3A", marginTop: 12 }}>{error}</div>}
+        <button onClick={onLogout} style={{ marginTop: 18, fontSize: 11.5, color: "#8A8272", background: "none", border: "none" }}>
+          Not you? Log out
+        </button>
+      </div>
     </div>
   );
 }
@@ -709,6 +765,13 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     : null;
 
   const matchedItem = products.find((p) => p.name.toLowerCase().trim() === itemQuery.toLowerCase().trim());
+  // Filtered + capped like nameOptions above — with hundreds/thousands of
+  // products, dumping every single one into the datalist on every render
+  // (previously unfiltered) is what made typing here feel laggy.
+  const itemOptions = (itemQuery.trim()
+    ? products.filter((p) => p.name.toLowerCase().includes(itemQuery.toLowerCase().trim()))
+    : products
+  ).slice(0, 50);
   const addMentionedItem = () => {
     if (!matchedItem || mentionedItems.some((it) => it.productId === matchedItem.id)) return;
     setMentionedItems((prev) => [...prev, { productId: matchedItem.id, name: matchedItem.name, sampleStatus: null }]);
@@ -954,7 +1017,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
                     style={{ ...inputStyle, flex: 1 }}
                   />
                   <datalist id="checkin-item-options">
-                    {products.map((p) => <option key={p.id} value={p.name} />)}
+                    {itemOptions.map((p) => <option key={p.id} value={p.name} />)}
                   </datalist>
                   <button
                     type="button"
@@ -1293,6 +1356,14 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
   const [freeProductQuery, setFreeProductQuery] = useState("");
 
   const matchedProduct = products.find((p) => batchLabel(p) === productQuery.trim());
+  // Filtered + capped instead of dumping every batch of every product into
+  // the datalist on every keystroke — with hundreds of products (each
+  // possibly listed multiple times for separate batches) that unfiltered
+  // list was the main cause of laggy typing while searching for an item.
+  const productOptions = (productQuery.trim()
+    ? products.filter((p) => p.name.toLowerCase().includes(productQuery.toLowerCase().trim()))
+    : products
+  ).slice(0, 50);
 
   const addItem = () => {
     setError("");
@@ -1333,6 +1404,10 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
   );
   const eligibleFreeProducts = products.filter((p) => p.qty > 0 && p.price > 0 && p.price <= weightedAvgPrice);
   const matchedFreeProduct = eligibleFreeProducts.find((p) => batchLabel(p) === freeProductQuery.trim());
+  const freeProductOptions = (freeProductQuery.trim()
+    ? eligibleFreeProducts.filter((p) => p.name.toLowerCase().includes(freeProductQuery.toLowerCase().trim()))
+    : eligibleFreeProducts
+  ).slice(0, 50);
 
   const applyOffer = (offer) => {
     if (!matchedFreeProduct) return;
@@ -1417,7 +1492,7 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
             style={inputStyle}
           />
           <datalist id="order-product-options">
-            {products.map((p) => <option key={p.id} value={batchLabel(p)} />)}
+            {productOptions.map((p) => <option key={p.id} value={batchLabel(p)} />)}
           </datalist>
         </div>
         <input type="number" min="1" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Qty" style={{ ...inputStyle, flex: 1, minWidth: 80 }} />
@@ -1461,7 +1536,7 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
               style={inputStyle}
             />
             <datalist id="free-item-options">
-              {eligibleFreeProducts.map((p) => <option key={p.id} value={batchLabel(p)} />)}
+              {freeProductOptions.map((p) => <option key={p.id} value={batchLabel(p)} />)}
             </datalist>
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
               <button
@@ -1955,27 +2030,32 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
     .filter((o) => o.clientName.toLowerCase().trim() === clientName.toLowerCase().trim())
     .reduce((sum, o) => sum + (Number(o.total) || 0), 0);
 
-  const rows = clients.map((c) => {
-    const lv = lastVisitFor(c.name);
-    const days = lv ? daysSince(lv.time) : null;
-    const cadence = TIER_CADENCE[c.tier] || 30;
-    const overdue = days === null || days > cadence;
-    const revenue = revenueFor(c.name);
-    const leadScore = computeLeadScore({ tier: c.tier, days, cadence, revenue });
-    return { ...c, days, overdue, cadence, revenue, leadScore };
-  }).sort((a, b) => b.leadScore - a.leadScore);
-
+  // Filters raw clients by the search text FIRST, then only computes the
+  // expensive per-row stuff (last visit lookup, revenue, lead score) for
+  // whatever matched — computing all of that for every pharmacy on every
+  // keystroke (the old approach) meant a few thousand pharmacies times a
+  // few thousand visits/orders re-run on each character typed, which is
+  // exactly what made this search feel slow.
   const q = search.toLowerCase().trim();
-  const filteredRows = q ? rows.filter((c) =>
-    c.name.toLowerCase().includes(q) ||
-    (c.area || "").toLowerCase().includes(q) ||
-    (c.phone || "").toLowerCase().includes(q) ||
-    (c.registrationNumber || "").toLowerCase().includes(q)
-  ) : [];
-  // Same priority score shown on every card below — highest-priority overdue
-  // pharmacies first, not just "whoever happens to have the most raw days
-  // since their last visit" (that ignored tier and order history entirely).
-  const suggestedFollowUps = rows.filter((c) => c.overdue).slice(0, 5);
+  const filteredRows = q
+    ? clients
+        .filter((c) =>
+          c.name.toLowerCase().includes(q) ||
+          (c.area || "").toLowerCase().includes(q) ||
+          (c.phone || "").toLowerCase().includes(q) ||
+          (c.registrationNumber || "").toLowerCase().includes(q)
+        )
+        .map((c) => {
+          const lv = lastVisitFor(c.name);
+          const days = lv ? daysSince(lv.time) : null;
+          const cadence = TIER_CADENCE[c.tier] || 30;
+          const overdue = days === null || days > cadence;
+          const revenue = revenueFor(c.name);
+          const leadScore = computeLeadScore({ tier: c.tier, days, cadence, revenue });
+          return { ...c, days, overdue, cadence, revenue, leadScore };
+        })
+        .sort((a, b) => b.leadScore - a.leadScore)
+    : [];
   const shownRows = filteredRows.slice(0, LIST_DISPLAY_CAP);
 
   const tierColor = { A: "#B33A3A", B: "#D9A441", C: "#6B7280" };
@@ -2065,27 +2145,6 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
           style={{ ...inputStyle, paddingLeft: 34 }}
         />
       </div>
-
-      {suggestedFollowUps.length > 0 && (
-        <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 10, padding: 16, marginBottom: 18 }}>
-          <h3 style={{ fontSize: 13.5, fontWeight: 600, margin: "0 0 2px", color: "#7A5B2E" }}>Suggested follow-ups</h3>
-          <p style={{ fontSize: 11, color: "#9C8659", margin: "0 0 10px" }}>
-            The 5 overdue pharmacies with the highest priority score — same score shown on each card below (tier + overdue-ness + order history).
-          </p>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {suggestedFollowUps.map((c) => (
-              <div key={c.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#fff", border: "1px solid #E9C88A", borderRadius: 8, padding: "8px 12px", fontSize: 12.5 }}>
-                <span><strong>{c.name}</strong> — priority {c.leadScore} · {c.days === null ? "never visited" : `${c.days}d since visit`} (cadence {c.cadence}d)</span>
-                {c.phone && (
-                  <a href={`https://wa.me/${c.phone.replace(/\D/g, "")}`} target="_blank" rel="noreferrer" style={{ fontSize: 11.5, color: "#4C7A5E", textDecoration: "none" }}>
-                    WhatsApp
-                  </a>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       {filteredRows.length > LIST_DISPLAY_CAP && (
         <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>
@@ -2431,25 +2490,32 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
     setShowAdd(false);
   };
 
-  const rows = doctors.map((d) => {
-    const lv = lastVisitFor(d.name);
-    const days = lv ? daysSince(lv.time) : null;
-    const cadence = TIER_CADENCE[d.tier] || 30;
-    const overdue = days === null || days > cadence;
-    const pendingSamples = pendingSamplesFor(d.name);
-    const leadScore = computeLeadScore({ tier: d.tier, days, cadence, engagement: pendingSamples.length });
-    return { ...d, days, overdue, cadence, pendingSamples, leadScore };
-  }).sort((a, b) => b.leadScore - a.leadScore);
-
+  // Same fix as Pharmacies: filter the raw list by the search text first,
+  // then only run the expensive per-doctor lookups (last visit, pending
+  // samples, lead score) on whatever matched, instead of on every doctor
+  // on every keystroke.
   const q = search.toLowerCase().trim();
-  const filteredRows = q ? rows.filter((d) =>
-    d.name.toLowerCase().includes(q) ||
-    (d.specialty || "").toLowerCase().includes(q) ||
-    (d.area || "").toLowerCase().includes(q) ||
-    (d.hospital || "").toLowerCase().includes(q) ||
-    (d.phone || "").toLowerCase().includes(q) ||
-    (d.registrationNumber || "").toLowerCase().includes(q)
-  ) : [];
+  const filteredRows = q
+    ? doctors
+        .filter((d) =>
+          d.name.toLowerCase().includes(q) ||
+          (d.specialty || "").toLowerCase().includes(q) ||
+          (d.area || "").toLowerCase().includes(q) ||
+          (d.hospital || "").toLowerCase().includes(q) ||
+          (d.phone || "").toLowerCase().includes(q) ||
+          (d.registrationNumber || "").toLowerCase().includes(q)
+        )
+        .map((d) => {
+          const lv = lastVisitFor(d.name);
+          const days = lv ? daysSince(lv.time) : null;
+          const cadence = TIER_CADENCE[d.tier] || 30;
+          const overdue = days === null || days > cadence;
+          const pendingSamples = pendingSamplesFor(d.name);
+          const leadScore = computeLeadScore({ tier: d.tier, days, cadence, engagement: pendingSamples.length });
+          return { ...d, days, overdue, cadence, pendingSamples, leadScore };
+        })
+        .sort((a, b) => b.leadScore - a.leadScore)
+    : [];
   const shownRows = filteredRows.slice(0, LIST_DISPLAY_CAP);
   const tierColor = { A: "#B33A3A", B: "#D9A441", C: "#6B7280" };
   const scoreColor = (s) => (s >= 65 ? "#B33A3A" : s >= 40 ? "#C17817" : "#6B7280");

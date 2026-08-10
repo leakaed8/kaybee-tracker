@@ -723,6 +723,14 @@ app.post("/api/punch", async (req, res) => {
       coordsLng: coords ? coords.lng : "",
     };
     await db.appendRow("PunchLog", entry);
+    if (type === "in") {
+      db.getSettings().then((settings) => {
+        if (!settings.managerTelegramChatId) return;
+        const timeStr = new Date(entry.time).toLocaleTimeString("en-US", { timeZone: "Asia/Beirut", hour: "numeric", minute: "2-digit" });
+        telegram.sendMessage(settings.managerTelegramChatId, `🟢 ${req.repName} punched in at ${timeStr}.`)
+          .catch((e) => console.error("punch-in telegram notify failed", e));
+      }).catch((e) => console.error("punch-in telegram notify failed", e));
+    }
     res.json(entry);
   } catch (e) {
     console.error(e);
@@ -1537,16 +1545,58 @@ const MONTHLY_DIGEST_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 function followUpButtons(followUpId) {
   return [
     [
-      { text: "In 2 days", callback_data: `fu2d:${followUpId}` },
-      { text: "In 3 days", callback_data: `fu3d:${followUpId}` },
-    ],
-    [
-      { text: "In 1 week", callback_data: `fu1w:${followUpId}` },
-      { text: "In 2 weeks", callback_data: `fu2w:${followUpId}` },
-      { text: "In 1 month", callback_data: `fu1m:${followUpId}` },
+      { text: "✅ Sign in (visited)", callback_data: `fusignin:${followUpId}` },
+      { text: "⏰ Snooze 2 days", callback_data: `fusnooze:${followUpId}` },
     ],
     [{ text: "🚫 Not interested — stop", callback_data: `fustop:${followUpId}` }],
   ];
+}
+
+// The re-ask sent right after "Sign in" — same idea as the original
+// scheduling step in the app (a short list of presets), just compact since
+// it's a Telegram message rather than a full form.
+function rescheduleButtons(followUpId) {
+  return [
+    [
+      { text: "In 2 days", callback_data: `fu2d:${followUpId}` },
+      { text: "In 1 week", callback_data: `fu1w:${followUpId}` },
+      { text: "In 1 month", callback_data: `fu1m:${followUpId}` },
+    ],
+    [{ text: "No follow-up needed", callback_data: `fudone:${followUpId}` }],
+  ];
+}
+
+// Minimal visit record for the "Sign in" button on a follow-up reminder —
+// registers today's visit straight from Telegram so the rep doesn't have to
+// separately open the app and re-log something they just confirmed. Order
+// and sample details still go through the app's own Check-In flow (Step 3
+// there already has the searchable item dropdown and stock-aware order
+// builder — rebuilding that inside Telegram's button-only UI isn't
+// practical), so this deliberately only covers the visit itself.
+async function createVisitFromFollowUp(followUp) {
+  const visit = {
+    id: `v${crypto.randomUUID()}`,
+    client: followUp.entityName,
+    notes: "",
+    coords: null,
+    time: new Date().toISOString(),
+    repName: followUp.repName,
+    mentionedItems: [],
+    objectionTag: "",
+  };
+  const row = visitToRow(visit);
+  await db.appendRow("Visits", row);
+  const reps = await db.getAllRows("Reps");
+  const rep = reps.find((r) => r.name === followUp.repName);
+  if (rep?.exportSheetId) await db.appendToRepExportSheet(rep.exportSheetId, row);
+  if (followUp.entityType === "pharmacy") {
+    const clients = await db.getAllRows("Clients");
+    const matchedClient = clients.find((c) => c.name.toLowerCase().trim() === followUp.entityName.toLowerCase().trim());
+    if (matchedClient && !matchedClient.assignedRep) {
+      await db.updateRowById("Clients", matchedClient.id, { assignedRep: followUp.repName });
+    }
+  }
+  return visit;
 }
 
 async function checkFollowUpReminders() {
@@ -1587,11 +1637,48 @@ async function handleFollowUpCallback(callbackQuery) {
     return;
   }
 
+  if (action === "fusnooze") {
+    await db.updateRowById("FollowUps", followUp.id, { status: "done" });
+    await db.appendRow("FollowUps", {
+      id: `fu${crypto.randomUUID()}`,
+      entityName: followUp.entityName,
+      entityType: followUp.entityType,
+      repName: followUp.repName,
+      dueDate: addDaysToTodayStr(2),
+      status: "pending",
+      visitId: followUp.visitId,
+      createdAt: new Date().toISOString(),
+    });
+    await telegram.answerCallbackQuery(id, "Snoozed 2 days.");
+    if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `Follow-up with ${followUp.entityName} snoozed — you'll hear again in 2 days.`);
+    return;
+  }
+
+  if (action === "fusignin") {
+    const visit = await createVisitFromFollowUp(followUp);
+    await db.updateRowById("FollowUps", followUp.id, { status: "done", visitId: visit.id });
+    await telegram.answerCallbackQuery(id, "Visit logged!");
+    if (message?.chat?.id) {
+      await telegram.sendMessage(
+        message.chat.id,
+        `✅ Logged today's visit to <b>${escapeHtml(followUp.entityName)}</b> — it's in Today's visits in the app.\n\n` +
+          `If an order was placed or a sample was given, add that in the app's Check-In flow (it has the item list and stock check Telegram can't do).\n\n` +
+          `Need another follow-up?`,
+        { inline_keyboard: rescheduleButtons(followUp.id) }
+      );
+    }
+    return;
+  }
+
+  if (action === "fudone") {
+    await telegram.answerCallbackQuery(id, "Got it — no follow-up scheduled.");
+    return;
+  }
+
   const preset = FOLLOWUP_PRESETS[action.replace(/^fu/, "")];
   if (!preset) { await telegram.answerCallbackQuery(id, "Unknown action."); return; }
 
-  await db.updateRowById("FollowUps", followUp.id, { status: "done" });
-  const nextFollowUp = {
+  await db.appendRow("FollowUps", {
     id: `fu${crypto.randomUUID()}`,
     entityName: followUp.entityName,
     entityType: followUp.entityType,
@@ -1600,10 +1687,9 @@ async function handleFollowUpCallback(callbackQuery) {
     status: "pending",
     visitId: followUp.visitId,
     createdAt: new Date().toISOString(),
-  };
-  await db.appendRow("FollowUps", nextFollowUp);
-  await telegram.answerCallbackQuery(id, `Rescheduled ${preset.label}.`);
-  if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `Follow-up with ${followUp.entityName} rescheduled ${preset.label}.`);
+  });
+  await telegram.answerCallbackQuery(id, `Follow-up scheduled ${preset.label}.`);
+  if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `Follow-up with ${followUp.entityName} scheduled ${preset.label}.`);
 }
 
 const FOLLOWUP_CHECK_INTERVAL_MS = 60 * 60 * 1000;
