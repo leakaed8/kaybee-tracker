@@ -235,7 +235,24 @@ function parseVisit(v) {
     mentionedItems, objectionTag: v.objectionTag || "",
   };
 }
-
+async function geocodeAddress(address) {
+  if (!address || !process.env.GOOGLE_MAPS_SERVER_KEY) return null;
+  try {
+    const query = encodeURIComponent(`${address}, Lebanon`);
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${query}&key=${process.env.GOOGLE_MAPS_SERVER_KEY}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.status === "OK" && data.results[0]) {
+      const { lat, lng } = data.results[0].geometry.location;
+      return { lat, lng };
+    }
+    console.warn(`Geocoding failed for "${address}": ${data.status}`);
+    return null;
+  } catch (e) {
+    console.error("geocodeAddress error", e.message);
+    return null;
+  }
+}
 function visitToRow(v) {
   return {
     id: v.id,
