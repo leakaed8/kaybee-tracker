@@ -142,6 +142,8 @@ export default function App() {
   const removeClient = (id) => withSync(() => api.removeClient(id));
   const bulkImportClients = (payload) => withSync(() => api.importClientsBulk(payload));
   const assignClientRep = (id, assignedRep) => withSync(() => api.assignClientRep(id, assignedRep));
+  const completeClientInfo = (id, patch) => withSync(() => api.completeClientInfo(id, patch));
+  const completeDoctorInfo = (id, patch) => withSync(() => api.completeDoctorInfo(id, patch));
   const addDoctor = (doctor) => withSync(() => api.addDoctor(doctor));
   const removeDoctor = (id) => withSync(() => api.removeDoctor(id));
   const bulkImportDoctors = (payload) => withSync(() => api.importDoctorsBulk(payload));
@@ -199,7 +201,7 @@ export default function App() {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontSize: 13, fontWeight: 500, color: "#5B5445", background: "#F0EBE0", borderRadius: 8, padding: "9px 16px" }}>
-            {role === "manager" ? "Manager" : repName ? `Med Rep · ${repName}` : "Med Rep"}
+            {role === "manager" ? "Manager" : role === "head_of_sales" ? "Head of Sales" : repName ? `Med Rep · ${repName}` : "Med Rep"}
           </span>
           <button onClick={logout} style={{ fontSize: 12, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 8, padding: "9px 12px" }}>
             Log out
@@ -208,20 +210,20 @@ export default function App() {
       </header>
 
       <nav style={{ display: "flex", gap: 4, padding: "12px 24px 0", borderBottom: "1px solid #E5DFD3", overflowX: "auto" }}>
-        <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />
         {role === "rep" && <TabBtn active={tab === "checkin"} onClick={() => setTab("checkin")} icon={<MapPin size={15} />} label="Check-In" />}
+        {role === "rep" && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
         <TabBtn active={tab === "stock"} onClick={() => setTab("stock")} icon={<Boxes size={15} />} label="Stock" />
+        <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />
         <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />
         <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />
         <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />
         <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />
-        {role === "rep" && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
         {role === "manager" && <TabBtn active={tab === "dashboard"} onClick={() => setTab("dashboard")} icon={<LayoutDashboard size={15} />} label="Dashboard" />}
         {role === "manager" && <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<Target size={15} />} label="Performance" />}
         {role === "manager" && <TabBtn active={tab === "outreach"} onClick={() => setTab("outreach")} icon={<MessageCircle size={15} />} label="Outreach" />}
         {role === "manager" && <TabBtn active={tab === "broadcast"} onClick={() => setTab("broadcast")} icon={<Megaphone size={15} />} label="Broadcast" />}
         {role === "manager" && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
-        {role === "manager" && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<RadarIcon size={15} />} label="Locations" />}
+        {(role === "manager" || role === "head_of_sales") && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<RadarIcon size={15} />} label="Locations" />}
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
       </nav>
 
@@ -276,6 +278,7 @@ export default function App() {
                 onRemove={removeClient}
                 onBulkImport={bulkImportClients}
                 onAssignRep={assignClientRep}
+                onCompleteInfo={completeClientInfo}
               />
             )}
             {tab === "doctors" && (
@@ -287,6 +290,7 @@ export default function App() {
                 onAdd={addDoctor}
                 onRemove={removeDoctor}
                 onBulkImport={bulkImportDoctors}
+                onCompleteInfo={completeDoctorInfo}
               />
             )}
             {tab === "knowledge" && <KnowledgeView />}
@@ -296,7 +300,9 @@ export default function App() {
             {tab === "orders" && role === "manager" && (
               <OrdersView orders={orders} onDelete={deleteOrder} onApproveDelete={approveDeleteOrder} onDenyDelete={denyDeleteOrder} />
             )}
-            {tab === "locations" && role === "manager" && <LocationsView visits={visits} punchLog={punchLog} repNames={repNames} onRemoveVisit={removeVisit} />}
+            {tab === "locations" && (role === "manager" || role === "head_of_sales") && (
+              <LocationsView role={role} visits={visits} punchLog={punchLog} repNames={repNames} onRemoveVisit={removeVisit} />
+            )}
             {tab === "performance" && role === "manager" && (
               <PerformanceView
                 visits={visits}
@@ -676,6 +682,54 @@ function StockView({ products }) {
   );
 }
 
+// Lets a rep fill in gaps on an existing pharmacy/doctor record (phone,
+// address, registration number, ...) without being able to touch fields
+// that already have a value — that still requires a manager. `fields` is
+// [{key, label}] for whichever fields are currently blank on this record.
+function CompleteInfoForm({ fields, onSave, onCancel }) {
+  const [values, setValues] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const hasAny = Object.values(values).some((v) => v && v.trim());
+
+  const save = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      await onSave(values);
+      onCancel();
+    } catch (e) {
+      setError(e.message || "Couldn't save.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 8, padding: 10, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+        {fields.map((f) => (
+          <Field key={f.key} label={f.label}>
+            <input
+              value={values[f.key] || ""}
+              onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+              style={inputStyle}
+            />
+          </Field>
+        ))}
+      </div>
+      {error && <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 6 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 6 }}>
+        <button disabled={!hasAny || saving} onClick={save} style={{ fontSize: 11.5, padding: "5px 10px", borderRadius: 6, border: "none", background: hasAny ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontWeight: 500 }}>
+          {saving ? "Saving…" : "Save"}
+        </button>
+        <button onClick={onCancel} style={{ fontSize: 11.5, padding: "5px 10px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff" }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 function Field({ label, children }) {
   return (
     <div>
@@ -763,6 +817,15 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
   const otherRepWarning = matchedClient && matchedClient.assignedRep && matchedClient.assignedRep !== repName
     ? matchedClient.assignedRep
     : null;
+
+  // A visit must point at a real Pharmacies/Doctors record, not just
+  // whatever string got typed — otherwise it logs against a name with no
+  // tier, address, or assigned rep behind it. New clients get added
+  // properly (with full details) via their own tab, not invented here.
+  const matchedEntity = entityType === "pharmacy"
+    ? matchedClient
+    : doctors.find((d) => d.name.toLowerCase().trim() === client.toLowerCase().trim());
+  const unknownEntity = client.trim().length > 0 && !matchedEntity;
 
   const matchedItem = products.find((p) => p.name.toLowerCase().trim() === itemQuery.toLowerCase().trim());
   // Filtered + capped like nameOptions above — with hundreds/thousands of
@@ -967,6 +1030,11 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
                 ⚠ {client} is assigned to <strong>{otherRepWarning}</strong> — you're about to visit another rep's pharmacy.
               </div>
             )}
+            {unknownEntity && (
+              <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", color: "#7A5B2E", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 10, fontWeight: 500 }}>
+                ⚠ "{client}" isn't in the system yet. Go to the {entityType === "pharmacy" ? "Pharmacies" : "Doctors"} tab and add it there first (with full details{entityType === "pharmacy" ? ", including registration number" : ""}), then come back to check in.
+              </div>
+            )}
             <Field label="Visit notes">
               <div style={{ position: "relative" }}>
                 <textarea
@@ -1094,9 +1162,9 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
             {visitError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{visitError}</div>}
             {!coords && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>Capture your GPS location before saving — this is how a visit gets confirmed as real.</div>}
 
-            <button disabled={!client || !coords || saving} onClick={submit} style={{
+            <button disabled={!client || !coords || !matchedEntity || saving} onClick={submit} style={{
               padding: "9px 18px", borderRadius: 8, border: "none",
-              background: client && coords && !saving ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500,
+              background: client && coords && matchedEntity && !saving ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500,
             }}>
               {saving ? "Saving…" : "Save visit & continue"}
             </button>
@@ -1260,6 +1328,60 @@ function RepTelegramLinkSection() {
         Link your Telegram to get the monthly focus list — what to pick up from pharmacies and what to push sales on — once your manager approves it.
       </p>
       {status.repLinked ? (
+        <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 5, background: "#4C7A5E1A", color: "#4C7A5E" }}>
+          ✓ Linked
+        </span>
+      ) : linkInfo ? (
+        <div style={{ fontSize: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
+          Tap to open Telegram and hit Start:
+          <div style={{ marginTop: 4 }}>
+            <a className="kb-font-mono" href={`https://t.me/${linkInfo.botUsername}?start=${linkInfo.code}`} target="_blank" rel="noreferrer" style={{ wordBreak: "break-all", color: "#4C7A5E" }}>
+              https://t.me/{linkInfo.botUsername}?start={linkInfo.code}
+            </a>
+          </div>
+        </div>
+      ) : (
+        <button onClick={generateLink} disabled={linking} style={{ fontSize: 12.5, padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24" }}>
+          {linking ? "Generating…" : "Link my Telegram"}
+        </button>
+      )}
+      {error && <div style={{ fontSize: 11.5, color: "#B33A3A", marginTop: 6 }}>{error}</div>}
+    </div>
+  );
+}
+
+// Head of Sales has no Settings tab, so this lives at the top of the one
+// tab he does have (Locations) — same self-service link pattern as reps.
+function HeadOfSalesTelegramLinkSection() {
+  const [status, setStatus] = useState(null);
+  const [linking, setLinking] = useState(false);
+  const [linkInfo, setLinkInfo] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => { api.getTelegramStatus().then(setStatus).catch(() => setStatus({ configured: false })); }, []);
+
+  const generateLink = async () => {
+    setLinking(true);
+    setError("");
+    try {
+      const { code, botUsername } = await api.getHeadOfSalesTelegramLinkCode();
+      setLinkInfo({ code, botUsername });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLinking(false);
+    }
+  };
+
+  if (!status?.configured) return null;
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Telegram alerts</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Link your Telegram to get order-deletion approval requests here.
+      </p>
+      {status.headOfSalesLinked ? (
         <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 5, background: "#4C7A5E1A", color: "#4C7A5E" }}>
           ✓ Linked
         </span>
@@ -1667,7 +1789,7 @@ function OrdersView({ orders, onDelete, onApproveDelete, onDenyDelete }) {
 }
 
 // ---------- Locations View (manager, check-in GPS history + punch in/out) ----------
-function LocationsView({ visits, punchLog, repNames, onRemoveVisit }) {
+function LocationsView({ role, visits, punchLog, repNames, onRemoveVisit }) {
   const [selectedRep, setSelectedRep] = useState("all");
   const [confirmId, setConfirmId] = useState(null);
 
@@ -1690,8 +1812,11 @@ function LocationsView({ visits, punchLog, repNames, onRemoveVisit }) {
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Check-in locations</h2>
       <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
-        Shows visit check-ins and punch in/out events, most recent first, with the GPS a rep recorded at that moment where available. This isn't live tracking — a web app can only record location at the moment a button is tapped. You can delete a mistaken visit here.
+        Shows visit check-ins and punch in/out events, most recent first, with the GPS a rep recorded at that moment where available — this is what tells you whether they were actually at a pharmacy or doctor, not just that they logged something. This isn't live tracking — a web app can only record location at the moment a button is tapped.
+        {role === "manager" && " You can delete a mistaken visit here."}
       </p>
+
+      {role === "head_of_sales" && <HeadOfSalesTelegramLinkSection />}
 
       <div style={{ marginBottom: 14 }}>
         <select value={selectedRep} onChange={(e) => setSelectedRep(e.target.value)} style={{ ...inputStyle, maxWidth: 240 }}>
@@ -1728,7 +1853,7 @@ function LocationsView({ visits, punchLog, repNames, onRemoveVisit }) {
                   View on map
                 </a>
               )}
-              {e.kind === "visit" && (
+              {e.kind === "visit" && role === "manager" && (
                 confirmId === e.id ? (
                   <>
                     <button onClick={() => doDelete(e.id)} style={{ fontSize: 11.5, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}>Yes</button>
@@ -1981,7 +2106,15 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
 }
 
 // ---------- Pharmacies View (tiering + follow-up nudges) ----------
-function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep }) {
+const CLIENT_FILLABLE_FIELDS = [
+  { key: "phone", label: "WhatsApp number" },
+  { key: "area", label: "Area" },
+  { key: "address", label: "Address" },
+  { key: "registrationNumber", label: "Registration number" },
+];
+
+function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onCompleteInfo }) {
+  const [completingId, setCompletingId] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [name, setName] = useState("");
@@ -2196,8 +2329,24 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
               <a href={mapsLinkFor(c)} target="_blank" rel="noreferrer" style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#4C7A5E", textDecoration: "none" }}>
                 <MapPin size={11} /> Get directions
               </a>
+              {role === "rep" && (() => {
+                const missing = CLIENT_FILLABLE_FIELDS.filter((f) => !c[f.key]);
+                if (missing.length === 0) return null;
+                return (
+                  <button onClick={() => setCompletingId(completingId === c.id ? null : c.id)} style={{ background: "none", border: "none", color: "#C17817", fontSize: 11, fontWeight: 500 }}>
+                    {completingId === c.id ? "Cancel" : "Complete missing info"}
+                  </button>
+                );
+              })()}
               <button onClick={() => onRemove(c.id)} style={{ background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
             </div>
+            {role === "rep" && completingId === c.id && (
+              <CompleteInfoForm
+                fields={CLIENT_FILLABLE_FIELDS.filter((f) => !c[f.key])}
+                onSave={(values) => onCompleteInfo(c.id, values)}
+                onCancel={() => setCompletingId(null)}
+              />
+            )}
           </div>
         ))}
         {!q && clients.length > 0 && (
@@ -2435,7 +2584,17 @@ function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
 }
 
 // ---------- Doctors View (tiering + follow-up nudges) ----------
-function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkImport }) {
+const DOCTOR_FILLABLE_FIELDS = [
+  { key: "phone", label: "Phone" },
+  { key: "area", label: "Area" },
+  { key: "hospital", label: "Hospital / clinic" },
+  { key: "specialty", label: "Specialty" },
+  { key: "address", label: "Address" },
+  { key: "registrationNumber", label: "Registration number" },
+];
+
+function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkImport, onCompleteInfo }) {
+  const [completingId, setCompletingId] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [name, setName] = useState("");
@@ -2635,8 +2794,24 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
               <a href={mapsLinkFor(d)} target="_blank" rel="noreferrer" style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#4C7A5E", textDecoration: "none" }}>
                 <MapPin size={11} /> Get directions
               </a>
+              {role === "rep" && (() => {
+                const missing = DOCTOR_FILLABLE_FIELDS.filter((f) => !d[f.key]);
+                if (missing.length === 0) return null;
+                return (
+                  <button onClick={() => setCompletingId(completingId === d.id ? null : d.id)} style={{ background: "none", border: "none", color: "#C17817", fontSize: 11, fontWeight: 500 }}>
+                    {completingId === d.id ? "Cancel" : "Complete missing info"}
+                  </button>
+                );
+              })()}
               <button onClick={() => onRemove(d.id)} style={{ background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
             </div>
+            {role === "rep" && completingId === d.id && (
+              <CompleteInfoForm
+                fields={DOCTOR_FILLABLE_FIELDS.filter((f) => !d[f.key])}
+                onSave={(values) => onCompleteInfo(d.id, values)}
+                onCancel={() => setCompletingId(null)}
+              />
+            )}
           </div>
         ))}
         {!q && doctors.length > 0 && (

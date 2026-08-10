@@ -111,6 +111,11 @@ function requireAuth(req, res, next) {
   if (payload === "manager") {
     req.role = "manager";
     req.repName = null;
+  } else if (payload === "hos") {
+    // Head of Sales — a narrower role than manager: GPS routing visibility
+    // and order-deletion approval only, nothing else manager-only.
+    req.role = "head_of_sales";
+    req.repName = null;
   } else if (payload.startsWith("rep|")) {
     req.role = "rep";
     req.repName = decodeURIComponent(payload.slice(4));
@@ -122,6 +127,11 @@ function requireAuth(req, res, next) {
 
 function requireManager(req, res, next) {
   if (req.role !== "manager") return res.status(403).json({ error: "Managers only." });
+  next();
+}
+
+function requireManagerOrHeadOfSales(req, res, next) {
+  if (req.role !== "manager" && req.role !== "head_of_sales") return res.status(403).json({ error: "Managers only." });
   next();
 }
 
@@ -273,11 +283,16 @@ app.post("/api/login", async (req, res) => {
   try {
     const { passcode } = req.body || {};
     const managerCode = process.env.MANAGER_PASSCODE;
+    const headOfSalesCode = process.env.HEAD_OF_SALES_PASSCODE;
     const legacyRepCode = process.env.REP_PASSCODE;
 
     if (managerCode && passcode === managerCode) {
       setSessionCookie(res, signPayload("manager"), 60 * 60 * 24 * 30);
       return res.json({ ok: true, role: "manager" });
+    }
+    if (headOfSalesCode && passcode === headOfSalesCode) {
+      setSessionCookie(res, signPayload("hos"), 60 * 60 * 24 * 30);
+      return res.json({ ok: true, role: "head_of_sales" });
     }
     if (legacyRepCode && passcode === legacyRepCode) {
       setSessionCookie(res, signPayload("rep|"), 60 * 60 * 24 * 30);
@@ -328,11 +343,20 @@ app.post("/api/telegram/webhook", async (req, res) => {
         await telegram.sendMessage(chatId, "Manager account linked! You'll get the monthly digest here for approval before it goes to reps.");
         return;
       }
-      await telegram.sendMessage(chatId, "That link code wasn't recognized — generate a new one from Settings and try again.");
+      if (settings.headOfSalesTelegramLinkCode === code) {
+        await db.setSettings({ headOfSalesTelegramChatId: chatId });
+        await telegram.sendMessage(chatId, "Head of Sales account linked! You'll get order-deletion approvals here.");
+        return;
+      }
+      await telegram.sendMessage(chatId, "That link code wasn't recognized — generate a new one and try again.");
     } else if (update.callback_query) {
       const data = update.callback_query.data || "";
       if (data.startsWith("fu")) {
         await handleFollowUpCallback(update.callback_query);
+      } else if (data.startsWith("orddel") || data.startsWith("ordkeep")) {
+        await handleOrderDeleteCallback(update.callback_query);
+      } else if (data.startsWith("keeprep") || data.startsWith("changerep")) {
+        await handleReassignmentCallback(update.callback_query);
       } else {
         await handleDigestCallback(update.callback_query);
       }
@@ -614,6 +638,17 @@ app.post("/api/visits", async (req, res) => {
     if (!coords || !coords.lat || !coords.lng) {
       return res.status(400).json({ error: "GPS location is required to log a visit." });
     }
+
+    // A visit must point at a real Pharmacies/Doctors record, not a name
+    // typed on the spot — otherwise it has no tier, address, or assigned
+    // rep behind it. New clients get added properly via their own tab.
+    const [allClients, allDoctors] = await Promise.all([db.getAllRows("Clients"), db.getAllRows("Doctors")]);
+    const matchedClient = allClients.find((c) => c.name.toLowerCase().trim() === client.toLowerCase().trim());
+    const matchedDoctor = allDoctors.find((d) => d.name.toLowerCase().trim() === client.toLowerCase().trim());
+    if (!matchedClient && !matchedDoctor) {
+      return res.status(400).json({ error: `"${client}" isn't in the system yet — add it in the Pharmacies or Doctors tab first.` });
+    }
+
     const visit = {
       id: `v${crypto.randomUUID()}`,
       client,
@@ -639,8 +674,6 @@ app.post("/api/visits", async (req, res) => {
     // response) and the manager (via push) know this crosses territories.
     let assignedRepWarning = null;
     if (req.repName) {
-      const allClients = await db.getAllRows("Clients");
-      const matchedClient = allClients.find((c) => c.name.toLowerCase().trim() === client.toLowerCase().trim());
       if (matchedClient) {
         if (!matchedClient.assignedRep) {
           await db.updateRowById("Clients", matchedClient.id, { assignedRep: req.repName });
@@ -651,6 +684,17 @@ app.post("/api/visits", async (req, res) => {
             body: `${req.repName} visited ${matchedClient.name}, which is assigned to ${matchedClient.assignedRep}`,
             url: "/",
           });
+          db.getSettings().then((settings) => {
+            if (!settings.managerTelegramChatId) return;
+            telegram.sendMessage(
+              settings.managerTelegramChatId,
+              `⚠️ <b>${escapeHtml(req.repName)}</b> visited <b>${escapeHtml(matchedClient.name)}</b>, which is assigned to <b>${escapeHtml(matchedClient.assignedRep)}</b>.\n\nKeep the current assignment, or move it to ${escapeHtml(req.repName)}?`,
+              { inline_keyboard: [[
+                { text: `Keep ${matchedClient.assignedRep}`, callback_data: `keeprep:${matchedClient.id}` },
+                { text: `Change to ${req.repName}`, callback_data: `changerep:${matchedClient.id}:${req.repName}` },
+              ]] }
+            );
+          }).catch((e) => console.error("cross-rep telegram notify failed", e));
         }
       }
     }
@@ -785,6 +829,25 @@ app.post("/api/orders/:id/request-delete", async (req, res) => {
     const ok = await db.updateRowById("Orders", req.params.id, { status: "deletion_requested" });
     if (!ok) return res.status(404).json({ error: "Order not found" });
     notifyManagers({ title: "Order deletion requested", body: "A rep asked to delete an order — review in the Orders tab.", url: "/" });
+
+    const orders = await db.getAllRows("Orders");
+    const order = orders.find((o) => o.id === req.params.id);
+    if (order) {
+      const settings = await db.getSettings();
+      const msg = `🗑 <b>${escapeHtml(req.repName || "A rep")}</b> asked to delete the order for <b>${escapeHtml(order.clientName)}</b> (${(Number(order.total) || 0).toFixed(2)}).`;
+      const buttons = {
+        inline_keyboard: [[
+          { text: "🗑 Delete", callback_data: `orddel:${order.id}` },
+          { text: "Keep it", callback_data: `ordkeep:${order.id}` },
+        ]],
+      };
+      if (settings.managerTelegramChatId) {
+        telegram.sendMessage(settings.managerTelegramChatId, msg, buttons).catch((e) => console.error("order-delete telegram (manager) failed", e));
+      }
+      if (settings.headOfSalesTelegramChatId) {
+        telegram.sendMessage(settings.headOfSalesTelegramChatId, msg, buttons).catch((e) => console.error("order-delete telegram (head of sales) failed", e));
+      }
+    }
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -909,6 +972,51 @@ app.patch("/api/clients/:id", requireManager, async (req, res) => {
   }
 });
 
+// Rep-accessible, but deliberately narrow: only fills in fields that are
+// currently blank. A rep filling gaps in an existing record (phone,
+// address, registration number) is fine; overwriting something a manager
+// already entered is not — that still goes through the manager-only PATCH
+// above.
+const CLIENT_FILLABLE_FIELDS = ["phone", "address", "registrationNumber", "area"];
+app.patch("/api/clients/:id/complete-info", async (req, res) => {
+  try {
+    if (!req.repName) return res.status(403).json({ error: "Reps only." });
+    const clients = await db.getAllRows("Clients");
+    const existing = clients.find((c) => c.id === req.params.id);
+    if (!existing) return res.status(404).json({ error: "Client not found" });
+    const patch = {};
+    for (const field of CLIENT_FILLABLE_FIELDS) {
+      if (!existing[field] && req.body[field]) patch[field] = String(req.body[field]).trim();
+    }
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing new to add." });
+    await db.updateRowById("Clients", existing.id, patch);
+    res.json({ ok: true, patch });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+const DOCTOR_FILLABLE_FIELDS = ["phone", "address", "registrationNumber", "area", "hospital", "specialty"];
+app.patch("/api/doctors/:id/complete-info", async (req, res) => {
+  try {
+    if (!req.repName) return res.status(403).json({ error: "Reps only." });
+    const doctors = await db.getAllRows("Doctors");
+    const existing = doctors.find((d) => d.id === req.params.id);
+    if (!existing) return res.status(404).json({ error: "Doctor not found" });
+    const patch = {};
+    for (const field of DOCTOR_FILLABLE_FIELDS) {
+      if (!existing[field] && req.body[field]) patch[field] = String(req.body[field]).trim();
+    }
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing new to add." });
+    await db.updateRowById("Doctors", existing.id, patch);
+    res.json({ ok: true, patch });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get("/api/reps", requireManager, async (req, res) => {
   try {
     const reps = await db.getAllRows("Reps");
@@ -966,6 +1074,9 @@ app.get("/api/telegram/status", async (req, res) => {
       const reps = await db.getAllRows("Reps");
       const rep = reps.find((r) => r.name === req.repName);
       result.repLinked = Boolean(rep?.telegramChatId);
+    }
+    if (req.role === "head_of_sales") {
+      result.headOfSalesLinked = Boolean(settings.headOfSalesTelegramChatId);
     }
     res.json(result);
   } catch (e) {
@@ -1027,6 +1138,21 @@ app.post("/api/settings/telegram-link-code", requireManager, async (req, res) =>
     if (!telegram.isConfigured()) return res.status(400).json({ error: "Telegram isn't configured on the server yet." });
     const code = crypto.randomBytes(4).toString("hex");
     await db.setSettings({ managerTelegramLinkCode: code });
+    res.json({ code, botUsername: telegramBotUsername });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Self-service, same pattern as the rep's own link-code endpoint — Head of
+// Sales has no Settings tab to reach a manager-style admin flow from.
+app.post("/api/settings/head-of-sales-telegram-link-code", async (req, res) => {
+  try {
+    if (req.role !== "head_of_sales") return res.status(403).json({ error: "Head of Sales only." });
+    if (!telegram.isConfigured()) return res.status(400).json({ error: "Telegram isn't configured on the server yet." });
+    const code = crypto.randomBytes(4).toString("hex");
+    await db.setSettings({ headOfSalesTelegramLinkCode: code });
     res.json({ code, botUsername: telegramBotUsername });
   } catch (e) {
     console.error(e);
@@ -1482,8 +1608,64 @@ async function resolveTelegramRequester(chatId) {
   if (settings.managerTelegramChatId && String(settings.managerTelegramChatId) === String(chatId)) {
     return { role: "manager" };
   }
+  if (settings.headOfSalesTelegramChatId && String(settings.headOfSalesTelegramChatId) === String(chatId)) {
+    return { role: "head_of_sales" };
+  }
   const rep = reps.find((r) => String(r.telegramChatId) === String(chatId));
   return rep ? { role: "rep", repName: rep.name } : null;
+}
+
+// Order deletion can be approved from Telegram by either the manager or
+// Head of Sales — whoever taps first wins, and the other one gets told who
+// acted so nobody's left wondering why an order they saw disappeared.
+async function handleOrderDeleteCallback(callbackQuery) {
+  const { id, data, message } = callbackQuery;
+  const [action, orderId] = (data || "").split(":");
+  const orders = await db.getAllRows("Orders");
+  const order = orders.find((o) => o.id === orderId);
+  if (!order) { await telegram.answerCallbackQuery(id, "This order is no longer available."); return; }
+  if (order.status !== "deletion_requested") { await telegram.answerCallbackQuery(id, "Already handled."); return; }
+
+  const [requester, settings] = await Promise.all([
+    resolveTelegramRequester(message?.chat?.id),
+    db.getSettings(),
+  ]);
+  const actorLabel = requester?.role === "head_of_sales" ? "Head of Sales" : "Manager";
+  const otherChatId = requester?.role === "head_of_sales" ? settings.managerTelegramChatId : settings.headOfSalesTelegramChatId;
+
+  if (action === "orddel") {
+    await db.deleteRowById("Orders", order.id);
+    await telegram.answerCallbackQuery(id, "Order deleted.");
+    if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `Deleted the order for ${order.clientName}.`);
+    if (otherChatId) await telegram.sendMessage(otherChatId, `${actorLabel} deleted the order for ${order.clientName} (${(Number(order.total) || 0).toFixed(2)}).`);
+  } else if (action === "ordkeep") {
+    await db.updateRowById("Orders", order.id, { status: "confirmed" });
+    await telegram.answerCallbackQuery(id, "Kept.");
+    if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `Kept the order for ${order.clientName}.`);
+    if (otherChatId) await telegram.sendMessage(otherChatId, `${actorLabel} chose to keep the order for ${order.clientName}.`);
+  }
+}
+
+// A rep visiting a pharmacy assigned to someone else prompts the manager to
+// pick a side, right from the Telegram alert, instead of having to open the
+// app and use the Pharmacies tab's assign-rep dropdown.
+async function handleReassignmentCallback(callbackQuery) {
+  const { id, data, message } = callbackQuery;
+  const [action, clientId, newRep] = (data || "").split(":");
+  const clients = await db.getAllRows("Clients");
+  const client = clients.find((c) => c.id === clientId);
+  if (!client) { await telegram.answerCallbackQuery(id, "This pharmacy is no longer available."); return; }
+
+  if (action === "keeprep") {
+    await telegram.answerCallbackQuery(id, "Kept as-is.");
+    if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `${client.name} stays assigned to ${client.assignedRep}.`);
+    return;
+  }
+  if (action === "changerep" && newRep) {
+    await db.updateRowById("Clients", client.id, { assignedRep: newRep });
+    await telegram.answerCallbackQuery(id, "Reassigned.");
+    if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `${client.name} is now assigned to ${newRep}.`);
+  }
 }
 
 async function handleDigestCallback(callbackQuery) {
