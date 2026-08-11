@@ -878,10 +878,37 @@ app.post("/api/punch", async (req, res) => {
     if (type !== "in" && type !== "out") return res.status(400).json({ error: "type must be 'in' or 'out'" });
     const log = await db.getAllRows("PunchLog");
     const mine = log.filter((p) => p.repName === req.repName).sort((a, b) => new Date(b.time) - new Date(a.time));
-    const currentlyIn = mine.length > 0 && mine[0].type === "in";
+    let currentlyIn = mine.length > 0 && mine[0].type === "in";
+    // Only a pre-existing unconfirmed auto-close should hold up a new punch-in
+    // — not one this same request is about to create below (see next block).
+    const hadPreexistingUnconfirmedAutoOut = mine.some((p) => p.type === "out" && p.auto === "true" && p.confirmed !== "true");
+
+    // A dangling "in" from a previous day (missed by the scheduled 9pm
+    // auto-close — the free-tier server can be asleep at that exact hour,
+    // or it just hasn't run yet today) would otherwise block every future
+    // punch-in forever: the server refuses a new "in" while the last one is
+    // still open, but the app requires a fresh punch specifically for
+    // today. Close it out right now instead of leaving the rep stuck — the
+    // rep still ends up seeing a "confirm your punch-out time" prompt for
+    // it next time, just not one that blocks getting into today's app.
+    if (type === "in" && currentlyIn && beirutDateStr(new Date(mine[0].time)) !== beirutDateStr(new Date())) {
+      const staleClose = {
+        id: `pl${crypto.randomUUID()}`,
+        repName: req.repName,
+        type: "out",
+        time: new Date().toISOString(),
+        coordsLat: "",
+        coordsLng: "",
+        auto: "true",
+        confirmed: "",
+      };
+      await db.appendRow("PunchLog", staleClose);
+      currentlyIn = false;
+    }
+
     if (type === "in" && currentlyIn) return res.status(400).json({ error: "Already punched in." });
     if (type === "out" && !currentlyIn) return res.status(400).json({ error: "Not punched in." });
-    if (type === "in" && mine.some((p) => p.type === "out" && p.auto === "true" && p.confirmed !== "true")) {
+    if (type === "in" && hadPreexistingUnconfirmedAutoOut) {
       return res.status(400).json({ error: "Confirm yesterday's punch-out time before punching in." });
     }
     const entry = {
