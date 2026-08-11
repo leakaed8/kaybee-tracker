@@ -111,14 +111,19 @@ function requireAuth(req, res, next) {
   if (payload === "manager") {
     req.role = "manager";
     req.repName = null;
-  } else if (payload === "hos") {
-    // Head of Sales — a narrower role than manager: GPS routing visibility
-    // and order-deletion approval only, nothing else manager-only.
-    req.role = "head_of_sales";
-    req.repName = null;
+    req.isSupervisor = false;
   } else if (payload.startsWith("rep|")) {
+    // A supervisor is a normal rep account with an extra flag set in
+    // Settings — full rep experience (Check-In, Route, punch in/out, own
+    // history) plus team-wide Locations/Performance visibility and the
+    // ability to comment on any rep's visit. The flag is baked into the
+    // signed session at login time (not looked up per-request, to avoid an
+    // extra Sheets read on every single API call) — toggling it in Settings
+    // takes effect the next time that rep logs in.
+    const [encodedName, flag] = payload.slice(4).split("|");
     req.role = "rep";
-    req.repName = decodeURIComponent(payload.slice(4));
+    req.repName = decodeURIComponent(encodedName);
+    req.isSupervisor = flag === "sup";
   } else {
     return res.status(401).json({ error: "Please log in." });
   }
@@ -127,11 +132,6 @@ function requireAuth(req, res, next) {
 
 function requireManager(req, res, next) {
   if (req.role !== "manager") return res.status(403).json({ error: "Managers only." });
-  next();
-}
-
-function requireManagerOrHeadOfSales(req, res, next) {
-  if (req.role !== "manager" && req.role !== "head_of_sales") return res.status(403).json({ error: "Managers only." });
   next();
 }
 
@@ -301,16 +301,11 @@ app.post("/api/login", async (req, res) => {
   try {
     const { passcode } = req.body || {};
     const managerCode = process.env.MANAGER_PASSCODE;
-    const headOfSalesCode = process.env.HEAD_OF_SALES_PASSCODE;
     const legacyRepCode = process.env.REP_PASSCODE;
 
     if (managerCode && passcode === managerCode) {
       setSessionCookie(res, signPayload("manager"), 60 * 60 * 24 * 30);
       return res.json({ ok: true, role: "manager" });
-    }
-    if (headOfSalesCode && passcode === headOfSalesCode) {
-      setSessionCookie(res, signPayload("hos"), 60 * 60 * 24 * 30);
-      return res.json({ ok: true, role: "head_of_sales" });
     }
     if (legacyRepCode && passcode === legacyRepCode) {
       setSessionCookie(res, signPayload("rep|"), 60 * 60 * 24 * 30);
@@ -320,8 +315,10 @@ app.post("/api/login", async (req, res) => {
     const reps = await db.getAllRows("Reps");
     const matched = reps.find((r) => r.passcode === passcode);
     if (matched) {
-      setSessionCookie(res, signPayload(`rep|${encodeURIComponent(matched.name)}`), 60 * 60 * 24 * 30);
-      return res.json({ ok: true, role: "rep", repName: matched.name });
+      const isSupervisor = matched.isSupervisor === "true";
+      const flag = isSupervisor ? "|sup" : "";
+      setSessionCookie(res, signPayload(`rep|${encodeURIComponent(matched.name)}${flag}`), 60 * 60 * 24 * 30);
+      return res.json({ ok: true, role: "rep", repName: matched.name, isSupervisor });
     }
 
     res.status(401).json({ error: "Incorrect passcode." });
@@ -361,11 +358,6 @@ app.post("/api/telegram/webhook", async (req, res) => {
         await telegram.sendMessage(chatId, "Manager account linked! You'll get the monthly digest here for approval before it goes to reps.");
         return;
       }
-      if (settings.headOfSalesTelegramLinkCode === code) {
-        await db.setSettings({ headOfSalesTelegramChatId: chatId });
-        await telegram.sendMessage(chatId, "Head of Sales account linked! You'll get order-deletion approvals here.");
-        return;
-      }
       await telegram.sendMessage(chatId, "That link code wasn't recognized — generate a new one and try again.");
     } else if (update.callback_query) {
       const data = update.callback_query.data || "";
@@ -386,7 +378,7 @@ app.post("/api/telegram/webhook", async (req, res) => {
 
 app.use("/api", requireAuth);
 
-app.get("/api/session", (req, res) => res.json({ role: req.role, repName: req.repName }));
+app.get("/api/session", (req, res) => res.json({ role: req.role, repName: req.repName, isSupervisor: !!req.isSupervisor }));
 
 app.get("/api/push/vapid-public-key", (req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY || "" }));
 
@@ -413,7 +405,7 @@ app.post("/api/push/subscribe", async (req, res) => {
   }
 });
 
-const BOOTSTRAP_TABS = ["Products", "Visits", "Clients", "Doctors", "OutreachLog", "Orders", "Reps", "Offers", "Samples", "PunchLog", "StockMovement", "FollowUps", "Competitors", "CompetitorSightings"];
+const BOOTSTRAP_TABS = ["Products", "Visits", "Clients", "Doctors", "OutreachLog", "Orders", "Reps", "Offers", "Samples", "PunchLog", "StockMovement", "FollowUps", "Competitors", "CompetitorSightings", "VisitComments"];
 
 // Google's Sheets API "read requests per minute PER USER" quota (60) is fixed
 // and not adjustable — and since this whole app authenticates as one shared
@@ -435,6 +427,7 @@ async function buildBootstrapPayload() {
     Products: products, Visits: visits, Clients: clients, Doctors: doctors, OutreachLog: outreachLog,
     Orders: orders, Reps: reps, Offers: offers, Samples: samples, PunchLog: punchLog, StockMovement: stockMovement,
     FollowUps: followUps, Competitors: competitors, CompetitorSightings: competitorSightings,
+    VisitComments: visitComments,
   } = batch;
   const movementIndex = buildMovementIndex(stockMovement);
   return {
@@ -452,6 +445,7 @@ async function buildBootstrapPayload() {
     followUps: followUps.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate)),
     competitors: competitors.sort((a, b) => a.name.localeCompare(b.name)),
     competitorSightings: competitorSightings.sort((a, b) => new Date(b.date) - new Date(a.date)),
+    visitComments: visitComments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
   };
 }
 
@@ -840,6 +834,43 @@ app.delete("/api/visits/:id", requireManager, async (req, res) => {
   }
 });
 
+// A supervisor (or manager) can leave a note on any rep's visit — "you
+// should've asked about X here" — right from the Locations view where
+// they're already looking at who visited what. The visiting rep gets a push
+// notification and sees it back in their own Check-In history.
+app.post("/api/visits/:id/comments", async (req, res) => {
+  try {
+    if (req.role !== "manager" && !(req.role === "rep" && req.isSupervisor)) {
+      return res.status(403).json({ error: "Managers and supervisors only." });
+    }
+    const { text } = req.body;
+    if (!text || !text.trim()) return res.status(400).json({ error: "Comment text is required." });
+    const visits = await db.getAllRows("Visits");
+    const visit = visits.find((v) => v.id === req.params.id);
+    if (!visit) return res.status(404).json({ error: "Visit not found." });
+
+    const comment = {
+      id: `vc${crypto.randomUUID()}`,
+      visitId: req.params.id,
+      authorName: req.role === "manager" ? "Manager" : req.repName,
+      text: text.trim(),
+      createdAt: new Date().toISOString(),
+    };
+    await db.appendRow("VisitComments", comment);
+    if (visit.repName) {
+      notifyRep(visit.repName, {
+        title: "New comment on your visit",
+        body: `${comment.authorName} commented on your visit to ${visit.client}`,
+        url: "/",
+      });
+    }
+    res.json(comment);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/punch", async (req, res) => {
   try {
     if (!req.repName) return res.status(403).json({ error: "Reps only." });
@@ -961,9 +992,6 @@ app.post("/api/orders/:id/request-delete", async (req, res) => {
       };
       if (settings.managerTelegramChatId) {
         telegram.sendMessage(settings.managerTelegramChatId, msg, buttons).catch((e) => console.error("order-delete telegram (manager) failed", e));
-      }
-      if (settings.headOfSalesTelegramChatId) {
-        telegram.sendMessage(settings.headOfSalesTelegramChatId, msg, buttons).catch((e) => console.error("order-delete telegram (head of sales) failed", e));
       }
     }
     res.json({ ok: true });
@@ -1190,7 +1218,7 @@ app.get("/api/reps", requireManager, async (req, res) => {
     const reps = await db.getAllRows("Reps");
     res.json(reps.map((r) => ({
       id: r.id, name: r.name, passcode: r.passcode, email: r.email || "", exportSheetId: r.exportSheetId || "",
-      telegramLinked: Boolean(r.telegramChatId),
+      telegramLinked: Boolean(r.telegramChatId), isSupervisor: r.isSupervisor === "true",
     })));
   } catch (e) {
     console.error(e);
@@ -1208,7 +1236,7 @@ app.post("/api/reps", requireManager, async (req, res) => {
     } catch (e) {
       console.error("Couldn't create visits export sheet", e.message);
     }
-    const rep = { id: `rep${crypto.randomUUID()}`, name: name.trim(), passcode, email: email.trim(), exportSheetId };
+    const rep = { id: `rep${crypto.randomUUID()}`, name: name.trim(), passcode, email: email.trim(), exportSheetId, isSupervisor: "false" };
     await db.appendRow("Reps", rep);
     res.json(rep);
   } catch (e) {
@@ -1221,6 +1249,7 @@ app.patch("/api/reps/:id", requireManager, async (req, res) => {
   try {
     const patch = {};
     if (req.body.email !== undefined) patch.email = req.body.email.trim();
+    if (req.body.isSupervisor !== undefined) patch.isSupervisor = req.body.isSupervisor ? "true" : "false";
     const ok = await db.updateRowById("Reps", req.params.id, patch);
     if (!ok) return res.status(404).json({ error: "Rep not found" });
     res.json({ ok: true });
@@ -1242,9 +1271,6 @@ app.get("/api/telegram/status", async (req, res) => {
       const reps = await db.getAllRows("Reps");
       const rep = reps.find((r) => r.name === req.repName);
       result.repLinked = Boolean(rep?.telegramChatId);
-    }
-    if (req.role === "head_of_sales") {
-      result.headOfSalesLinked = Boolean(settings.headOfSalesTelegramChatId);
     }
     res.json(result);
   } catch (e) {
@@ -1306,21 +1332,6 @@ app.post("/api/settings/telegram-link-code", requireManager, async (req, res) =>
     if (!telegram.isConfigured()) return res.status(400).json({ error: "Telegram isn't configured on the server yet." });
     const code = crypto.randomBytes(4).toString("hex");
     await db.setSettings({ managerTelegramLinkCode: code });
-    res.json({ code, botUsername: telegramBotUsername });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Self-service, same pattern as the rep's own link-code endpoint — Head of
-// Sales has no Settings tab to reach a manager-style admin flow from.
-app.post("/api/settings/head-of-sales-telegram-link-code", async (req, res) => {
-  try {
-    if (req.role !== "head_of_sales") return res.status(403).json({ error: "Head of Sales only." });
-    if (!telegram.isConfigured()) return res.status(400).json({ error: "Telegram isn't configured on the server yet." });
-    const code = crypto.randomBytes(4).toString("hex");
-    await db.setSettings({ headOfSalesTelegramLinkCode: code });
     res.json({ code, botUsername: telegramBotUsername });
   } catch (e) {
     console.error(e);
@@ -1776,16 +1787,10 @@ async function resolveTelegramRequester(chatId) {
   if (settings.managerTelegramChatId && String(settings.managerTelegramChatId) === String(chatId)) {
     return { role: "manager" };
   }
-  if (settings.headOfSalesTelegramChatId && String(settings.headOfSalesTelegramChatId) === String(chatId)) {
-    return { role: "head_of_sales" };
-  }
   const rep = reps.find((r) => String(r.telegramChatId) === String(chatId));
   return rep ? { role: "rep", repName: rep.name } : null;
 }
 
-// Order deletion can be approved from Telegram by either the manager or
-// Head of Sales — whoever taps first wins, and the other one gets told who
-// acted so nobody's left wondering why an order they saw disappeared.
 async function handleOrderDeleteCallback(callbackQuery) {
   const { id, data, message } = callbackQuery;
   const [action, orderId] = (data || "").split(":");
@@ -1794,23 +1799,14 @@ async function handleOrderDeleteCallback(callbackQuery) {
   if (!order) { await telegram.answerCallbackQuery(id, "This order is no longer available."); return; }
   if (order.status !== "deletion_requested") { await telegram.answerCallbackQuery(id, "Already handled."); return; }
 
-  const [requester, settings] = await Promise.all([
-    resolveTelegramRequester(message?.chat?.id),
-    db.getSettings(),
-  ]);
-  const actorLabel = requester?.role === "head_of_sales" ? "Head of Sales" : "Manager";
-  const otherChatId = requester?.role === "head_of_sales" ? settings.managerTelegramChatId : settings.headOfSalesTelegramChatId;
-
   if (action === "orddel") {
     await db.deleteRowById("Orders", order.id);
     await telegram.answerCallbackQuery(id, "Order deleted.");
     if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `Deleted the order for ${order.clientName}.`);
-    if (otherChatId) await telegram.sendMessage(otherChatId, `${actorLabel} deleted the order for ${order.clientName} (${(Number(order.total) || 0).toFixed(2)}).`);
   } else if (action === "ordkeep") {
     await db.updateRowById("Orders", order.id, { status: "confirmed" });
     await telegram.answerCallbackQuery(id, "Kept.");
     if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `Kept the order for ${order.clientName}.`);
-    if (otherChatId) await telegram.sendMessage(otherChatId, `${actorLabel} chose to keep the order for ${order.clientName}.`);
   }
 }
 

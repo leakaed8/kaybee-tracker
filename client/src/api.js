@@ -57,7 +57,6 @@ export const api = {
   unlockStockMovementYear: (year) => request("/stock-movement/unlock", { method: "POST", body: JSON.stringify({ year }) }),
   getRepTelegramLinkCode: (id) => request(`/reps/${id}/telegram-link-code`, { method: "POST" }),
   getManagerTelegramLinkCode: () => request("/settings/telegram-link-code", { method: "POST" }),
-  getHeadOfSalesTelegramLinkCode: () => request("/settings/head-of-sales-telegram-link-code", { method: "POST" }),
   scheduleFollowUp: (followUp) => request("/followups", { method: "POST", body: JSON.stringify(followUp) }),
   addSamples: (payload) => request("/samples", { method: "POST", body: JSON.stringify(payload) }),
   getPharmacySalesStatus: () => request("/pharmacy-sales/status"),
@@ -66,4 +65,5 @@ export const api = {
   addCompetitor: (competitor) => request("/competitors", { method: "POST", body: JSON.stringify(competitor) }),
   updateCompetitor: (id, patch) => request(`/competitors/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   removeCompetitor: (id) => request(`/competitors/${id}`, { method: "DELETE" }),
+  addVisitComment: (visitId, text) => request(`/visits/${visitId}/comments`, { method: "POST", body: JSON.stringify({ text }) }),
 };

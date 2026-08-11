@@ -9,7 +9,7 @@ const SCHEMAS = {
   Doctors: ["id", "name", "hospital", "area", "phone", "specialty", "tier", "registrationNumber", "address", "coordsLat", "coordsLng"],
   OutreachLog: ["id", "name", "date", "templateIndex"],
   Orders: ["id", "clientName", "visitId", "repName", "date", "items", "total", "status"],
-  Reps: ["id", "name", "passcode", "email", "exportSheetId", "telegramChatId", "telegramLinkCode"],
+  Reps: ["id", "name", "passcode", "email", "exportSheetId", "telegramChatId", "telegramLinkCode", "isSupervisor"],
   Offers: ["id", "label", "buyQty", "getQty", "expiresAt", "active"],
   PushSubscriptions: ["id", "role", "repName", "endpoint", "p256dh", "auth"],
   Settings: ["key", "value"],
@@ -21,6 +21,7 @@ const SCHEMAS = {
   PharmacySales: ["id", "productName", "pharmacyName", "expiry", "qty"],
   Competitors: ["id", "name", "supplierName", "supplierContact", "offerDetails", "notes", "createdAt"],
   CompetitorSightings: ["id", "visitId", "client", "repName", "competitorName", "notes", "date"],
+  VisitComments: ["id", "visitId", "authorName", "text", "createdAt"],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];

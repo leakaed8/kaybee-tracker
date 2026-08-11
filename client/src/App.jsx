@@ -50,11 +50,35 @@ const savePendingVisits = (list) => {
 // nitpick normal imprecision.
 const LOCATION_MISMATCH_KM = 1;
 
+// The Geolocation API's own `timeout` option only starts counting once a
+// permission decision has been made — if a browser/webview leaves the
+// permission prompt hanging (seen in some embedded contexts, and is exactly
+// what happened when a manager got stuck on "Punching in…" forever testing
+// this), neither the success nor the error callback ever fires and the
+// caller hangs indefinitely. This adds an unconditional fallback on top so
+// every caller gets an answer — real coords or null — within timeoutMs.
+function getCurrentPositionSafe(onResult, timeoutMs = 8000) {
+  if (!navigator.geolocation) { onResult(null); return; }
+  let done = false;
+  const finish = (coords) => {
+    if (done) return;
+    done = true;
+    onResult(coords);
+  };
+  const fallback = setTimeout(() => finish(null), timeoutMs + 2000);
+  navigator.geolocation.getCurrentPosition(
+    (pos) => { clearTimeout(fallback); finish({ lat: pos.coords.latitude.toFixed(5), lng: pos.coords.longitude.toFixed(5) }); },
+    () => { clearTimeout(fallback); finish(null); },
+    { timeout: timeoutMs }
+  );
+}
+
 // ---------- main app ----------
 export default function App() {
   const [authState, setAuthState] = useState("checking"); // checking | out | in
   const [role, setRole] = useState("manager");
   const [repName, setRepName] = useState("");
+  const [isSupervisor, setIsSupervisor] = useState(false);
   const [tab, setTab] = useState("expiry");
   const [products, setProducts] = useState([]);
   const [visits, setVisits] = useState([]);
@@ -68,6 +92,7 @@ export default function App() {
   const [punchLog, setPunchLog] = useState([]);
   const [competitors, setCompetitors] = useState([]);
   const [competitorSightings, setCompetitorSightings] = useState([]);
+  const [visitComments, setVisitComments] = useState([]);
   const [settings, setSettings] = useState({
     slowThreshold: 15, repPhone: "", dailyTarget: 3, monthlyVisitTarget: 60, monthlyRevenueTarget: 10000, templates: [],
   });
@@ -80,7 +105,7 @@ export default function App() {
 
   useEffect(() => {
     api.getSession()
-      .then((data) => { setRole(data.role); setRepName(data.repName || ""); setAuthState("in"); })
+      .then((data) => { setRole(data.role); setRepName(data.repName || ""); setIsSupervisor(!!data.isSupervisor); setAuthState("in"); })
       .catch(() => setAuthState("out"));
   }, []);
 
@@ -104,6 +129,7 @@ export default function App() {
       setPunchLog(data.punchLog || []);
       setCompetitors(data.competitors || []);
       setCompetitorSightings(data.competitorSightings || []);
+      setVisitComments(data.visitComments || []);
       if (!settingsDirtyRef.current) setSettings(data.settings);
       setLoadError("");
     } catch (e) {
@@ -156,14 +182,7 @@ export default function App() {
       if (pending.length === 0) return;
       const remaining = [];
       for (const v of pending) {
-        const coords = await new Promise((resolve) => {
-          if (!navigator.geolocation) return resolve(null);
-          navigator.geolocation.getCurrentPosition(
-            (pos) => resolve({ lat: pos.coords.latitude.toFixed(5), lng: pos.coords.longitude.toFixed(5) }),
-            () => resolve(null),
-            { timeout: 8000 }
-          );
-        });
+        const coords = await new Promise((resolve) => getCurrentPositionSafe(resolve));
         if (!coords) { remaining.push(v); continue; }
         try {
           await api.addVisit({ ...v, coords });
@@ -229,6 +248,7 @@ export default function App() {
   const addCompetitor = (competitor) => withSync(() => api.addCompetitor(competitor));
   const updateCompetitor = (id, patch) => withSync(() => api.updateCompetitor(id, patch));
   const removeCompetitor = (id) => withSync(() => api.removeCompetitor(id));
+  const addVisitComment = (visitId, text) => withSync(() => api.addVisitComment(visitId, text));
 
   const zoned = products.map((p) => ({ ...p, zone: zoneFor(p), slowMover: isSlowMover(p, settings.slowThreshold), atRisk: isAtRisk(p) }));
   const sorted = [...zoned].sort((a, b) => daysUntil(a.expiry) - daysUntil(b.expiry));
@@ -242,7 +262,7 @@ export default function App() {
   }
 
   if (authState === "out") {
-    return <LoginView onSuccess={(r, rn) => { setRole(r); setRepName(rn || ""); setAuthState("in"); }} />;
+    return <LoginView onSuccess={(r, rn, sup) => { setRole(r); setRepName(rn || ""); setIsSupervisor(!!sup); setAuthState("in"); }} />;
   }
 
   const punchedInToday = punchLog.some(
@@ -293,7 +313,7 @@ export default function App() {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontSize: 13, fontWeight: 500, color: "#5B5445", background: "#F0EBE0", borderRadius: 8, padding: "9px 16px" }}>
-            {role === "manager" ? "Manager" : role === "head_of_sales" ? "Head of Sales" : repName ? `Med Rep · ${repName}` : "Med Rep"}
+            {role === "manager" ? "Manager" : repName ? `Med Rep · ${repName}${isSupervisor ? " (Supervisor)" : ""}` : "Med Rep"}
           </span>
           <button onClick={logout} style={{ fontSize: 12, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 8, padding: "9px 12px" }}>
             Log out
@@ -311,12 +331,12 @@ export default function App() {
         <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />
         <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />
         {role === "manager" && <TabBtn active={tab === "dashboard"} onClick={() => setTab("dashboard")} icon={<LayoutDashboard size={15} />} label="Dashboard" />}
-        {role === "manager" && <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<Target size={15} />} label="Performance" />}
+        {(role === "manager" || isSupervisor) && <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<Target size={15} />} label="Performance" />}
         {role === "manager" && <TabBtn active={tab === "outreach"} onClick={() => setTab("outreach")} icon={<MessageCircle size={15} />} label="Outreach" />}
         {role === "manager" && <TabBtn active={tab === "broadcast"} onClick={() => setTab("broadcast")} icon={<Megaphone size={15} />} label="Broadcast" />}
         {role === "manager" && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
-        {role === "manager" && <TabBtn active={tab === "competitors"} onClick={() => setTab("competitors")} icon={<Swords size={15} />} label="Competitors" />}
-        {(role === "manager" || role === "head_of_sales") && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<RadarIcon size={15} />} label="Locations" />}
+        {(role === "manager" || role === "rep") && <TabBtn active={tab === "competitors"} onClick={() => setTab("competitors")} icon={<Swords size={15} />} label="Competitors" />}
+        {(role === "manager" || isSupervisor) && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<RadarIcon size={15} />} label="Locations" />}
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
       </nav>
 
@@ -359,6 +379,7 @@ export default function App() {
                 onQueueOffline={queueVisitOffline}
                 pendingVisitCount={pendingVisitCount}
                 competitors={competitors}
+                visitComments={visitComments}
               />
             )}
             {tab === "stock" && <StockView products={sorted} />}
@@ -396,8 +417,9 @@ export default function App() {
             {tab === "orders" && role === "manager" && (
               <OrdersView orders={orders} onDelete={deleteOrder} onApproveDelete={approveDeleteOrder} onDenyDelete={denyDeleteOrder} />
             )}
-            {tab === "competitors" && role === "manager" && (
+            {tab === "competitors" && (role === "manager" || role === "rep") && (
               <CompetitorsView
+                canEdit={role === "manager"}
                 competitors={competitors}
                 sightings={competitorSightings}
                 onAdd={addCompetitor}
@@ -405,10 +427,21 @@ export default function App() {
                 onRemove={removeCompetitor}
               />
             )}
-            {tab === "locations" && (role === "manager" || role === "head_of_sales") && (
-              <LocationsView role={role} visits={visits} clients={clients} doctors={doctors} punchLog={punchLog} repNames={repNames} onRemoveVisit={removeVisit} />
+            {tab === "locations" && (role === "manager" || isSupervisor) && (
+              <LocationsView
+                role={role}
+                isSupervisor={isSupervisor}
+                visits={visits}
+                clients={clients}
+                doctors={doctors}
+                punchLog={punchLog}
+                repNames={repNames}
+                onRemoveVisit={removeVisit}
+                visitComments={visitComments}
+                onAddComment={addVisitComment}
+              />
             )}
-            {tab === "performance" && role === "manager" && (
+            {tab === "performance" && (role === "manager" || isSupervisor) && (
               <PerformanceView
                 visits={visits}
                 orders={orders}
@@ -466,7 +499,7 @@ function LoginView({ onSuccess }) {
     setLoading(true);
     try {
       const data = await api.login(passcode);
-      onSuccess(data.role, data.repName);
+      onSuccess(data.role, data.repName, data.isSupervisor);
     } catch (err) {
       setError("Incorrect passcode.");
     } finally {
@@ -515,17 +548,11 @@ function PunchInGate({ repName, onPunch, onLogout, unconfirmedAutoPunch, onConfi
   const doPunchIn = () => {
     setPunching(true);
     setError("");
-    const submit = (coords) => {
+    getCurrentPositionSafe((coords) => {
       onPunch("in", coords)
         .catch((e) => setError(e?.message || "Couldn't record punch. Try again."))
         .finally(() => setPunching(false));
-    };
-    if (!navigator.geolocation) { submit(null); return; }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => submit({ lat: pos.coords.latitude.toFixed(5), lng: pos.coords.longitude.toFixed(5) }),
-      () => submit(null),
-      { timeout: 8000 }
-    );
+    });
   };
 
   const confirmAsIs = () => {
@@ -922,7 +949,7 @@ function Field({ label, children }) {
 const inputStyle = { width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #E5DFD3", fontSize: 13, background: "#FAF7F2" };
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ visits, clients, doctors, products, offers, orders, punchLog, repName, onAddVisit, onCreateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors }) {
+function CheckInView({ visits, clients, doctors, products, offers, orders, punchLog, repName, onAddVisit, onCreateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors, visitComments }) {
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
   const [entityType, setEntityType] = useState("pharmacy"); // pharmacy | doctor
@@ -1045,32 +1072,21 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
   const doPunch = (type) => {
     setPunching(true);
     setPunchError("");
-    const submit = (coords) => {
+    getCurrentPositionSafe((coords) => {
       onPunch(type, coords)
         .catch((e) => setPunchError(e?.message || "Couldn't record punch."))
         .finally(() => setPunching(false));
-    };
-    if (!navigator.geolocation) { submit(null); return; }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => submit({ lat: pos.coords.latitude.toFixed(5), lng: pos.coords.longitude.toFixed(5) }),
-      () => submit(null),
-      { timeout: 8000 }
-    );
+    });
   };
 
   const getLocation = () => {
     setLocating(true);
     setLocError("");
-    if (!navigator.geolocation) {
-      setLocError("Location not available on this device/browser.");
+    getCurrentPositionSafe((coords) => {
       setLocating(false);
-      return;
-    }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => { setCoords({ lat: pos.coords.latitude.toFixed(5), lng: pos.coords.longitude.toFixed(5) }); setLocating(false); },
-      () => { setLocError("Couldn't get location. Check permissions."); setLocating(false); },
-      { timeout: 8000 }
-    );
+      if (coords) { setCoords(coords); return; }
+      setLocError("Couldn't get location. Check permissions.");
+    });
   };
 
   const [visitError, setVisitError] = useState("");
@@ -1561,6 +1577,11 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
               </div>
             )}
             {v.coords && <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 4 }}><MapPin size={11} style={{ verticalAlign: -1 }} /> {v.coords.lat}, {v.coords.lng}</div>}
+            {(visitComments || []).filter((c) => c.visitId === v.id).map((c) => (
+              <div key={c.id} style={{ fontSize: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "6px 10px", marginTop: 6 }}>
+                <strong>{c.authorName}</strong>: {c.text}
+              </div>
+            ))}
           </div>
         ))}
         {todayVisits.length === 0 && <EmptyState text="No visits logged yet today." />}
@@ -1628,60 +1649,6 @@ function RepTelegramLinkSection() {
         Link your Telegram to get the monthly focus list — what to pick up from pharmacies and what to push sales on — once your manager approves it.
       </p>
       {status.repLinked ? (
-        <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 5, background: "#4C7A5E1A", color: "#4C7A5E" }}>
-          ✓ Linked
-        </span>
-      ) : linkInfo ? (
-        <div style={{ fontSize: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
-          Tap to open Telegram and hit Start:
-          <div style={{ marginTop: 4 }}>
-            <a className="kb-font-mono" href={`https://t.me/${linkInfo.botUsername}?start=${linkInfo.code}`} target="_blank" rel="noreferrer" style={{ wordBreak: "break-all", color: "#4C7A5E" }}>
-              https://t.me/{linkInfo.botUsername}?start={linkInfo.code}
-            </a>
-          </div>
-        </div>
-      ) : (
-        <button onClick={generateLink} disabled={linking} style={{ fontSize: 12.5, padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24" }}>
-          {linking ? "Generating…" : "Link my Telegram"}
-        </button>
-      )}
-      {error && <div style={{ fontSize: 11.5, color: "#B33A3A", marginTop: 6 }}>{error}</div>}
-    </div>
-  );
-}
-
-// Head of Sales has no Settings tab, so this lives at the top of the one
-// tab he does have (Locations) — same self-service link pattern as reps.
-function HeadOfSalesTelegramLinkSection() {
-  const [status, setStatus] = useState(null);
-  const [linking, setLinking] = useState(false);
-  const [linkInfo, setLinkInfo] = useState(null);
-  const [error, setError] = useState("");
-
-  useEffect(() => { api.getTelegramStatus().then(setStatus).catch(() => setStatus({ configured: false })); }, []);
-
-  const generateLink = async () => {
-    setLinking(true);
-    setError("");
-    try {
-      const { code, botUsername } = await api.getHeadOfSalesTelegramLinkCode();
-      setLinkInfo({ code, botUsername });
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setLinking(false);
-    }
-  };
-
-  if (!status?.configured) return null;
-
-  return (
-    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
-      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Telegram alerts</label>
-      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
-        Link your Telegram to get order-deletion approval requests here.
-      </p>
-      {status.headOfSalesLinked ? (
         <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 5, background: "#4C7A5E1A", color: "#4C7A5E" }}>
           ✓ Linked
         </span>
@@ -2195,7 +2162,7 @@ function OrdersView({ orders, onDelete, onApproveDelete, onDenyDelete }) {
 // clean by only managers editing it — reps just pick from it), and a feed of
 // what reps actually saw in the field, logged from Check-In. Neither table
 // changes the other; this is where a manager reads what's been collected.
-function CompetitorsView({ competitors, sightings, onAdd, onUpdate, onRemove }) {
+function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onRemove }) {
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ name: "", supplierName: "", supplierContact: "", offerDetails: "", notes: "" });
   const [saving, setSaving] = useState(false);
@@ -2232,15 +2199,22 @@ function CompetitorsView({ competitors, sightings, onAdd, onUpdate, onRemove }) 
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Competitors</h2>
-        <button
-          onClick={() => setShowAdd((v) => !v)}
-          style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
-        >
-          <Plus size={14} /> Add competitor
-        </button>
+        {canEdit && (
+          <button
+            onClick={() => setShowAdd((v) => !v)}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
+          >
+            <Plus size={14} /> Add competitor
+          </button>
+        )}
       </div>
+      {!canEdit && (
+        <p style={{ fontSize: 12.5, color: "#8A8272", marginTop: -8, marginBottom: 16 }}>
+          Shared by your manager — use this to see what other reps are running into and negotiate accordingly.
+        </p>
+      )}
 
-      {showAdd && (
+      {canEdit && showAdd && (
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
             <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Competitor name" style={inputStyle} />
@@ -2259,7 +2233,7 @@ function CompetitorsView({ competitors, sightings, onAdd, onUpdate, onRemove }) 
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 28 }}>
         {competitors.map((c) => (
           <div key={c.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
-            {editingId === c.id ? (
+            {canEdit && editingId === c.id ? (
               <div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
                   <input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} placeholder="Competitor name" style={inputStyle} />
@@ -2285,17 +2259,19 @@ function CompetitorsView({ competitors, sightings, onAdd, onUpdate, onRemove }) 
                   {c.offerDetails && <div style={{ fontSize: 12.5, marginTop: 4 }}>{c.offerDetails}</div>}
                   {c.notes && <div style={{ fontSize: 12, color: "#8A8272", marginTop: 4 }}>{c.notes}</div>}
                 </div>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button onClick={() => startEdit(c)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Edit</button>
-                  {confirmId === c.id ? (
-                    <>
-                      <button onClick={() => { onRemove(c.id); setConfirmId(null); }} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}>Yes</button>
-                      <button onClick={() => setConfirmId(null)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Cancel</button>
-                    </>
-                  ) : (
-                    <button onClick={() => setConfirmId(c.id)} style={{ fontSize: 12, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "6px 10px" }}>Delete</button>
-                  )}
-                </div>
+                {canEdit && (
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button onClick={() => startEdit(c)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Edit</button>
+                    {confirmId === c.id ? (
+                      <>
+                        <button onClick={() => { onRemove(c.id); setConfirmId(null); }} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}>Yes</button>
+                        <button onClick={() => setConfirmId(null)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Cancel</button>
+                      </>
+                    ) : (
+                      <button onClick={() => setConfirmId(c.id)} style={{ fontSize: 12, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "6px 10px" }}>Delete</button>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -2318,9 +2294,25 @@ function CompetitorsView({ competitors, sightings, onAdd, onUpdate, onRemove }) 
 }
 
 // ---------- Locations View (manager, check-in GPS history + punch in/out) ----------
-function LocationsView({ role, visits, clients, doctors, punchLog, repNames, onRemoveVisit }) {
+function LocationsView({ role, isSupervisor, visits, clients, doctors, punchLog, repNames, onRemoveVisit, visitComments, onAddComment }) {
   const [selectedRep, setSelectedRep] = useState("all");
   const [confirmId, setConfirmId] = useState(null);
+  const [commentingId, setCommentingId] = useState(null);
+  const [commentText, setCommentText] = useState("");
+  const [commentSaving, setCommentSaving] = useState(false);
+  const canComment = role === "manager" || isSupervisor;
+  const commentsFor = (visitId) => (visitComments || []).filter((c) => c.visitId === visitId);
+  const submitComment = async (visitId) => {
+    if (!commentText.trim()) return;
+    setCommentSaving(true);
+    try {
+      await onAddComment(visitId, commentText.trim());
+      setCommentText("");
+      setCommentingId(null);
+    } finally {
+      setCommentSaving(false);
+    }
+  };
 
   // For each visit, cross-checks the GPS captured against the matching
   // pharmacy/doctor's own saved location (if it has one) — this is the
@@ -2361,8 +2353,6 @@ function LocationsView({ role, visits, clients, doctors, punchLog, repNames, onR
         {role === "manager" && " You can delete a mistaken visit here."}
       </p>
 
-      {role === "head_of_sales" && <HeadOfSalesTelegramLinkSection />}
-
       <div style={{ marginBottom: 14 }}>
         <select value={selectedRep} onChange={(e) => setSelectedRep(e.target.value)} style={{ ...inputStyle, maxWidth: 240 }}>
           <option value="all">All reps</option>
@@ -2381,41 +2371,72 @@ function LocationsView({ role, visits, clients, doctors, punchLog, repNames, onR
           <div key={`${e.kind}-${e.id}`} style={{
             background: e.kind === "punch" ? (e.punchType === "in" ? "#EFF6F1" : "#FBF1EF") : "#fff",
             border: `1px solid ${e.kind === "punch" ? (e.punchType === "in" ? "#4C7A5E55" : "#B33A3A55") : "#E5DFD3"}`,
-            borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8,
+            borderRadius: 10, padding: 12,
           }}>
-            <div>
-              <div style={{ fontWeight: 600, fontSize: 13.5 }}>
-                {e.label}{e.repName ? ` · ${e.repName}` : ""}
-              </div>
-              <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
-                {new Date(e.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
-                {e.coords ? ` · ${e.coords.lat}, ${e.coords.lng}` : " · no GPS captured"}
-              </div>
-              {e.mismatchKm != null && (
-                <div style={{ fontSize: 11, color: "#B33A3A", fontWeight: 600, marginTop: 3 }}>
-                  ⚠ {e.mismatchKm.toFixed(1)}km from {e.label}'s known location
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 13.5 }}>
+                  {e.label}{e.repName ? ` · ${e.repName}` : ""}
                 </div>
-              )}
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              {e.coords && (
-                <a href={`https://maps.google.com/?q=${e.coords.lat},${e.coords.lng}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: "#4C7A5E", textDecoration: "none", border: "1px solid #4C7A5E33", borderRadius: 6, padding: "6px 10px" }}>
-                  View on map
-                </a>
-              )}
-              {e.kind === "visit" && role === "manager" && (
-                confirmId === e.id ? (
-                  <>
-                    <button onClick={() => doDelete(e.id)} style={{ fontSize: 11.5, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}>Yes</button>
-                    <button onClick={() => setConfirmId(null)} style={{ fontSize: 11.5, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Cancel</button>
-                  </>
-                ) : (
-                  <button onClick={() => setConfirmId(e.id)} title="Delete visit" style={{ background: "none", border: "none", color: "#B7AF9E", padding: 4 }}>
-                    <X size={14} />
+                <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
+                  {new Date(e.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                  {e.coords ? ` · ${e.coords.lat}, ${e.coords.lng}` : " · no GPS captured"}
+                </div>
+                {e.mismatchKm != null && (
+                  <div style={{ fontSize: 11, color: "#B33A3A", fontWeight: 600, marginTop: 3 }}>
+                    ⚠ {e.mismatchKm.toFixed(1)}km from {e.label}'s known location
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                {e.coords && (
+                  <a href={`https://maps.google.com/?q=${e.coords.lat},${e.coords.lng}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: "#4C7A5E", textDecoration: "none", border: "1px solid #4C7A5E33", borderRadius: 6, padding: "6px 10px" }}>
+                    View on map
+                  </a>
+                )}
+                {e.kind === "visit" && canComment && (
+                  <button onClick={() => setCommentingId(commentingId === e.id ? null : e.id)} title="Comment on this visit" style={{ background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "5px 9px", color: "#5B5445" }}>
+                    <MessageCircle size={13} />
                   </button>
-                )
-              )}
+                )}
+                {e.kind === "visit" && role === "manager" && (
+                  confirmId === e.id ? (
+                    <>
+                      <button onClick={() => doDelete(e.id)} style={{ fontSize: 11.5, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}>Yes</button>
+                      <button onClick={() => setConfirmId(null)} style={{ fontSize: 11.5, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Cancel</button>
+                    </>
+                  ) : (
+                    <button onClick={() => setConfirmId(e.id)} title="Delete visit" style={{ background: "none", border: "none", color: "#B7AF9E", padding: 4 }}>
+                      <X size={14} />
+                    </button>
+                  )
+                )}
+              </div>
             </div>
+
+            {e.kind === "visit" && commentsFor(e.id).length > 0 && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3", display: "flex", flexDirection: "column", gap: 6 }}>
+                {commentsFor(e.id).map((c) => (
+                  <div key={c.id} style={{ fontSize: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "6px 10px" }}>
+                    <strong>{c.authorName}</strong>: {c.text}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {e.kind === "visit" && commentingId === e.id && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3", display: "flex", gap: 8 }}>
+                <input
+                  value={commentText}
+                  onChange={(ev) => setCommentText(ev.target.value)}
+                  placeholder="Leave a note for this rep…"
+                  style={{ ...inputStyle, flex: 1 }}
+                />
+                <button disabled={commentSaving} onClick={() => submitComment(e.id)} style={{ fontSize: 12, padding: "8px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontWeight: 500 }}>
+                  {commentSaving ? "Saving…" : "Send"}
+                </button>
+              </div>
+            )}
           </div>
         ))}
         {allEvents.length === 0 && <EmptyState text="No check-ins or punches yet." />}
@@ -2691,16 +2712,11 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
   const getLocation = () => {
     setLocating(true);
     setLocError("");
-    if (!navigator.geolocation) {
-      setLocError("Location not available on this device/browser.");
+    getCurrentPositionSafe((coords) => {
       setLocating(false);
-      return;
-    }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => { setCoords({ lat: pos.coords.latitude.toFixed(5), lng: pos.coords.longitude.toFixed(5) }); setLocating(false); },
-      () => { setLocError("Couldn't get location. Check permissions."); setLocating(false); },
-      { timeout: 8000 }
-    );
+      if (coords) { setCoords(coords); return; }
+      setLocError("Couldn't get location. Check permissions.");
+    });
   };
 
   const addClient = () => {
@@ -3171,16 +3187,11 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
   const getLocation = () => {
     setLocating(true);
     setLocError("");
-    if (!navigator.geolocation) {
-      setLocError("Location not available on this device/browser.");
+    getCurrentPositionSafe((coords) => {
       setLocating(false);
-      return;
-    }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => { setCoords({ lat: pos.coords.latitude.toFixed(5), lng: pos.coords.longitude.toFixed(5) }); setLocating(false); },
-      () => { setLocError("Couldn't get location. Check permissions."); setLocating(false); },
-      { timeout: 8000 }
-    );
+      if (coords) { setCoords(coords); return; }
+      setLocError("Couldn't get location. Check permissions.");
+    });
   };
 
   const pendingSamplesFor = (doctorName) => {
@@ -3876,11 +3887,10 @@ function RouteView({ clients, doctors, visits }) {
 
   const getMyLocation = () => {
     setLocating(true);
-    navigator.geolocation?.getCurrentPosition(
-      (pos) => { setMyLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude }); setLocating(false); },
-      () => setLocating(false),
-      { timeout: 8000 }
-    );
+    getCurrentPositionSafe((coords) => {
+      setLocating(false);
+      if (coords) setMyLoc(coords);
+    });
   };
 
   const optimize = () => {
@@ -4837,6 +4847,15 @@ function RepsManagementSection({ onRepsChanged }) {
     }
   };
 
+  const toggleSupervisor = async (rep) => {
+    try {
+      await api.updateRep(rep.id, { isSupervisor: !rep.isSupervisor });
+      await load();
+    } catch (e) {
+      setRowErrors((prev) => ({ ...prev, [rep.id]: e.message }));
+    }
+  };
+
   const saveEmailFor = async (rep) => {
     const emailToUse = (sheetEmails[rep.id] || "").trim();
     if (!emailToUse) return;
@@ -4883,9 +4902,15 @@ function RepsManagementSection({ onRepsChanged }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
           {reps.map((r) => (
             <div key={r.id} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px", fontSize: 12.5 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
                 <span><strong>{r.name}</strong> · passcode: {r.passcode}</span>
-                <button onClick={() => removeRep(r.id)} style={{ background: "none", border: "none", color: "#B33A3A", fontSize: 11.5 }}>Remove</button>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, color: "#5B5445" }} title="Sees every rep's Locations + Performance, and can comment on any visit">
+                    <input type="checkbox" checked={!!r.isSupervisor} onChange={() => toggleSupervisor(r)} />
+                    Supervisor
+                  </label>
+                  <button onClick={() => removeRep(r.id)} style={{ background: "none", border: "none", color: "#B33A3A", fontSize: 11.5 }}>Remove</button>
+                </div>
               </div>
               {r.exportSheetId ? (
                 <a href={`https://docs.google.com/spreadsheets/d/${r.exportSheetId}/edit`} target="_blank" rel="noreferrer" style={{ fontSize: 11.5, color: "#4C7A5E", display: "inline-block", marginTop: 6 }}>
