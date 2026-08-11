@@ -13,7 +13,7 @@ const SCHEMAS = {
   Offers: ["id", "label", "buyQty", "getQty", "expiresAt", "active"],
   PushSubscriptions: ["id", "role", "repName", "endpoint", "p256dh", "auth"],
   Settings: ["key", "value"],
-  Samples: ["id", "doctorName", "productName", "productId", "status", "repName", "visitId", "date"],
+  Samples: ["id", "doctorName", "productName", "productId", "status", "repName", "visitId", "date", "qty"],
   PunchLog: ["id", "repName", "type", "time", "coordsLat", "coordsLng"],
   StockMovement: ["id", "productName", "year", "month", "qty"],
   MonthlyDigests: ["id", "month", "status", "payload", "createdAt"],

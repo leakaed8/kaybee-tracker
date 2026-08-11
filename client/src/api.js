@@ -59,6 +59,7 @@ export const api = {
   getManagerTelegramLinkCode: () => request("/settings/telegram-link-code", { method: "POST" }),
   getHeadOfSalesTelegramLinkCode: () => request("/settings/head-of-sales-telegram-link-code", { method: "POST" }),
   scheduleFollowUp: (followUp) => request("/followups", { method: "POST", body: JSON.stringify(followUp) }),
+  addSamples: (payload) => request("/samples", { method: "POST", body: JSON.stringify(payload) }),
   getPharmacySalesStatus: () => request("/pharmacy-sales/status"),
   importPharmacySales: (rows) => request("/pharmacy-sales/import", { method: "POST", body: JSON.stringify({ rows }) }),
 };

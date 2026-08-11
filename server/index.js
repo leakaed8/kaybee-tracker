@@ -245,6 +245,20 @@ function parseVisit(v) {
     mentionedItems, objectionTag: v.objectionTag || "",
   };
 }
+// Same formula as haversineKm in client/src/helpers.js — used here to check
+// a check-in's GPS against the pharmacy's own saved location, so a mismatch
+// gets flagged to the manager immediately instead of only being visible if
+// someone happens to look at the Locations tab later.
+function haversineKmServer(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 + Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+const LOCATION_MISMATCH_KM = 1;
+
 async function geocodeAddress(address) {
   if (!address || !process.env.GOOGLE_MAPS_SERVER_KEY) return null;
   try {
@@ -699,6 +713,22 @@ app.post("/api/visits", async (req, res) => {
       }
     }
 
+    // Cross-checks the check-in GPS against the pharmacy's own saved
+    // location (geocoded address or a GPS fix from when it was added) —
+    // this is what actually answers "were they really there," not just
+    // that some GPS was captured. Only meaningful once the pharmacy has a
+    // saved location of its own to compare against.
+    if (matchedClient?.coordsLat && matchedClient?.coordsLng && coords?.lat && coords?.lng) {
+      const distanceKm = haversineKmServer(Number(coords.lat), Number(coords.lng), Number(matchedClient.coordsLat), Number(matchedClient.coordsLng));
+      if (distanceKm > LOCATION_MISMATCH_KM) {
+        notifyManagers({
+          title: "Check-in location mismatch",
+          body: `${req.repName || "A rep"} checked in at ${matchedClient.name} but is ${distanceKm.toFixed(1)}km from its known location.`,
+          url: "/",
+        });
+      }
+    }
+
     const sampleRows = visit.mentionedItems
       .filter((it) => it.sampleStatus === "gave" || it.sampleStatus === "next_visit")
       .map((it) => ({
@@ -713,6 +743,42 @@ app.post("/api/visits", async (req, res) => {
       }));
     if (sampleRows.length) await db.appendRows("Samples", sampleRows);
     res.json({ ...visit, assignedRepWarning });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Pharmacy sample-giving, asked right after the order question in Check-In
+// — separate from the doctor "items mentioned" flow above (which predates
+// quantity tracking), so this is the one place item + qty samples get
+// recorded. Reuses the Samples sheet's "doctorName" column as a generic
+// recipient-name field — same underlying data, just also used for
+// pharmacies now.
+app.post("/api/samples", async (req, res) => {
+  try {
+    if (!req.repName) return res.status(403).json({ error: "Reps only." });
+    const { entityName, visitId, items } = req.body;
+    if (!entityName || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "entityName and at least one item are required" });
+    }
+    const now = new Date().toISOString();
+    const rows = items
+      .filter((it) => it.name && Number(it.qty) > 0)
+      .map((it) => ({
+        id: `s${crypto.randomUUID()}`,
+        doctorName: entityName,
+        productName: it.name,
+        productId: it.productId || "",
+        status: "gave",
+        repName: req.repName,
+        visitId: visitId || "",
+        date: now,
+        qty: Number(it.qty),
+      }));
+    if (rows.length === 0) return res.status(400).json({ error: "No valid items to save." });
+    await db.appendRows("Samples", rows);
+    res.json({ ok: true, count: rows.length });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

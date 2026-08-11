@@ -30,6 +30,26 @@ import {
 const POLL_INTERVAL_MS = 30000; // Sheets API's per-user read quota is fixed and shared across every session — keep this conservative
 const LIST_DISPLAY_CAP = 200; // cap rendered rows so huge imported lists (30k+) don't freeze the browser — use search to narrow
 
+// Visits saved when GPS capture fails (indoors, no signal, permission
+// denied) — queued here instead of lost, then flushed automatically once a
+// GPS fix becomes available. Lives in localStorage rather than React state
+// so it survives a refresh/app close while still unsynced.
+const PENDING_VISITS_KEY = "kb_pending_visits";
+const loadPendingVisits = () => {
+  try { return JSON.parse(localStorage.getItem(PENDING_VISITS_KEY) || "[]"); } catch { return []; }
+};
+const savePendingVisits = (list) => {
+  try { localStorage.setItem(PENDING_VISITS_KEY, JSON.stringify(list)); } catch { /* storage unavailable — nothing more we can do */ }
+};
+
+// How far a check-in's GPS can be from a pharmacy/doctor's own saved
+// location (geocoded address or a GPS fix captured when it was added)
+// before it's flagged as a possible mismatch. Generous on purpose — a
+// geocoded address is only approximate, and phone GPS itself drifts, so
+// this is meant to catch "visited the wrong place entirely" cases, not
+// nitpick normal imprecision.
+const LOCATION_MISMATCH_KM = 1;
+
 // ---------- main app ----------
 export default function App() {
   const [authState, setAuthState] = useState("checking"); // checking | out | in
@@ -110,6 +130,52 @@ export default function App() {
       return undefined;
     }
   }, [refresh]);
+
+  // Retries visits that got queued locally because GPS wasn't available at
+  // the time (see PENDING_VISITS_KEY) — tries again on a timer and whenever
+  // the browser comes back online. Only runs while this tab is open; it's
+  // not a background-sync service worker, so a rep needs to reopen the app
+  // at some point after regaining signal for the queue to actually flush.
+  const [pendingVisitCount, setPendingVisitCount] = useState(() => loadPendingVisits().length);
+
+  const queueVisitOffline = useCallback((visit) => {
+    const pending = loadPendingVisits();
+    pending.push(visit);
+    savePendingVisits(pending);
+    setPendingVisitCount(pending.length);
+  }, []);
+
+  useEffect(() => {
+    if (authState !== "in" || role !== "rep") return;
+    const trySyncPendingVisits = async () => {
+      const pending = loadPendingVisits();
+      if (pending.length === 0) return;
+      const remaining = [];
+      for (const v of pending) {
+        const coords = await new Promise((resolve) => {
+          if (!navigator.geolocation) return resolve(null);
+          navigator.geolocation.getCurrentPosition(
+            (pos) => resolve({ lat: pos.coords.latitude.toFixed(5), lng: pos.coords.longitude.toFixed(5) }),
+            () => resolve(null),
+            { timeout: 8000 }
+          );
+        });
+        if (!coords) { remaining.push(v); continue; }
+        try {
+          await api.addVisit({ ...v, coords });
+        } catch (e) {
+          remaining.push(v);
+        }
+      }
+      savePendingVisits(remaining);
+      setPendingVisitCount(remaining.length);
+      if (remaining.length !== pending.length) refresh({ fresh: true });
+    };
+    trySyncPendingVisits();
+    const id = setInterval(trySyncPendingVisits, 30000);
+    window.addEventListener("online", trySyncPendingVisits);
+    return () => { clearInterval(id); window.removeEventListener("online", trySyncPendingVisits); };
+  }, [authState, role, refresh]);
 
   const updateSettingsField = useCallback((patch) => {
     settingsDirtyRef.current = true;
@@ -198,6 +264,11 @@ export default function App() {
           <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
             {syncStatus === "saving" ? "syncing…" : syncStatus === "saved" ? "✓ synced" : syncStatus === "error" ? "⚠ sync error, will retry" : "expiry · routes · visits"}
           </div>
+          {pendingVisitCount > 0 && (
+            <div style={{ fontSize: 11, color: "#C17817", marginTop: 2 }}>
+              ⏳ {pendingVisitCount} visit{pendingVisitCount === 1 ? "" : "s"} waiting for GPS/signal to sync
+            </div>
+          )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontSize: 13, fontWeight: 500, color: "#5B5445", background: "#F0EBE0", borderRadius: 8, padding: "9px 16px" }}>
@@ -263,6 +334,8 @@ export default function App() {
                 onCreateOrder={createOrder}
                 onRequestDeleteOrder={requestDeleteOrder}
                 onPunch={punch}
+                onQueueOffline={queueVisitOffline}
+                pendingVisitCount={pendingVisitCount}
               />
             )}
             {tab === "stock" && <StockView products={sorted} />}
@@ -301,7 +374,7 @@ export default function App() {
               <OrdersView orders={orders} onDelete={deleteOrder} onApproveDelete={approveDeleteOrder} onDenyDelete={denyDeleteOrder} />
             )}
             {tab === "locations" && (role === "manager" || role === "head_of_sales") && (
-              <LocationsView role={role} visits={visits} punchLog={punchLog} repNames={repNames} onRemoveVisit={removeVisit} />
+              <LocationsView role={role} visits={visits} clients={clients} doctors={doctors} punchLog={punchLog} repNames={repNames} onRemoveVisit={removeVisit} />
             )}
             {tab === "performance" && role === "manager" && (
               <PerformanceView
@@ -742,7 +815,7 @@ function Field({ label, children }) {
 const inputStyle = { width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #E5DFD3", fontSize: 13, background: "#FAF7F2" };
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ visits, clients, doctors, products, offers, orders, punchLog, repName, onAddVisit, onCreateOrder, onRequestDeleteOrder, onPunch }) {
+function CheckInView({ visits, clients, doctors, products, offers, orders, punchLog, repName, onAddVisit, onCreateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount }) {
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
   const [entityType, setEntityType] = useState("pharmacy"); // pharmacy | doctor
@@ -827,6 +900,15 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     : doctors.find((d) => d.name.toLowerCase().trim() === client.toLowerCase().trim());
   const unknownEntity = client.trim().length > 0 && !matchedEntity;
 
+  // Cross-checks the GPS just captured against the pharmacy/doctor's own
+  // saved location, if it has one — this is how you'd know a rep's check-in
+  // GPS actually matches the place they say they visited, not just that
+  // some GPS was captured.
+  const locationMismatchKm = coords && matchedEntity?.coordsLat && matchedEntity?.coordsLng
+    ? haversineKm(Number(coords.lat), Number(coords.lng), Number(matchedEntity.coordsLat), Number(matchedEntity.coordsLng))
+    : null;
+  const locationMismatch = locationMismatchKm !== null && locationMismatchKm > LOCATION_MISMATCH_KM;
+
   const matchedItem = products.find((p) => p.name.toLowerCase().trim() === itemQuery.toLowerCase().trim());
   // Filtered + capped like nameOptions above — with hundreds/thousands of
   // products, dumping every single one into the datalist on every render
@@ -902,6 +984,21 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     }
   };
 
+  // GPS genuinely isn't always available (indoors, dead zones) — rather
+  // than leave the rep stuck with no way forward, this queues the visit
+  // locally and finishes it later automatically once a fix comes through.
+  // Order/sample steps aren't offered for these since there's no real
+  // visit id yet to attach them to; the rep can note anything important in
+  // the text notes instead, or check in again once it's synced.
+  const saveOffline = () => {
+    onQueueOffline({ client, notes, mentionedItems, queuedAt: new Date().toISOString() });
+    setLastVisit({ client, pending: true });
+    setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
+    setVisitError(""); setLocError("");
+    setFollowUpStatus(null);
+    setStep("done");
+  };
+
   const scheduleFollowUp = async (presetKey) => {
     setFollowUpSaving(true);
     setFollowUpError("");
@@ -934,7 +1031,18 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     setStep("checkin");
   };
 
-  const STEP_INFO = {
+  // Pharmacies get an extra step (sample-giving) that doctors don't, since
+  // doctors already track samples via the "items mentioned" list in step 1.
+  const STEP_KEYS = entityType === "pharmacy"
+    ? ["checkin", "orderPrompt", "order", "sample", "followup"]
+    : ["checkin", "orderPrompt", "order", "followup"];
+  const STEP_INFO = entityType === "pharmacy" ? {
+    checkin: { n: 1, title: "Log the visit" },
+    orderPrompt: { n: 2, title: "Did they place an order?" },
+    order: { n: 3, title: "Order details" },
+    sample: { n: 4, title: "Did you give a sample?" },
+    followup: { n: 5, title: "Schedule a follow-up" },
+  } : {
     checkin: { n: 1, title: "Log the visit" },
     orderPrompt: { n: 2, title: "Did they place an order?" },
     order: { n: 3, title: "Order details" },
@@ -984,11 +1092,11 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
       {step !== "done" && (
         <>
           <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 6 }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: "#8A8272" }}>Step {STEP_INFO[step].n} of 4</span>
+            <span style={{ fontSize: 12, fontWeight: 600, color: "#8A8272" }}>Step {STEP_INFO[step].n} of {STEP_KEYS.length}</span>
             <span style={{ fontSize: 14, fontWeight: 600 }}>{STEP_INFO[step].title}</span>
           </div>
           <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
-            {["checkin", "orderPrompt", "order", "followup"].map((s) => (
+            {STEP_KEYS.map((s) => (
               <div key={s} style={{ flex: 1, height: 4, borderRadius: 2, background: STEP_INFO[s].n <= STEP_INFO[step].n ? "#4C7A5E" : "#E5DFD3" }} />
             ))}
           </div>
@@ -1158,7 +1266,27 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
               </button>
               {coords && <span className="kb-font-mono" style={{ fontSize: 11.5, color: "#4C7A5E" }}><Check size={12} style={{ verticalAlign: -1 }} /> {coords.lat}, {coords.lng}</span>}
             </div>
-            {locError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{locError}</div>}
+            {locationMismatch && (
+              <div style={{ background: "#FBF0F0", border: "1px solid #E5B8B0", color: "#7A3B3B", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 12, fontWeight: 500 }}>
+                ⚠ You're {locationMismatchKm.toFixed(1)}km from {client}'s known location. Double-check you're at the right place before saving.
+              </div>
+            )}
+            {locError && (
+              <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 8, padding: 10, marginBottom: 12 }}>
+                <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 6 }}>{locError}</div>
+                <div style={{ fontSize: 12, color: "#7A5B2E", marginBottom: 8 }}>
+                  No GPS available right now (indoors, dead zone)? You can save this offline — it'll sync automatically once you have a signal.
+                </div>
+                <button
+                  type="button"
+                  disabled={!client || !matchedEntity}
+                  onClick={saveOffline}
+                  style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: client && matchedEntity ? "#C17817" : "#D8D2C4", color: "#fff", fontSize: 12.5, fontWeight: 500 }}
+                >
+                  Save offline, sync later
+                </button>
+              </div>
+            )}
             {visitError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{visitError}</div>}
             {!coords && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>Capture your GPS location before saving — this is how a visit gets confirmed as real.</div>}
 
@@ -1179,7 +1307,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
             <button onClick={() => setStep("order")} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
               Yes, add order
             </button>
-            <button onClick={() => setStep("followup")} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
+            <button onClick={() => setStep(entityType === "pharmacy" ? "sample" : "followup")} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
               No
             </button>
           </div>
@@ -1194,6 +1322,15 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
           offers={offers}
           orders={orders}
           onCreateOrder={onCreateOrder}
+          onDone={() => setStep(entityType === "pharmacy" ? "sample" : "followup")}
+        />
+      )}
+
+      {step === "sample" && lastVisit && (
+        <PharmacySampleStep
+          clientName={lastVisit.client}
+          visitId={lastVisit.id}
+          products={products}
           onDone={() => setStep("followup")}
         />
       )}
@@ -1226,7 +1363,20 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
         </div>
       )}
 
-      {step === "done" && lastVisit && (
+      {step === "done" && lastVisit && lastVisit.pending && (
+        <div style={{ background: "#fff", border: "1px solid #E9C88A", borderRadius: 10, padding: 20, marginBottom: 20, textAlign: "center" }}>
+          <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6, color: "#C17817" }}>
+            ⏳ Saved offline for {lastVisit.client}
+          </div>
+          <div style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 16 }}>
+            It'll sync automatically once you have a GPS signal or connection — no need to redo anything. Keep the app open occasionally so it can try. You'll see it appear in Today's visits once synced.
+          </div>
+          <button onClick={startNewVisit} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
+            Log another visit
+          </button>
+        </div>
+      )}
+      {step === "done" && lastVisit && !lastVisit.pending && (
         <div style={{ background: "#fff", border: "1px solid #4C7A5E55", borderRadius: 10, padding: 20, marginBottom: 20, textAlign: "center" }}>
           <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6, color: "#4C7A5E" }}>
             <Check size={16} style={{ verticalAlign: -2 }} /> Visit logged for {lastVisit.client}
@@ -1458,6 +1608,108 @@ function downloadOrderPdf(order, stockWarnings = []) {
   }
 
   doc.save(`order-${order.clientName.replace(/\s+/g, "_")}-${order.date.slice(0, 10)}.pdf`);
+}
+
+// ---------- Pharmacy sample step (used from Check-In, pharmacies only) ----
+// Doctors already track sample-giving via the "items mentioned" list in
+// step 1 of Check-In; pharmacies had no equivalent until now, and this is
+// also the first place quantity gets recorded alongside the item.
+function PharmacySampleStep({ clientName, visitId, products, onDone }) {
+  const [asked, setAsked] = useState(null); // null | "yes" | "no"
+  const [itemQuery, setItemQuery] = useState("");
+  const [qty, setQty] = useState("");
+  const [items, setItems] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const itemOptions = (itemQuery.trim()
+    ? products.filter((p) => p.name.toLowerCase().includes(itemQuery.toLowerCase().trim()))
+    : products
+  ).slice(0, 50);
+  const matchedItem = products.find((p) => p.name.toLowerCase().trim() === itemQuery.toLowerCase().trim());
+
+  const addItem = () => {
+    setError("");
+    if (!matchedItem) { setError("Pick an item from the list."); return; }
+    const q = Number(qty);
+    if (!q || q <= 0) { setError("Enter a quantity greater than 0."); return; }
+    setItems((prev) => [...prev, { productId: matchedItem.id, name: matchedItem.name, qty: q }]);
+    setItemQuery(""); setQty("");
+  };
+  const removeItem = (idx) => setItems((prev) => prev.filter((_, i) => i !== idx));
+
+  const finish = async () => {
+    if (items.length === 0) { onDone(); return; }
+    setSaving(true);
+    setError("");
+    try {
+      await api.addSamples({ entityName: clientName, visitId, items });
+      onDone();
+    } catch (e) {
+      setError(e?.message || "Couldn't save the samples.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (asked === null) {
+    return (
+      <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <span style={{ fontSize: 13.5 }}>Did you give <strong>{clientName}</strong> a sample?</span>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => setAsked("yes")} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+            Yes
+          </button>
+          <button onClick={onDone} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
+            No
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+      <h3 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 10px" }}>Samples given to {clientName}</h3>
+      <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+        <div style={{ flex: 2, minWidth: 160 }}>
+          <input
+            value={itemQuery}
+            onChange={(e) => setItemQuery(e.target.value)}
+            placeholder="Search item…"
+            list="sample-item-options"
+            style={inputStyle}
+          />
+          <datalist id="sample-item-options">
+            {itemOptions.map((p) => <option key={p.id} value={p.name} />)}
+          </datalist>
+        </div>
+        <input type="number" min="1" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Qty" style={{ ...inputStyle, flex: 1, minWidth: 80 }} />
+        <button onClick={addItem} style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+          Add
+        </button>
+      </div>
+
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
+
+      {items.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+          {items.map((it, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "6px 10px", fontSize: 12.5 }}>
+              <span>{it.name} × {it.qty}</span>
+              <button onClick={() => removeItem(i)} style={{ background: "none", border: "none", color: "#B7AF9E" }}><X size={13} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <button disabled={saving} onClick={finish} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
+          {saving ? "Saving…" : items.length > 0 ? "Save samples & continue" : "Continue"}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 // ---------- Order Builder (used from Check-In) ----------
@@ -1789,12 +2041,28 @@ function OrdersView({ orders, onDelete, onApproveDelete, onDenyDelete }) {
 }
 
 // ---------- Locations View (manager, check-in GPS history + punch in/out) ----------
-function LocationsView({ role, visits, punchLog, repNames, onRemoveVisit }) {
+function LocationsView({ role, visits, clients, doctors, punchLog, repNames, onRemoveVisit }) {
   const [selectedRep, setSelectedRep] = useState("all");
   const [confirmId, setConfirmId] = useState(null);
 
-  const visitEvents = visits
-    .map((v) => ({ kind: "visit", id: v.id, repName: v.repName, time: v.time, coords: v.coords || null, label: v.client }));
+  // For each visit, cross-checks the GPS captured against the matching
+  // pharmacy/doctor's own saved location (if it has one) — this is the
+  // answer to "how do I know they were actually there," not just that some
+  // GPS exists on the visit.
+  const knownCoordsFor = (name) => {
+    const key = name.toLowerCase().trim();
+    const entity = clients.find((c) => c.name.toLowerCase().trim() === key) || doctors.find((d) => d.name.toLowerCase().trim() === key);
+    return entity?.coordsLat && entity?.coordsLng ? { lat: Number(entity.coordsLat), lng: Number(entity.coordsLng) } : null;
+  };
+
+  const visitEvents = visits.map((v) => {
+    const known = v.coords ? knownCoordsFor(v.client) : null;
+    const mismatchKm = known ? haversineKm(Number(v.coords.lat), Number(v.coords.lng), known.lat, known.lng) : null;
+    return {
+      kind: "visit", id: v.id, repName: v.repName, time: v.time, coords: v.coords || null, label: v.client,
+      mismatchKm: mismatchKm !== null && mismatchKm > LOCATION_MISMATCH_KM ? mismatchKm : null,
+    };
+  });
 
   const punchEvents = (punchLog || [])
     .filter((p) => p.coords)
@@ -1846,6 +2114,11 @@ function LocationsView({ role, visits, punchLog, repNames, onRemoveVisit }) {
                 {new Date(e.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
                 {e.coords ? ` · ${e.coords.lat}, ${e.coords.lng}` : " · no GPS captured"}
               </div>
+              {e.mismatchKm != null && (
+                <div style={{ fontSize: 11, color: "#B33A3A", fontWeight: 600, marginTop: 3 }}>
+                  ⚠ {e.mismatchKm.toFixed(1)}km from {e.label}'s known location
+                </div>
+              )}
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
               {e.coords && (
