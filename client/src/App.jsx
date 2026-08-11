@@ -157,7 +157,11 @@ export default function App() {
     } catch (e) {
       setSyncStatus("error");
       setLoadError(e.message);
-      return undefined;
+      // Rethrown so the many callers written with their own try/catch or
+      // .catch() (Punch In's error message, a form's inline validation
+      // error, etc.) actually fire — swallowing it here meant those were
+      // silently dead code and a failed action could look like it worked.
+      throw e;
     }
   }, [refresh]);
 

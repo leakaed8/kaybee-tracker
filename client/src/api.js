@@ -1,8 +1,27 @@
+// A stalled request (dropped connection, a slow Render cold-start that never
+// comes back, anything) has no natural end — fetch() itself has no timeout,
+// so without this an action like Punch In can spin on "Punching in…"
+// forever with no way for the rep to know something's wrong or retry.
+const REQUEST_TIMEOUT_MS = 25000;
+
 async function request(path, options) {
-  const res = await fetch(`/api${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(`/api${path}`, {
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      ...options,
+    });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      throw new Error("Couldn't reach the server — check your connection and try again.");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `Request failed: ${res.status}`);
