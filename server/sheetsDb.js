@@ -14,11 +14,13 @@ const SCHEMAS = {
   PushSubscriptions: ["id", "role", "repName", "endpoint", "p256dh", "auth"],
   Settings: ["key", "value"],
   Samples: ["id", "doctorName", "productName", "productId", "status", "repName", "visitId", "date", "qty"],
-  PunchLog: ["id", "repName", "type", "time", "coordsLat", "coordsLng"],
+  PunchLog: ["id", "repName", "type", "time", "coordsLat", "coordsLng", "auto", "confirmed"],
   StockMovement: ["id", "productName", "year", "month", "qty"],
   MonthlyDigests: ["id", "month", "status", "payload", "createdAt"],
   FollowUps: ["id", "entityName", "entityType", "repName", "dueDate", "status", "visitId", "createdAt"],
   PharmacySales: ["id", "productName", "pharmacyName", "expiry", "qty"],
+  Competitors: ["id", "name", "supplierName", "supplierContact", "offerDetails", "notes", "createdAt"],
+  CompetitorSightings: ["id", "visitId", "client", "repName", "competitorName", "notes", "date"],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];

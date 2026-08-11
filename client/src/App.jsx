@@ -10,7 +10,7 @@ import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
   TrendingDown, TrendingUp, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
   Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar as RadarIcon, Search, BookOpen,
-  GraduationCap, Boxes,
+  GraduationCap, Boxes, Swords,
 } from "lucide-react";
 import { api } from "./api.js";
 import {
@@ -66,6 +66,8 @@ export default function App() {
   const [offers, setOffers] = useState([]);
   const [samples, setSamples] = useState([]);
   const [punchLog, setPunchLog] = useState([]);
+  const [competitors, setCompetitors] = useState([]);
+  const [competitorSightings, setCompetitorSightings] = useState([]);
   const [settings, setSettings] = useState({
     slowThreshold: 15, repPhone: "", dailyTarget: 3, monthlyVisitTarget: 60, monthlyRevenueTarget: 10000, templates: [],
   });
@@ -100,6 +102,8 @@ export default function App() {
       setOffers(data.offers || []);
       setSamples(data.samples || []);
       setPunchLog(data.punchLog || []);
+      setCompetitors(data.competitors || []);
+      setCompetitorSightings(data.competitorSightings || []);
       if (!settingsDirtyRef.current) setSettings(data.settings);
       setLoadError("");
     } catch (e) {
@@ -203,6 +207,7 @@ export default function App() {
   const addVisit = (visit) => withSync(() => api.addVisit(visit));
   const removeVisit = (id) => withSync(() => api.removeVisit(id));
   const punch = (type, coords) => withSync(() => api.punch(type, coords));
+  const confirmPunch = (id, correctedTime) => withSync(() => api.confirmPunch(id, correctedTime));
   const createOrder = (order) => withSync(() => api.createOrder(order));
   const addClient = (client) => withSync(() => api.addClient(client));
   const removeClient = (id) => withSync(() => api.removeClient(id));
@@ -221,6 +226,9 @@ export default function App() {
   const addOffer = (offer) => withSync(() => api.addOffer(offer));
   const toggleOfferActive = (id, active) => withSync(() => api.updateOffer(id, { active }));
   const removeOffer = (id) => withSync(() => api.removeOffer(id));
+  const addCompetitor = (competitor) => withSync(() => api.addCompetitor(competitor));
+  const updateCompetitor = (id, patch) => withSync(() => api.updateCompetitor(id, patch));
+  const removeCompetitor = (id) => withSync(() => api.removeCompetitor(id));
 
   const zoned = products.map((p) => ({ ...p, zone: zoneFor(p), slowMover: isSlowMover(p, settings.slowThreshold), atRisk: isAtRisk(p) }));
   const sorted = [...zoned].sort((a, b) => daysUntil(a.expiry) - daysUntil(b.expiry));
@@ -240,8 +248,21 @@ export default function App() {
   const punchedInToday = punchLog.some(
     (p) => p.repName === repName && p.type === "in" && new Date(p.time).toDateString() === new Date().toDateString()
   );
-  if (loaded && role === "rep" && !punchedInToday) {
-    return <PunchInGate repName={repName} onPunch={punch} onLogout={logout} />;
+  // A punch-out the system auto-recorded because the rep never tapped it
+  // themselves (see checkMissedPunchOuts server-side) — they have to confirm
+  // or correct that time before punching in again, so it's not just silently
+  // trusted.
+  const unconfirmedAutoPunch = punchLog.find((p) => p.repName === repName && p.type === "out" && p.auto && !p.confirmed);
+  if (loaded && role === "rep" && (!punchedInToday || unconfirmedAutoPunch)) {
+    return (
+      <PunchInGate
+        repName={repName}
+        onPunch={punch}
+        onLogout={logout}
+        unconfirmedAutoPunch={unconfirmedAutoPunch}
+        onConfirmPunch={confirmPunch}
+      />
+    );
   }
 
   return (
@@ -294,6 +315,7 @@ export default function App() {
         {role === "manager" && <TabBtn active={tab === "outreach"} onClick={() => setTab("outreach")} icon={<MessageCircle size={15} />} label="Outreach" />}
         {role === "manager" && <TabBtn active={tab === "broadcast"} onClick={() => setTab("broadcast")} icon={<Megaphone size={15} />} label="Broadcast" />}
         {role === "manager" && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
+        {role === "manager" && <TabBtn active={tab === "competitors"} onClick={() => setTab("competitors")} icon={<Swords size={15} />} label="Competitors" />}
         {(role === "manager" || role === "head_of_sales") && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<RadarIcon size={15} />} label="Locations" />}
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
       </nav>
@@ -336,6 +358,7 @@ export default function App() {
                 onPunch={punch}
                 onQueueOffline={queueVisitOffline}
                 pendingVisitCount={pendingVisitCount}
+                competitors={competitors}
               />
             )}
             {tab === "stock" && <StockView products={sorted} />}
@@ -372,6 +395,15 @@ export default function App() {
             {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} visits={visits} />}
             {tab === "orders" && role === "manager" && (
               <OrdersView orders={orders} onDelete={deleteOrder} onApproveDelete={approveDeleteOrder} onDenyDelete={denyDeleteOrder} />
+            )}
+            {tab === "competitors" && role === "manager" && (
+              <CompetitorsView
+                competitors={competitors}
+                sightings={competitorSightings}
+                onAdd={addCompetitor}
+                onUpdate={updateCompetitor}
+                onRemove={removeCompetitor}
+              />
             )}
             {tab === "locations" && (role === "manager" || role === "head_of_sales") && (
               <LocationsView role={role} visits={visits} clients={clients} doctors={doctors} punchLog={punchLog} repNames={repNames} onRemoveVisit={removeVisit} />
@@ -472,9 +504,13 @@ function LoginView({ onSuccess }) {
 // hasn't punched in yet today — no header, no nav, nothing else reachable —
 // so the first thing that happens every day is a punch-in, not something a
 // rep can scroll past or forget.
-function PunchInGate({ repName, onPunch, onLogout }) {
+function PunchInGate({ repName, onPunch, onLogout, unconfirmedAutoPunch, onConfirmPunch }) {
   const [punching, setPunching] = useState(false);
   const [error, setError] = useState("");
+  const [correcting, setCorrecting] = useState(false);
+  const [correctedTime, setCorrectedTime] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const [confirmError, setConfirmError] = useState("");
 
   const doPunchIn = () => {
     setPunching(true);
@@ -491,6 +527,77 @@ function PunchInGate({ repName, onPunch, onLogout }) {
       { timeout: 8000 }
     );
   };
+
+  const confirmAsIs = () => {
+    setConfirming(true);
+    setConfirmError("");
+    onConfirmPunch(unconfirmedAutoPunch.id)
+      .catch((e) => setConfirmError(e?.message || "Couldn't confirm. Try again."))
+      .finally(() => setConfirming(false));
+  };
+
+  const submitCorrection = () => {
+    if (!correctedTime) { setConfirmError("Enter the time you actually left."); return; }
+    setConfirming(true);
+    setConfirmError("");
+    onConfirmPunch(unconfirmedAutoPunch.id, new Date(correctedTime).toISOString())
+      .catch((e) => setConfirmError(e?.message || "Couldn't save. Try again."))
+      .finally(() => setConfirming(false));
+  };
+
+  if (unconfirmedAutoPunch) {
+    const autoTimeStr = new Date(unconfirmedAutoPunch.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#FAF7F2", fontFamily: "'IBM Plex Sans', system-ui, sans-serif", padding: 16 }}>
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 14, padding: 32, width: "100%", maxWidth: 360, textAlign: "center" }}>
+          <div className="kb-font-display" style={{ fontSize: 19, fontWeight: 600, marginBottom: 8 }}>
+            You didn't punch out
+          </div>
+          <p style={{ fontSize: 13.5, color: "#8A8272", marginBottom: 20 }}>
+            We auto-recorded <strong>{autoTimeStr}</strong> since you never tapped Punch out. Is that about right?
+          </p>
+          {!correcting ? (
+            <>
+              <button
+                onClick={confirmAsIs}
+                disabled={confirming}
+                style={{ width: "100%", padding: "13px 18px", borderRadius: 10, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 14.5, fontWeight: 600, marginBottom: 10 }}
+              >
+                {confirming ? "Saving…" : "Yes, that's right"}
+              </button>
+              <button
+                onClick={() => setCorrecting(true)}
+                disabled={confirming}
+                style={{ width: "100%", padding: "13px 18px", borderRadius: 10, border: "1px solid #E5DFD3", background: "#fff", fontSize: 14.5, fontWeight: 500 }}
+              >
+                No, let me fix it
+              </button>
+            </>
+          ) : (
+            <>
+              <input
+                type="datetime-local"
+                value={correctedTime}
+                onChange={(e) => setCorrectedTime(e.target.value)}
+                style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 14, marginBottom: 12 }}
+              />
+              <button
+                onClick={submitCorrection}
+                disabled={confirming}
+                style={{ width: "100%", padding: "13px 18px", borderRadius: 10, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 14.5, fontWeight: 600 }}
+              >
+                {confirming ? "Saving…" : "Save actual time"}
+              </button>
+            </>
+          )}
+          {confirmError && <div style={{ fontSize: 12.5, color: "#B33A3A", marginTop: 12 }}>{confirmError}</div>}
+          <button onClick={onLogout} style={{ marginTop: 18, fontSize: 11.5, color: "#8A8272", background: "none", border: "none" }}>
+            Not you? Log out
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#FAF7F2", fontFamily: "'IBM Plex Sans', system-ui, sans-serif", padding: 16 }}>
@@ -815,7 +922,7 @@ function Field({ label, children }) {
 const inputStyle = { width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #E5DFD3", fontSize: 13, background: "#FAF7F2" };
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ visits, clients, doctors, products, offers, orders, punchLog, repName, onAddVisit, onCreateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount }) {
+function CheckInView({ visits, clients, doctors, products, offers, orders, punchLog, repName, onAddVisit, onCreateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors }) {
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
   const [entityType, setEntityType] = useState("pharmacy"); // pharmacy | doctor
@@ -838,6 +945,9 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
   const [mentionedItems, setMentionedItems] = useState([]);
   const [itemQuery, setItemQuery] = useState("");
   const [sampleMenuFor, setSampleMenuFor] = useState(null);
+  const [sawCompetitor, setSawCompetitor] = useState(false);
+  const [competitorName, setCompetitorName] = useState("");
+  const [competitorNotes, setCompetitorNotes] = useState("");
   const [listening, setListening] = useState(false);
   const recognitionRef = useRef(null);
 
@@ -971,9 +1081,14 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     setSaving(true);
     try {
       const visitClient = client;
-      const created = await onAddVisit({ client, notes, coords, mentionedItems });
+      const created = await onAddVisit({
+        client, notes, coords, mentionedItems,
+        competitorName: sawCompetitor ? competitorName : "",
+        competitorNotes: sawCompetitor ? competitorNotes : "",
+      });
       setLastVisit(created || { client: visitClient });
       setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
+      setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
       setFollowUpStatus(null);
       setFollowUpError("");
       setStep("orderPrompt");
@@ -991,9 +1106,15 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
   // visit id yet to attach them to; the rep can note anything important in
   // the text notes instead, or check in again once it's synced.
   const saveOffline = () => {
-    onQueueOffline({ client, notes, mentionedItems, queuedAt: new Date().toISOString() });
+    onQueueOffline({
+      client, notes, mentionedItems,
+      competitorName: sawCompetitor ? competitorName : "",
+      competitorNotes: sawCompetitor ? competitorNotes : "",
+      queuedAt: new Date().toISOString(),
+    });
     setLastVisit({ client, pending: true });
     setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
+    setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
     setVisitError(""); setLocError("");
     setFollowUpStatus(null);
     setStep("done");
@@ -1180,6 +1301,35 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
                 ))}
               </div>
             </Field>
+
+            {entityType === "pharmacy" && (
+              <Field label="Competitors">
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#5B5445", marginBottom: sawCompetitor ? 8 : 0 }}>
+                  <input type="checkbox" checked={sawCompetitor} onChange={(e) => setSawCompetitor(e.target.checked)} />
+                  Any competitor brands on the shelf here?
+                </label>
+                {sawCompetitor && (
+                  <>
+                    <input
+                      value={competitorName}
+                      onChange={(e) => setCompetitorName(e.target.value)}
+                      placeholder="Who's the competitor? e.g. another vitamin brand"
+                      list="checkin-competitor-options"
+                      style={{ ...inputStyle, marginBottom: 8 }}
+                    />
+                    <datalist id="checkin-competitor-options">
+                      {(competitors || []).map((c) => <option key={c.id} value={c.name} />)}
+                    </datalist>
+                    <input
+                      value={competitorNotes}
+                      onChange={(e) => setCompetitorNotes(e.target.value)}
+                      placeholder="What are they offering? (price, terms, promo…)"
+                      style={inputStyle}
+                    />
+                  </>
+                )}
+              </Field>
+            )}
 
             {entityType === "doctor" && (
               <Field label="Items mentioned during visit">
@@ -2035,6 +2185,133 @@ function OrdersView({ orders, onDelete, onApproveDelete, onDenyDelete }) {
           </div>
         ))}
         {orders.length === 0 && <EmptyState text="No orders logged yet." />}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Competitors View (manager) ----------
+// Two halves: the master list itself (name + supplier + offer details, kept
+// clean by only managers editing it — reps just pick from it), and a feed of
+// what reps actually saw in the field, logged from Check-In. Neither table
+// changes the other; this is where a manager reads what's been collected.
+function CompetitorsView({ competitors, sightings, onAdd, onUpdate, onRemove }) {
+  const [showAdd, setShowAdd] = useState(false);
+  const [form, setForm] = useState({ name: "", supplierName: "", supplierContact: "", offerDetails: "", notes: "" });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({});
+  const [confirmId, setConfirmId] = useState(null);
+
+  const submitAdd = async () => {
+    if (!form.name.trim()) { setError("Competitor name is required."); return; }
+    setSaving(true);
+    setError("");
+    try {
+      await onAdd(form);
+      setForm({ name: "", supplierName: "", supplierContact: "", offerDetails: "", notes: "" });
+      setShowAdd(false);
+    } catch (e) {
+      setError(e?.message || "Couldn't save.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const startEdit = (c) => {
+    setEditingId(c.id);
+    setEditForm({ name: c.name, supplierName: c.supplierName, supplierContact: c.supplierContact, offerDetails: c.offerDetails, notes: c.notes });
+  };
+  const saveEdit = async (id) => {
+    await onUpdate(id, editForm);
+    setEditingId(null);
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Competitors</h2>
+        <button
+          onClick={() => setShowAdd((v) => !v)}
+          style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
+        >
+          <Plus size={14} /> Add competitor
+        </button>
+      </div>
+
+      {showAdd && (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Competitor name" style={inputStyle} />
+            <input value={form.supplierName} onChange={(e) => setForm({ ...form, supplierName: e.target.value })} placeholder="Supplier name" style={inputStyle} />
+            <input value={form.supplierContact} onChange={(e) => setForm({ ...form, supplierContact: e.target.value })} placeholder="Supplier contact (phone/email)" style={inputStyle} />
+            <input value={form.offerDetails} onChange={(e) => setForm({ ...form, offerDetails: e.target.value })} placeholder="Offer details (pricing, terms, promos)" style={inputStyle} />
+          </div>
+          <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Other notes" rows={2} style={{ ...inputStyle, resize: "vertical", marginBottom: 10 }} />
+          {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
+          <button disabled={saving} onClick={submitAdd} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+            {saving ? "Saving…" : "Save competitor"}
+          </button>
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 28 }}>
+        {competitors.map((c) => (
+          <div key={c.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
+            {editingId === c.id ? (
+              <div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+                  <input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} placeholder="Competitor name" style={inputStyle} />
+                  <input value={editForm.supplierName} onChange={(e) => setEditForm({ ...editForm, supplierName: e.target.value })} placeholder="Supplier name" style={inputStyle} />
+                  <input value={editForm.supplierContact} onChange={(e) => setEditForm({ ...editForm, supplierContact: e.target.value })} placeholder="Supplier contact" style={inputStyle} />
+                  <input value={editForm.offerDetails} onChange={(e) => setEditForm({ ...editForm, offerDetails: e.target.value })} placeholder="Offer details" style={inputStyle} />
+                </div>
+                <textarea value={editForm.notes} onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })} rows={2} style={{ ...inputStyle, resize: "vertical", marginBottom: 10 }} />
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => saveEdit(c.id)} style={{ fontSize: 12, background: "#1F2A24", color: "#FAF7F2", border: "none", borderRadius: 6, padding: "7px 12px" }}>Save</button>
+                  <button onClick={() => setEditingId(null)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "7px 12px" }}>Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, flexWrap: "wrap" }}>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13.5 }}>{c.name}</div>
+                  {c.supplierName && (
+                    <div style={{ fontSize: 12, color: "#8A8272", marginTop: 2 }}>
+                      Supplier: {c.supplierName}{c.supplierContact ? ` · ${c.supplierContact}` : ""}
+                    </div>
+                  )}
+                  {c.offerDetails && <div style={{ fontSize: 12.5, marginTop: 4 }}>{c.offerDetails}</div>}
+                  {c.notes && <div style={{ fontSize: 12, color: "#8A8272", marginTop: 4 }}>{c.notes}</div>}
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button onClick={() => startEdit(c)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Edit</button>
+                  {confirmId === c.id ? (
+                    <>
+                      <button onClick={() => { onRemove(c.id); setConfirmId(null); }} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}>Yes</button>
+                      <button onClick={() => setConfirmId(null)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Cancel</button>
+                    </>
+                  ) : (
+                    <button onClick={() => setConfirmId(c.id)} style={{ fontSize: 12, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "6px 10px" }}>Delete</button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+        {competitors.length === 0 && <EmptyState text="No competitors added yet." />}
+      </div>
+
+      <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 10px", color: "#8A8272" }}>Recent sightings from the field ({sightings.length})</h3>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {sightings.slice(0, LIST_DISPLAY_CAP).map((s) => (
+          <div key={s.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "10px 12px", fontSize: 12.5 }}>
+            <strong>{s.competitorName}</strong> at {s.client} — logged by {s.repName || "unknown"} on {new Date(s.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}
+            {s.notes && <div style={{ color: "#8A8272", marginTop: 2 }}>{s.notes}</div>}
+          </div>
+        ))}
+        {sightings.length === 0 && <EmptyState text="No competitor sightings logged yet." />}
       </div>
     </div>
   );

@@ -231,7 +231,11 @@ function parseOffer(o) {
 
 function parsePunch(p) {
   const coords = p.coordsLat && p.coordsLng ? { lat: p.coordsLat, lng: p.coordsLng } : null;
-  return { id: p.id, repName: p.repName, type: p.type, time: p.time, coords };
+  return {
+    id: p.id, repName: p.repName, type: p.type, time: p.time, coords,
+    auto: p.auto === "true",
+    confirmed: p.confirmed === "true",
+  };
 }
 
 function parseVisit(v) {
@@ -409,7 +413,7 @@ app.post("/api/push/subscribe", async (req, res) => {
   }
 });
 
-const BOOTSTRAP_TABS = ["Products", "Visits", "Clients", "Doctors", "OutreachLog", "Orders", "Reps", "Offers", "Samples", "PunchLog", "StockMovement", "FollowUps"];
+const BOOTSTRAP_TABS = ["Products", "Visits", "Clients", "Doctors", "OutreachLog", "Orders", "Reps", "Offers", "Samples", "PunchLog", "StockMovement", "FollowUps", "Competitors", "CompetitorSightings"];
 
 // Google's Sheets API "read requests per minute PER USER" quota (60) is fixed
 // and not adjustable — and since this whole app authenticates as one shared
@@ -430,7 +434,7 @@ async function buildBootstrapPayload() {
   const {
     Products: products, Visits: visits, Clients: clients, Doctors: doctors, OutreachLog: outreachLog,
     Orders: orders, Reps: reps, Offers: offers, Samples: samples, PunchLog: punchLog, StockMovement: stockMovement,
-    FollowUps: followUps,
+    FollowUps: followUps, Competitors: competitors, CompetitorSightings: competitorSightings,
   } = batch;
   const movementIndex = buildMovementIndex(stockMovement);
   return {
@@ -446,6 +450,8 @@ async function buildBootstrapPayload() {
     settings: parseSettings(rawSettings),
     samples: samples.sort((a, b) => new Date(b.date) - new Date(a.date)),
     followUps: followUps.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate)),
+    competitors: competitors.sort((a, b) => a.name.localeCompare(b.name)),
+    competitorSightings: competitorSightings.sort((a, b) => new Date(b.date) - new Date(a.date)),
   };
 }
 
@@ -643,7 +649,7 @@ app.post("/api/pharmacy-sales/import", requireManager, async (req, res) => {
 
 app.post("/api/visits", async (req, res) => {
   try {
-    const { client, notes, coords, mentionedItems } = req.body;
+    const { client, notes, coords, mentionedItems, competitorName, competitorNotes } = req.body;
     if (!client) return res.status(400).json({ error: "client is required" });
     // Enforced server-side too, not just disabled in the UI — a visit with
     // no location proves nothing about whether the rep was actually there.
@@ -742,6 +748,19 @@ app.post("/api/visits", async (req, res) => {
         date: visit.time,
       }));
     if (sampleRows.length) await db.appendRows("Samples", sampleRows);
+
+    if (competitorName && String(competitorName).trim()) {
+      await db.appendRow("CompetitorSightings", {
+        id: `cs${crypto.randomUUID()}`,
+        visitId: visit.id,
+        client: visit.client,
+        repName: req.repName || "",
+        competitorName: String(competitorName).trim(),
+        notes: competitorNotes || "",
+        date: visit.time,
+      });
+    }
+
     res.json({ ...visit, assignedRepWarning });
   } catch (e) {
     console.error(e);
@@ -831,6 +850,9 @@ app.post("/api/punch", async (req, res) => {
     const currentlyIn = mine.length > 0 && mine[0].type === "in";
     if (type === "in" && currentlyIn) return res.status(400).json({ error: "Already punched in." });
     if (type === "out" && !currentlyIn) return res.status(400).json({ error: "Not punched in." });
+    if (type === "in" && mine.some((p) => p.type === "out" && p.auto === "true" && p.confirmed !== "true")) {
+      return res.status(400).json({ error: "Confirm yesterday's punch-out time before punching in." });
+    }
     const entry = {
       id: `pl${crypto.randomUUID()}`,
       repName: req.repName,
@@ -838,6 +860,8 @@ app.post("/api/punch", async (req, res) => {
       time: new Date().toISOString(),
       coordsLat: coords ? coords.lat : "",
       coordsLng: coords ? coords.lng : "",
+      auto: "",
+      confirmed: "true",
     };
     await db.appendRow("PunchLog", entry);
     if (type === "in") {
@@ -849,6 +873,34 @@ app.post("/api/punch", async (req, res) => {
       }).catch((e) => console.error("punch-in telegram notify failed", e));
     }
     res.json(entry);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// A rep confirms (or corrects) a punch-out the system auto-recorded because
+// they never tapped "Punch out" themselves. Required before they can punch
+// in for a new day — see checkMissedPunchOuts below for how these get
+// created in the first place.
+app.patch("/api/punch/:id/confirm", async (req, res) => {
+  try {
+    if (!req.repName) return res.status(403).json({ error: "Reps only." });
+    const log = await db.getAllRows("PunchLog");
+    const entry = log.find((p) => p.id === req.params.id);
+    if (!entry) return res.status(404).json({ error: "Punch record not found." });
+    if (entry.repName !== req.repName) return res.status(403).json({ error: "Not your punch record." });
+    if (entry.auto !== "true") return res.status(400).json({ error: "Only auto-recorded punches need confirming." });
+    const patch = { confirmed: "true" };
+    const { correctedTime } = req.body;
+    if (correctedTime) {
+      const d = new Date(correctedTime);
+      if (isNaN(d.getTime())) return res.status(400).json({ error: "Invalid corrected time." });
+      patch.time = d.toISOString();
+    }
+    const ok = await db.updateRowById("PunchLog", req.params.id, patch);
+    if (!ok) return res.status(404).json({ error: "Punch record not found." });
+    res.json({ ok: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -988,6 +1040,56 @@ app.patch("/api/offers/:id", requireManager, async (req, res) => {
 app.delete("/api/offers/:id", requireManager, async (req, res) => {
   try {
     await db.deleteRowById("Offers", req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Competitors are a manager-curated master list (name + supplier + offer
+// details) — reps pick from it (or type a name that isn't listed yet) when
+// logging a sighting during Check-In, they don't add to the list directly.
+// Keeps the list clean instead of accumulating rep-typed duplicates/typos.
+app.post("/api/competitors", requireManager, async (req, res) => {
+  try {
+    const { name, supplierName, supplierContact, offerDetails, notes } = req.body;
+    if (!name) return res.status(400).json({ error: "name is required" });
+    const competitor = {
+      id: `comp${crypto.randomUUID()}`,
+      name: String(name).trim(),
+      supplierName: supplierName || "",
+      supplierContact: supplierContact || "",
+      offerDetails: offerDetails || "",
+      notes: notes || "",
+      createdAt: new Date().toISOString(),
+    };
+    await db.appendRow("Competitors", competitor);
+    res.json(competitor);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/competitors/:id", requireManager, async (req, res) => {
+  try {
+    const patch = {};
+    for (const key of ["name", "supplierName", "supplierContact", "offerDetails", "notes"]) {
+      if (req.body[key] !== undefined) patch[key] = req.body[key];
+    }
+    const ok = await db.updateRowById("Competitors", req.params.id, patch);
+    if (!ok) return res.status(404).json({ error: "Competitor not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/competitors/:id", requireManager, async (req, res) => {
+  try {
+    await db.deleteRowById("Competitors", req.params.id);
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -2032,6 +2134,55 @@ async function checkMonthlyVisitsSummary() {
     console.error("checkMonthlyVisitsSummary failed", e);
   }
 }
+
+// A rep who forgets to punch out leaves an open "in" forever, which quietly
+// breaks anything relying on punch state (and just looks like the app is
+// stuck). Once a day, past the cutoff hour, close out anyone still open —
+// flagged "auto" and unconfirmed so PunchInGate makes them confirm or
+// correct that time before they can punch in for a new day (see
+// /api/punch and /api/punch/:id/confirm above).
+const PUNCH_AUTO_CLOSE_HOUR = 21; // 9pm Beirut
+const PUNCH_AUTO_CLOSE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+function beirutDateStr(date) {
+  return date.toLocaleDateString("sv-SE", { timeZone: "Asia/Beirut" }); // yyyy-mm-dd, sorts/compares cleanly
+}
+async function checkMissedPunchOuts() {
+  try {
+    const now = new Date();
+    const beirutHour = Number(now.toLocaleString("en-US", { timeZone: "Asia/Beirut", hour: "2-digit", hour12: false }));
+    if (beirutHour < PUNCH_AUTO_CLOSE_HOUR) return;
+    const todayStr = beirutDateStr(now);
+    const settings = await db.getSettings();
+    if (settings.lastPunchAutoCloseDate === todayStr) return;
+    const [log, reps] = await Promise.all([db.getAllRows("PunchLog"), db.getAllRows("Reps")]);
+    for (const rep of reps) {
+      const mine = log.filter((p) => p.repName === rep.name).sort((a, b) => new Date(b.time) - new Date(a.time));
+      const last = mine[0];
+      if (!last || last.type !== "in") continue;
+      const entry = {
+        id: `pl${crypto.randomUUID()}`,
+        repName: rep.name,
+        type: "out",
+        time: now.toISOString(),
+        coordsLat: "",
+        coordsLng: "",
+        auto: "true",
+        confirmed: "",
+      };
+      await db.appendRow("PunchLog", entry);
+      if (settings.managerTelegramChatId) {
+        const timeStr = now.toLocaleTimeString("en-US", { timeZone: "Asia/Beirut", hour: "numeric", minute: "2-digit" });
+        telegram.sendMessage(settings.managerTelegramChatId, `⏰ ${rep.name} didn't punch out — auto-closed at ${timeStr}.`)
+          .catch((e) => console.error("missed punch-out telegram notify failed", e));
+      }
+    }
+    await db.setSettings({ lastPunchAutoCloseDate: todayStr });
+  } catch (e) {
+    console.error("checkMissedPunchOuts failed", e);
+  }
+}
+checkMissedPunchOuts();
+setInterval(checkMissedPunchOuts, PUNCH_AUTO_CLOSE_CHECK_INTERVAL_MS);
 
 if (telegram.isConfigured()) {
   checkMonthlyDigest();
