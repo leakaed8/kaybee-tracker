@@ -157,6 +157,13 @@ export default function App() {
     } catch (e) {
       setSyncStatus("error");
       setLoadError(e.message);
+      // A failure here doesn't always mean the write didn't happen — a
+      // timed-out or dropped request can still have gone through
+      // server-side (Punch In succeeding but the confirmation getting
+      // lost is exactly this). Re-syncing even on failure means the app
+      // catches up with reality on its own instead of getting stuck
+      // showing a stale "not punched in" gate forever.
+      refresh({ fresh: true }).catch(() => {});
       // Rethrown so the many callers written with their own try/catch or
       // .catch() (Punch In's error message, a form's inline validation
       // error, etc.) actually fire — swallowing it here meant those were
