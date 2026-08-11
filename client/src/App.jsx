@@ -334,13 +334,13 @@ export default function App() {
 
       <nav style={{ display: "flex", gap: 4, padding: "12px 24px 0", borderBottom: "1px solid #E5DFD3", overflowX: "auto" }}>
         {role === "rep" && <TabBtn active={tab === "checkin"} onClick={() => setTab("checkin")} icon={<MapPin size={15} />} label="Check-In" />}
-        {role === "rep" && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
+        {role === "rep" && !isSupervisor && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
         <TabBtn active={tab === "stock"} onClick={() => setTab("stock")} icon={<Boxes size={15} />} label="Stock" />
         <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />
         <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />
-        <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />
+        {!isSupervisor && <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />}
         <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />
-        <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />
+        {!isSupervisor && <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />}
         {role === "manager" && <TabBtn active={tab === "dashboard"} onClick={() => setTab("dashboard")} icon={<LayoutDashboard size={15} />} label="Dashboard" />}
         {(role === "manager" || isSupervisor) && <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<Target size={15} />} label="Performance" />}
         {role === "manager" && <TabBtn active={tab === "outreach"} onClick={() => setTab("outreach")} icon={<MessageCircle size={15} />} label="Outreach" />}
@@ -409,7 +409,7 @@ export default function App() {
                 onCompleteInfo={completeClientInfo}
               />
             )}
-            {tab === "doctors" && (
+            {tab === "doctors" && !isSupervisor && (
               <DoctorsView
                 doctors={doctors}
                 visits={visits}
@@ -422,8 +422,8 @@ export default function App() {
               />
             )}
             {tab === "knowledge" && <KnowledgeView />}
-            {tab === "training" && <TrainingView />}
-            {tab === "route" && role === "rep" && <RouteView clients={clients} doctors={doctors} visits={visits} />}
+            {tab === "training" && !isSupervisor && <TrainingView />}
+            {tab === "route" && role === "rep" && !isSupervisor && <RouteView clients={clients} doctors={doctors} visits={visits} />}
             {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} visits={visits} />}
             {tab === "orders" && role === "manager" && (
               <OrdersView orders={orders} onDelete={deleteOrder} onApproveDelete={approveDeleteOrder} onDenyDelete={denyDeleteOrder} />
@@ -456,6 +456,8 @@ export default function App() {
               <PerformanceView
                 visits={visits}
                 orders={orders}
+                samples={samples}
+                competitorSightings={competitorSightings}
                 clients={clients}
                 doctors={doctors}
                 repNames={repNames}
@@ -4203,7 +4205,89 @@ function RepPerformanceCard({ title, visits, monthlyVisitTarget, orders = [], mo
   );
 }
 
-function PerformanceView({ visits, orders, clients, doctors, repNames, monthlyVisitTarget, setMonthlyVisitTarget, monthlyRevenueTarget, setMonthlyRevenueTarget }) {
+// One rep's day at a time, on purpose — dumping every rep's every visit into
+// one long feed is exactly the "bulk information" this was built to avoid.
+// Pick a name, see what they actually did: who they saw, what was
+// discussed, what they noted, and what came out of it (order/offers,
+// samples, competitor intel) — the things the aggregate stats above don't
+// show.
+function RepActivityToday({ visits, orders, samples, competitorSightings, repNames }) {
+  const [selectedRep, setSelectedRep] = useState("");
+  const todayVisits = (selectedRep ? visits.filter((v) => v.repName === selectedRep) : [])
+    .filter((v) => new Date(v.time).toDateString() === new Date().toDateString())
+    .sort((a, b) => new Date(b.time) - new Date(a.time));
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+      <h3 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 4px" }}>Today's activity</h3>
+      <p style={{ fontSize: 12, color: "#8A8272", margin: "0 0 12px" }}>
+        Who they visited, what was discussed, and what came of it.
+      </p>
+      <select value={selectedRep} onChange={(e) => setSelectedRep(e.target.value)} style={{ ...inputStyle, maxWidth: 260, marginBottom: 14 }}>
+        <option value="">Select a med rep…</option>
+        {repNames.map((n) => <option key={n} value={n}>{n}</option>)}
+      </select>
+
+      {!selectedRep && <EmptyState text="Pick a rep to see today's visits." />}
+      {selectedRep && todayVisits.length === 0 && <EmptyState text={`${selectedRep} hasn't logged a visit yet today.`} />}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {todayVisits.map((v) => {
+          const order = orders.find((o) => o.visitId === v.id);
+          const visitSamples = samples.filter((s) => s.visitId === v.id);
+          const sighting = competitorSightings.find((cs) => cs.visitId === v.id);
+          return (
+            <div key={v.id} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
+                <span style={{ fontWeight: 600, fontSize: 13.5 }}>{v.client}</span>
+                <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>
+                  {new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              </div>
+
+              {v.notes && (
+                <div style={{ fontSize: 12.5, marginTop: 6 }}>
+                  <strong style={{ color: "#8A8272", fontWeight: 600 }}>Notes: </strong>{v.notes}
+                </div>
+              )}
+
+              {v.mentionedItems && v.mentionedItems.length > 0 && (
+                <div style={{ fontSize: 12.5, marginTop: 4 }}>
+                  <strong style={{ color: "#8A8272", fontWeight: 600 }}>Items discussed: </strong>
+                  {v.mentionedItems.map((it) => it.name).join(", ")}
+                </div>
+              )}
+
+              {order && (
+                <div style={{ fontSize: 12.5, marginTop: 4 }}>
+                  <strong style={{ color: "#8A8272", fontWeight: 600 }}>Order: </strong>
+                  {order.items.map((it) => `${it.name} ×${it.qty}${it.isFree ? " (free — offer)" : ""}`).join(", ")}
+                  {" — "}{order.total.toFixed(2)}
+                </div>
+              )}
+
+              {visitSamples.length > 0 && (
+                <div style={{ fontSize: 12.5, marginTop: 4 }}>
+                  <strong style={{ color: "#8A8272", fontWeight: 600 }}>Samples given: </strong>
+                  {visitSamples.map((s) => `${s.productName}${s.qty ? ` ×${s.qty}` : ""}`).join(", ")}
+                </div>
+              )}
+
+              {sighting && (
+                <div style={{ fontSize: 12.5, marginTop: 4, color: "#B33A3A" }}>
+                  <strong style={{ fontWeight: 600 }}>Competitor: </strong>
+                  {sighting.competitorName}{sighting.notes ? ` — ${sighting.notes}` : ""}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function PerformanceView({ visits, orders, samples, competitorSightings, clients, doctors, repNames, monthlyVisitTarget, setMonthlyVisitTarget, monthlyRevenueTarget, setMonthlyRevenueTarget }) {
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
@@ -4299,6 +4383,8 @@ function PerformanceView({ visits, orders, clients, doctors, repNames, monthlyVi
             color="#1F2A24" icon={<MessageCircle size={16} />} />
         </div>
       )}
+
+      <RepActivityToday visits={visits} orders={orders} samples={samples} competitorSightings={competitorSightings} repNames={repNames} />
 
       <RepPerformanceCard title="All reps combined" visits={visits} monthlyVisitTarget={monthlyVisitTarget}
         orders={orders} monthlyRevenueTarget={revenueTargetTotal} clients={clients} />
