@@ -1,0 +1,21 @@
+{
+  "name": "daily-tasks-bot",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Private Telegram daily task manager (DailyTasks_LeaBot)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js",
+    "test": "node --test test/*.test.js",
+    "set-webhook": "node scripts/setWebhook.js",
+    "delete-webhook": "node scripts/deleteWebhook.js"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.14.0",
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -33,3 +33,11 @@ service account credentials and Sheet ID — see SETUP.md.
 npm run build   # builds client/dist and installs server deps
 npm start       # serves the built frontend + API on one port (PORT env var)
 ```
+
+## DailyTasks_LeaBot
+
+This repo also hosts a second, unrelated project: a private Telegram daily
+task manager. It's fully independent of the app above (own folder, own
+dependencies, own deployment). See
+[`daily-tasks-bot/README.md`](./daily-tasks-bot/README.md) and
+[`daily-tasks-bot/SETUP.md`](./daily-tasks-bot/SETUP.md).
