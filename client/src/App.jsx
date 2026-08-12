@@ -92,6 +92,7 @@ export default function App() {
   const [punchLog, setPunchLog] = useState([]);
   const [competitors, setCompetitors] = useState([]);
   const [competitorSightings, setCompetitorSightings] = useState([]);
+  const [competitorProducts, setCompetitorProducts] = useState([]);
   const [visitComments, setVisitComments] = useState([]);
   const [settings, setSettings] = useState({
     slowThreshold: 15, repPhone: "", dailyTarget: 3, monthlyVisitTarget: 60, monthlyRevenueTarget: 10000, templates: [],
@@ -129,6 +130,7 @@ export default function App() {
       setPunchLog(data.punchLog || []);
       setCompetitors(data.competitors || []);
       setCompetitorSightings(data.competitorSightings || []);
+      setCompetitorProducts(data.competitorProducts || []);
       setVisitComments(data.visitComments || []);
       if (!settingsDirtyRef.current) setSettings(data.settings);
       setLoadError("");
@@ -260,6 +262,9 @@ export default function App() {
   const addCompetitor = (competitor) => withSync(() => api.addCompetitor(competitor));
   const updateCompetitor = (id, patch) => withSync(() => api.updateCompetitor(id, patch));
   const removeCompetitor = (id) => withSync(() => api.removeCompetitor(id));
+  const addCompetitorProduct = (product) => withSync(() => api.addCompetitorProduct(product));
+  const updateCompetitorProduct = (id, patch) => withSync(() => api.updateCompetitorProduct(id, patch));
+  const removeCompetitorProduct = (id) => withSync(() => api.removeCompetitorProduct(id));
   const addVisitComment = (visitId, text) => withSync(() => api.addVisitComment(visitId, text));
 
   const zoned = products.map((p) => ({ ...p, zone: zoneFor(p), slowMover: isSlowMover(p, settings.slowThreshold), atRisk: isAtRisk(p) }));
@@ -438,6 +443,10 @@ export default function App() {
                 onAdd={addCompetitor}
                 onUpdate={updateCompetitor}
                 onRemove={removeCompetitor}
+                products={competitorProducts}
+                onAddProduct={addCompetitorProduct}
+                onUpdateProduct={updateCompetitorProduct}
+                onRemoveProduct={removeCompetitorProduct}
               />
             )}
             {tab === "locations" && (role === "manager" || isSupervisor) && (
@@ -2211,7 +2220,7 @@ function OrdersView({ orders, onDelete, onApproveDelete, onDenyDelete }) {
 // clean by only managers editing it — reps just pick from it), and a feed of
 // what reps actually saw in the field, logged from Check-In. Neither table
 // changes the other; this is where a manager reads what's been collected.
-function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onRemove }) {
+function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onRemove, products, onAddProduct, onUpdateProduct, onRemoveProduct }) {
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ name: "", supplierName: "", supplierContact: "", offerDetails: "", notes: "" });
   const [saving, setSaving] = useState(false);
@@ -2219,6 +2228,16 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [confirmId, setConfirmId] = useState(null);
+
+  const emptyProductForm = { competitorName: "", productName: "", genericName: "", dosage: "", packSize: "", price: "", discountRate: "", notes: "" };
+  const [productSearch, setProductSearch] = useState("");
+  const [showAddProduct, setShowAddProduct] = useState(false);
+  const [productForm, setProductForm] = useState(emptyProductForm);
+  const [productSaving, setProductSaving] = useState(false);
+  const [productError, setProductError] = useState("");
+  const [editingProductId, setEditingProductId] = useState(null);
+  const [editProductForm, setEditProductForm] = useState({});
+  const [confirmProductId, setConfirmProductId] = useState(null);
 
   const submitAdd = async () => {
     if (!form.name.trim()) { setError("Competitor name is required."); return; }
@@ -2242,6 +2261,40 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
   const saveEdit = async (id) => {
     await onUpdate(id, editForm);
     setEditingId(null);
+  };
+
+  const q = productSearch.trim().toLowerCase();
+  const filteredProducts = !q ? products : products.filter((p) =>
+    (p.genericName || "").toLowerCase().includes(q) ||
+    (p.productName || "").toLowerCase().includes(q) ||
+    (p.competitorName || "").toLowerCase().includes(q)
+  );
+
+  const submitAddProduct = async () => {
+    if (!productForm.competitorName.trim() || !productForm.productName.trim()) {
+      setProductError("Competitor and product name are required.");
+      return;
+    }
+    setProductSaving(true);
+    setProductError("");
+    try {
+      await onAddProduct(productForm);
+      setProductForm(emptyProductForm);
+      setShowAddProduct(false);
+    } catch (e) {
+      setProductError(e?.message || "Couldn't save.");
+    } finally {
+      setProductSaving(false);
+    }
+  };
+
+  const startEditProduct = (p) => {
+    setEditingProductId(p.id);
+    setEditProductForm({ competitorName: p.competitorName, productName: p.productName, genericName: p.genericName, dosage: p.dosage, packSize: p.packSize, price: p.price, discountRate: p.discountRate, notes: p.notes });
+  };
+  const saveEditProduct = async (id) => {
+    await onUpdateProduct(id, editProductForm);
+    setEditingProductId(null);
   };
 
   return (
@@ -2337,6 +2390,107 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
           </div>
         ))}
         {sightings.length === 0 && <EmptyState text="No competitor sightings logged yet." />}
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "28px 0 10px" }}>
+        <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0, color: "#8A8272" }}>Competitor price list</h3>
+        {canEdit && (
+          <button
+            onClick={() => setShowAddProduct((v) => !v)}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
+          >
+            <Plus size={14} /> Add product
+          </button>
+        )}
+      </div>
+      <p style={{ fontSize: 12.5, color: "#8A8272", marginTop: -4, marginBottom: 12 }}>
+        Search by generic name (e.g. "magnesium") to see every competitor brand that carries it, with pricing.
+      </p>
+      <input
+        value={productSearch}
+        onChange={(e) => setProductSearch(e.target.value)}
+        placeholder="Search by generic or brand name…"
+        style={{ ...inputStyle, marginBottom: 14 }}
+      />
+
+      {canEdit && showAddProduct && (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+            <input value={productForm.competitorName} onChange={(e) => setProductForm({ ...productForm, competitorName: e.target.value })} placeholder="Competitor name" style={inputStyle} list="competitor-name-options" />
+            <input value={productForm.productName} onChange={(e) => setProductForm({ ...productForm, productName: e.target.value })} placeholder="Brand / product name" style={inputStyle} />
+            <input value={productForm.genericName} onChange={(e) => setProductForm({ ...productForm, genericName: e.target.value })} placeholder="Generic name (e.g. Magnesium)" style={inputStyle} />
+            <input value={productForm.dosage} onChange={(e) => setProductForm({ ...productForm, dosage: e.target.value })} placeholder="Dose per tab (e.g. 500mg)" style={inputStyle} />
+            <input value={productForm.packSize} onChange={(e) => setProductForm({ ...productForm, packSize: e.target.value })} placeholder="Pack size (e.g. 20 tabs)" style={inputStyle} />
+            <input value={productForm.price} onChange={(e) => setProductForm({ ...productForm, price: e.target.value })} placeholder="Price" style={inputStyle} />
+            <input value={productForm.discountRate} onChange={(e) => setProductForm({ ...productForm, discountRate: e.target.value })} placeholder="Discount offered to pharmacies (%)" style={inputStyle} />
+          </div>
+          <textarea value={productForm.notes} onChange={(e) => setProductForm({ ...productForm, notes: e.target.value })} placeholder="Other notes" rows={2} style={{ ...inputStyle, resize: "vertical", marginBottom: 10 }} />
+          {productError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{productError}</div>}
+          <button disabled={productSaving} onClick={submitAddProduct} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+            {productSaving ? "Saving…" : "Save product"}
+          </button>
+        </div>
+      )}
+
+      <datalist id="competitor-name-options">
+        {competitors.map((c) => <option key={c.id} value={c.name} />)}
+      </datalist>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {filteredProducts.map((p) => (
+          <div key={p.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
+            {canEdit && editingProductId === p.id ? (
+              <div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+                  <input value={editProductForm.competitorName} onChange={(e) => setEditProductForm({ ...editProductForm, competitorName: e.target.value })} placeholder="Competitor name" style={inputStyle} />
+                  <input value={editProductForm.productName} onChange={(e) => setEditProductForm({ ...editProductForm, productName: e.target.value })} placeholder="Brand / product name" style={inputStyle} />
+                  <input value={editProductForm.genericName} onChange={(e) => setEditProductForm({ ...editProductForm, genericName: e.target.value })} placeholder="Generic name" style={inputStyle} />
+                  <input value={editProductForm.dosage} onChange={(e) => setEditProductForm({ ...editProductForm, dosage: e.target.value })} placeholder="Dose per tab" style={inputStyle} />
+                  <input value={editProductForm.packSize} onChange={(e) => setEditProductForm({ ...editProductForm, packSize: e.target.value })} placeholder="Pack size" style={inputStyle} />
+                  <input value={editProductForm.price} onChange={(e) => setEditProductForm({ ...editProductForm, price: e.target.value })} placeholder="Price" style={inputStyle} />
+                  <input value={editProductForm.discountRate} onChange={(e) => setEditProductForm({ ...editProductForm, discountRate: e.target.value })} placeholder="Discount %" style={inputStyle} />
+                </div>
+                <textarea value={editProductForm.notes} onChange={(e) => setEditProductForm({ ...editProductForm, notes: e.target.value })} rows={2} style={{ ...inputStyle, resize: "vertical", marginBottom: 10 }} />
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => saveEditProduct(p.id)} style={{ fontSize: 12, background: "#1F2A24", color: "#FAF7F2", border: "none", borderRadius: 6, padding: "7px 12px" }}>Save</button>
+                  <button onClick={() => setEditingProductId(null)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "7px 12px" }}>Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, flexWrap: "wrap" }}>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13.5 }}>
+                    {p.productName} <span style={{ fontWeight: 400, color: "#8A8272" }}>— {p.competitorName}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: "#8A8272", marginTop: 2 }}>
+                    {p.genericName && <span>{p.genericName}</span>}
+                    {p.dosage && <span> · {p.dosage}</span>}
+                    {p.packSize && <span> · {p.packSize}</span>}
+                  </div>
+                  <div style={{ fontSize: 12.5, marginTop: 4 }}>
+                    {p.price && <span style={{ fontWeight: 600 }}>{p.price}</span>}
+                    {p.discountRate && <span style={{ color: "#8A8272" }}> · {p.discountRate}% offered to pharmacies</span>}
+                  </div>
+                  {p.notes && <div style={{ fontSize: 12, color: "#8A8272", marginTop: 4 }}>{p.notes}</div>}
+                </div>
+                {canEdit && (
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button onClick={() => startEditProduct(p)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Edit</button>
+                    {confirmProductId === p.id ? (
+                      <>
+                        <button onClick={() => { onRemoveProduct(p.id); setConfirmProductId(null); }} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}>Yes</button>
+                        <button onClick={() => setConfirmProductId(null)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Cancel</button>
+                      </>
+                    ) : (
+                      <button onClick={() => setConfirmProductId(p.id)} style={{ fontSize: 12, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "6px 10px" }}>Delete</button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+        {filteredProducts.length === 0 && <EmptyState text={q ? "No matching products found." : "No competitor products added yet."} />}
       </div>
     </div>
   );

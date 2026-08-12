@@ -85,5 +85,8 @@ export const api = {
   addCompetitor: (competitor) => request("/competitors", { method: "POST", body: JSON.stringify(competitor) }),
   updateCompetitor: (id, patch) => request(`/competitors/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   removeCompetitor: (id) => request(`/competitors/${id}`, { method: "DELETE" }),
+  addCompetitorProduct: (product) => request("/competitor-products", { method: "POST", body: JSON.stringify(product) }),
+  updateCompetitorProduct: (id, patch) => request(`/competitor-products/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  removeCompetitorProduct: (id) => request(`/competitor-products/${id}`, { method: "DELETE" }),
   addVisitComment: (visitId, text) => request(`/visits/${visitId}/comments`, { method: "POST", body: JSON.stringify({ text }) }),
 };

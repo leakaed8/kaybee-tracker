@@ -22,6 +22,7 @@ const SCHEMAS = {
   Competitors: ["id", "name", "supplierName", "supplierContact", "offerDetails", "notes", "createdAt"],
   CompetitorSightings: ["id", "visitId", "client", "repName", "competitorName", "notes", "date"],
   VisitComments: ["id", "visitId", "authorName", "text", "createdAt"],
+  CompetitorProducts: ["id", "competitorName", "productName", "genericName", "dosage", "packSize", "price", "discountRate", "notes", "createdAt"],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];

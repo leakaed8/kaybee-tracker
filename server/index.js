@@ -410,7 +410,7 @@ app.post("/api/push/subscribe", async (req, res) => {
   }
 });
 
-const BOOTSTRAP_TABS = ["Products", "Visits", "Clients", "Doctors", "OutreachLog", "Orders", "Reps", "Offers", "Samples", "PunchLog", "StockMovement", "FollowUps", "Competitors", "CompetitorSightings", "VisitComments"];
+const BOOTSTRAP_TABS = ["Products", "Visits", "Clients", "Doctors", "OutreachLog", "Orders", "Reps", "Offers", "Samples", "PunchLog", "StockMovement", "FollowUps", "Competitors", "CompetitorSightings", "VisitComments", "CompetitorProducts"];
 
 // Google's Sheets API "read requests per minute PER USER" quota (60) is fixed
 // and not adjustable — and since this whole app authenticates as one shared
@@ -432,7 +432,7 @@ async function buildBootstrapPayload() {
     Products: products, Visits: visits, Clients: clients, Doctors: doctors, OutreachLog: outreachLog,
     Orders: orders, Reps: reps, Offers: offers, Samples: samples, PunchLog: punchLog, StockMovement: stockMovement,
     FollowUps: followUps, Competitors: competitors, CompetitorSightings: competitorSightings,
-    VisitComments: visitComments,
+    VisitComments: visitComments, CompetitorProducts: competitorProducts,
   } = batch;
   const movementIndex = buildMovementIndex(stockMovement);
   return {
@@ -451,6 +451,7 @@ async function buildBootstrapPayload() {
     competitors: competitors.sort((a, b) => a.name.localeCompare(b.name)),
     competitorSightings: competitorSightings.sort((a, b) => new Date(b.date) - new Date(a.date)),
     visitComments: visitComments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
+    competitorProducts: competitorProducts.sort((a, b) => a.genericName.localeCompare(b.genericName)),
   };
 }
 
@@ -1167,6 +1168,62 @@ app.patch("/api/competitors/:id", requireManager, async (req, res) => {
 app.delete("/api/competitors/:id", requireManager, async (req, res) => {
   try {
     await db.deleteRowById("Competitors", req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// A competitor's actual product catalog (brand, active ingredient/generic
+// name, dose, pack size, price, and whatever discount they offer on it) —
+// separate from the Competitors master list above so reps can search it by
+// generic name while out in the field ("magnesium" -> every competitor
+// brand that has one, with prices) instead of digging through free-text
+// offer notes. Same manager-curated / rep-read-and-search governance as
+// the master list.
+app.post("/api/competitor-products", requireManager, async (req, res) => {
+  try {
+    const { competitorName, productName, genericName, dosage, packSize, price, discountRate, notes } = req.body;
+    if (!competitorName || !productName) return res.status(400).json({ error: "competitorName and productName are required" });
+    const product = {
+      id: `cp${crypto.randomUUID()}`,
+      competitorName: String(competitorName).trim(),
+      productName: String(productName).trim(),
+      genericName: genericName || "",
+      dosage: dosage || "",
+      packSize: packSize || "",
+      price: price || "",
+      discountRate: discountRate || "",
+      notes: notes || "",
+      createdAt: new Date().toISOString(),
+    };
+    await db.appendRow("CompetitorProducts", product);
+    res.json(product);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/competitor-products/:id", requireManager, async (req, res) => {
+  try {
+    const patch = {};
+    for (const key of ["competitorName", "productName", "genericName", "dosage", "packSize", "price", "discountRate", "notes"]) {
+      if (req.body[key] !== undefined) patch[key] = req.body[key];
+    }
+    const ok = await db.updateRowById("CompetitorProducts", req.params.id, patch);
+    if (!ok) return res.status(404).json({ error: "Competitor product not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/competitor-products/:id", requireManager, async (req, res) => {
+  try {
+    await db.deleteRowById("CompetitorProducts", req.params.id);
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
