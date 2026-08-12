@@ -2516,7 +2516,7 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
   const [workbook, setWorkbook] = useState(null);
   const [headers, setHeaders] = useState([]);
   const [rows, setRows] = useState([]);
-  const [mapping, setMapping] = useState({ name: "", phone: "", area: "", address: "", registrationNumber: "", assignedRep: "" });
+  const [mapping, setMapping] = useState({ name: "", nameAr: "", phone: "", area: "", address: "", registrationNumber: "", assignedRep: "" });
   const [assignAllTo, setAssignAllTo] = useState("");
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
@@ -2533,7 +2533,7 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
     setRows(dataRows);
   };
 
-  const resetMapping = () => { setMapping({ name: "", phone: "", area: "", address: "", registrationNumber: "", assignedRep: "" }); setAssignAllTo(""); };
+  const resetMapping = () => { setMapping({ name: "", nameAr: "", phone: "", area: "", address: "", registrationNumber: "", assignedRep: "" }); setAssignAllTo(""); };
 
   const handleFile = (e) => {
     const file = e.target.files[0];
@@ -2566,6 +2566,7 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
   const { newClients, skippedCount } = useMemo(() => {
     if (!mapping.name) return { newClients: [], skippedCount: 0 };
     const nameIdx = headers.indexOf(mapping.name);
+    const nameArIdx = headers.indexOf(mapping.nameAr);
     const phoneIdx = headers.indexOf(mapping.phone);
     const areaIdx = headers.indexOf(mapping.area);
     const addressIdx = headers.indexOf(mapping.address);
@@ -2589,6 +2590,7 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
       const rowRep = repIdx >= 0 ? String(r[repIdx] ?? "").trim() : "";
       fresh.push({
         name,
+        nameAr: nameArIdx >= 0 ? String(r[nameArIdx] ?? "").trim() : "",
         phone: phoneIdx >= 0 ? String(r[phoneIdx] ?? "").trim() : "",
         area: areaIdx >= 0 ? String(r[areaIdx] ?? "").trim() : "",
         address: addressIdx >= 0 ? String(r[addressIdx] ?? "").trim() : "",
@@ -2674,6 +2676,7 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
             {fieldSelect("name", "Name column", true)}
+            {fieldSelect("nameAr", "Name in Arabic column", false)}
             {fieldSelect("phone", "Phone number column", false)}
             {fieldSelect("area", "Area column", false)}
             {fieldSelect("address", "Address column", false)}
@@ -2708,6 +2711,7 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
                     <thead>
                       <tr style={{ textAlign: "left", color: "#8A8272" }}>
                         <th style={{ padding: "4px 6px" }}>Name</th>
+                        <th style={{ padding: "4px 6px" }}>Name (Arabic)</th>
                         <th style={{ padding: "4px 6px" }}>Phone</th>
                         <th style={{ padding: "4px 6px" }}>Area</th>
                         <th style={{ padding: "4px 6px" }}>Assigned rep</th>
@@ -2717,6 +2721,7 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
                       {newClients.slice(0, 5).map((c, i) => (
                         <tr key={i} style={{ borderTop: "1px solid #E5DFD3" }}>
                           <td style={{ padding: "4px 6px" }}>{c.name}</td>
+                          <td style={{ padding: "4px 6px" }} dir="rtl">{c.nameAr || "—"}</td>
                           <td style={{ padding: "4px 6px" }}>{c.phone || "—"}</td>
                           <td style={{ padding: "4px 6px" }}>{c.area || "—"}</td>
                           <td style={{ padding: "4px 6px" }}>{c.assignedRep || "—"}</td>
@@ -2755,6 +2760,7 @@ const CLIENT_FILLABLE_FIELDS = [
   { key: "area", label: "Area" },
   { key: "address", label: "Address" },
   { key: "registrationNumber", label: "Registration number" },
+  { key: "nameAr", label: "Name in Arabic" },
 ];
 
 function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onCompleteInfo }) {
@@ -2762,6 +2768,7 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [name, setName] = useState("");
+  const [nameAr, setNameAr] = useState("");
   const [phone, setPhone] = useState("");
   const [tier, setTier] = useState("B");
   const [area, setArea] = useState("");
@@ -2795,8 +2802,8 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
 
   const addClient = () => {
     if (!name) return;
-    onAdd({ name, phone, tier, area, address, registrationNumber, assignedRep, discountRate, coordsLat: coords?.lat || "", coordsLng: coords?.lng || "" });
-    setName(""); setPhone(""); setArea(""); setAddress(""); setRegistrationNumber(""); setTier("B"); setAssignedRep(""); setDiscountRate(""); setCoords(null); setLocError("");
+    onAdd({ name, nameAr, phone, tier, area, address, registrationNumber, assignedRep, discountRate, coordsLat: coords?.lat || "", coordsLng: coords?.lng || "" });
+    setName(""); setNameAr(""); setPhone(""); setArea(""); setAddress(""); setRegistrationNumber(""); setTier("B"); setAssignedRep(""); setDiscountRate(""); setCoords(null); setLocError("");
     setShowAdd(false);
   };
 
@@ -2818,6 +2825,7 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
     ? clients
         .filter((c) =>
           c.name.toLowerCase().includes(q) ||
+          (c.nameAr || "").includes(search.trim()) ||
           (c.area || "").toLowerCase().includes(q) ||
           (c.phone || "").toLowerCase().includes(q) ||
           (c.registrationNumber || "").toLowerCase().includes(q)
@@ -2871,6 +2879,7 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
             <Field label="Pharmacy name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Pharmacie Al Nour" style={inputStyle} /></Field>
+            <Field label="Name in Arabic (optional)"><input value={nameAr} onChange={(e) => setNameAr(e.target.value)} placeholder="مثال: صيدلية النور" dir="rtl" style={inputStyle} /></Field>
             <Field label="WhatsApp number"><input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+961 xx xxx xxx" style={inputStyle} /></Field>
             <Field label="Tier">
               <select value={tier} onChange={(e) => setTier(e.target.value)} style={inputStyle}>
@@ -2938,8 +2947,9 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
           <div key={c.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <div>
-                <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
                   <span style={{ fontWeight: 600, fontSize: 13.5 }}>{c.name}</span>
+                  {c.nameAr && <span dir="rtl" style={{ fontSize: 13, color: "#5B5445" }}>{c.nameAr}</span>}
                   <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 7px", borderRadius: 5, background: `${tierColor[c.tier]}1A`, color: tierColor[c.tier] }}>Tier {c.tier}</span>
                   <span title="Priority score — tier, overdue-ness, and order history combined" style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 7px", borderRadius: 5, background: `${scoreColor(c.leadScore)}1A`, color: scoreColor(c.leadScore) }}>
                     Priority {c.leadScore}

@@ -1176,7 +1176,7 @@ app.delete("/api/competitors/:id", requireManager, async (req, res) => {
 
 app.post("/api/clients", async (req, res) => {
   try {
-    const { name, phone, tier, area, assignedRep, registrationNumber, address, coordsLat, coordsLng, discountRate } = req.body;
+    const { name, phone, tier, area, assignedRep, registrationNumber, address, coordsLat, coordsLng, discountRate, nameAr } = req.body;
     if (!name) return res.status(400).json({ error: "name is required" });
     const resolvedAssignedRep = req.repName ? req.repName : (assignedRep || "");
 
@@ -1196,6 +1196,7 @@ app.post("/api/clients", async (req, res) => {
       coordsLat: coords ? coords.lat : "",
       coordsLng: coords ? coords.lng : "",
       discountRate: discountRate || "",
+      nameAr: nameAr || "",
     };
     await db.appendRow("Clients", client);
     res.json(client);
@@ -1210,6 +1211,7 @@ app.patch("/api/clients/:id", requireManager, async (req, res) => {
     const patch = {};
     if (req.body.assignedRep !== undefined) patch.assignedRep = req.body.assignedRep;
     if (req.body.discountRate !== undefined) patch.discountRate = req.body.discountRate;
+    if (req.body.nameAr !== undefined) patch.nameAr = req.body.nameAr;
     const ok = await db.updateRowById("Clients", req.params.id, patch);
     if (!ok) return res.status(404).json({ error: "Client not found" });
     res.json({ ok: true });
@@ -1224,7 +1226,7 @@ app.patch("/api/clients/:id", requireManager, async (req, res) => {
 // address, registration number) is fine; overwriting something a manager
 // already entered is not — that still goes through the manager-only PATCH
 // above.
-const CLIENT_FILLABLE_FIELDS = ["phone", "address", "registrationNumber", "area"];
+const CLIENT_FILLABLE_FIELDS = ["phone", "address", "registrationNumber", "area", "nameAr"];
 app.patch("/api/clients/:id/complete-info", async (req, res) => {
   try {
     if (!req.repName) return res.status(403).json({ error: "Reps only." });
@@ -1446,6 +1448,7 @@ app.post("/api/clients/import-bulk", requireManager, async (req, res) => {
         assignedRep: c.assignedRep || "",
         registrationNumber: c.registrationNumber || "",
         address: c.address || "",
+        nameAr: c.nameAr || "",
       }));
 
     if (newClients.length > 0) await db.appendRows("Clients", newClients);
