@@ -4,153 +4,135 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function byCreatedAt(a, b) {
+  return a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0;
+}
+
 // Every function below takes "today" (a YYYY-MM-DD string, already resolved
 // against Asia/Beirut by the caller) as an explicit argument rather than
-// reading the clock itself. That keeps all the carry-over logic pure and
-// deterministic, so it can be unit tested without mocking time.
+// reading the clock itself, and a "store" (see sheetsStore.js / the test
+// double in test/memoryStore.js) rather than talking to any specific
+// database directly. That keeps the carry-over logic pure, deterministic,
+// and testable without real Google credentials.
 
-async function addTask(db, today, { title, dueDate, chatId }) {
+async function addTask(store, today, { title, dueDate, chatId }) {
   const due = dueDate || today;
   const now = nowIso();
-  const result = await db.execute({
-    sql: `INSERT INTO tasks
-            (title, status, priority, created_at, updated_at, due_date, original_due_date, carryover_count, telegram_chat_id)
-          VALUES (?, 'pending', 'normal', ?, ?, ?, ?, 0, ?)`,
-    args: [title, now, now, due, due, chatId],
+  return store.insertTask({
+    title,
+    status: "pending",
+    priority: "normal",
+    created_at: now,
+    updated_at: now,
+    due_date: due,
+    original_due_date: due,
+    completed_at: null,
+    carryover_count: 0,
+    telegram_message_id: null,
+    telegram_chat_id: chatId == null ? null : String(chatId),
   });
-  return getTaskById(db, Number(result.lastInsertRowid));
 }
 
 // Rolls forward any pending task whose due_date has slipped into the past
 // relative to "today". Safe to call as often as we like (idempotent once a
-// task's due_date reaches today, the WHERE clause simply stops matching it).
-async function runCarryover(db, today) {
+// task's due_date reaches today, the filter simply stops matching it).
+async function runCarryover(store, today) {
+  const all = await store.listTasks();
+  const toRoll = all.filter((t) => t.status === "pending" && t.due_date < today);
+  if (!toRoll.length) return 0;
   const now = nowIso();
-  const result = await db.execute({
-    sql: `UPDATE tasks
-          SET due_date = ?, carryover_count = carryover_count + 1, updated_at = ?
-          WHERE status = 'pending' AND due_date < ?`,
-    args: [today, now, today],
-  });
-  return result.rowsAffected || 0;
+  await store.batchUpdateTasks(
+    toRoll.map((t) => ({
+      id: t.id,
+      patch: { due_date: today, carryover_count: t.carryover_count + 1, updated_at: now },
+    }))
+  );
+  return toRoll.length;
 }
 
-async function getTodayGrouped(db, today) {
-  await runCarryover(db, today);
+async function getTodayGrouped(store, today) {
+  await runCarryover(store, today);
+  const all = await store.listTasks();
 
-  const pending = await db.execute({
-    sql: `SELECT * FROM tasks WHERE status = 'pending' AND due_date = ? ORDER BY id ASC`,
-    args: [today],
-  });
-  const completedToday = await db.execute({
-    sql: `SELECT * FROM tasks WHERE status = 'completed' AND due_date = ? ORDER BY id ASC`,
-    args: [today],
-  });
+  const pending = all
+    .filter((t) => t.status === "pending" && t.due_date === today)
+    .sort(byCreatedAt);
+  const completedToday = all.filter((t) => t.status === "completed" && t.due_date === today);
 
-  const rows = pending.rows.map(rowToTask);
-  const carriedOver = rows.filter((t) => t.original_due_date !== t.due_date);
-  const newToday = rows.filter((t) => t.original_due_date === t.due_date);
+  const carriedOver = pending.filter((t) => t.original_due_date !== t.due_date);
+  const newToday = pending.filter((t) => t.original_due_date === t.due_date);
 
   return {
     today,
     carriedOver,
     newToday,
-    completedCount: completedToday.rows.length,
-    pendingCount: rows.length,
+    completedCount: completedToday.length,
+    pendingCount: pending.length,
   };
 }
 
-async function getTaskById(db, id) {
-  const result = await db.execute({ sql: `SELECT * FROM tasks WHERE id = ?`, args: [id] });
-  return result.rows[0] ? rowToTask(result.rows[0]) : null;
+async function findTaskById(store, id) {
+  const all = await store.listTasks();
+  return all.find((t) => t.id === id) || null;
 }
 
-async function completeTask(db, id) {
+async function completeTask(store, id) {
+  const existing = await findTaskById(store, id);
+  if (!existing || existing.status !== "pending") return existing;
   const now = nowIso();
-  await db.execute({
-    sql: `UPDATE tasks SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ? AND status = 'pending'`,
-    args: [now, now, id],
-  });
-  return getTaskById(db, id);
+  return store.updateTask(id, { status: "completed", completed_at: now, updated_at: now });
 }
 
-async function rescheduleTomorrow(db, today, id) {
+async function rescheduleTomorrow(store, today, id) {
+  const existing = await findTaskById(store, id);
+  if (!existing || existing.status !== "pending") return existing;
   const tomorrow = addDays(today, 1);
   const now = nowIso();
-  await db.execute({
-    sql: `UPDATE tasks SET due_date = ?, updated_at = ? WHERE id = ? AND status = 'pending'`,
-    args: [tomorrow, now, id],
-  });
-  return getTaskById(db, id);
+  return store.updateTask(id, { due_date: tomorrow, updated_at: now });
 }
 
-async function deleteTask(db, id) {
+async function deleteTask(store, id) {
   const now = nowIso();
-  await db.execute({
-    sql: `UPDATE tasks SET status = 'deleted', updated_at = ? WHERE id = ?`,
-    args: [now, id],
-  });
+  await store.updateTask(id, { status: "deleted", updated_at: now });
 }
 
-async function getTasksOnMessage(db, chatId, messageId) {
-  const result = await db.execute({
-    sql: `SELECT * FROM tasks
-          WHERE telegram_chat_id = ? AND telegram_message_id = ? AND status != 'deleted'
-          ORDER BY id ASC`,
-    args: [chatId, messageId],
-  });
-  return result.rows.map(rowToTask);
+async function getTasksOnMessage(store, chatId, messageId) {
+  const all = await store.listTasks();
+  return all
+    .filter(
+      (t) =>
+        t.status !== "deleted" &&
+        String(t.telegram_chat_id) === String(chatId) &&
+        String(t.telegram_message_id) === String(messageId)
+    )
+    .sort(byCreatedAt);
 }
 
-async function setTaskMessageRef(db, taskIds, chatId, messageId) {
+async function setTaskMessageRef(store, taskIds, chatId, messageId) {
   if (!taskIds.length) return;
   const now = nowIso();
-  await db.batch(
+  await store.batchUpdateTasks(
     taskIds.map((id) => ({
-      sql: `UPDATE tasks SET telegram_message_id = ?, telegram_chat_id = ?, updated_at = ? WHERE id = ?`,
-      args: [messageId, chatId, now, id],
+      id,
+      patch: { telegram_message_id: String(messageId), telegram_chat_id: String(chatId), updated_at: now },
     }))
   );
 }
 
-async function wasDigestSentToday(db, today) {
-  const result = await db.execute({
-    sql: `SELECT value FROM bot_state WHERE key = 'last_digest_sent_date'`,
-    args: [],
-  });
-  return Boolean(result.rows[0] && result.rows[0].value === today);
+async function wasDigestSentToday(store, today) {
+  const value = await store.getState("last_digest_sent_date");
+  return value === today;
 }
 
-async function markDigestSentToday(db, today) {
-  await db.execute({
-    sql: `INSERT INTO bot_state (key, value) VALUES ('last_digest_sent_date', ?)
-          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-    args: [today],
-  });
-}
-
-function rowToTask(row) {
-  return {
-    id: Number(row.id),
-    title: row.title,
-    status: row.status,
-    priority: row.priority,
-    created_at: row.created_at,
-    updated_at: row.updated_at,
-    due_date: row.due_date,
-    original_due_date: row.original_due_date,
-    completed_at: row.completed_at,
-    carryover_count: Number(row.carryover_count),
-    telegram_message_id: row.telegram_message_id == null ? null : Number(row.telegram_message_id),
-    telegram_chat_id: row.telegram_chat_id == null ? null : Number(row.telegram_chat_id),
-  };
+async function markDigestSentToday(store, today) {
+  await store.setState("last_digest_sent_date", today);
 }
 
 module.exports = {
   addTask,
   runCarryover,
   getTodayGrouped,
-  getTaskById,
+  findTaskById,
   completeTask,
   rescheduleTomorrow,
   deleteTask,

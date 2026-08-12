@@ -9,34 +9,43 @@ next day — same task record, not a duplicate.
 Only one Telegram account (yours) can ever use this bot. Everyone else gets
 a generic "not authorized" reply.
 
+Runs entirely on platforms already used elsewhere in this repo — **Render**
+for hosting and **Google** (Sheets + Apps Script) for storage and
+scheduling. No Turso, no third-party cron service, no extra signups.
+
 **Not a programmer?** Skip straight to [SETUP.md](./SETUP.md) — it's a
 step-by-step, copy-paste checklist with nothing that requires reading code.
 
 ## How it works
 
 ```
-Telegram  <-->  Render (free web service, Express)  <-->  Turso (SQLite, persistent)
+Telegram  <-->  Render (free web service, Express)  <-->  Google Sheets (source of truth)
                         ^
                         |
-              cron-job.org pings /cron/daily
-              at 09:30 Asia/Beirut every day
+              Google Apps Script time-driven trigger
+              pings /cron/daily at 09:30 Asia/Beirut
 ```
 
 - **Telegram → server**: Telegram delivers messages/button-taps to this
   server via a *webhook* (not polling), at a secret, unguessable URL.
-- **Server → Turso**: all task data lives in a Turso database (hosted
-  SQLite). This is the source of truth — nothing is stored only in memory
-  or only in Telegram.
+- **Server → Google Sheets**: all task data lives in a Google Sheet, read
+  and written via the same service-account pattern kaybee-tracker already
+  uses (`server/sheetsDb.js`). This is the source of truth — nothing is
+  stored only in memory or only in Telegram. Two tabs are created
+  automatically the first time the bot runs: `Tasks` and `State` (a tiny
+  key/value tab used only to remember "did today's digest already go out").
 - **The 9:30 AM message**: Render's free tier isn't guaranteed to be awake
-  at any given moment, so a free external scheduler (cron-job.org) pings a
-  protected endpoint on the server at 09:30 `Asia/Beirut` every day, which
-  triggers the send. The endpoint is idempotent (checks whether today's
-  digest already went out) so a duplicate ping never double-sends.
+  at any given moment, so a Google Apps Script time-driven trigger (bound to
+  the same Google account, free, and timezone-aware) pings a protected
+  endpoint on the server at 09:30 `Asia/Beirut` every day, which triggers
+  the send. The endpoint is idempotent (checks whether today's digest
+  already went out) so a duplicate ping never double-sends. See
+  `apps-script/dailyTrigger.gs`.
 - **Carry-over**: computed on read, not by a separate midnight job. Any time
   "today's tasks" are computed (the 9:30 send, or `/today`), pending tasks
   whose `due_date` is in the past get rolled forward to today and their
   `carryover_count` incremented. This makes it self-healing — if a day's
-  cron ping is ever missed, the next read catches everything up correctly.
+  trigger is ever missed, the next read catches everything up correctly.
 
 ## Project layout
 
@@ -45,8 +54,7 @@ daily-tasks-bot/
   src/
     server.js         Express app: webhook + cron endpoints
     config.js          Reads/validates environment variables
-    db.js               Turso client + schema bootstrap
-    schema.sql           Table definitions
+    sheetsStore.js     Google Sheets-backed task store (the database)
     dateUtils.js       Beirut-timezone date helpers + tiny NL date parser
     taskService.js     All task business logic (carry-over, add, complete, ...)
     messageBuilder.js  Renders the Telegram message text + inline keyboard
@@ -54,17 +62,28 @@ daily-tasks-bot/
     auth.js            Single-user whitelist check
     botHandlers.js     Dispatches incoming commands / button taps
     logger.js           console logger that redacts secret-looking fields
+  apps-script/
+    dailyTrigger.gs    Paste into Extensions > Apps Script on your Sheet
   scripts/
     setWebhook.js      Run once locally after deploying, to register the webhook
     deleteWebhook.js   Run locally to stop the bot receiving updates
-  test/                node --test unit tests (carry-over, auth, dates)
+  test/
+    memoryStore.js     In-memory stand-in for sheetsStore.js, used by tests
+    *.test.js           node --test unit tests (carry-over, auth, dates)
 ```
 
-## Data model (`tasks` table)
+`taskService.js` never talks to Google APIs directly — it only calls a
+small store interface (`listTasks` / `insertTask` / `updateTask` /
+`batchUpdateTasks` / `getState` / `setState`). `sheetsStore.js` implements
+that interface for real; `test/memoryStore.js` implements the same
+interface in plain memory, which is what the unit tests use instead of
+hitting the real Sheets API — no Google credentials needed to run `npm test`.
+
+## Data model (`Tasks` tab)
 
 | column | meaning |
 |---|---|
-| `id` | primary key |
+| `id` | primary key (`t` + a random UUID) |
 | `title` | task text |
 | `status` | `pending` \| `completed` \| `deleted` |
 | `priority` | reserved for future use, defaults to `normal` |
@@ -81,7 +100,7 @@ daily-tasks-bot/
 cd daily-tasks-bot
 npm install
 cp .env.example .env   # then fill in real values, see SETUP.md
-npm test                # run the unit tests (no network / real Telegram needed)
+npm test                # run the unit tests (no network / real Google needed)
 npm start                # starts the server on http://localhost:3000
 ```
 
@@ -111,15 +130,16 @@ completing), `🗑` (asks for confirmation, then soft-deletes).
   incoming request is also checked against the `X-Telegram-Bot-Api-Secret-Token`
   header Telegram sends — set via `WEBHOOK_SECRET`.
 - The daily cron endpoint requires a separate secret (`CRON_SECRET`) as a
-  query parameter.
-- The bot token, webhook secret, cron secret, and DB credentials are only
-  ever read from environment variables — never hardcoded, never logged
+  query parameter, kept out of the Apps Script source itself (read from a
+  Script Property instead — see `apps-script/dailyTrigger.gs`).
+- The bot token, webhook secret, cron secret, and Google credentials are
+  only ever read from environment variables — never hardcoded, never logged
   (`logger.js` redacts any field whose key looks like `token`/`secret`/`key`/`password`).
 
 ## Future features (not built yet, but the code is structured for them)
 
 Recurring tasks, priorities/categories, weekly summaries, overdue warnings,
 `/list` / `/delete` / `/edit`, search, voice-to-task, and hooking into other
-business systems. `taskService.js` and `schema.sql` are the places to extend
-first — e.g. `priority` already exists as a column, just unused by any
-command yet.
+business systems. `taskService.js` and `sheetsStore.js` are the places to
+extend first — e.g. `priority` already exists as a column, just unused by
+any command yet.

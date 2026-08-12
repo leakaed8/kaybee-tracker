@@ -13,13 +13,13 @@ function parseCommand(text) {
 }
 
 async function sendTodayMessage(ctx, chatId) {
-  const { db, telegram, config } = ctx;
+  const { store, telegram, config } = ctx;
   const today = todayInTz(config.timezone);
-  const grouped = await taskService.getTodayGrouped(db, today);
+  const grouped = await taskService.getTodayGrouped(store, today);
   const { text, keyboard } = buildTodayMessage(grouped, config.timezone);
   const sent = await telegram.sendMessage(chatId, text, keyboard);
   const allTaskIds = [...grouped.carriedOver, ...grouped.newToday].map((t) => t.id);
-  await taskService.setTaskMessageRef(db, allTaskIds, chatId, sent.message_id);
+  await taskService.setTaskMessageRef(store, allTaskIds, chatId, sent.message_id);
   return sent;
 }
 
@@ -88,7 +88,7 @@ async function handleMessage(ctx, message) {
         return;
       }
       const today = todayInTz(config.timezone);
-      const task = await taskService.addTask(ctx.db, today, { title, dueDate, chatId });
+      const task = await taskService.addTask(ctx.store, today, { title, dueDate, chatId });
       await telegram.sendMessage(
         chatId,
         `Added: <b>${escapeForReply(task.title)}</b>\nDue: ${task.due_date}`
@@ -108,7 +108,7 @@ function escapeForReply(text) {
 }
 
 async function handleCallbackQuery(ctx, callbackQuery) {
-  const { db, telegram, config, logger } = ctx;
+  const { store, telegram, config, logger } = ctx;
   const userId = callbackQuery.from && callbackQuery.from.id;
   const message = callbackQuery.message;
   if (!message) return;
@@ -121,8 +121,7 @@ async function handleCallbackQuery(ctx, callbackQuery) {
     return;
   }
 
-  const [action, idStr] = (callbackQuery.data || "").split(":");
-  const taskId = Number(idStr);
+  const [action, taskId] = (callbackQuery.data || "").split(":");
   if (!taskId) {
     await telegram.answerCallbackQuery(callbackQuery.id);
     return;
@@ -133,11 +132,11 @@ async function handleCallbackQuery(ctx, callbackQuery) {
 
   switch (action) {
     case "done":
-      await taskService.completeTask(db, taskId);
+      await taskService.completeTask(store, taskId);
       feedback = "Done ✅";
       break;
     case "tomorrow":
-      await taskService.rescheduleTomorrow(db, todayInTz(config.timezone), taskId);
+      await taskService.rescheduleTomorrow(store, todayInTz(config.timezone), taskId);
       feedback = "Moved to tomorrow ↩️";
       break;
     case "delete":
@@ -145,7 +144,7 @@ async function handleCallbackQuery(ctx, callbackQuery) {
       feedback = "Confirm delete?";
       break;
     case "delete_confirm":
-      await taskService.deleteTask(db, taskId);
+      await taskService.deleteTask(store, taskId);
       feedback = "Deleted 🗑";
       break;
     case "delete_cancel":
@@ -156,7 +155,7 @@ async function handleCallbackQuery(ctx, callbackQuery) {
       return;
   }
 
-  const tasks = await taskService.getTasksOnMessage(db, chatId, messageId);
+  const tasks = await taskService.getTasksOnMessage(store, chatId, messageId);
   const { text, keyboard } = rebuildMessage(tasks, config.timezone, { pendingConfirmDeleteId });
   await telegram.editMessageText(chatId, messageId, text, keyboard);
   await telegram.answerCallbackQuery(callbackQuery.id, feedback);

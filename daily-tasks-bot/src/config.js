@@ -15,8 +15,12 @@ const config = {
   allowedTelegramUserId: process.env.ALLOWED_TELEGRAM_USER_ID || "",
   webhookSecret: required("WEBHOOK_SECRET"),
   cronSecret: required("CRON_SECRET"),
-  tursoDatabaseUrl: required("TURSO_DATABASE_URL"),
-  tursoAuthToken: required("TURSO_AUTH_TOKEN"),
+  // Same env var names as kaybee-tracker's server/.env.example, so if this is
+  // deployed with the same Google Cloud service account, you can reuse the
+  // exact same GOOGLE_SERVICE_ACCOUNT_EMAIL / GOOGLE_PRIVATE_KEY values.
+  googleServiceAccountEmail: required("GOOGLE_SERVICE_ACCOUNT_EMAIL"),
+  googlePrivateKey: required("GOOGLE_PRIVATE_KEY"),
+  sheetId: required("SHEET_ID"),
   port: Number(process.env.PORT) || 3000,
   timezone: process.env.TIMEZONE || "Asia/Beirut",
 };
