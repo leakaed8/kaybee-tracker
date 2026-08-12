@@ -2516,7 +2516,7 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
   const [workbook, setWorkbook] = useState(null);
   const [headers, setHeaders] = useState([]);
   const [rows, setRows] = useState([]);
-  const [mapping, setMapping] = useState({ name: "", phone: "", area: "", address: "", registrationNumber: "" });
+  const [mapping, setMapping] = useState({ name: "", phone: "", area: "", address: "", registrationNumber: "", assignedRep: "" });
   const [assignAllTo, setAssignAllTo] = useState("");
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
@@ -2533,7 +2533,7 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
     setRows(dataRows);
   };
 
-  const resetMapping = () => { setMapping({ name: "", phone: "", area: "", address: "", registrationNumber: "" }); setAssignAllTo(""); };
+  const resetMapping = () => { setMapping({ name: "", phone: "", area: "", address: "", registrationNumber: "", assignedRep: "" }); setAssignAllTo(""); };
 
   const handleFile = (e) => {
     const file = e.target.files[0];
@@ -2570,6 +2570,7 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
     const areaIdx = headers.indexOf(mapping.area);
     const addressIdx = headers.indexOf(mapping.address);
     const regIdx = headers.indexOf(mapping.registrationNumber);
+    const repIdx = headers.indexOf(mapping.assignedRep);
 
     const existingNames = new Set(existingClients.map((c) => c.name.toLowerCase().trim()));
     const seenInFile = new Set();
@@ -2582,13 +2583,17 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
       const key = name.toLowerCase().trim();
       if (existingNames.has(key) || seenInFile.has(key)) { skipped++; return; }
       seenInFile.add(key);
+      // A rep named per-row in the file (e.g. only some pharmacies already
+      // belong to someone) wins over the blanket "assign all to" choice —
+      // that dropdown is just the fallback for whatever's left blank.
+      const rowRep = repIdx >= 0 ? String(r[repIdx] ?? "").trim() : "";
       fresh.push({
         name,
         phone: phoneIdx >= 0 ? String(r[phoneIdx] ?? "").trim() : "",
         area: areaIdx >= 0 ? String(r[areaIdx] ?? "").trim() : "",
         address: addressIdx >= 0 ? String(r[addressIdx] ?? "").trim() : "",
         registrationNumber: regIdx >= 0 ? String(r[regIdx] ?? "").trim() : "",
-        assignedRep: assignAllTo || "",
+        assignedRep: rowRep || assignAllTo || "",
       });
     });
 
@@ -2673,14 +2678,22 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
             {fieldSelect("area", "Area column", false)}
             {fieldSelect("address", "Address column", false)}
             {fieldSelect("registrationNumber", "Registration number column", false)}
+            {fieldSelect("assignedRep", "Assigned rep column (if the file already has one)", false)}
             <div>
-              <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>Assign all to a rep (optional)</label>
+              <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>
+                Assign the rest to a rep (optional)
+              </label>
               <select value={assignAllTo} onChange={(e) => setAssignAllTo(e.target.value)} style={inputStyle}>
                 <option value="">— leave unassigned —</option>
                 {repNames.map((n) => <option key={n} value={n}>{n}</option>)}
               </select>
             </div>
           </div>
+          {mapping.assignedRep && (
+            <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 6 }}>
+              Rows with a rep named in that column use it; everything else falls back to your "assign the rest" choice above.
+            </div>
+          )}
 
           {mapping.name && (
             <div style={{ marginTop: 12 }}>
