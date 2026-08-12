@@ -1182,15 +1182,18 @@ app.delete("/api/competitors/:id", requireManager, async (req, res) => {
 // brand that has one, with prices) instead of digging through free-text
 // offer notes. Same manager-curated / rep-read-and-search governance as
 // the master list.
+const COMPETITOR_PRODUCT_FIELDS = ["competitorName", "productName", "genericName", "form", "dosage", "packSize", "price", "discountRate", "notes"];
+
 app.post("/api/competitor-products", requireManager, async (req, res) => {
   try {
-    const { competitorName, productName, genericName, dosage, packSize, price, discountRate, notes } = req.body;
+    const { competitorName, productName, genericName, form, dosage, packSize, price, discountRate, notes } = req.body;
     if (!competitorName || !productName) return res.status(400).json({ error: "competitorName and productName are required" });
     const product = {
       id: `cp${crypto.randomUUID()}`,
       competitorName: String(competitorName).trim(),
       productName: String(productName).trim(),
       genericName: genericName || "",
+      form: form || "",
       dosage: dosage || "",
       packSize: packSize || "",
       price: price || "",
@@ -1206,10 +1209,36 @@ app.post("/api/competitor-products", requireManager, async (req, res) => {
   }
 });
 
+// Bulk upload: a manager builds this out from an Excel sheet on the client
+// (item name, number of pills, type of pills, dose per pill, public price,
+// supplier offer...); the client maps columns and sends parsed rows here.
+app.post("/api/competitor-products/import-bulk", requireManager, async (req, res) => {
+  try {
+    const { products } = req.body;
+    const addList = Array.isArray(products) ? products : [];
+
+    const newProducts = addList
+      .filter((p) => p.competitorName && p.productName)
+      .map((p) => {
+        const product = { id: `cp${crypto.randomUUID()}`, createdAt: new Date().toISOString() };
+        for (const key of COMPETITOR_PRODUCT_FIELDS) product[key] = p[key] || "";
+        product.competitorName = String(product.competitorName).trim();
+        product.productName = String(product.productName).trim();
+        return product;
+      });
+
+    if (newProducts.length > 0) await db.appendRows("CompetitorProducts", newProducts);
+    res.json({ ok: true, added: newProducts.length, skipped: addList.length - newProducts.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.patch("/api/competitor-products/:id", requireManager, async (req, res) => {
   try {
     const patch = {};
-    for (const key of ["competitorName", "productName", "genericName", "dosage", "packSize", "price", "discountRate", "notes"]) {
+    for (const key of COMPETITOR_PRODUCT_FIELDS) {
       if (req.body[key] !== undefined) patch[key] = req.body[key];
     }
     const ok = await db.updateRowById("CompetitorProducts", req.params.id, patch);

@@ -265,6 +265,7 @@ export default function App() {
   const addCompetitorProduct = (product) => withSync(() => api.addCompetitorProduct(product));
   const updateCompetitorProduct = (id, patch) => withSync(() => api.updateCompetitorProduct(id, patch));
   const removeCompetitorProduct = (id) => withSync(() => api.removeCompetitorProduct(id));
+  const importCompetitorProductsBulk = (products) => withSync(() => api.importCompetitorProductsBulk(products));
   const addVisitComment = (visitId, text) => withSync(() => api.addVisitComment(visitId, text));
 
   const zoned = products.map((p) => ({ ...p, zone: zoneFor(p), slowMover: isSlowMover(p, settings.slowThreshold), atRisk: isAtRisk(p) }));
@@ -447,6 +448,7 @@ export default function App() {
                 onAddProduct={addCompetitorProduct}
                 onUpdateProduct={updateCompetitorProduct}
                 onRemoveProduct={removeCompetitorProduct}
+                onImportProducts={importCompetitorProductsBulk}
               />
             )}
             {tab === "locations" && (role === "manager" || isSupervisor) && (
@@ -2220,7 +2222,7 @@ function OrdersView({ orders, onDelete, onApproveDelete, onDenyDelete }) {
 // clean by only managers editing it — reps just pick from it), and a feed of
 // what reps actually saw in the field, logged from Check-In. Neither table
 // changes the other; this is where a manager reads what's been collected.
-function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onRemove, products, onAddProduct, onUpdateProduct, onRemoveProduct }) {
+function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onRemove, products, onAddProduct, onUpdateProduct, onRemoveProduct, onImportProducts }) {
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ name: "", supplierName: "", supplierContact: "", offerDetails: "", notes: "" });
   const [saving, setSaving] = useState(false);
@@ -2229,9 +2231,10 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
   const [editForm, setEditForm] = useState({});
   const [confirmId, setConfirmId] = useState(null);
 
-  const emptyProductForm = { competitorName: "", productName: "", genericName: "", dosage: "", packSize: "", price: "", discountRate: "", notes: "" };
+  const emptyProductForm = { competitorName: "", productName: "", genericName: "", form: "", dosage: "", packSize: "", price: "", discountRate: "", notes: "" };
   const [productSearch, setProductSearch] = useState("");
   const [showAddProduct, setShowAddProduct] = useState(false);
+  const [showImportProducts, setShowImportProducts] = useState(false);
   const [productForm, setProductForm] = useState(emptyProductForm);
   const [productSaving, setProductSaving] = useState(false);
   const [productError, setProductError] = useState("");
@@ -2290,7 +2293,7 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
 
   const startEditProduct = (p) => {
     setEditingProductId(p.id);
-    setEditProductForm({ competitorName: p.competitorName, productName: p.productName, genericName: p.genericName, dosage: p.dosage, packSize: p.packSize, price: p.price, discountRate: p.discountRate, notes: p.notes });
+    setEditProductForm({ competitorName: p.competitorName, productName: p.productName, genericName: p.genericName, form: p.form, dosage: p.dosage, packSize: p.packSize, price: p.price, discountRate: p.discountRate, notes: p.notes });
   };
   const saveEditProduct = async (id) => {
     await onUpdateProduct(id, editProductForm);
@@ -2392,15 +2395,23 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
         {sightings.length === 0 && <EmptyState text="No competitor sightings logged yet." />}
       </div>
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "28px 0 10px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "28px 0 10px", flexWrap: "wrap", gap: 8 }}>
         <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0, color: "#8A8272" }}>Competitor price list</h3>
         {canEdit && (
-          <button
-            onClick={() => setShowAddProduct((v) => !v)}
-            style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
-          >
-            <Plus size={14} /> Add product
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              onClick={() => { setShowImportProducts((v) => !v); setShowAddProduct(false); }}
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 12.5, fontWeight: 500 }}
+            >
+              <Upload size={14} /> Import Excel
+            </button>
+            <button
+              onClick={() => { setShowAddProduct((v) => !v); setShowImportProducts(false); }}
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
+            >
+              <Plus size={14} /> Add product
+            </button>
+          </div>
         )}
       </div>
       <p style={{ fontSize: 12.5, color: "#8A8272", marginTop: -4, marginBottom: 12 }}>
@@ -2413,16 +2424,25 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
         style={{ ...inputStyle, marginBottom: 14 }}
       />
 
+      {canEdit && showImportProducts && (
+        <CompetitorProductExcelImportSection
+          competitors={competitors}
+          onImport={onImportProducts}
+          onDone={() => setShowImportProducts(false)}
+        />
+      )}
+
       {canEdit && showAddProduct && (
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
             <input value={productForm.competitorName} onChange={(e) => setProductForm({ ...productForm, competitorName: e.target.value })} placeholder="Competitor name" style={inputStyle} list="competitor-name-options" />
             <input value={productForm.productName} onChange={(e) => setProductForm({ ...productForm, productName: e.target.value })} placeholder="Brand / product name" style={inputStyle} />
             <input value={productForm.genericName} onChange={(e) => setProductForm({ ...productForm, genericName: e.target.value })} placeholder="Generic name (e.g. Magnesium)" style={inputStyle} />
-            <input value={productForm.dosage} onChange={(e) => setProductForm({ ...productForm, dosage: e.target.value })} placeholder="Dose per tab (e.g. 500mg)" style={inputStyle} />
-            <input value={productForm.packSize} onChange={(e) => setProductForm({ ...productForm, packSize: e.target.value })} placeholder="Pack size (e.g. 20 tabs)" style={inputStyle} />
-            <input value={productForm.price} onChange={(e) => setProductForm({ ...productForm, price: e.target.value })} placeholder="Price" style={inputStyle} />
-            <input value={productForm.discountRate} onChange={(e) => setProductForm({ ...productForm, discountRate: e.target.value })} placeholder="Discount offered to pharmacies (%)" style={inputStyle} />
+            <input value={productForm.form} onChange={(e) => setProductForm({ ...productForm, form: e.target.value })} placeholder="Type (tablet, capsule, syrup…)" style={inputStyle} list="pill-form-options" />
+            <input value={productForm.dosage} onChange={(e) => setProductForm({ ...productForm, dosage: e.target.value })} placeholder="Dose per pill (e.g. 500mg)" style={inputStyle} />
+            <input value={productForm.packSize} onChange={(e) => setProductForm({ ...productForm, packSize: e.target.value })} placeholder="Number of pills (e.g. 20)" style={inputStyle} />
+            <input value={productForm.price} onChange={(e) => setProductForm({ ...productForm, price: e.target.value })} placeholder="Public price" style={inputStyle} />
+            <input value={productForm.discountRate} onChange={(e) => setProductForm({ ...productForm, discountRate: e.target.value })} placeholder="Supplier offer to pharmacies (%)" style={inputStyle} />
           </div>
           <textarea value={productForm.notes} onChange={(e) => setProductForm({ ...productForm, notes: e.target.value })} placeholder="Other notes" rows={2} style={{ ...inputStyle, resize: "vertical", marginBottom: 10 }} />
           {productError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{productError}</div>}
@@ -2435,6 +2455,9 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
       <datalist id="competitor-name-options">
         {competitors.map((c) => <option key={c.id} value={c.name} />)}
       </datalist>
+      <datalist id="pill-form-options">
+        {["Tablet", "Capsule", "Syrup", "Injection", "Cream / Ointment", "Drops", "Sachet"].map((f) => <option key={f} value={f} />)}
+      </datalist>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {filteredProducts.map((p) => (
@@ -2445,10 +2468,11 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
                   <input value={editProductForm.competitorName} onChange={(e) => setEditProductForm({ ...editProductForm, competitorName: e.target.value })} placeholder="Competitor name" style={inputStyle} />
                   <input value={editProductForm.productName} onChange={(e) => setEditProductForm({ ...editProductForm, productName: e.target.value })} placeholder="Brand / product name" style={inputStyle} />
                   <input value={editProductForm.genericName} onChange={(e) => setEditProductForm({ ...editProductForm, genericName: e.target.value })} placeholder="Generic name" style={inputStyle} />
-                  <input value={editProductForm.dosage} onChange={(e) => setEditProductForm({ ...editProductForm, dosage: e.target.value })} placeholder="Dose per tab" style={inputStyle} />
-                  <input value={editProductForm.packSize} onChange={(e) => setEditProductForm({ ...editProductForm, packSize: e.target.value })} placeholder="Pack size" style={inputStyle} />
-                  <input value={editProductForm.price} onChange={(e) => setEditProductForm({ ...editProductForm, price: e.target.value })} placeholder="Price" style={inputStyle} />
-                  <input value={editProductForm.discountRate} onChange={(e) => setEditProductForm({ ...editProductForm, discountRate: e.target.value })} placeholder="Discount %" style={inputStyle} />
+                  <input value={editProductForm.form} onChange={(e) => setEditProductForm({ ...editProductForm, form: e.target.value })} placeholder="Type (tablet, capsule, syrup…)" style={inputStyle} list="pill-form-options" />
+                  <input value={editProductForm.dosage} onChange={(e) => setEditProductForm({ ...editProductForm, dosage: e.target.value })} placeholder="Dose per pill" style={inputStyle} />
+                  <input value={editProductForm.packSize} onChange={(e) => setEditProductForm({ ...editProductForm, packSize: e.target.value })} placeholder="Number of pills" style={inputStyle} />
+                  <input value={editProductForm.price} onChange={(e) => setEditProductForm({ ...editProductForm, price: e.target.value })} placeholder="Public price" style={inputStyle} />
+                  <input value={editProductForm.discountRate} onChange={(e) => setEditProductForm({ ...editProductForm, discountRate: e.target.value })} placeholder="Supplier offer (%)" style={inputStyle} />
                 </div>
                 <textarea value={editProductForm.notes} onChange={(e) => setEditProductForm({ ...editProductForm, notes: e.target.value })} rows={2} style={{ ...inputStyle, resize: "vertical", marginBottom: 10 }} />
                 <div style={{ display: "flex", gap: 8 }}>
@@ -2464,12 +2488,13 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
                   </div>
                   <div style={{ fontSize: 12, color: "#8A8272", marginTop: 2 }}>
                     {p.genericName && <span>{p.genericName}</span>}
+                    {p.form && <span> · {p.form}</span>}
                     {p.dosage && <span> · {p.dosage}</span>}
-                    {p.packSize && <span> · {p.packSize}</span>}
+                    {p.packSize && <span> · {p.packSize} pills</span>}
                   </div>
                   <div style={{ fontSize: 12.5, marginTop: 4 }}>
-                    {p.price && <span style={{ fontWeight: 600 }}>{p.price}</span>}
-                    {p.discountRate && <span style={{ color: "#8A8272" }}> · {p.discountRate}% offered to pharmacies</span>}
+                    {p.price && <span style={{ fontWeight: 600 }}>Public price: {p.price}</span>}
+                    {p.discountRate && <span style={{ color: "#8A8272" }}> · {p.discountRate}% supplier offer</span>}
                   </div>
                   {p.notes && <div style={{ fontSize: 12, color: "#8A8272", marginTop: 4 }}>{p.notes}</div>}
                 </div>
@@ -2492,6 +2517,225 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
         ))}
         {filteredProducts.length === 0 && <EmptyState text={q ? "No matching products found." : "No competitor products added yet."} />}
       </div>
+    </div>
+  );
+}
+
+// ---------- Competitor product Excel import (manager) ----------
+// Same shape as the Pharmacies/Doctors Excel importers: map your sheet's
+// columns to what the app needs, preview, confirm. If the whole sheet is one
+// competitor's price list, "Assign all to a competitor" saves mapping a
+// column at all; if it's a mixed sheet, map a Competitor column per row instead.
+function CompetitorProductExcelImportSection({ competitors, onImport, onDone }) {
+  const [sheetNames, setSheetNames] = useState([]);
+  const [selectedSheet, setSelectedSheet] = useState("");
+  const [workbook, setWorkbook] = useState(null);
+  const [headers, setHeaders] = useState([]);
+  const [rows, setRows] = useState([]);
+  const emptyMapping = { competitorName: "", productName: "", genericName: "", form: "", dosage: "", packSize: "", price: "", discountRate: "", notes: "" };
+  const [mapping, setMapping] = useState(emptyMapping);
+  const [assignAllTo, setAssignAllTo] = useState("");
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const readSheet = (wb, sheetName) => {
+    const ws = wb.Sheets[sheetName];
+    const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+    const headerRow = (json[0] || []).map((h, i) => (h === "" ? `Column ${i + 1}` : String(h)));
+    const dataRows = json.slice(1).filter((r) => r.some((cell) => cell !== ""));
+    setHeaders(headerRow);
+    setRows(dataRows);
+  };
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setError("");
+    setResult(null);
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: "array", cellDates: true });
+        setWorkbook(wb);
+        setSheetNames(wb.SheetNames);
+        setSelectedSheet(wb.SheetNames[0]);
+        readSheet(wb, wb.SheetNames[0]);
+        setMapping(emptyMapping);
+      } catch (err) {
+        setError("Couldn't read that file. Make sure it's a valid Excel (.xlsx) file.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const changeSheet = (name) => {
+    setSelectedSheet(name);
+    readSheet(workbook, name);
+    setMapping(emptyMapping);
+  };
+
+  const parsed = useMemo(() => {
+    if (!mapping.productName || (!mapping.competitorName && !assignAllTo)) return { valid: [], skipped: 0 };
+    const idx = (field) => headers.indexOf(mapping[field]);
+    const competitorIdx = idx("competitorName");
+    const productIdx = idx("productName");
+    const genericIdx = idx("genericName");
+    const formIdx = idx("form");
+    const dosageIdx = idx("dosage");
+    const packSizeIdx = idx("packSize");
+    const priceIdx = idx("price");
+    const discountIdx = idx("discountRate");
+    const notesIdx = idx("notes");
+
+    let skipped = 0;
+    const valid = [];
+    rows.forEach((r) => {
+      const productName = String(r[productIdx] ?? "").trim();
+      const rowCompetitor = competitorIdx >= 0 ? String(r[competitorIdx] ?? "").trim() : "";
+      const competitorName = rowCompetitor || assignAllTo;
+      if (!productName || !competitorName) { skipped++; return; }
+      valid.push({
+        competitorName,
+        productName,
+        genericName: genericIdx >= 0 ? String(r[genericIdx] ?? "").trim() : "",
+        form: formIdx >= 0 ? String(r[formIdx] ?? "").trim() : "",
+        dosage: dosageIdx >= 0 ? String(r[dosageIdx] ?? "").trim() : "",
+        packSize: packSizeIdx >= 0 ? String(r[packSizeIdx] ?? "").trim() : "",
+        price: priceIdx >= 0 ? String(r[priceIdx] ?? "").trim() : "",
+        discountRate: discountIdx >= 0 ? String(r[discountIdx] ?? "").trim() : "",
+        notes: notesIdx >= 0 ? String(r[notesIdx] ?? "").trim() : "",
+      });
+    });
+    return { valid, skipped };
+  }, [mapping, rows, headers, assignAllTo]);
+
+  const canImport = mapping.productName && (mapping.competitorName || assignAllTo) && parsed.valid.length > 0;
+
+  const doImport = async () => {
+    setError("");
+    setImporting(true);
+    try {
+      await onImport(parsed.valid);
+      setResult({ count: parsed.valid.length });
+      setWorkbook(null);
+      setHeaders([]);
+      setRows([]);
+      setSheetNames([]);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    } catch (e) {
+      setError(e.message || "Import failed.");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const fieldSelect = (field, label, required) => (
+    <div>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>
+        {label}{required ? " *" : " (optional)"}
+      </label>
+      <select value={mapping[field]} onChange={(e) => setMapping((m) => ({ ...m, [field]: e.target.value }))} style={inputStyle}>
+        <option value="">{required ? "— select a column —" : "— none —"}</option>
+        {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+      </select>
+    </div>
+  );
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Upload a competitor price list (Excel file)</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Item name, number of pills, type of pills, dose per pill, public price, supplier offer — match your sheet's columns below, preview the result, then confirm.
+      </p>
+
+      <button
+        onClick={() => fileInputRef.current?.click()}
+        style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500, marginBottom: 10 }}
+      >
+        <Upload size={15} /> Choose Excel file
+      </button>
+      <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ display: "none" }} />
+
+      {error && <div style={{ fontSize: 12.5, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
+      {result && <div style={{ fontSize: 12.5, color: "#4C7A5E", display: "flex", alignItems: "center", gap: 5, marginBottom: 10 }}><Check size={14} /> Imported {result.count} products.</div>}
+
+      {headers.length > 0 && (
+        <div style={{ padding: 12, background: "#FAF7F2", borderRadius: 8 }}>
+          {sheetNames.length > 1 && (
+            <div style={{ marginBottom: 10 }}>
+              <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>Sheet</label>
+              <select value={selectedSheet} onChange={(e) => changeSheet(e.target.value)} style={inputStyle}>
+                {sheetNames.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+          )}
+
+          <div style={{ marginBottom: 10 }}>
+            <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>Assign all rows to a competitor (optional)</label>
+            <input
+              value={assignAllTo}
+              onChange={(e) => setAssignAllTo(e.target.value)}
+              placeholder="Use this if the whole sheet is one competitor's list"
+              style={inputStyle}
+              list="competitor-name-options"
+            />
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+            {fieldSelect("competitorName", "Competitor column (per-row, overrides above)", false)}
+            {fieldSelect("productName", "Item name", true)}
+            {fieldSelect("genericName", "Generic name", false)}
+            {fieldSelect("form", "Type of pills (tablet, capsule…)", false)}
+            {fieldSelect("dosage", "Dose per pill", false)}
+            {fieldSelect("packSize", "Number of pills", false)}
+            {fieldSelect("price", "Public price", false)}
+            {fieldSelect("discountRate", "Supplier offer (%)", false)}
+            {fieldSelect("notes", "Notes", false)}
+          </div>
+
+          <div style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 12 }}>
+            {parsed.valid.length} of {rows.length} rows ready to import{parsed.skipped > 0 ? ` (${parsed.skipped} skipped — missing item name or competitor)` : ""}.
+          </div>
+
+          {parsed.valid.length > 0 && (
+            <div style={{ maxHeight: 220, overflowY: "auto", border: "1px solid #E5DFD3", borderRadius: 8, marginBottom: 12 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: "#F0EAE0" }}>
+                    <th style={{ textAlign: "left", padding: "6px 8px" }}>Competitor</th>
+                    <th style={{ textAlign: "left", padding: "6px 8px" }}>Item</th>
+                    <th style={{ textAlign: "left", padding: "6px 8px" }}>Generic</th>
+                    <th style={{ textAlign: "left", padding: "6px 8px" }}>Price</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {parsed.valid.slice(0, 200).map((p, i) => (
+                    <tr key={i} style={{ borderTop: "1px solid #E5DFD3" }}>
+                      <td style={{ padding: "6px 8px" }}>{p.competitorName}</td>
+                      <td style={{ padding: "6px 8px" }}>{p.productName}</td>
+                      <td style={{ padding: "6px 8px" }}>{p.genericName}</td>
+                      <td style={{ padding: "6px 8px" }}>{p.price}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {parsed.valid.length > 200 && (
+                <div style={{ padding: "6px 8px", fontSize: 11.5, color: "#8A8272" }}>…and {parsed.valid.length - 200} more.</div>
+              )}
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button disabled={!canImport || importing} onClick={doImport} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: canImport ? "#1F2A24" : "#B8B2A3", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+              {importing ? "Importing…" : `Import ${parsed.valid.length} products`}
+            </button>
+            <button onClick={onDone} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>Close</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
