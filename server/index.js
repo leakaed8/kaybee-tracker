@@ -206,6 +206,7 @@ function avgMonthlyMovementFor(name, movementIndex) {
 }
 
 function parseOrder(o) {
+  const total = Number(o.total) || 0;
   return {
     id: o.id,
     clientName: o.clientName,
@@ -213,8 +214,12 @@ function parseOrder(o) {
     repName: o.repName || "",
     date: o.date,
     items: JSON.parse(o.items || "[]"),
-    total: Number(o.total) || 0,
+    total,
     status: o.status || "confirmed",
+    discountRate: o.discountRate !== "" && o.discountRate !== undefined ? Number(o.discountRate) : 0,
+    // Orders placed before this field existed have no netTotal stored —
+    // treat their collected amount as the list total rather than 0.
+    netTotal: o.netTotal !== "" && o.netTotal !== undefined ? Number(o.netTotal) : total,
   };
 }
 
@@ -967,7 +972,7 @@ app.patch("/api/punch/:id/confirm", async (req, res) => {
 
 app.post("/api/orders", async (req, res) => {
   try {
-    const { clientName, visitId, items } = req.body;
+    const { clientName, visitId, items, discountRate } = req.body;
     if (!clientName || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "clientName and at least one item are required" });
     }
@@ -981,6 +986,21 @@ app.post("/api/orders", async (req, res) => {
       expiry: it.expiry || "",
     }));
     const total = cleanItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
+
+    // The pharmacy's negotiated trade discount (22.5%, 35%, or a one-off
+    // exception) comes off the list-price total on top of any buy-X-get-Y
+    // offer already baked into the free items above — that's what actually
+    // gets collected, and it's what "sales" should mean in every report.
+    // The rep can override the pharmacy's standard rate for this one order
+    // (an exception) by sending a different discountRate explicitly.
+    let appliedDiscountRate = Number(discountRate) || 0;
+    if (discountRate === undefined || discountRate === null || discountRate === "") {
+      const clients = await db.getAllRows("Clients");
+      const matchedClient = clients.find((c) => c.name.toLowerCase().trim() === clientName.toLowerCase().trim());
+      appliedDiscountRate = matchedClient?.discountRate ? Number(matchedClient.discountRate) : 0;
+    }
+    const netTotal = total * (1 - appliedDiscountRate / 100);
+
     const order = {
       id: `ord${crypto.randomUUID()}`,
       clientName,
@@ -990,9 +1010,11 @@ app.post("/api/orders", async (req, res) => {
       items: JSON.stringify(cleanItems),
       total,
       status: "confirmed",
+      discountRate: appliedDiscountRate,
+      netTotal,
     };
     await db.appendRow("Orders", order);
-    notifyManagers({ title: "New order placed", body: `${clientName} — ${total.toFixed(2)}`, url: "/" });
+    notifyManagers({ title: "New order placed", body: `${clientName} — ${netTotal.toFixed(2)} collected (list ${total.toFixed(2)})`, url: "/" });
     res.json(parseOrder(order));
   } catch (e) {
     console.error(e);
@@ -1154,7 +1176,7 @@ app.delete("/api/competitors/:id", requireManager, async (req, res) => {
 
 app.post("/api/clients", async (req, res) => {
   try {
-    const { name, phone, tier, area, assignedRep, registrationNumber, address, coordsLat, coordsLng } = req.body;
+    const { name, phone, tier, area, assignedRep, registrationNumber, address, coordsLat, coordsLng, discountRate } = req.body;
     if (!name) return res.status(400).json({ error: "name is required" });
     const resolvedAssignedRep = req.repName ? req.repName : (assignedRep || "");
 
@@ -1173,6 +1195,7 @@ app.post("/api/clients", async (req, res) => {
       address: address || "",
       coordsLat: coords ? coords.lat : "",
       coordsLng: coords ? coords.lng : "",
+      discountRate: discountRate || "",
     };
     await db.appendRow("Clients", client);
     res.json(client);
@@ -1186,6 +1209,7 @@ app.patch("/api/clients/:id", requireManager, async (req, res) => {
   try {
     const patch = {};
     if (req.body.assignedRep !== undefined) patch.assignedRep = req.body.assignedRep;
+    if (req.body.discountRate !== undefined) patch.discountRate = req.body.discountRate;
     const ok = await db.updateRowById("Clients", req.params.id, patch);
     if (!ok) return res.status(404).json({ error: "Client not found" });
     res.json({ ok: true });
@@ -1419,6 +1443,7 @@ app.post("/api/clients/import-bulk", requireManager, async (req, res) => {
         phone: c.phone || "",
         tier: c.tier || "B",
         area: c.area || "",
+        assignedRep: c.assignedRep || "",
         registrationNumber: c.registrationNumber || "",
         address: c.address || "",
       }));
@@ -2082,29 +2107,42 @@ const FOLLOWUP_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 // looping a Sheets read per rep, to stay well under the fixed 60
 // reads/minute quota shared by the whole team.
 async function runMonthlyVisitsSummary(month) {
-  const [visits, orders, followUps, reps, settings] = await Promise.all([
+  const [visits, orders, followUps, reps, clients, doctors, settings] = await Promise.all([
     db.getAllRows("Visits"),
     db.getAllRows("Orders"),
     db.getAllRows("FollowUps"),
     db.getAllRows("Reps"),
+    db.getAllRows("Clients"),
+    db.getAllRows("Doctors"),
     db.getSettings(),
   ]);
+
+  const pharmacyNames = new Set(clients.map((c) => c.name.toLowerCase().trim()));
+  const doctorNames = new Set(doctors.map((d) => d.name.toLowerCase().trim()));
 
   const [y, m] = month.split("-").map(Number);
   const inMonth = (dateStr) => {
     const d = new Date(dateStr);
     return d.getFullYear() === y && d.getMonth() + 1 === m;
   };
+  // What actually gets collected after the pharmacy's negotiated discount —
+  // orders placed before this field existed have no netTotal stored, so
+  // their list total is the best available stand-in.
+  const netOf = (o) => (o.netTotal !== "" && o.netTotal !== undefined ? Number(o.netTotal) : Number(o.total) || 0);
 
   const statsByRep = {};
   for (const rep of reps) {
     const repVisits = visits.filter((v) => v.repName === rep.name && inMonth(v.time));
+    const pharmacyVisits = repVisits.filter((v) => pharmacyNames.has(v.client.toLowerCase().trim())).length;
+    const doctorVisits = repVisits.filter((v) => doctorNames.has(v.client.toLowerCase().trim())).length;
     const repOrders = orders.filter((o) => o.repName === rep.name && inMonth(o.date));
     const repFollowUps = followUps.filter((f) => f.repName === rep.name && inMonth(f.createdAt));
     statsByRep[rep.name] = {
       visits: repVisits.length,
+      pharmacyVisits,
+      doctorVisits,
       orders: repOrders.length,
-      orderValue: repOrders.reduce((sum, o) => sum + (Number(o.total) || 0), 0),
+      orderValue: repOrders.reduce((sum, o) => sum + netOf(o), 0),
       followUpsScheduled: repFollowUps.length,
       followUpsStopped: followUps.filter((f) => f.repName === rep.name && f.status === "stopped" && inMonth(f.createdAt)).length,
       followUpsPending: followUps.filter((f) => f.repName === rep.name && (f.status === "pending" || f.status === "reminded")).length,
@@ -2116,8 +2154,8 @@ async function runMonthlyVisitsSummary(month) {
     const s = statsByRep[rep.name];
     const msg =
       `📊 <b>Your ${month} summary</b>\n\n` +
-      `Visits logged: <b>${s.visits}</b>\n` +
-      `Orders placed: <b>${s.orders}</b> (${s.orderValue.toLocaleString()})\n` +
+      `Visits logged: <b>${s.visits}</b> (${s.pharmacyVisits} pharmacies, ${s.doctorVisits} doctors)\n` +
+      `Orders placed: <b>${s.orders}</b> — sales collected: <b>${s.orderValue.toLocaleString()}</b>\n` +
       `Follow-ups scheduled: <b>${s.followUpsScheduled}</b>\n` +
       `Follow-ups stopped: <b>${s.followUpsStopped}</b>\n` +
       `Follow-ups still pending: <b>${s.followUpsPending}</b>`;
@@ -2131,9 +2169,10 @@ async function runMonthlyVisitsSummary(month) {
   if (settings.managerTelegramChatId) {
     const lines = reps.map((rep) => {
       const s = statsByRep[rep.name];
-      return `• <b>${escapeHtml(rep.name)}</b> — ${s.visits} visits, ${s.orders} orders (${s.orderValue.toLocaleString()}), ${s.followUpsScheduled} follow-ups (${s.followUpsPending} pending)`;
+      return `• <b>${escapeHtml(rep.name)}</b> — ${s.visits} visits (${s.pharmacyVisits} pharmacies, ${s.doctorVisits} doctors), ${s.orders} orders, <b>${s.orderValue.toLocaleString()}</b> collected, ${s.followUpsScheduled} follow-ups (${s.followUpsPending} pending)`;
     });
-    const teamMsg = `📊 <b>Team ${month} summary</b>\n\n${lines.join("\n") || "No reps linked yet."}`;
+    const teamTotal = reps.reduce((sum, rep) => sum + statsByRep[rep.name].orderValue, 0);
+    const teamMsg = `📊 <b>Team ${month} summary</b>\n\n${lines.join("\n") || "No reps linked yet."}\n\nTeam total collected: <b>${teamTotal.toLocaleString()}</b>`;
     try {
       await telegram.sendMessage(settings.managerTelegramChatId, teamMsg);
     } catch (e) {
@@ -2149,10 +2188,13 @@ async function checkMonthlyVisitsSummary() {
     const now = new Date();
     if (now.getDate() !== MONTHLY_VISITS_SUMMARY_DAY) return;
     const settings = await db.getSettings();
-    const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-    if (settings.lastMonthlyVisitsSummaryMonth === thisMonth) return;
-    await runMonthlyVisitsSummary(thisMonth);
-    await db.setSettings({ lastMonthlyVisitsSummaryMonth: thisMonth });
+    // Fires on the 1st, so the month that just ended (not the one that just
+    // started, which on day 1 has nothing in it yet) is the one to report.
+    const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prevMonth = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, "0")}`;
+    if (settings.lastMonthlyVisitsSummaryMonth === prevMonth) return;
+    await runMonthlyVisitsSummary(prevMonth);
+    await db.setSettings({ lastMonthlyVisitsSummaryMonth: prevMonth });
   } catch (e) {
     console.error("checkMonthlyVisitsSummary failed", e);
   }

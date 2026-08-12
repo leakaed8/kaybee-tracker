@@ -53,6 +53,7 @@ export const api = {
   importClientsBulk: (payload) => request("/clients/import-bulk", { method: "POST", body: JSON.stringify(payload) }),
   removeClient: (id) => request(`/clients/${id}`, { method: "DELETE" }),
   assignClientRep: (id, assignedRep) => request(`/clients/${id}`, { method: "PATCH", body: JSON.stringify({ assignedRep }) }),
+  updateClientDiscount: (id, discountRate) => request(`/clients/${id}`, { method: "PATCH", body: JSON.stringify({ discountRate }) }),
   completeClientInfo: (id, patch) => request(`/clients/${id}/complete-info`, { method: "PATCH", body: JSON.stringify(patch) }),
   completeDoctorInfo: (id, patch) => request(`/doctors/${id}/complete-info`, { method: "PATCH", body: JSON.stringify(patch) }),
   addDoctor: (doctor) => request("/doctors", { method: "POST", body: JSON.stringify(doctor) }),

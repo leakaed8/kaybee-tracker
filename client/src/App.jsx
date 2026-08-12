@@ -243,6 +243,7 @@ export default function App() {
   const removeClient = (id) => withSync(() => api.removeClient(id));
   const bulkImportClients = (payload) => withSync(() => api.importClientsBulk(payload));
   const assignClientRep = (id, assignedRep) => withSync(() => api.assignClientRep(id, assignedRep));
+  const updateClientDiscount = (id, discountRate) => withSync(() => api.updateClientDiscount(id, discountRate));
   const completeClientInfo = (id, patch) => withSync(() => api.completeClientInfo(id, patch));
   const completeDoctorInfo = (id, patch) => withSync(() => api.completeDoctorInfo(id, patch));
   const addDoctor = (doctor) => withSync(() => api.addDoctor(doctor));
@@ -406,6 +407,7 @@ export default function App() {
                 onRemove={removeClient}
                 onBulkImport={bulkImportClients}
                 onAssignRep={assignClientRep}
+                onUpdateDiscount={updateClientDiscount}
                 onCompleteInfo={completeClientInfo}
               />
             )}
@@ -1500,6 +1502,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
           products={products}
           offers={offers}
           orders={orders}
+          clients={clients}
           onCreateOrder={onCreateOrder}
           onDone={() => setStep(entityType === "pharmacy" ? "sample" : "followup")}
         />
@@ -1607,7 +1610,8 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
             <div>
               <div style={{ fontWeight: 600, fontSize: 13.5 }}>{o.clientName}</div>
               <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
-                {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })} · total {o.total.toFixed(2)}
+                {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })} · collected {Number(o.netTotal ?? o.total).toFixed(2)}
+                {o.discountRate > 0 ? ` (list ${o.total.toFixed(2)}, ${o.discountRate}% off)` : ""}
               </div>
             </div>
             {o.status === "deletion_requested" ? (
@@ -1708,7 +1712,13 @@ function downloadOrderPdf(order, stockWarnings = []) {
       it.isFree ? "FREE" : Number(it.unitPrice).toFixed(2),
       it.isFree ? "0.00" : (it.qty * it.unitPrice).toFixed(2),
     ]),
-    foot: [["", "", "", "Total", Number(order.total).toFixed(2)]],
+    foot: order.discountRate
+      ? [
+          ["", "", "", "List total", Number(order.total).toFixed(2)],
+          ["", "", "", `Discount (${order.discountRate}%)`, `-${(Number(order.total) - Number(order.netTotal ?? order.total)).toFixed(2)}`],
+          ["", "", "", "Net total", Number(order.netTotal ?? order.total).toFixed(2)],
+        ]
+      : [["", "", "", "Total", Number(order.total).toFixed(2)]],
   });
 
   if (stockWarnings.length > 0) {
@@ -1850,7 +1860,7 @@ function PharmacySampleStep({ clientName, visitId, products, onDone }) {
 // stock actually gets offered to pharmacies first.
 const batchLabel = (p) => `${p.name} — exp ${fmtDate(p.expiry)} (${p.qty} in stock)`;
 
-function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateOrder, onDone }) {
+function OrderBuilder({ clientName, visitId, products, offers, orders, clients, onCreateOrder, onDone }) {
   const [productQuery, setProductQuery] = useState("");
   const [qty, setQty] = useState("");
   const [items, setItems] = useState([]);
@@ -1859,6 +1869,12 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
   const [appliedOfferIds, setAppliedOfferIds] = useState(new Set());
   const [applyingOfferId, setApplyingOfferId] = useState(null);
   const [freeProductQuery, setFreeProductQuery] = useState("");
+
+  // Pre-filled from the pharmacy's own negotiated rate, but editable per
+  // order — discounts aren't uniform across pharmacies, and even a given
+  // pharmacy's standard rate sometimes has a one-off exception.
+  const matchedClient = (clients || []).find((c) => c.name.toLowerCase().trim() === clientName.toLowerCase().trim());
+  const [discountRate, setDiscountRate] = useState(matchedClient?.discountRate || "");
 
   const matchedProduct = products.find((p) => batchLabel(p) === productQuery.trim());
   // Filtered + capped instead of dumping every batch of every product into
@@ -1902,6 +1918,7 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
   const regularQty = regularItems.reduce((sum, it) => sum + it.qty, 0);
   const weightedAvgPrice = regularQty > 0 ? regularItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0) / regularQty : 0;
   const total = items.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
+  const netTotal = total * (1 - (Number(discountRate) || 0) / 100);
 
   const todayStr = new Date().toISOString().slice(0, 10);
   const eligibleOffers = offers.filter((o) =>
@@ -1966,15 +1983,17 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
         return;
       }
       const finalTotal = finalItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
+      const finalDiscountRate = Number(discountRate) || 0;
       const payload = {
         clientName,
         visitId,
         items: finalItems.map(({ productId, name, qty, unitPrice, isFree, originalPrice, expiry }) => ({
           productId, name, qty, unitPrice, isFree: !!isFree, originalPrice: originalPrice || 0, expiry: expiry || "",
         })),
+        discountRate: finalDiscountRate,
       };
       const created = await onCreateOrder(payload);
-      downloadOrderPdf(created || { ...payload, date: new Date().toISOString(), total: finalTotal }, stockWarnings);
+      downloadOrderPdf(created || { ...payload, date: new Date().toISOString(), total: finalTotal, netTotal: finalTotal * (1 - finalDiscountRate / 100) }, stockWarnings);
       onDone();
     } catch (e) {
       setError(e.message || "Couldn't save the order.");
@@ -2098,7 +2117,23 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, onCreateO
               </tbody>
             </table>
           </div>
-          <div style={{ textAlign: "right", fontSize: 13, fontWeight: 600, marginTop: 6 }}>Total: {total.toFixed(2)}</div>
+          <div style={{ textAlign: "right", fontSize: 13, marginTop: 6 }}>List total: {total.toFixed(2)}</div>
+
+          <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8, marginTop: 8 }}>
+            <label style={{ fontSize: 12, color: "#8A8272" }}>
+              Discount %{matchedClient?.discountRate ? " (pharmacy's standard rate — override for an exception)" : ""}
+            </label>
+            <input
+              type="number" min="0" max="100" step="0.5"
+              value={discountRate}
+              onChange={(e) => setDiscountRate(e.target.value)}
+              placeholder="0"
+              style={{ ...inputStyle, width: 80, padding: "6px 8px" }}
+            />
+          </div>
+          <div style={{ textAlign: "right", fontSize: 15, fontWeight: 600, marginTop: 6 }}>
+            Net total (collected): {netTotal.toFixed(2)}
+          </div>
         </div>
       )}
 
@@ -2139,7 +2174,8 @@ function OrdersView({ orders, onDelete, onApproveDelete, onDenyDelete }) {
             <div>
               <div style={{ fontWeight: 600, fontSize: 13.5 }}>{o.clientName}{o.repName ? ` · ${o.repName}` : ""}</div>
               <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
-                {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })} · {o.items.length} item{o.items.length === 1 ? "" : "s"} · total {o.total.toFixed(2)}
+                {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })} · {o.items.length} item{o.items.length === 1 ? "" : "s"} · collected {Number(o.netTotal ?? o.total).toFixed(2)}
+                {o.discountRate > 0 ? ` (list ${o.total.toFixed(2)}, ${o.discountRate}% off)` : ""}
               </div>
               {o.status === "deletion_requested" && <div style={{ fontSize: 11.5, color: "#B33A3A", marginTop: 4 }}>Rep requested deletion</div>}
             </div>
@@ -2474,13 +2510,14 @@ async function importChunkWithRetry(fn, attempt = 1) {
   }
 }
 
-function ClientExcelImportSection({ existingClients, onImport, onDone }) {
+function ClientExcelImportSection({ existingClients, repNames, onImport, onDone }) {
   const [sheetNames, setSheetNames] = useState([]);
   const [selectedSheet, setSelectedSheet] = useState("");
   const [workbook, setWorkbook] = useState(null);
   const [headers, setHeaders] = useState([]);
   const [rows, setRows] = useState([]);
   const [mapping, setMapping] = useState({ name: "", phone: "", area: "", address: "", registrationNumber: "" });
+  const [assignAllTo, setAssignAllTo] = useState("");
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const [importing, setImporting] = useState(false);
@@ -2496,7 +2533,7 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
     setRows(dataRows);
   };
 
-  const resetMapping = () => setMapping({ name: "", phone: "", area: "", address: "", registrationNumber: "" });
+  const resetMapping = () => { setMapping({ name: "", phone: "", area: "", address: "", registrationNumber: "" }); setAssignAllTo(""); };
 
   const handleFile = (e) => {
     const file = e.target.files[0];
@@ -2551,11 +2588,12 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
         area: areaIdx >= 0 ? String(r[areaIdx] ?? "").trim() : "",
         address: addressIdx >= 0 ? String(r[addressIdx] ?? "").trim() : "",
         registrationNumber: regIdx >= 0 ? String(r[regIdx] ?? "").trim() : "",
+        assignedRep: assignAllTo || "",
       });
     });
 
     return { newClients: fresh, skippedCount: skipped };
-  }, [mapping, rows, headers, existingClients]);
+  }, [mapping, rows, headers, existingClients, assignAllTo]);
 
   const doImport = async () => {
     setError("");
@@ -2635,6 +2673,13 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
             {fieldSelect("area", "Area column", false)}
             {fieldSelect("address", "Address column", false)}
             {fieldSelect("registrationNumber", "Registration number column", false)}
+            <div>
+              <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>Assign all to a rep (optional)</label>
+              <select value={assignAllTo} onChange={(e) => setAssignAllTo(e.target.value)} style={inputStyle}>
+                <option value="">— leave unassigned —</option>
+                {repNames.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
           </div>
 
           {mapping.name && (
@@ -2652,6 +2697,7 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
                         <th style={{ padding: "4px 6px" }}>Name</th>
                         <th style={{ padding: "4px 6px" }}>Phone</th>
                         <th style={{ padding: "4px 6px" }}>Area</th>
+                        <th style={{ padding: "4px 6px" }}>Assigned rep</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -2660,6 +2706,7 @@ function ClientExcelImportSection({ existingClients, onImport, onDone }) {
                           <td style={{ padding: "4px 6px" }}>{c.name}</td>
                           <td style={{ padding: "4px 6px" }}>{c.phone || "—"}</td>
                           <td style={{ padding: "4px 6px" }}>{c.area || "—"}</td>
+                          <td style={{ padding: "4px 6px" }}>{c.assignedRep || "—"}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -2697,7 +2744,7 @@ const CLIENT_FILLABLE_FIELDS = [
   { key: "registrationNumber", label: "Registration number" },
 ];
 
-function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onCompleteInfo }) {
+function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onCompleteInfo }) {
   const [completingId, setCompletingId] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -2708,6 +2755,7 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
   const [address, setAddress] = useState("");
   const [registrationNumber, setRegistrationNumber] = useState("");
   const [assignedRep, setAssignedRep] = useState("");
+  const [discountRate, setDiscountRate] = useState("");
   const [search, setSearch] = useState("");
   const [coords, setCoords] = useState(null);
   const [locating, setLocating] = useState(false);
@@ -2734,14 +2782,17 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
 
   const addClient = () => {
     if (!name) return;
-    onAdd({ name, phone, tier, area, address, registrationNumber, assignedRep, coordsLat: coords?.lat || "", coordsLng: coords?.lng || "" });
-    setName(""); setPhone(""); setArea(""); setAddress(""); setRegistrationNumber(""); setTier("B"); setAssignedRep(""); setCoords(null); setLocError("");
+    onAdd({ name, phone, tier, area, address, registrationNumber, assignedRep, discountRate, coordsLat: coords?.lat || "", coordsLng: coords?.lng || "" });
+    setName(""); setPhone(""); setArea(""); setAddress(""); setRegistrationNumber(""); setTier("B"); setAssignedRep(""); setDiscountRate(""); setCoords(null); setLocError("");
     setShowAdd(false);
   };
 
+  // What's actually been collected (post-discount), not the list-price
+  // total — a pharmacy's ordered value shouldn't look bigger than what it
+  // really paid.
   const revenueFor = (clientName) => (orders || [])
     .filter((o) => o.clientName.toLowerCase().trim() === clientName.toLowerCase().trim())
-    .reduce((sum, o) => sum + (Number(o.total) || 0), 0);
+    .reduce((sum, o) => sum + Number(o.netTotal ?? o.total ?? 0), 0);
 
   // Filters raw clients by the search text FIRST, then only computes the
   // expensive per-row stuff (last visit lookup, revenue, lead score) for
@@ -2801,7 +2852,7 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
         </div>
       </div>
 
-      {role === "manager" && showImport && <ClientExcelImportSection existingClients={clients} onImport={onBulkImport} onDone={() => setShowImport(false)} />}
+      {role === "manager" && showImport && <ClientExcelImportSection existingClients={clients} repNames={repNames} onImport={onBulkImport} onDone={() => setShowImport(false)} />}
 
       {showAdd && (
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
@@ -2828,6 +2879,11 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
             ) : (
               <Field label="Assigned sales rep">
                 <div style={{ ...inputStyle, background: "#FAF7F2", color: "#5B5445" }}>{repName} (you)</div>
+              </Field>
+            )}
+            {role === "manager" && (
+              <Field label="Standard discount % (optional)">
+                <input type="number" min="0" max="100" step="0.5" value={discountRate} onChange={(e) => setDiscountRate(e.target.value)} placeholder="e.g. 22.5" style={inputStyle} />
               </Field>
             )}
           </div>
@@ -2895,6 +2951,25 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
                       {c.assignedRep ? `Rep: ${c.assignedRep}` : "Unassigned"}
                     </span>
                   )}
+                  {role === "manager" ? (
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 8, fontSize: 11, color: "#5B5445" }}>
+                      Discount
+                      <input
+                        type="number" min="0" max="100" step="0.5"
+                        defaultValue={c.discountRate || ""}
+                        onBlur={(e) => {
+                          const v = e.target.value;
+                          if (v !== String(c.discountRate || "")) onUpdateDiscount(c.id, v);
+                        }}
+                        placeholder="0"
+                        style={{ width: 50, padding: "2px 4px", fontSize: 11, borderRadius: 5, border: "1px solid #E5DFD3" }}
+                      />%
+                    </span>
+                  ) : c.discountRate ? (
+                    <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 7px", borderRadius: 5, marginLeft: 6, background: "#F0EBE0", color: "#5B5445" }}>
+                      Discount: {c.discountRate}%
+                    </span>
+                  ) : null}
                 </div>
               </div>
               <div style={{ textAlign: "right" }}>
@@ -4142,7 +4217,7 @@ function RepPerformanceCard({ title, visits, monthlyVisitTarget, orders = [], mo
   });
 
   const monthOrders = orders.filter((o) => new Date(o.date) >= monthStart);
-  const revenueThisMonth = monthOrders.reduce((s, o) => s + (Number(o.total) || 0), 0);
+  const revenueThisMonth = monthOrders.reduce((s, o) => s + Number(o.netTotal ?? o.total ?? 0), 0);
   const revenuePct = Math.min(100, Math.round((revenueThisMonth / Math.max(monthlyRevenueTarget, 1)) * 100));
   const convertedVisits = monthVisits.filter((v) => monthOrders.some((o) => o.visitId === v.id)).length;
   const conversionRate = visitsThisMonth ? Math.round((convertedVisits / visitsThisMonth) * 100) : 0;
@@ -4262,7 +4337,8 @@ function RepActivityToday({ visits, orders, samples, competitorSightings, repNam
                 <div style={{ fontSize: 12.5, marginTop: 4 }}>
                   <strong style={{ color: "#8A8272", fontWeight: 600 }}>Order: </strong>
                   {order.items.map((it) => `${it.name} ×${it.qty}${it.isFree ? " (free — offer)" : ""}`).join(", ")}
-                  {" — "}{order.total.toFixed(2)}
+                  {" — "}{Number(order.netTotal ?? order.total).toFixed(2)} collected
+                  {order.discountRate > 0 ? ` (list ${order.total.toFixed(2)}, ${order.discountRate}% off)` : ""}
                 </div>
               )}
 
@@ -4308,7 +4384,7 @@ function PerformanceView({ visits, orders, samples, competitorSightings, clients
     };
   });
 
-  const revenueThisMonthTotal = orders.filter((o) => new Date(o.date) >= monthStart).reduce((s, o) => s + (Number(o.total) || 0), 0);
+  const revenueThisMonthTotal = orders.filter((o) => new Date(o.date) >= monthStart).reduce((s, o) => s + Number(o.netTotal ?? o.total ?? 0), 0);
   const revenueTargetTotal = monthlyRevenueTarget * Math.max(repNames.length, 1);
 
   const MONTHS_BACK = 6;
@@ -4321,7 +4397,7 @@ function PerformanceView({ visits, orders, samples, competitorSightings, clients
     repNames.forEach((name) => {
       row[name] = orders
         .filter((o) => o.repName === name && new Date(o.date).getFullYear() === year && new Date(o.date).getMonth() === month)
-        .reduce((s, o) => s + (Number(o.total) || 0), 0);
+        .reduce((s, o) => s + Number(o.netTotal ?? o.total ?? 0), 0);
     });
     return row;
   });
@@ -4338,7 +4414,7 @@ function PerformanceView({ visits, orders, samples, competitorSightings, clients
       const repVisits = visits.filter((v) => v.repName === name);
       const monthVisits = repVisits.filter((v) => new Date(v.time) >= monthStart);
       const repOrders = orders.filter((o) => o.repName === name && new Date(o.date) >= monthStart);
-      const repRevenue = repOrders.reduce((s, o) => s + (Number(o.total) || 0), 0);
+      const repRevenue = repOrders.reduce((s, o) => s + Number(o.netTotal ?? o.total ?? 0), 0);
       const convertedVisits = monthVisits.filter((v) => repOrders.some((o) => o.visitId === v.id)).length;
       const conversionRate = monthVisits.length ? convertedVisits / monthVisits.length : 0;
       const repClients = clients.filter((c) => c.assignedRep === name);
