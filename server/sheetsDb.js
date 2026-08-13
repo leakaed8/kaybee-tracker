@@ -8,7 +8,7 @@ const SCHEMAS = {
   Clients: ["id", "name", "phone", "tier", "area", "assignedRep", "registrationNumber", "address", "coordsLat", "coordsLng", "discountRate", "nameAr"],
   Doctors: ["id", "name", "hospital", "area", "phone", "specialty", "tier", "registrationNumber", "address", "coordsLat", "coordsLng"],
   OutreachLog: ["id", "name", "date", "templateIndex"],
-  Orders: ["id", "clientName", "visitId", "repName", "date", "items", "total", "status", "discountRate", "netTotal"],
+  Orders: ["id", "clientName", "visitId", "repName", "date", "items", "total", "status", "discountRate", "netTotal", "posEntered", "posEnteredAt", "posEnteredBy"],
   Reps: ["id", "name", "passcode", "email", "exportSheetId", "telegramChatId", "telegramLinkCode", "isSupervisor"],
   Offers: ["id", "label", "buyQty", "getQty", "expiresAt", "active"],
   PushSubscriptions: ["id", "role", "repName", "endpoint", "p256dh", "auth"],
@@ -142,7 +142,12 @@ async function ensureSheets() {
         range: `${tab}!A1:Z1`,
       });
       const firstRow = existing.data.values?.[0];
-      if (!firstRow || firstRow.length === 0) {
+      // Also tops up an existing tab whose header row is shorter than the
+      // current schema (e.g. new columns added to Orders for POS tracking)
+      // — data itself is always read/written by position from the JS
+      // schema array, never by looking up the sheet's header text, so this
+      // is purely for a human opening the sheet to see the right labels.
+      if (!firstRow || firstRow.length === 0 || firstRow.length < headers.length) {
         await sheets.spreadsheets.values.update({
           spreadsheetId: SHEET_ID,
           range: `${tab}!A1`,

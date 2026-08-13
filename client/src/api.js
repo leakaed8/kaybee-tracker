@@ -65,6 +65,7 @@ export const api = {
   requestDeleteOrder: (id) => request(`/orders/${id}/request-delete`, { method: "POST" }),
   approveDeleteOrder: (id) => request(`/orders/${id}/approve-delete`, { method: "POST" }),
   denyDeleteOrder: (id) => request(`/orders/${id}/deny-delete`, { method: "POST" }),
+  markOrderPosEntered: (id) => request(`/orders/${id}/pos-entered`, { method: "PATCH" }),
   addOffer: (offer) => request("/offers", { method: "POST", body: JSON.stringify(offer) }),
   updateOffer: (id, patch) => request(`/offers/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   removeOffer: (id) => request(`/offers/${id}`, { method: "DELETE" }),

@@ -220,6 +220,9 @@ function parseOrder(o) {
     // Orders placed before this field existed have no netTotal stored —
     // treat their collected amount as the list total rather than 0.
     netTotal: o.netTotal !== "" && o.netTotal !== undefined ? Number(o.netTotal) : total,
+    posEntered: o.posEntered === "true",
+    posEnteredAt: o.posEnteredAt || "",
+    posEnteredBy: o.posEnteredBy || "",
   };
 }
 
@@ -584,7 +587,7 @@ app.get("/api/visits", async (req, res) => {
 // page and get page 1 of their requested limit, same result as before.
 app.get("/api/orders", async (req, res) => {
   try {
-    const { repName, client, product, from, to, page, limit, all } = req.query;
+    const { repName, client, product, from, to, page, limit, all, posStatus } = req.query;
     const rows = await db.getAllRows("Orders");
     let orders = rows.map(parseOrder).sort((a, b) => new Date(b.date) - new Date(a.date));
     if (repName) orders = orders.filter((o) => o.repName === repName);
@@ -598,6 +601,11 @@ app.get("/api/orders", async (req, res) => {
     }
     if (from) orders = orders.filter((o) => new Date(o.date) >= new Date(from));
     if (to) orders = orders.filter((o) => new Date(o.date) <= new Date(`${to}T23:59:59`));
+    // Pending POS never resets on a schedule — it's just "has posEntered
+    // been stamped yet," so an order placed weeks ago and never entered
+    // still shows up here indefinitely.
+    if (posStatus === "pending") orders = orders.filter((o) => !o.posEntered);
+    if (posStatus === "entered") orders = orders.filter((o) => o.posEntered);
 
     const total = orders.length;
     // Same "give me the true complete set" escape hatch as /api/visits, for
@@ -1245,6 +1253,26 @@ app.post("/api/orders", async (req, res) => {
       originalPrice: Number(it.originalPrice) || 0,
       expiry: it.expiry || "",
     }));
+
+    // Re-derives which offer (if any) this order's total quantity would
+    // qualify for, independently of whatever isFree flags the client sent
+    // — so this can't be bypassed by calling the API directly. Mirrors
+    // only the "which offer's threshold is met, biggest wins" selection
+    // step from applyOfferToItems (client/src/App.jsx) — not the price-
+    // averaging/free-item-picking step, which stays client-only.
+    const totalQty = cleanItems.reduce((sum, it) => sum + it.qty, 0);
+    const offerRows = await db.getAllRows("Offers");
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const activeOffers = offerRows.map(parseOffer).filter((o) => o.active && (!o.expiresAt || o.expiresAt >= todayStr));
+    const qualifyingOffer = activeOffers
+      .filter((o) => totalQty >= o.buyQty + o.getQty)
+      .sort((a, b) => (b.buyQty + b.getQty) - (a.buyQty + a.getQty))[0];
+    if (qualifyingOffer && qualifyingOffer.buyQty === 7 && qualifyingOffer.getQty === 1 && totalQty !== 8) {
+      return res.status(400).json({
+        error: `Buy 7 + Get 1 Free requires exactly 8 units. You currently have ${totalQty} units. Please adjust the quantities to 8 units to continue.`,
+      });
+    }
+
     const total = cleanItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
 
     // The pharmacy's negotiated trade discount (22.5%, 35%, or a one-off
@@ -1335,6 +1363,30 @@ app.delete("/api/orders/:id", requireManager, async (req, res) => {
   try {
     await db.deleteRowById("Orders", req.params.id);
     res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Internal POS-entry confirmation — restricted to the Head of Sales (the
+// rep flagged as supervisor), not the manager, per explicit request. Only
+// ever touches these three fields: never the order's items, pricing,
+// discount, total, or status. Doesn't reset on any schedule — an order
+// stays "Pending POS" indefinitely until this is called.
+app.patch("/api/orders/:id/pos-entered", async (req, res) => {
+  try {
+    if (!(req.role === "rep" && req.isSupervisor)) {
+      return res.status(403).json({ error: "Only the Head of Sales can mark an order as POS entered." });
+    }
+    const patch = {
+      posEntered: "true",
+      posEnteredAt: new Date().toISOString(),
+      posEnteredBy: req.repName || "",
+    };
+    const ok = await db.updateRowById("Orders", req.params.id, patch);
+    if (!ok) return res.status(404).json({ error: "Order not found" });
+    res.json({ ok: true, ...patch });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

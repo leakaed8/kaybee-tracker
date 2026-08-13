@@ -372,7 +372,7 @@ export default function App() {
         {(role === "manager" || isSupervisor) && <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<Target size={15} />} label="Performance" />}
         {role === "manager" && <TabBtn active={tab === "outreach"} onClick={() => setTab("outreach")} icon={<MessageCircle size={15} />} label="Outreach" />}
         {role === "manager" && <TabBtn active={tab === "broadcast"} onClick={() => setTab("broadcast")} icon={<Megaphone size={15} />} label="Broadcast" />}
-        {role === "manager" && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
+        {(role === "manager" || isSupervisor) && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
         {(role === "manager" || role === "rep") && <TabBtn active={tab === "competitors"} onClick={() => setTab("competitors")} icon={<Swords size={15} />} label="Competitors" />}
         {(role === "manager" || isSupervisor) && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<RadarIcon size={15} />} label="Locations" />}
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
@@ -446,8 +446,15 @@ export default function App() {
             {tab === "training" && !isSupervisor && <TrainingView />}
             {tab === "route" && role === "rep" && !isSupervisor && <RouteView clients={clients} doctors={doctors} />}
             {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} />}
-            {tab === "orders" && role === "manager" && (
-              <OrderHistoryView repNames={repNames} onDelete={deleteOrder} onApproveDelete={approveDeleteOrder} onDenyDelete={denyDeleteOrder} />
+            {tab === "orders" && (role === "manager" || isSupervisor) && (
+              <OrdersTabView
+                role={role}
+                isSupervisor={isSupervisor}
+                repNames={repNames}
+                onDelete={deleteOrder}
+                onApproveDelete={approveDeleteOrder}
+                onDenyDelete={denyDeleteOrder}
+              />
             )}
             {tab === "competitors" && (role === "manager" || role === "rep") && (
               <CompetitorsView
@@ -482,6 +489,7 @@ export default function App() {
                 setMonthlyVisitTarget={(v) => updateSettingsField({ monthlyVisitTarget: v })}
                 monthlyRevenueTarget={settings.monthlyRevenueTarget}
                 setMonthlyRevenueTarget={(v) => updateSettingsField({ monthlyRevenueTarget: v })}
+                isSupervisor={isSupervisor}
               />
             )}
             {tab === "outreach" && role === "manager" && (
@@ -2054,8 +2062,19 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   const total = displayItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
   const netTotal = total * (1 - (Number(discountRate) || 0) / 100);
 
+  // Strict quantity gate for the 7+1 offer specifically: it's "in play" the
+  // moment the rep taps it as their target, or the moment it auto-applies
+  // (whichever happens first) — matches the offer picker above, which lets
+  // items be added before or after picking a target. Every other offer is
+  // untouched: only buy-7-get-1 requires exactly 8 physical units.
+  const sevenPlusOneOffer = activeOffers.find((o) => o.buyQty === 7 && o.getQty === 1);
+  const sevenPlusOneInPlay = !!sevenPlusOneOffer && (targetOfferId === sevenPlusOneOffer.id || appliedOffer?.id === sevenPlusOneOffer.id);
+  const sevenPlusOneInvalid = sevenPlusOneInPlay && regularQty > 8;
+  const sevenPlusOneMessage = `Buy 7 + Get 1 Free requires exactly 8 units. You currently have ${regularQty} units. Please adjust the quantities to 8 units to continue.`;
+
   const doCreateOrder = async () => {
     if (displayItems.length === 0) { setError("Add at least one item first."); return; }
+    if (sevenPlusOneInvalid) { setError(sevenPlusOneMessage); return; }
     setError("");
     setSaving(true);
     try {
@@ -2144,6 +2163,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
           {targetOfferId && (() => {
             const offer = activeOffers.find((o) => o.id === targetOfferId);
             if (!offer || appliedOffer?.id === offer.id) return null;
+            if (offer.buyQty === 7 && offer.getQty === 1) return null; // dedicated 7+1 readout below
             const threshold = offer.buyQty + offer.getQty;
             return (
               <div style={{ fontSize: 12, marginTop: 6, color: "#8A8272" }}>
@@ -2151,6 +2171,16 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
               </div>
             );
           })()}
+          {sevenPlusOneInPlay && (
+            <div style={{ marginTop: 6 }}>
+              <div className="kb-font-mono" style={{ fontSize: 12, fontWeight: sevenPlusOneInvalid ? 600 : 400, color: sevenPlusOneInvalid ? "#B33A3A" : "#8A8272" }}>
+                Current: {regularQty} / 8 units
+              </div>
+              {sevenPlusOneInvalid && (
+                <div style={{ fontSize: 12, marginTop: 4, color: "#B33A3A" }}>{sevenPlusOneMessage}</div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -2247,9 +2277,9 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
 
       <div style={{ display: "flex", gap: 8 }}>
         <button
-          disabled={saving || items.length === 0}
+          disabled={saving || items.length === 0 || sevenPlusOneInvalid}
           onClick={doCreateOrder}
-          style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: !saving && items.length > 0 ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+          style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: !saving && items.length > 0 && !sevenPlusOneInvalid ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
         >
           {saving ? "Creating…" : "Create order & download PDF"}
         </button>
@@ -2259,17 +2289,59 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   );
 }
 
-// ---------- Order History View (manager) ----------
+// ---------- Orders tab (manager + Head of Sales) ----------
+// Order History and Pending POS are two views over the same paginated
+// endpoint, kept as separate compact screens rather than one giant table
+// with everything in it — a pill toggle switches between them, both live
+// under the same "Orders" nav slot.
+function OrdersTabView({ role, isSupervisor, repNames, onDelete, onApproveDelete, onDenyDelete }) {
+  const [subTab, setSubTab] = useState("history"); // history | pending
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+        <button
+          onClick={() => setSubTab("history")}
+          style={{
+            padding: "6px 14px", borderRadius: 16, fontSize: 12.5, fontWeight: 500,
+            border: subTab === "history" ? "1px solid #1F2A24" : "1px solid #E5DFD3",
+            background: subTab === "history" ? "#1F2A24" : "#fff", color: subTab === "history" ? "#FAF7F2" : "#5B5445",
+          }}
+        >
+          Order History
+        </button>
+        <button
+          onClick={() => setSubTab("pending")}
+          style={{
+            padding: "6px 14px", borderRadius: 16, fontSize: 12.5, fontWeight: 500,
+            border: subTab === "pending" ? "1px solid #C17817" : "1px solid #E5DFD3",
+            background: subTab === "pending" ? "#C17817" : "#fff", color: subTab === "pending" ? "#fff" : "#5B5445",
+          }}
+        >
+          Pending POS
+        </button>
+      </div>
+      {subTab === "history" ? (
+        <OrderHistoryView role={role} repNames={repNames} onDelete={onDelete} onApproveDelete={onApproveDelete} onDenyDelete={onDenyDelete} />
+      ) : (
+        <PendingPOSView isSupervisor={isSupervisor} />
+      )}
+    </div>
+  );
+}
+
+// ---------- Order History View (manager + Head of Sales, read-only for the latter) ----------
 // Built on the paginated GET /api/orders endpoint instead of a full-array
 // bootstrap dump — Orders only ever grows, so shipping the whole table to
 // every open session on a timer was exactly the pattern that made Excel
 // imports (and, over time, this table itself) slow the whole app down.
 const ORDER_HISTORY_PAGE_SIZE = 25;
-function OrderHistoryView({ repNames, onDelete, onApproveDelete, onDenyDelete }) {
+function OrderHistoryView({ role, repNames, onDelete, onApproveDelete, onDenyDelete }) {
   const [confirmIds, setConfirmIds] = useState(new Set());
   const [repFilter, setRepFilter] = useState("");
   const [clientFilter, setClientFilter] = useState("");
   const [productFilter, setProductFilter] = useState("");
+  const [posFilter, setPosFilter] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [page, setPage] = useState(1);
@@ -2279,17 +2351,17 @@ function OrderHistoryView({ repNames, onDelete, onApproveDelete, onDenyDelete })
   const load = () => {
     setLoading(true);
     api.getOrders({
-      repName: repFilter, client: clientFilter, product: productFilter,
+      repName: repFilter, client: clientFilter, product: productFilter, posStatus: posFilter,
       from: fromDate, to: toDate, page, limit: ORDER_HISTORY_PAGE_SIZE,
     })
       .then((data) => setResult(data))
       .catch(() => setResult({ orders: [], total: 0 }))
       .finally(() => setLoading(false));
   };
-  useEffect(() => { load(); }, [repFilter, clientFilter, productFilter, fromDate, toDate, page]);
+  useEffect(() => { load(); }, [repFilter, clientFilter, productFilter, posFilter, fromDate, toDate, page]);
   // Any filter change should jump back to page 1 — staying on page 4 of a
   // now-much-smaller filtered result would just show an empty page.
-  useEffect(() => { setPage(1); }, [repFilter, clientFilter, productFilter, fromDate, toDate]);
+  useEffect(() => { setPage(1); }, [repFilter, clientFilter, productFilter, posFilter, fromDate, toDate]);
 
   const askConfirm = (id) => setConfirmIds((prev) => new Set(prev).add(id));
   const cancelConfirm = (id) => setConfirmIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
@@ -2298,6 +2370,9 @@ function OrderHistoryView({ repNames, onDelete, onApproveDelete, onDenyDelete })
   const doDeny = (id) => onDenyDelete(id).then(load);
 
   const totalPages = Math.max(1, Math.ceil(result.total / ORDER_HISTORY_PAGE_SIZE));
+  // Delete/approve/deny hit requireManager-gated routes server-side — hide
+  // them here too for a Head of Sales session so there's no dead button.
+  const canManage = role === "manager";
 
   return (
     <div>
@@ -2310,6 +2385,11 @@ function OrderHistoryView({ repNames, onDelete, onApproveDelete, onDenyDelete })
         </select>
         <input value={clientFilter} onChange={(e) => setClientFilter(e.target.value)} placeholder="Pharmacy name…" style={inputStyle} />
         <input value={productFilter} onChange={(e) => setProductFilter(e.target.value)} placeholder="Product name…" style={inputStyle} />
+        <select value={posFilter} onChange={(e) => setPosFilter(e.target.value)} style={inputStyle}>
+          <option value="">Any POS status</option>
+          <option value="pending">Pending POS</option>
+          <option value="entered">POS entered</option>
+        </select>
         <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} style={inputStyle} />
         <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} style={inputStyle} />
       </div>
@@ -2331,12 +2411,21 @@ function OrderHistoryView({ repNames, onDelete, onApproveDelete, onDenyDelete })
                 {o.discountRate > 0 ? ` (list ${o.total.toFixed(2)}, ${o.discountRate}% off)` : ""}
               </div>
               {o.status === "deletion_requested" && <div style={{ fontSize: 11.5, color: "#B33A3A", marginTop: 4 }}>Rep requested deletion</div>}
+              <div style={{ fontSize: 11, marginTop: 4 }}>
+                {o.posEntered ? (
+                  <span style={{ color: "#4C7A5E", fontWeight: 600 }}>
+                    ✓ POS Entered{o.posEnteredBy ? ` — ${o.posEnteredBy}` : ""}{o.posEnteredAt ? `, ${new Date(o.posEnteredAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}` : ""}
+                  </span>
+                ) : (
+                  <span style={{ color: "#C17817", fontWeight: 600 }}>Pending POS</span>
+                )}
+              </div>
             </div>
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
               <button onClick={() => downloadOrderPdf(o)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12, fontWeight: 500 }}>
                 <Download size={13} /> PDF
               </button>
-              {o.status === "deletion_requested" ? (
+              {canManage && (o.status === "deletion_requested" ? (
                 <>
                   <button onClick={() => doApprove(o.id)} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "7px 12px" }}>Approve delete</button>
                   <button onClick={() => doDeny(o.id)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "7px 12px" }}>Deny</button>
@@ -2349,7 +2438,7 @@ function OrderHistoryView({ repNames, onDelete, onApproveDelete, onDenyDelete })
                 </>
               ) : (
                 <button onClick={() => askConfirm(o.id)} style={{ fontSize: 12, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "7px 12px" }}>Delete</button>
-              )}
+              ))}
             </div>
           </div>
         ))}
@@ -2360,6 +2449,86 @@ function OrderHistoryView({ repNames, onDelete, onApproveDelete, onDenyDelete })
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, fontSize: 12.5 }}>
           <span style={{ color: "#8A8272" }}>
             Showing {(page - 1) * ORDER_HISTORY_PAGE_SIZE + 1}–{Math.min(page * ORDER_HISTORY_PAGE_SIZE, result.total)} of {result.total.toLocaleString()}
+          </span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button disabled={page <= 1} onClick={() => setPage((p) => p - 1)} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5, opacity: page <= 1 ? 0.5 : 1 }}>Prev</button>
+            <span style={{ color: "#8A8272" }}>Page {page} of {totalPages}</span>
+            <button disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5, opacity: page >= totalPages ? 0.5 : 1 }}>Next</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Pending POS View (compact; the Head of Sales' own worklist) ----------
+// Never resets on a schedule — an order sits here until explicitly marked,
+// no matter how many weeks pass. Uses the same paginated GET /api/orders
+// endpoint as Order History, just filtered to posStatus=pending, so this
+// never loads the full Orders table either.
+const PENDING_POS_PAGE_SIZE = 20;
+function PendingPOSView({ isSupervisor }) {
+  const [page, setPage] = useState(1);
+  const [result, setResult] = useState({ orders: [], total: 0 });
+  const [loading, setLoading] = useState(true);
+  const [markingId, setMarkingId] = useState(null);
+
+  const load = () => {
+    setLoading(true);
+    api.getOrders({ posStatus: "pending", page, limit: PENDING_POS_PAGE_SIZE })
+      .then((data) => setResult(data))
+      .catch(() => setResult({ orders: [], total: 0 }))
+      .finally(() => setLoading(false));
+  };
+  useEffect(() => { load(); }, [page]);
+
+  const markEntered = async (id) => {
+    setMarkingId(id);
+    try {
+      await api.markOrderPosEntered(id);
+      load();
+    } catch (e) {
+      // Left in the list so the rep sees it didn't go through; error is
+      // rare here since the button is already hidden for non-supervisors.
+    } finally {
+      setMarkingId(null);
+    }
+  };
+
+  const totalPages = Math.max(1, Math.ceil(result.total / PENDING_POS_PAGE_SIZE));
+
+  return (
+    <div>
+      <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 14px" }}>
+        Orders placed but not yet re-entered into the physical POS. Nothing here expires or resets — it stays until marked.
+      </p>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {result.orders.map((o) => (
+          <div key={o.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13.5 }}>{o.clientName}{o.repName ? ` · ${o.repName}` : ""}</div>
+              <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
+                {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })} · {o.items.length} item{o.items.length === 1 ? "" : "s"} · collected {Number(o.netTotal ?? o.total).toFixed(2)}
+              </div>
+            </div>
+            {isSupervisor && (
+              <button
+                disabled={markingId === o.id}
+                onClick={() => markEntered(o.id)}
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 14px", borderRadius: 8, border: "none", background: "#4C7A5E", color: "#fff", fontSize: 12.5, fontWeight: 500 }}
+              >
+                <Check size={13} /> {markingId === o.id ? "Saving…" : "POS Entered"}
+              </button>
+            )}
+          </div>
+        ))}
+        {!loading && result.orders.length === 0 && <EmptyState text="Nothing pending — every order has been entered into the POS." />}
+      </div>
+
+      {result.total > PENDING_POS_PAGE_SIZE && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, fontSize: 12.5 }}>
+          <span style={{ color: "#8A8272" }}>
+            Showing {(page - 1) * PENDING_POS_PAGE_SIZE + 1}–{Math.min(page * PENDING_POS_PAGE_SIZE, result.total)} of {result.total.toLocaleString()}
           </span>
           <div style={{ display: "flex", gap: 8 }}>
             <button disabled={page <= 1} onClick={() => setPage((p) => p - 1)} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5, opacity: page <= 1 ? 0.5 : 1 }}>Prev</button>
@@ -4902,7 +5071,9 @@ function accountStatusList(clients, doctors, visits) {
   });
 }
 
-function RepPerformanceCard({ title, visits, monthlyVisitTarget, orders = [], monthlyRevenueTarget = 0, clients = [], repNameFilter = null }) {
+function RepPerformanceCard({ title, visits, monthlyVisitTarget, orders = [], monthlyRevenueTarget = 0, clients = [], repNameFilter = null, isSupervisor = false, onMarkPosEntered = null }) {
+  const [expandedClient, setExpandedClient] = useState(null);
+  const [markingId, setMarkingId] = useState(null);
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
@@ -4944,6 +5115,40 @@ function RepPerformanceCard({ title, visits, monthlyVisitTarget, orders = [], mo
     return days === null || days > cadence;
   }).length;
 
+  // Pharmacies-visited drill-down — per-rep cards only ("All reps combined"
+  // has no single rep's route to drill into). Built entirely from the
+  // visits/orders already passed into this card (no new fetch): one row
+  // per distinct pharmacy visited this month, most-recent visit first.
+  const pharmaciesVisited = repNameFilter
+    ? (() => {
+        const byClient = {};
+        monthVisits.forEach((v) => {
+          const key = v.client;
+          if (!byClient[key] || new Date(v.time) > new Date(byClient[key].time)) byClient[key] = v;
+        });
+        return Object.values(byClient).sort((a, b) => new Date(b.time) - new Date(a.time));
+      })()
+    : [];
+  const weekDay = now.getDay();
+  const weekStart = new Date(now);
+  weekStart.setDate(now.getDate() - (weekDay === 0 ? 6 : weekDay - 1));
+  weekStart.setHours(0, 0, 0, 0);
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekStart.getDate() + 6);
+  weekEnd.setHours(23, 59, 59, 999);
+  const orderThisWeekFor = (clientName) =>
+    orders.find((o) => o.clientName === clientName && new Date(o.date) >= weekStart && new Date(o.date) <= weekEnd);
+
+  const handleMarkPosEntered = async (orderId) => {
+    if (!onMarkPosEntered) return;
+    setMarkingId(orderId);
+    try {
+      await onMarkPosEntered(orderId);
+    } finally {
+      setMarkingId(null);
+    }
+  };
+
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
       <h3 className="kb-font-display" style={{ fontSize: 16, fontWeight: 600, margin: "0 0 12px" }}>{title}</h3>
@@ -4980,6 +5185,76 @@ function RepPerformanceCard({ title, visits, monthlyVisitTarget, orders = [], mo
           </div>
         ))}
       </div>
+
+      {repNameFilter && (
+        <>
+          <div style={{ fontSize: 12, fontWeight: 600, margin: "16px 0 8px", color: "#8A8272" }}>Pharmacies visited this month</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {pharmaciesVisited.length === 0 && <EmptyState text="No pharmacies visited yet this month." />}
+            {pharmaciesVisited.map((v) => {
+              const isOpen = expandedClient === v.client;
+              const order = orderThisWeekFor(v.client);
+              return (
+                <div key={v.client} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, overflow: "hidden" }}>
+                  <button
+                    onClick={() => setExpandedClient(isOpen ? null : v.client)}
+                    style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", background: "none", border: "none", cursor: "pointer", textAlign: "left", font: "inherit" }}
+                  >
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>{isOpen ? "▾" : "▸"} {v.client}</span>
+                    <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>
+                      {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}{" "}
+                      {new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  </button>
+                  {isOpen && (
+                    <div style={{ padding: "0 12px 12px", borderTop: "1px solid #E5DFD3" }}>
+                      {v.notes && (
+                        <div style={{ fontSize: 12.5, marginTop: 8 }}>
+                          <strong style={{ color: "#8A8272", fontWeight: 600 }}>Notes: </strong>{v.notes}
+                        </div>
+                      )}
+                      {v.mentionedItems && v.mentionedItems.length > 0 && (
+                        <div style={{ fontSize: 12.5, marginTop: 4 }}>
+                          <strong style={{ color: "#8A8272", fontWeight: 600 }}>Items discussed: </strong>
+                          {v.mentionedItems.map((it) => it.name).join(", ")}
+                        </div>
+                      )}
+
+                      <div style={{ fontSize: 12, fontWeight: 600, margin: "10px 0 4px", color: "#8A8272" }}>Order this week</div>
+                      {!order && <div style={{ fontSize: 12.5, color: "#8A8272" }}>No order placed this week.</div>}
+                      {order && (
+                        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: 10 }}>
+                          <div style={{ fontSize: 12.5 }}>
+                            {order.items.map((it) => `${it.name} ×${it.qty}${it.isFree ? " (free — offer)" : ""}`).join(", ")}
+                          </div>
+                          <div style={{ fontSize: 12.5, marginTop: 4 }}>
+                            {Number(order.netTotal ?? order.total).toFixed(2)} collected
+                            {order.discountRate > 0 ? ` (list ${Number(order.total).toFixed(2)}, ${order.discountRate}% off)` : ""}
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
+                            <span style={{ fontSize: 11.5, fontWeight: 600, color: order.posEntered ? "#4C7A5E" : "#C17817" }}>
+                              {order.posEntered ? `✓ POS Entered — ${order.posEnteredBy}, ${new Date(order.posEnteredAt).toLocaleDateString("en-GB")}` : "Pending POS"}
+                            </span>
+                            {!order.posEntered && isSupervisor && onMarkPosEntered && (
+                              <button
+                                onClick={() => handleMarkPosEntered(order.id)}
+                                disabled={markingId === order.id}
+                                style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11.5, fontWeight: 600, color: "#4C7A5E", background: "#EAF3EC", border: "1px solid #C7DFCE", borderRadius: 6, padding: "4px 8px", cursor: "pointer" }}
+                              >
+                                <Check size={12} /> {markingId === order.id ? "Saving…" : "POS Entered"}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -5086,7 +5361,7 @@ function RepActivityToday({ repNames }) {
   );
 }
 
-function PerformanceView({ clients, doctors, repNames, monthlyVisitTarget, setMonthlyVisitTarget, monthlyRevenueTarget, setMonthlyRevenueTarget }) {
+function PerformanceView({ clients, doctors, repNames, monthlyVisitTarget, setMonthlyVisitTarget, monthlyRevenueTarget, setMonthlyRevenueTarget, isSupervisor }) {
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
@@ -5099,6 +5374,15 @@ function PerformanceView({ clients, doctors, repNames, monthlyVisitTarget, setMo
     api.getVisits({ all: true }).then((data) => setVisits(data.visits || [])).catch(() => {});
     api.getOrders({ all: true }).then((data) => setOrders(data.orders || [])).catch(() => {});
   }, []);
+
+  // Orders are already fully loaded above (all:true, for the existing
+  // revenue charts) — the Pharmacy drill-down reuses that in-memory data
+  // instead of issuing its own fetch. Marking POS-entered just patches
+  // this same state in place so the badge updates immediately.
+  const markPosEntered = async (orderId) => {
+    const patch = await api.markOrderPosEntered(orderId);
+    setOrders((prev) => prev.map((o) => (o.id === orderId ? { ...o, ...patch } : o)));
+  };
 
   const accountsWithStatus = accountStatusList(clients, doctors, visits);
   const totalOverdue = accountsWithStatus.filter((a) => a.overdue).length;
@@ -5208,6 +5492,8 @@ function PerformanceView({ clients, doctors, repNames, monthlyVisitTarget, setMo
           monthlyRevenueTarget={monthlyRevenueTarget}
           clients={clients}
           repNameFilter={name}
+          isSupervisor={isSupervisor}
+          onMarkPosEntered={markPosEntered}
         />
       ))}
 
