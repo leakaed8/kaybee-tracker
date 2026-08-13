@@ -29,11 +29,30 @@ async function request(path, options) {
   return res.json();
 }
 
+// Builds a query string from a params object, dropping undefined/null/empty
+// values so callers can pass a sparse object without worrying about it
+// (e.g. { client: "", limit: 5 } becomes just "?limit=5").
+function qs(params) {
+  const clean = Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== null && v !== "");
+  if (clean.length === 0) return "";
+  return `?${new URLSearchParams(clean).toString()}`;
+}
+
 export const api = {
   login: (passcode) => request("/login", { method: "POST", body: JSON.stringify({ passcode }) }),
   logout: () => request("/logout", { method: "POST" }),
   getSession: () => request("/session"),
   bootstrap: (opts) => request(opts?.fresh ? "/bootstrap?fresh=true" : "/bootstrap"),
+  bootstrapReference: (opts) => request(opts?.fresh ? "/bootstrap/reference?fresh=true" : "/bootstrap/reference"),
+  getVisits: (params) => request(`/visits${qs(params)}`),
+  getOrders: (params) => request(`/orders${qs(params)}`),
+  getSamples: (params) => request(`/samples${qs(params)}`),
+  getPunchLog: (params) => request(`/punch-log${qs(params)}`),
+  getOutreachLogToday: () => request("/outreach-log/today"),
+  getCompetitorSightings: (params) => request(`/competitor-sightings${qs(params)}`),
+  getCompetitorProducts: (params) => request(`/competitor-products${qs(params)}`),
+  getClientVisitStats: (names) => request("/clients/visit-stats", { method: "POST", body: JSON.stringify({ names }) }),
+  getDoctorVisitStats: (names) => request("/doctors/visit-stats", { method: "POST", body: JSON.stringify({ names }) }),
   addProduct: (product) => request("/products", { method: "POST", body: JSON.stringify(product) }),
   removeProduct: (id) => request(`/products/${id}`, { method: "DELETE" }),
   importSampleInventory: () => request("/products/import-sample", { method: "POST" }),

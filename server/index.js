@@ -410,60 +410,294 @@ app.post("/api/push/subscribe", async (req, res) => {
   }
 });
 
-const BOOTSTRAP_TABS = ["Products", "Visits", "Clients", "Doctors", "OutreachLog", "Orders", "Reps", "Offers", "Samples", "PunchLog", "StockMovement", "FollowUps", "Competitors", "CompetitorSightings", "VisitComments", "CompetitorProducts"];
+// Bootstrap used to be one 16-tab dump, polled by every open session every
+// 30s. Growing any single tab via an Excel import (Clients to 3000+ rows,
+// CompetitorProducts, StockMovement across years) slowed that whole batched
+// read down for everyone, since it was all one Sheets request. Split into
+// two tiers instead:
+//  - "Live" tabs are small and either change often or gate the app itself
+//    (punch state) — these stay on the fast poll.
+//  - "Reference" tabs (Products/Clients/Doctors) are needed broadly for
+//    search/autocomplete but tolerate being a few minutes stale — these get
+//    their own much slower poll (see REFERENCE_POLL_INTERVAL_MS client-side).
+// Everything else that used to ride along in bootstrap (Visits, Orders,
+// Samples, OutreachLog, PunchLog's full history, CompetitorSightings,
+// VisitComments, CompetitorProducts) is dropped entirely in favor of scoped,
+// on-demand endpoints fetched only by the specific view that needs them.
+const LIVE_BOOTSTRAP_TABS = ["Reps", "Offers", "Competitors", "PunchLog"];
+const REFERENCE_BOOTSTRAP_TABS = ["Products", "Clients", "Doctors"];
 
-// Google's Sheets API "read requests per minute PER USER" quota (60) is fixed
-// and not adjustable — and since this whole app authenticates as one shared
-// service account, that limit is split across every rep and manager
-// combined, not per person. Batching (above) cut this endpoint from 11
-// requests to 2; this cache cuts it further by letting concurrent sessions
-// polling within the same few seconds share one Sheets read instead of each
-// firing their own. Any write path passes ?fresh=true to skip the cache, so
-// a manager who just added something always sees it immediately.
-let bootstrapCache = null; // { data, timestamp }
-const BOOTSTRAP_CACHE_TTL_MS = 8000;
+// See the comment above BOOTSTRAP_CACHE_TTL_MS's old location: this cache
+// lets concurrent sessions polling within the same few seconds share one
+// Sheets read instead of each firing their own. ?fresh=true (used by
+// withSync after a write) skips it so the person who just wrote something
+// sees it immediately.
+//
+// Only the rep-independent raw rows are cached here — myLastPunch is
+// per-rep, so it's reshaped fresh from the (possibly cached) PunchLog rows
+// on every request instead of being baked into a cache shared across every
+// session (which would leak one rep's punch state into another rep's
+// response).
+let liveBootstrapRawCache = null; // { data, timestamp }
+const LIVE_BOOTSTRAP_CACHE_TTL_MS = 8000;
+let referenceBootstrapCache = null; // { data, timestamp }
+const REFERENCE_BOOTSTRAP_CACHE_TTL_MS = 3 * 60 * 1000;
 
-async function buildBootstrapPayload() {
-  const [batch, rawSettings] = await Promise.all([
-    db.getAllRowsBatch(BOOTSTRAP_TABS),
+async function fetchLiveBootstrapRaw() {
+  const [batch, rawSettings, outreachRows] = await Promise.all([
+    db.getAllRowsBatch(LIVE_BOOTSTRAP_TABS),
     db.getSettings(),
+    db.getAllRows("OutreachLog"),
   ]);
-  const {
-    Products: products, Visits: visits, Clients: clients, Doctors: doctors, OutreachLog: outreachLog,
-    Orders: orders, Reps: reps, Offers: offers, Samples: samples, PunchLog: punchLog, StockMovement: stockMovement,
-    FollowUps: followUps, Competitors: competitors, CompetitorSightings: competitorSightings,
-    VisitComments: visitComments, CompetitorProducts: competitorProducts,
-  } = batch;
+  return { batch, rawSettings, outreachRows };
+}
+
+function shapeLiveBootstrap(raw, repName) {
+  const { Reps: reps, Offers: offers, Competitors: competitors, PunchLog: punchLog } = raw.batch;
+
+  // Only the current rep's own last punch is needed to gate the app / drive
+  // the punch button — never the whole team's history (that's now
+  // LocationsView's own on-demand fetch). Managers have no repName, so this
+  // is just null for them.
+  const myPunchRows = punchLog.filter((p) => p.repName === repName);
+  const myLastPunch = myPunchRows.length
+    ? parsePunch(myPunchRows.reduce((latest, p) => (new Date(p.time) > new Date(latest.time) ? p : latest)))
+    : null;
+
+  // Nothing in the app reads outreach history — only "how many contacted
+  // today" — so this stays a full read server-side (Sheets can't filter by
+  // date on its own) but ships as a single number, not the ever-growing log.
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayOutreachCount = raw.outreachRows.filter((o) => o.date === todayStr).length;
+
+  return {
+    repNames: reps.map((r) => r.name),
+    offers: offers.map(parseOffer),
+    competitors: competitors.sort((a, b) => a.name.localeCompare(b.name)),
+    settings: parseSettings(raw.rawSettings),
+    myLastPunch,
+    todayOutreachCount,
+  };
+}
+
+async function buildReferenceBootstrapPayload() {
+  const [batch, stockMovement] = await Promise.all([
+    db.getAllRowsBatch(REFERENCE_BOOTSTRAP_TABS),
+    db.getAllRows("StockMovement"),
+  ]);
+  const { Products: products, Clients: clients, Doctors: doctors } = batch;
   const movementIndex = buildMovementIndex(stockMovement);
   return {
     products: products.map((p) => ({ ...parseProduct(p), avgMonthlyMovement: avgMonthlyMovementFor(p.name, movementIndex) })),
-    visits: visits.map(parseVisit).sort((a, b) => new Date(b.time) - new Date(a.time)),
     clients,
     doctors,
-    outreachLog: outreachLog.sort((a, b) => new Date(b.date) - new Date(a.date)),
-    orders: orders.map(parseOrder).sort((a, b) => new Date(b.date) - new Date(a.date)),
-    punchLog: punchLog.map(parsePunch).sort((a, b) => new Date(b.time) - new Date(a.time)),
-    repNames: reps.map((r) => r.name),
-    offers: offers.map(parseOffer),
-    settings: parseSettings(rawSettings),
-    samples: samples.sort((a, b) => new Date(b.date) - new Date(a.date)),
-    followUps: followUps.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate)),
-    competitors: competitors.sort((a, b) => a.name.localeCompare(b.name)),
-    competitorSightings: competitorSightings.sort((a, b) => new Date(b.date) - new Date(a.date)),
-    visitComments: visitComments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
-    competitorProducts: competitorProducts.sort((a, b) => a.genericName.localeCompare(b.genericName)),
   };
 }
 
 app.get("/api/bootstrap", async (req, res) => {
   try {
     const wantsFresh = req.query.fresh === "true";
-    if (!wantsFresh && bootstrapCache && Date.now() - bootstrapCache.timestamp < BOOTSTRAP_CACHE_TTL_MS) {
-      return res.json(bootstrapCache.data);
+    let raw;
+    if (!wantsFresh && liveBootstrapRawCache && Date.now() - liveBootstrapRawCache.timestamp < LIVE_BOOTSTRAP_CACHE_TTL_MS) {
+      raw = liveBootstrapRawCache.data;
+    } else {
+      raw = await fetchLiveBootstrapRaw();
+      liveBootstrapRawCache = { data: raw, timestamp: Date.now() };
     }
-    const data = await buildBootstrapPayload();
-    bootstrapCache = { data, timestamp: Date.now() };
+    res.json(shapeLiveBootstrap(raw, req.repName));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/bootstrap/reference", async (req, res) => {
+  try {
+    const wantsFresh = req.query.fresh === "true";
+    if (!wantsFresh && referenceBootstrapCache && Date.now() - referenceBootstrapCache.timestamp < REFERENCE_BOOTSTRAP_CACHE_TTL_MS) {
+      return res.json(referenceBootstrapCache.data);
+    }
+    const data = await buildReferenceBootstrapPayload();
+    referenceBootstrapCache = { data, timestamp: Date.now() };
     res.json(data);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+function clampLimit(raw, def, max) {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return def;
+  return Math.min(n, max);
+}
+
+// Scoped, on-demand replacements for what used to ride along in the old
+// 16-tab bootstrap dump. Each of these still does a full Sheets read under
+// the hood (Sheets has no server-side query support), but the *response* is
+// a small, filtered slice — that's the actual fix, since these are fetched
+// only by the specific view/moment that needs them instead of shipped to
+// every open session on a fixed timer.
+
+app.get("/api/visits", async (req, res) => {
+  try {
+    const { client, repName, limit, all } = req.query;
+    const [rows, commentRows] = await Promise.all([
+      db.getAllRows("Visits"),
+      db.getAllRows("VisitComments"),
+    ]);
+    let visits = rows.map(parseVisit).sort((a, b) => new Date(b.time) - new Date(a.time));
+    if (client) {
+      const key = String(client).toLowerCase().trim();
+      visits = visits.filter((v) => v.client.toLowerCase().trim() === key);
+    }
+    if (repName) visits = visits.filter((v) => v.repName === repName);
+    const total = visits.length;
+    // Dashboard/Performance need the true complete history to compute
+    // per-account overdue status and monthly aggregates correctly — capping
+    // that would silently produce wrong numbers. Reserved for
+    // manager/supervisor views that fetch once on tab-open, not polled.
+    const wantsAll = all === "true" && (req.role === "manager" || req.isSupervisor);
+    if (!wantsAll) visits = visits.slice(0, clampLimit(limit, 20, 200));
+
+    const commentsByVisit = new Map();
+    commentRows.forEach((c) => {
+      const list = commentsByVisit.get(c.visitId) || [];
+      list.push({ id: c.id, authorName: c.authorName, text: c.text, createdAt: c.createdAt });
+      commentsByVisit.set(c.visitId, list);
+    });
+    const withComments = visits.map((v) => ({
+      ...v,
+      comments: (commentsByVisit.get(v.id) || []).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
+    }));
+    res.json({ visits: withComments, total });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Also the endpoint the new Order History view (see the tab === "orders"
+// switch) is built on — repName/client/product/from/to narrow it, page+limit
+// paginate it. Consumers that just want "the last N for X" (Check-In's
+// recent orders, OrderBuilder's other-recent-orders-for-this-product) omit
+// page and get page 1 of their requested limit, same result as before.
+app.get("/api/orders", async (req, res) => {
+  try {
+    const { repName, client, product, from, to, page, limit, all } = req.query;
+    const rows = await db.getAllRows("Orders");
+    let orders = rows.map(parseOrder).sort((a, b) => new Date(b.date) - new Date(a.date));
+    if (repName) orders = orders.filter((o) => o.repName === repName);
+    if (client) {
+      const key = String(client).toLowerCase().trim();
+      orders = orders.filter((o) => (o.clientName || "").toLowerCase().includes(key));
+    }
+    if (product) {
+      const key = String(product).toLowerCase().trim();
+      orders = orders.filter((o) => o.items.some((it) => (it.name || "").toLowerCase().includes(key)));
+    }
+    if (from) orders = orders.filter((o) => new Date(o.date) >= new Date(from));
+    if (to) orders = orders.filter((o) => new Date(o.date) <= new Date(`${to}T23:59:59`));
+
+    const total = orders.length;
+    // Same "give me the true complete set" escape hatch as /api/visits, for
+    // Dashboard/Performance's revenue-aggregation math.
+    if (all === "true" && (req.role === "manager" || req.isSupervisor)) {
+      return res.json({ orders, total, page: 1, limit: total });
+    }
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const pageSize = clampLimit(limit, 25, 100);
+    const start = (pageNum - 1) * pageSize;
+    res.json({ orders: orders.slice(start, start + pageSize), total, page: pageNum, limit: pageSize });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/samples", async (req, res) => {
+  try {
+    const { doctorName, visitId, limit } = req.query;
+    const rows = await db.getAllRows("Samples");
+    let samples = rows.sort((a, b) => new Date(b.date) - new Date(a.date));
+    if (doctorName) {
+      const key = String(doctorName).toLowerCase().trim();
+      samples = samples.filter((s) => s.doctorName.toLowerCase().trim() === key);
+    }
+    if (visitId) samples = samples.filter((s) => s.visitId === visitId);
+    res.json({ samples: samples.slice(0, clampLimit(limit, 50, 500)) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Manager/supervisor-only: the full team punch history LocationsView used
+// to get for free out of bootstrap. Fetched by that view itself now, not
+// polled. Not requireManager — supervisors get team-wide Locations access
+// too (see the visit-comments route above for the same rule).
+app.get("/api/punch-log", async (req, res) => {
+  try {
+    if (req.role !== "manager" && !(req.role === "rep" && req.isSupervisor)) {
+      return res.status(403).json({ error: "Managers and supervisors only." });
+    }
+    const { repName, limit } = req.query;
+    const rows = await db.getAllRows("PunchLog");
+    let log = rows.map(parsePunch).sort((a, b) => new Date(b.time) - new Date(a.time));
+    if (repName && repName !== "all") log = log.filter((p) => p.repName === repName);
+    res.json({ punchLog: log.slice(0, clampLimit(limit, 200, 1000)) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/outreach-log/today", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("OutreachLog");
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const entries = rows.filter((o) => o.date === todayStr);
+    res.json({ entries });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/competitor-sightings", async (req, res) => {
+  try {
+    const { client, visitId, limit } = req.query;
+    const rows = await db.getAllRows("CompetitorSightings");
+    let sightings = rows.sort((a, b) => new Date(b.date) - new Date(a.date));
+    if (client) {
+      const key = String(client).toLowerCase().trim();
+      sightings = sightings.filter((s) => (s.client || "").toLowerCase().trim() === key);
+    }
+    if (visitId) sightings = sightings.filter((s) => s.visitId === visitId);
+    res.json({ sightings: sightings.slice(0, clampLimit(limit, 200, 500)) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Server-side search replaces CompetitorsView's old full-array fetch +
+// client-side filter — the direct fix for the second unbounded/Excel-import-
+// grown list identified alongside Orders.
+app.get("/api/competitor-products", async (req, res) => {
+  try {
+    const { q, limit } = req.query;
+    const rows = await db.getAllRows("CompetitorProducts");
+    let products = rows.sort((a, b) => a.genericName.localeCompare(b.genericName));
+    if (q) {
+      const key = String(q).toLowerCase().trim();
+      products = products.filter((p) =>
+        (p.genericName || "").toLowerCase().includes(key) ||
+        (p.productName || "").toLowerCase().includes(key) ||
+        (p.competitorName || "").toLowerCase().includes(key)
+      );
+    }
+    res.json({ competitorProducts: products.slice(0, clampLimit(limit, 200, 500)), total: products.length });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -1548,9 +1782,23 @@ app.post("/api/clients/import-bulk", requireManager, async (req, res) => {
     const { toAdd } = req.body;
     const addList = Array.isArray(toAdd) ? toAdd : [];
 
-    const newClients = addList
-      .filter((c) => c.name)
-      .map((c) => ({
+    // Dedup authoritatively here, not just in the browser — the client's
+    // "existing pharmacies" copy is a snapshot that can lag behind (loaded
+    // once per session, not polled), and multiple managers can import
+    // overlapping files around the same time. Guards against both the
+    // already-in-the-sheet case and duplicates within this same submitted
+    // chunk.
+    const existing = await db.getAllRows("Clients");
+    const existingNames = new Set(existing.map((c) => c.name.toLowerCase().trim()));
+    const seenInRequest = new Set();
+
+    const newClients = [];
+    let skipped = 0;
+    addList.filter((c) => c.name).forEach((c) => {
+      const key = String(c.name).toLowerCase().trim();
+      if (existingNames.has(key) || seenInRequest.has(key)) { skipped++; return; }
+      seenInRequest.add(key);
+      newClients.push({
         id: `c${crypto.randomUUID()}`,
         name: String(c.name).trim(),
         phone: c.phone || "",
@@ -1560,11 +1808,12 @@ app.post("/api/clients/import-bulk", requireManager, async (req, res) => {
         registrationNumber: c.registrationNumber || "",
         address: c.address || "",
         nameAr: c.nameAr || "",
-      }));
+      });
+    });
 
     if (newClients.length > 0) await db.appendRows("Clients", newClients);
 
-    res.json({ ok: true, added: newClients.length });
+    res.json({ ok: true, added: newClients.length, skipped });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -1575,6 +1824,40 @@ app.delete("/api/clients/:id", async (req, res) => {
   try {
     await db.deleteRowById("Clients", req.params.id);
     res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ClientsView shows nothing until a rep searches, then needs last-visit
+// (for the overdue badge) and total collected revenue for each matched
+// pharmacy. Rather than N separate requests per visible row (or shipping
+// the whole Visits/Orders history to the client just to derive this),
+// the view sends the names it's currently showing and gets back one
+// small, computed map — a single full Visits+Orders scan server-side,
+// same cost as before, but the response is only as big as the search.
+app.post("/api/clients/visit-stats", async (req, res) => {
+  try {
+    const names = Array.isArray(req.body.names) ? req.body.names.map((n) => String(n).toLowerCase().trim()) : [];
+    if (names.length === 0) return res.json({ stats: {} });
+    const nameSet = new Set(names);
+    const [visitRows, orderRows] = await Promise.all([db.getAllRows("Visits"), db.getAllRows("Orders")]);
+    const stats = {};
+    names.forEach((n) => { stats[n] = { lastVisit: null, revenue: 0 }; });
+    visitRows.forEach((v) => {
+      const key = String(v.client || "").toLowerCase().trim();
+      if (!nameSet.has(key)) return;
+      if (!stats[key].lastVisit || new Date(v.time) > new Date(stats[key].lastVisit)) stats[key].lastVisit = v.time;
+    });
+    orderRows.forEach((o) => {
+      const key = String(o.clientName || "").toLowerCase().trim();
+      if (!nameSet.has(key)) return;
+      const total = Number(o.total) || 0;
+      const netTotal = o.netTotal !== "" && o.netTotal !== undefined ? Number(o.netTotal) : total;
+      stats[key].revenue += netTotal;
+    });
+    res.json({ stats });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -1612,9 +1895,19 @@ app.post("/api/doctors/import-bulk", requireManager, async (req, res) => {
     const { toAdd } = req.body;
     const addList = Array.isArray(toAdd) ? toAdd : [];
 
-    const newDoctors = addList
-      .filter((d) => d.name)
-      .map((d) => ({
+    // See the matching comment in /api/clients/import-bulk — dedup must be
+    // authoritative here, not just in the browser's (possibly stale) copy.
+    const existing = await db.getAllRows("Doctors");
+    const existingNames = new Set(existing.map((d) => d.name.toLowerCase().trim()));
+    const seenInRequest = new Set();
+
+    const newDoctors = [];
+    let skipped = 0;
+    addList.filter((d) => d.name).forEach((d) => {
+      const key = String(d.name).toLowerCase().trim();
+      if (existingNames.has(key) || seenInRequest.has(key)) { skipped++; return; }
+      seenInRequest.add(key);
+      newDoctors.push({
         id: `doc${crypto.randomUUID()}`,
         name: String(d.name).trim(),
         hospital: d.hospital || "",
@@ -1624,11 +1917,12 @@ app.post("/api/doctors/import-bulk", requireManager, async (req, res) => {
         tier: d.tier || "B",
         registrationNumber: d.registrationNumber || "",
         address: d.address || "",
-      }));
+      });
+    });
 
     if (newDoctors.length > 0) await db.appendRows("Doctors", newDoctors);
 
-    res.json({ ok: true, added: newDoctors.length });
+    res.json({ ok: true, added: newDoctors.length, skipped });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -1639,6 +1933,42 @@ app.delete("/api/doctors/:id", async (req, res) => {
   try {
     await db.deleteRowById("Doctors", req.params.id);
     res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Same idea as /api/clients/visit-stats: DoctorsView needs last-visit and
+// the "give next visit" sample badge per doctor currently on screen, in one
+// scan instead of one request per row.
+app.post("/api/doctors/visit-stats", async (req, res) => {
+  try {
+    const names = Array.isArray(req.body.names) ? req.body.names.map((n) => String(n).toLowerCase().trim()) : [];
+    if (names.length === 0) return res.json({ stats: {} });
+    const nameSet = new Set(names);
+    const [visitRows, sampleRows] = await Promise.all([db.getAllRows("Visits"), db.getAllRows("Samples")]);
+    const stats = {};
+    names.forEach((n) => { stats[n] = { lastVisit: null, pendingSamples: [] }; });
+    visitRows.forEach((v) => {
+      const key = String(v.client || "").toLowerCase().trim();
+      if (!nameSet.has(key)) return;
+      if (!stats[key].lastVisit || new Date(v.time) > new Date(stats[key].lastVisit)) stats[key].lastVisit = v.time;
+    });
+    const latestByDoctorProduct = new Map();
+    sampleRows.forEach((s) => {
+      const key = String(s.doctorName || "").toLowerCase().trim();
+      if (!nameSet.has(key)) return;
+      const mapKey = `${key}::${s.productId}`;
+      const existing = latestByDoctorProduct.get(mapKey);
+      if (!existing || new Date(s.date) > new Date(existing.date)) latestByDoctorProduct.set(mapKey, s);
+    });
+    latestByDoctorProduct.forEach((s) => {
+      if (s.status !== "next_visit") return;
+      const key = String(s.doctorName || "").toLowerCase().trim();
+      stats[key].pendingSamples.push({ productName: s.productName });
+    });
+    res.json({ stats });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

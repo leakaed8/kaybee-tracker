@@ -80,21 +80,19 @@ export default function App() {
   const [repName, setRepName] = useState("");
   const [isSupervisor, setIsSupervisor] = useState(false);
   const [tab, setTab] = useState("expiry");
+  // "Reference" tier — Products/Clients/Doctors — loaded once at login, then
+  // refreshed on a slow timer (see REFERENCE_POLL_INTERVAL_MS below), not
+  // the fast 30s poll. These are needed broadly for search/autocomplete but
+  // tolerate being a few minutes stale.
   const [products, setProducts] = useState([]);
-  const [visits, setVisits] = useState([]);
   const [clients, setClients] = useState([]);
   const [doctors, setDoctors] = useState([]);
-  const [outreachLog, setOutreachLog] = useState([]);
-  const [orders, setOrders] = useState([]);
+  // "Live" tier — small, polled every 30s as before.
   const [repNames, setRepNames] = useState([]);
   const [offers, setOffers] = useState([]);
-  const [samples, setSamples] = useState([]);
-  const [followUps, setFollowUps] = useState([]);
-  const [punchLog, setPunchLog] = useState([]);
   const [competitors, setCompetitors] = useState([]);
-  const [competitorSightings, setCompetitorSightings] = useState([]);
-  const [competitorProducts, setCompetitorProducts] = useState([]);
-  const [visitComments, setVisitComments] = useState([]);
+  const [myLastPunch, setMyLastPunch] = useState(null);
+  const [todayOutreachCount, setTodayOutreachCount] = useState(0);
   const [settings, setSettings] = useState({
     slowThreshold: 15, repPhone: "", dailyTarget: 3, monthlyVisitTarget: 60, monthlyRevenueTarget: 10000, templates: [],
   });
@@ -116,24 +114,14 @@ export default function App() {
     setAuthState("out");
   };
 
-  const refresh = useCallback(async (opts) => {
+  const refreshLive = useCallback(async (opts) => {
     try {
       const data = await api.bootstrap(opts);
-      setProducts(data.products);
-      setVisits(data.visits);
-      setClients(data.clients);
-      setDoctors(data.doctors || []);
-      setOutreachLog(data.outreachLog);
-      setOrders(data.orders || []);
       setRepNames(data.repNames || []);
       setOffers(data.offers || []);
-      setSamples(data.samples || []);
-      setFollowUps(data.followUps || []);
-      setPunchLog(data.punchLog || []);
       setCompetitors(data.competitors || []);
-      setCompetitorSightings(data.competitorSightings || []);
-      setCompetitorProducts(data.competitorProducts || []);
-      setVisitComments(data.visitComments || []);
+      setMyLastPunch(data.myLastPunch || null);
+      setTodayOutreachCount(data.todayOutreachCount || 0);
       if (!settingsDirtyRef.current) setSettings(data.settings);
       setLoadError("");
     } catch (e) {
@@ -143,18 +131,44 @@ export default function App() {
     }
   }, []);
 
+  // Products/Clients/Doctors are needed broadly for search/autocomplete but
+  // tolerate being a few minutes stale — fetched once at login, then on this
+  // much slower interval instead of the 30s live poll, so an Excel import
+  // into any of them doesn't get re-downloaded by every open session every
+  // 30 seconds.
+  const REFERENCE_POLL_INTERVAL_MS = 5 * 60 * 1000;
+  const refreshReference = useCallback(async (opts) => {
+    try {
+      const data = await api.bootstrapReference(opts);
+      setProducts(data.products || []);
+      setClients(data.clients || []);
+      setDoctors(data.doctors || []);
+    } catch (e) {
+      setLoadError(e.message);
+    }
+  }, []);
+
   useEffect(() => {
     if (authState !== "in") return;
-    refresh();
-    const id = setInterval(refresh, POLL_INTERVAL_MS);
+    refreshLive();
+    const id = setInterval(refreshLive, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [refresh, authState]);
+  }, [refreshLive, authState]);
 
-  const withSync = useCallback(async (fn) => {
+  useEffect(() => {
+    if (authState !== "in") return;
+    refreshReference();
+    const id = setInterval(refreshReference, REFERENCE_POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [refreshReference, authState]);
+
+  const withSync = useCallback(async (fn, { touchesReference = false } = {}) => {
     setSyncStatus("saving");
     try {
       const result = await fn();
-      await refresh({ fresh: true }); // skip the cache — the person who just wrote should see it immediately
+      // Skip the cache — the person who just wrote should see it immediately.
+      await refreshLive({ fresh: true });
+      if (touchesReference) await refreshReference({ fresh: true });
       setSyncStatus("saved");
       setTimeout(() => setSyncStatus(""), 1200);
       return result;
@@ -167,14 +181,14 @@ export default function App() {
       // lost is exactly this). Re-syncing even on failure means the app
       // catches up with reality on its own instead of getting stuck
       // showing a stale "not punched in" gate forever.
-      refresh({ fresh: true }).catch(() => {});
+      refreshLive({ fresh: true }).catch(() => {});
       // Rethrown so the many callers written with their own try/catch or
       // .catch() (Punch In's error message, a form's inline validation
       // error, etc.) actually fire — swallowing it here meant those were
       // silently dead code and a failed action could look like it worked.
       throw e;
     }
-  }, [refresh]);
+  }, [refreshLive, refreshReference]);
 
   // Retries visits that got queued locally because GPS wasn't available at
   // the time (see PENDING_VISITS_KEY) — tries again on a timer and whenever
@@ -207,13 +221,16 @@ export default function App() {
       }
       savePendingVisits(remaining);
       setPendingVisitCount(remaining.length);
-      if (remaining.length !== pending.length) refresh({ fresh: true });
+      if (remaining.length !== pending.length) {
+        refreshLive({ fresh: true });
+        refreshReference({ fresh: true }); // a synced visit can silently set assignedRep server-side
+      }
     };
     trySyncPendingVisits();
     const id = setInterval(trySyncPendingVisits, 30000);
     window.addEventListener("online", trySyncPendingVisits);
     return () => { clearInterval(id); window.removeEventListener("online", trySyncPendingVisits); };
-  }, [authState, role, refresh]);
+  }, [authState, role, refreshLive, refreshReference]);
 
   const updateSettingsField = useCallback((patch) => {
     settingsDirtyRef.current = true;
@@ -234,25 +251,23 @@ export default function App() {
   }, []);
 
   const todayStr = new Date().toISOString().slice(0, 10);
-  const contactedToday = outreachLog.filter((o) => o.date === todayStr).length;
-
-  const removeProduct = (id) => withSync(() => api.removeProduct(id));
-  const bulkImportProducts = (products) => withSync(() => api.importBulkProducts(products));
-  const addVisit = (visit) => withSync(() => api.addVisit(visit));
+  const removeProduct = (id) => withSync(() => api.removeProduct(id), { touchesReference: true });
+  const bulkImportProducts = (products) => withSync(() => api.importBulkProducts(products), { touchesReference: true });
+  const addVisit = (visit) => withSync(() => api.addVisit(visit), { touchesReference: true }); // can silently set a client's assignedRep server-side
   const removeVisit = (id) => withSync(() => api.removeVisit(id));
   const punch = (type, coords) => withSync(() => api.punch(type, coords));
   const confirmPunch = (id, correctedTime) => withSync(() => api.confirmPunch(id, correctedTime));
   const createOrder = (order) => withSync(() => api.createOrder(order));
-  const addClient = (client) => withSync(() => api.addClient(client));
-  const removeClient = (id) => withSync(() => api.removeClient(id));
-  const bulkImportClients = (payload) => withSync(() => api.importClientsBulk(payload));
-  const assignClientRep = (id, assignedRep) => withSync(() => api.assignClientRep(id, assignedRep));
-  const updateClientDiscount = (id, discountRate) => withSync(() => api.updateClientDiscount(id, discountRate));
-  const completeClientInfo = (id, patch) => withSync(() => api.completeClientInfo(id, patch));
-  const completeDoctorInfo = (id, patch) => withSync(() => api.completeDoctorInfo(id, patch));
-  const addDoctor = (doctor) => withSync(() => api.addDoctor(doctor));
-  const removeDoctor = (id) => withSync(() => api.removeDoctor(id));
-  const bulkImportDoctors = (payload) => withSync(() => api.importDoctorsBulk(payload));
+  const addClient = (client) => withSync(() => api.addClient(client), { touchesReference: true });
+  const removeClient = (id) => withSync(() => api.removeClient(id), { touchesReference: true });
+  const bulkImportClients = (payload) => withSync(() => api.importClientsBulk(payload), { touchesReference: true });
+  const assignClientRep = (id, assignedRep) => withSync(() => api.assignClientRep(id, assignedRep), { touchesReference: true });
+  const updateClientDiscount = (id, discountRate) => withSync(() => api.updateClientDiscount(id, discountRate), { touchesReference: true });
+  const completeClientInfo = (id, patch) => withSync(() => api.completeClientInfo(id, patch), { touchesReference: true });
+  const completeDoctorInfo = (id, patch) => withSync(() => api.completeDoctorInfo(id, patch), { touchesReference: true });
+  const addDoctor = (doctor) => withSync(() => api.addDoctor(doctor), { touchesReference: true });
+  const removeDoctor = (id) => withSync(() => api.removeDoctor(id), { touchesReference: true });
+  const bulkImportDoctors = (payload) => withSync(() => api.importDoctorsBulk(payload), { touchesReference: true });
   const logOutreach = (entry) => withSync(() => api.logOutreach(entry));
   const deleteOrder = (id) => withSync(() => api.deleteOrder(id));
   const requestDeleteOrder = (id) => withSync(() => api.requestDeleteOrder(id));
@@ -285,14 +300,17 @@ export default function App() {
     return <LoginView onSuccess={(r, rn, sup) => { setRole(r); setRepName(rn || ""); setIsSupervisor(!!sup); setAuthState("in"); }} />;
   }
 
-  const punchedInToday = punchLog.some(
-    (p) => p.repName === repName && p.type === "in" && new Date(p.time).toDateString() === new Date().toDateString()
-  );
+  // Both derived from myLastPunch (the current rep's own last punch row —
+  // see buildLiveBootstrapPayload server-side) rather than scanning a full
+  // team punch history: an unconfirmed auto-punch-out is, by construction,
+  // always that rep's chronologically last punch (PunchInGate blocks a new
+  // punch-in until it's confirmed), so "the single latest row" is enough.
+  const punchedInToday = myLastPunch?.type === "in" && new Date(myLastPunch.time).toDateString() === new Date().toDateString();
   // A punch-out the system auto-recorded because the rep never tapped it
   // themselves (see checkMissedPunchOuts server-side) — they have to confirm
   // or correct that time before punching in again, so it's not just silently
   // trusted.
-  const unconfirmedAutoPunch = punchLog.find((p) => p.repName === repName && p.type === "out" && p.auto && !p.confirmed);
+  const unconfirmedAutoPunch = myLastPunch?.type === "out" && myLastPunch.auto && !myLastPunch.confirmed ? myLastPunch : null;
   if (loaded && role === "rep" && (!punchedInToday || unconfirmedAutoPunch)) {
     return (
       <PunchInGate
@@ -384,13 +402,10 @@ export default function App() {
             )}
             {tab === "checkin" && role === "rep" && (
               <CheckInView
-                visits={visits}
                 clients={clients}
                 doctors={doctors}
                 products={products}
                 offers={offers}
-                orders={orders}
-                punchLog={punchLog}
                 repName={repName}
                 onAddVisit={addVisit}
                 onCreateOrder={createOrder}
@@ -399,15 +414,13 @@ export default function App() {
                 onQueueOffline={queueVisitOffline}
                 pendingVisitCount={pendingVisitCount}
                 competitors={competitors}
-                visitComments={visitComments}
+                myLastPunch={myLastPunch}
               />
             )}
             {tab === "stock" && <StockView products={sorted} />}
             {tab === "clients" && (
               <ClientsView
                 clients={clients}
-                visits={visits}
-                orders={orders}
                 role={role}
                 repName={repName}
                 repNames={repNames}
@@ -422,8 +435,6 @@ export default function App() {
             {tab === "doctors" && !isSupervisor && (
               <DoctorsView
                 doctors={doctors}
-                visits={visits}
-                samples={samples}
                 role={role}
                 onAdd={addDoctor}
                 onRemove={removeDoctor}
@@ -433,20 +444,18 @@ export default function App() {
             )}
             {tab === "knowledge" && <KnowledgeView />}
             {tab === "training" && !isSupervisor && <TrainingView />}
-            {tab === "route" && role === "rep" && !isSupervisor && <RouteView clients={clients} doctors={doctors} visits={visits} />}
-            {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} visits={visits} />}
+            {tab === "route" && role === "rep" && !isSupervisor && <RouteView clients={clients} doctors={doctors} />}
+            {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} />}
             {tab === "orders" && role === "manager" && (
-              <OrdersView orders={orders} onDelete={deleteOrder} onApproveDelete={approveDeleteOrder} onDenyDelete={denyDeleteOrder} />
+              <OrderHistoryView repNames={repNames} onDelete={deleteOrder} onApproveDelete={approveDeleteOrder} onDenyDelete={denyDeleteOrder} />
             )}
             {tab === "competitors" && (role === "manager" || role === "rep") && (
               <CompetitorsView
                 canEdit={role === "manager"}
                 competitors={competitors}
-                sightings={competitorSightings}
                 onAdd={addCompetitor}
                 onUpdate={updateCompetitor}
                 onRemove={removeCompetitor}
-                products={competitorProducts}
                 onAddProduct={addCompetitorProduct}
                 onUpdateProduct={updateCompetitorProduct}
                 onRemoveProduct={removeCompetitorProduct}
@@ -457,22 +466,15 @@ export default function App() {
               <LocationsView
                 role={role}
                 isSupervisor={isSupervisor}
-                visits={visits}
                 clients={clients}
                 doctors={doctors}
-                punchLog={punchLog}
                 repNames={repNames}
                 onRemoveVisit={removeVisit}
-                visitComments={visitComments}
                 onAddComment={addVisitComment}
               />
             )}
             {tab === "performance" && (role === "manager" || isSupervisor) && (
               <PerformanceView
-                visits={visits}
-                orders={orders}
-                samples={samples}
-                competitorSightings={competitorSightings}
                 clients={clients}
                 doctors={doctors}
                 repNames={repNames}
@@ -485,9 +487,8 @@ export default function App() {
             {tab === "outreach" && role === "manager" && (
               <OutreachView
                 dailyTarget={settings.dailyTarget}
-                contactedToday={contactedToday}
+                contactedToday={todayOutreachCount}
                 templates={settings.templates}
-                outreachLog={outreachLog}
                 todayStr={todayStr}
                 onLog={logOutreach}
               />
@@ -977,7 +978,7 @@ function Field({ label, children }) {
 const inputStyle = { width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #E5DFD3", fontSize: 13, background: "#FAF7F2" };
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ visits, clients, doctors, products, offers, orders, punchLog, repName, onAddVisit, onCreateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors, visitComments }) {
+function CheckInView({ clients, doctors, products, offers, repName, onAddVisit, onCreateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors, myLastPunch }) {
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
   const [entityType, setEntityType] = useState("pharmacy"); // pharmacy | doctor
@@ -1005,6 +1006,25 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
   const [competitorNotes, setCompetitorNotes] = useState("");
   const [listening, setListening] = useState(false);
   const recognitionRef = useRef(null);
+  // Own-scoped, on-demand replacements for what used to come out of the
+  // global visits/orders bootstrap arrays — fetched here, refetched after
+  // whatever action would change them, instead of held in App() state.
+  const [todayVisits, setTodayVisits] = useState([]);
+  const [recentOrders, setRecentOrders] = useState([]);
+
+  const loadTodayVisits = useCallback(() => {
+    api.getVisits({ repName, limit: 50 })
+      .then((data) => {
+        const todayStr = new Date().toDateString();
+        setTodayVisits((data.visits || []).filter((v) => new Date(v.time).toDateString() === todayStr));
+      })
+      .catch(() => {});
+  }, [repName]);
+  const loadRecentOrders = useCallback(() => {
+    api.getOrders({ repName, limit: 10 }).then((data) => setRecentOrders(data.orders || [])).catch(() => {});
+  }, [repName]);
+  useEffect(() => { loadTodayVisits(); }, [loadTodayVisits]);
+  useEffect(() => { loadRecentOrders(); }, [loadRecentOrders]);
 
   useEffect(() => {
     api.getMyExportSheet().then((data) => setExportSheetId(data.exportSheetId || "")).catch(() => {});
@@ -1068,12 +1088,15 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
   // The last couple of visits to whoever's just been picked — a memory
   // refresher right in the flow so a rep isn't walking in blind on what was
   // discussed or promised last time, without having to leave Check-In first.
-  const recentVisitsForEntity = matchedEntity
-    ? visits
-        .filter((v) => v.client.toLowerCase().trim() === matchedEntity.name.toLowerCase().trim())
-        .sort((a, b) => new Date(b.time) - new Date(a.time))
-        .slice(0, 3)
-    : [];
+  // Fetched on demand per matched entity instead of scanning a full visits
+  // history held in state — the server already sorts newest-first.
+  const [recentVisitsForEntity, setRecentVisitsForEntity] = useState([]);
+  useEffect(() => {
+    if (!matchedEntity) { setRecentVisitsForEntity([]); return; }
+    api.getVisits({ client: matchedEntity.name, limit: 3 })
+      .then((data) => setRecentVisitsForEntity(data.visits || []))
+      .catch(() => setRecentVisitsForEntity([]));
+  }, [matchedEntity?.name]);
 
   // Cross-checks the GPS just captured against the pharmacy/doctor's own
   // saved location, if it has one — this is how you'd know a rep's check-in
@@ -1103,8 +1126,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     setSampleMenuFor(null);
   };
 
-  const myPunches = punchLog.filter((p) => p.repName === repName).sort((a, b) => new Date(b.time) - new Date(a.time));
-  const lastPunch = myPunches[0] || null;
+  const lastPunch = myLastPunch;
   const isPunchedIn = lastPunch?.type === "in";
 
   const doPunch = (type) => {
@@ -1145,6 +1167,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
       setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
       setFollowUpStatus(null);
       setFollowUpError("");
+      loadTodayVisits();
       // Doctors don't buy stock, and sample-giving is already captured
       // per-item above (in "Items mentioned") — so they skip straight to
       // scheduling a follow-up. Pharmacies still go on to the order question
@@ -1226,8 +1249,6 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     checkin: { n: 1, title: "Log the visit" },
     followup: { n: 2, title: "Schedule a follow-up" },
   };
-
-  const todayVisits = visits.filter((v) => v.repName === repName && new Date(v.time).toDateString() === new Date().toDateString());
 
   return (
     <div>
@@ -1545,10 +1566,9 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
           visitId={lastVisit.id}
           products={products}
           offers={offers}
-          orders={orders}
           clients={clients}
           onCreateOrder={onCreateOrder}
-          onDone={() => setStep("sample")}
+          onDone={() => { loadRecentOrders(); setStep("sample"); }}
         />
       )}
 
@@ -1637,7 +1657,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
               </div>
             )}
             {v.coords && <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 4 }}><MapPin size={11} style={{ verticalAlign: -1 }} /> {v.coords.lat}, {v.coords.lng}</div>}
-            {(visitComments || []).filter((c) => c.visitId === v.id).map((c) => (
+            {(v.comments || []).map((c) => (
               <div key={c.id} style={{ fontSize: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "6px 10px", marginTop: 6 }}>
                 <strong>{c.authorName}</strong>: {c.text}
               </div>
@@ -1649,7 +1669,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
 
       <h3 style={{ fontSize: 14, fontWeight: 600, margin: "20px 0 10px", color: "#8A8272" }}>Your recent orders</h3>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {orders.filter((o) => o.repName === repName).slice(0, 10).map((o) => (
+        {recentOrders.map((o) => (
           <div key={o.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
             <div>
               <div style={{ fontWeight: 600, fontSize: 13.5 }}>{o.clientName}</div>
@@ -1661,13 +1681,13 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
             {o.status === "deletion_requested" ? (
               <span style={{ fontSize: 11.5, color: "#C17817" }}>Deletion requested — awaiting approval</span>
             ) : (
-              <button onClick={() => onRequestDeleteOrder(o.id)} style={{ fontSize: 11.5, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "6px 10px" }}>
+              <button onClick={() => onRequestDeleteOrder(o.id).then(loadRecentOrders)} style={{ fontSize: 11.5, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "6px 10px" }}>
                 Request deletion
               </button>
             )}
           </div>
         ))}
-        {orders.filter((o) => o.repName === repName).length === 0 && <EmptyState text="No orders yet." />}
+        {recentOrders.length === 0 && <EmptyState text="No orders yet." />}
       </div>
 
       <div style={{ marginTop: 20 }}>
@@ -1961,7 +1981,7 @@ function applyOfferToItems(rawItems, offers) {
   return { displayItems, appliedOffer: offer, avg, roundedAvg, freeItem: chosen, freeQty };
 }
 
-function OrderBuilder({ clientName, visitId, products, offers, orders, clients, onCreateOrder, onDone }) {
+function OrderBuilder({ clientName, visitId, products, offers, clients, onCreateOrder, onDone }) {
   const [productQuery, setProductQuery] = useState("");
   const [qty, setQty] = useState("");
   const [items, setItems] = useState([]);
@@ -2050,9 +2070,11 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
           continue;
         }
         const cappedQty = Math.max(0, it.availableQty);
-        const otherOrders = (orders || [])
+        // Fetched on demand instead of scanning a full orders history held
+        // in state — only needed the moment a stock cap actually triggers.
+        const otherOrdersData = await api.getOrders({ product: it.name, limit: 6 }).catch(() => ({ orders: [] }));
+        const otherOrders = (otherOrdersData.orders || [])
           .filter((o) => o.clientName !== clientName && (o.items || []).some((oi) => oi.productId === it.productId))
-          .sort((a, b) => new Date(b.date) - new Date(a.date))
           .slice(0, 5)
           .map((o) => ({
             clientName: o.clientName,
@@ -2237,18 +2259,63 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
   );
 }
 
-// ---------- Orders View (manager, order history) ----------
-function OrdersView({ orders, onDelete, onApproveDelete, onDenyDelete }) {
+// ---------- Order History View (manager) ----------
+// Built on the paginated GET /api/orders endpoint instead of a full-array
+// bootstrap dump — Orders only ever grows, so shipping the whole table to
+// every open session on a timer was exactly the pattern that made Excel
+// imports (and, over time, this table itself) slow the whole app down.
+const ORDER_HISTORY_PAGE_SIZE = 25;
+function OrderHistoryView({ repNames, onDelete, onApproveDelete, onDenyDelete }) {
   const [confirmIds, setConfirmIds] = useState(new Set());
+  const [repFilter, setRepFilter] = useState("");
+  const [clientFilter, setClientFilter] = useState("");
+  const [productFilter, setProductFilter] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [page, setPage] = useState(1);
+  const [result, setResult] = useState({ orders: [], total: 0 });
+  const [loading, setLoading] = useState(true);
+
+  const load = () => {
+    setLoading(true);
+    api.getOrders({
+      repName: repFilter, client: clientFilter, product: productFilter,
+      from: fromDate, to: toDate, page, limit: ORDER_HISTORY_PAGE_SIZE,
+    })
+      .then((data) => setResult(data))
+      .catch(() => setResult({ orders: [], total: 0 }))
+      .finally(() => setLoading(false));
+  };
+  useEffect(() => { load(); }, [repFilter, clientFilter, productFilter, fromDate, toDate, page]);
+  // Any filter change should jump back to page 1 — staying on page 4 of a
+  // now-much-smaller filtered result would just show an empty page.
+  useEffect(() => { setPage(1); }, [repFilter, clientFilter, productFilter, fromDate, toDate]);
+
   const askConfirm = (id) => setConfirmIds((prev) => new Set(prev).add(id));
   const cancelConfirm = (id) => setConfirmIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
-  const doDelete = (id) => { onDelete(id); cancelConfirm(id); };
+  const doDelete = (id) => { onDelete(id).then(load); cancelConfirm(id); };
+  const doApprove = (id) => onApproveDelete(id).then(load);
+  const doDeny = (id) => onDenyDelete(id).then(load);
+
+  const totalPages = Math.max(1, Math.ceil(result.total / ORDER_HISTORY_PAGE_SIZE));
 
   return (
     <div>
-      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Orders</h2>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Order History</h2>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8, marginBottom: 16 }}>
+        <select value={repFilter} onChange={(e) => setRepFilter(e.target.value)} style={inputStyle}>
+          <option value="">All reps</option>
+          {repNames.map((r) => <option key={r} value={r}>{r}</option>)}
+        </select>
+        <input value={clientFilter} onChange={(e) => setClientFilter(e.target.value)} placeholder="Pharmacy name…" style={inputStyle} />
+        <input value={productFilter} onChange={(e) => setProductFilter(e.target.value)} placeholder="Product name…" style={inputStyle} />
+        <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} style={inputStyle} />
+        <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} style={inputStyle} />
+      </div>
+
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {orders.map((o) => (
+        {result.orders.map((o) => (
           <div
             key={o.id}
             style={{
@@ -2271,8 +2338,8 @@ function OrdersView({ orders, onDelete, onApproveDelete, onDenyDelete }) {
               </button>
               {o.status === "deletion_requested" ? (
                 <>
-                  <button onClick={() => onApproveDelete(o.id)} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "7px 12px" }}>Approve delete</button>
-                  <button onClick={() => onDenyDelete(o.id)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "7px 12px" }}>Deny</button>
+                  <button onClick={() => doApprove(o.id)} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "7px 12px" }}>Approve delete</button>
+                  <button onClick={() => doDeny(o.id)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "7px 12px" }}>Deny</button>
                 </>
               ) : confirmIds.has(o.id) ? (
                 <>
@@ -2286,8 +2353,21 @@ function OrdersView({ orders, onDelete, onApproveDelete, onDenyDelete }) {
             </div>
           </div>
         ))}
-        {orders.length === 0 && <EmptyState text="No orders logged yet." />}
+        {!loading && result.orders.length === 0 && <EmptyState text="No orders found." />}
       </div>
+
+      {result.total > ORDER_HISTORY_PAGE_SIZE && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, fontSize: 12.5 }}>
+          <span style={{ color: "#8A8272" }}>
+            Showing {(page - 1) * ORDER_HISTORY_PAGE_SIZE + 1}–{Math.min(page * ORDER_HISTORY_PAGE_SIZE, result.total)} of {result.total.toLocaleString()}
+          </span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button disabled={page <= 1} onClick={() => setPage((p) => p - 1)} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5, opacity: page <= 1 ? 0.5 : 1 }}>Prev</button>
+            <span style={{ color: "#8A8272" }}>Page {page} of {totalPages}</span>
+            <button disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5, opacity: page >= totalPages ? 0.5 : 1 }}>Next</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2297,7 +2377,7 @@ function OrdersView({ orders, onDelete, onApproveDelete, onDenyDelete }) {
 // clean by only managers editing it — reps just pick from it), and a feed of
 // what reps actually saw in the field, logged from Check-In. Neither table
 // changes the other; this is where a manager reads what's been collected.
-function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onRemove, products, onAddProduct, onUpdateProduct, onRemoveProduct, onImportProducts }) {
+function CompetitorsView({ canEdit, competitors, onAdd, onUpdate, onRemove, onAddProduct, onUpdateProduct, onRemoveProduct, onImportProducts }) {
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ name: "", supplierName: "", supplierContact: "", offerDetails: "", notes: "" });
   const [saving, setSaving] = useState(false);
@@ -2316,6 +2396,23 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
   const [editingProductId, setEditingProductId] = useState(null);
   const [editProductForm, setEditProductForm] = useState({});
   const [confirmProductId, setConfirmProductId] = useState(null);
+  // Both self-fetched now instead of being shipped in full on every 30s
+  // bootstrap poll — products via server-side search (this is the tab that
+  // grows via Excel import), sightings as a small capped recent feed.
+  const [products, setProducts] = useState([]);
+  const [productsTotal, setProductsTotal] = useState(0);
+  const [sightings, setSightings] = useState([]);
+
+  const loadProducts = useCallback(() => {
+    api.getCompetitorProducts({ q: productSearch }).then((data) => {
+      setProducts(data.competitorProducts || []);
+      setProductsTotal(data.total || 0);
+    }).catch(() => { setProducts([]); setProductsTotal(0); });
+  }, [productSearch]);
+  useEffect(() => { loadProducts(); }, [loadProducts]);
+  useEffect(() => {
+    api.getCompetitorSightings({}).then((data) => setSightings(data.sightings || [])).catch(() => setSightings([]));
+  }, []);
 
   const submitAdd = async () => {
     if (!form.name.trim()) { setError("Competitor name is required."); return; }
@@ -2341,12 +2438,9 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
     setEditingId(null);
   };
 
-  const q = productSearch.trim().toLowerCase();
-  const filteredProducts = !q ? products : products.filter((p) =>
-    (p.genericName || "").toLowerCase().includes(q) ||
-    (p.productName || "").toLowerCase().includes(q) ||
-    (p.competitorName || "").toLowerCase().includes(q)
-  );
+  // Search now happens server-side (see loadProducts above) — products is
+  // already exactly what matches productSearch.
+  const filteredProducts = products;
 
   const submitAddProduct = async () => {
     if (!productForm.competitorName.trim() || !productForm.productName.trim()) {
@@ -2359,6 +2453,7 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
       await onAddProduct(productForm);
       setProductForm(emptyProductForm);
       setShowAddProduct(false);
+      loadProducts();
     } catch (e) {
       setProductError(e?.message || "Couldn't save.");
     } finally {
@@ -2373,6 +2468,7 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
   const saveEditProduct = async (id) => {
     await onUpdateProduct(id, editProductForm);
     setEditingProductId(null);
+    loadProducts();
   };
 
   return (
@@ -2502,7 +2598,7 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
       {canEdit && showImportProducts && (
         <CompetitorProductExcelImportSection
           competitors={competitors}
-          onImport={onImportProducts}
+          onImport={(products) => onImportProducts(products).then((r) => { loadProducts(); return r; })}
           onDone={() => setShowImportProducts(false)}
         />
       )}
@@ -2535,7 +2631,7 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
       </datalist>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {filteredProducts.map((p) => (
+        {filteredProducts.slice(0, LIST_DISPLAY_CAP).map((p) => (
           <div key={p.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
             {canEdit && editingProductId === p.id ? (
               <div>
@@ -2578,7 +2674,7 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
                     <button onClick={() => startEditProduct(p)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Edit</button>
                     {confirmProductId === p.id ? (
                       <>
-                        <button onClick={() => { onRemoveProduct(p.id); setConfirmProductId(null); }} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}>Yes</button>
+                        <button onClick={() => { onRemoveProduct(p.id).then(loadProducts); setConfirmProductId(null); }} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}>Yes</button>
                         <button onClick={() => setConfirmProductId(null)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Cancel</button>
                       </>
                     ) : (
@@ -2590,7 +2686,12 @@ function CompetitorsView({ canEdit, competitors, sightings, onAdd, onUpdate, onR
             )}
           </div>
         ))}
-        {filteredProducts.length === 0 && <EmptyState text={q ? "No matching products found." : "No competitor products added yet."} />}
+        {filteredProducts.length === 0 && <EmptyState text={productSearch.trim() ? "No matching products found." : "No competitor products added yet."} />}
+        {productsTotal > filteredProducts.length && (
+          <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 4 }}>
+            Showing {filteredProducts.length} of {productsTotal.toLocaleString()} — use search to narrow the list.
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2816,14 +2917,28 @@ function CompetitorProductExcelImportSection({ competitors, onImport, onDone }) 
 }
 
 // ---------- Locations View (manager, check-in GPS history + punch in/out) ----------
-function LocationsView({ role, isSupervisor, visits, clients, doctors, punchLog, repNames, onRemoveVisit, visitComments, onAddComment }) {
+function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemoveVisit, onAddComment }) {
   const [selectedRep, setSelectedRep] = useState("all");
   const [confirmId, setConfirmId] = useState(null);
   const [commentingId, setCommentingId] = useState(null);
   const [commentText, setCommentText] = useState("");
   const [commentSaving, setCommentSaving] = useState(false);
   const canComment = role === "manager" || isSupervisor;
-  const commentsFor = (visitId) => (visitComments || []).filter((c) => c.visitId === visitId);
+
+  // Both self-fetched here, scoped to the selected rep, instead of riding
+  // along in every 30s bootstrap poll for every open session — this view is
+  // manager/supervisor-only and opened rarely relative to how often a rep
+  // in the field polls. visits already carries embedded comments (see
+  // GET /api/visits), so no separate visitComments fetch is needed.
+  const [visits, setVisits] = useState([]);
+  const [punchLog, setPunchLog] = useState([]);
+  const loadEvents = useCallback(() => {
+    const repParam = selectedRep === "all" ? undefined : selectedRep;
+    api.getVisits({ repName: repParam, all: true }).then((data) => setVisits(data.visits || [])).catch(() => setVisits([]));
+    api.getPunchLog({ repName: selectedRep, limit: 500 }).then((data) => setPunchLog(data.punchLog || [])).catch(() => setPunchLog([]));
+  }, [selectedRep]);
+  useEffect(() => { loadEvents(); }, [loadEvents]);
+
   const submitComment = async (visitId) => {
     if (!commentText.trim()) return;
     setCommentSaving(true);
@@ -2831,6 +2946,7 @@ function LocationsView({ role, isSupervisor, visits, clients, doctors, punchLog,
       await onAddComment(visitId, commentText.trim());
       setCommentText("");
       setCommentingId(null);
+      loadEvents();
     } finally {
       setCommentSaving(false);
     }
@@ -2852,6 +2968,7 @@ function LocationsView({ role, isSupervisor, visits, clients, doctors, punchLog,
     return {
       kind: "visit", id: v.id, repName: v.repName, time: v.time, coords: v.coords || null, label: v.client,
       mismatchKm: mismatchKm !== null && mismatchKm > LOCATION_MISMATCH_KM ? mismatchKm : null,
+      comments: v.comments || [],
     };
   });
 
@@ -2860,12 +2977,11 @@ function LocationsView({ role, isSupervisor, visits, clients, doctors, punchLog,
     .map((p) => ({ kind: "punch", id: p.id, repName: p.repName, time: p.time, coords: p.coords, label: p.type === "in" ? "Punched in" : "Punched out", punchType: p.type }));
 
   const allEvents = [...visitEvents, ...punchEvents]
-    .filter((e) => selectedRep === "all" || e.repName === selectedRep)
     .sort((a, b) => new Date(b.time) - new Date(a.time));
 
   const shownEvents = allEvents.slice(0, LIST_DISPLAY_CAP);
 
-  const doDelete = (id) => { onRemoveVisit(id); setConfirmId(null); };
+  const doDelete = (id) => { onRemoveVisit(id).then(loadEvents); setConfirmId(null); };
 
   return (
     <div>
@@ -2936,9 +3052,9 @@ function LocationsView({ role, isSupervisor, visits, clients, doctors, punchLog,
               </div>
             </div>
 
-            {e.kind === "visit" && commentsFor(e.id).length > 0 && (
+            {e.kind === "visit" && e.comments.length > 0 && (
               <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3", display: "flex", flexDirection: "column", gap: 6 }}>
-                {commentsFor(e.id).map((c) => (
+                {e.comments.map((c) => (
                   <div key={c.id} style={{ fontSize: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "6px 10px" }}>
                     <strong>{c.authorName}</strong>: {c.text}
                   </div>
@@ -3081,14 +3197,21 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
     setProgress({ done: 0, total: newClients.length });
     try {
       let added = 0;
+      let serverSkipped = 0;
       for (let i = 0; i < newClients.length; i += IMPORT_CHUNK_SIZE) {
         const chunk = newClients.slice(i, i + IMPORT_CHUNK_SIZE);
         const data = await importChunkWithRetry(() => api.importClientsBulk({ toAdd: chunk }));
         added += data?.added ?? chunk.length;
+        serverSkipped += data?.skipped ?? 0;
         setProgress({ done: Math.min(i + IMPORT_CHUNK_SIZE, newClients.length), total: newClients.length });
       }
       await onImport({ toAdd: [] }); // one refresh now that every chunk is in, instead of one per chunk
-      setResult({ added, skipped: skippedCount });
+      // The server's dedup is authoritative (it checks against the live
+      // sheet, not this browser's possibly-stale snapshot) — report what it
+      // actually skipped, added to what this preview already knew to skip
+      // (duplicates within the file itself, which the server also skips but
+      // can't distinguish from "already in the sheet" in its own count).
+      setResult({ added, skipped: skippedCount + serverSkipped });
       setWorkbook(null);
       setHeaders([]);
       setRows([]);
@@ -3236,9 +3359,10 @@ const CLIENT_FILLABLE_FIELDS = [
   { key: "nameAr", label: "Name in Arabic" },
 ];
 
-function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onCompleteInfo }) {
+function ClientsView({ clients, role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onCompleteInfo }) {
   const [completingId, setCompletingId] = useState(null);
   const [historyId, setHistoryId] = useState(null);
+  const [historyRows, setHistoryRows] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [name, setName] = useState("");
@@ -3254,20 +3378,16 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
   const [coords, setCoords] = useState(null);
   const [locating, setLocating] = useState(false);
   const [locError, setLocError] = useState("");
+  const [statsByName, setStatsByName] = useState({});
 
-  const lastVisitFor = (clientName) => {
-    const matches = visits.filter((v) => v.client.toLowerCase().trim() === clientName.toLowerCase().trim());
-    if (matches.length === 0) return null;
-    return matches.reduce((latest, v) => (new Date(v.time) > new Date(latest.time) ? v : latest), matches[0]);
-  };
-
-  // The last few visits to this pharmacy, newest first — what a rep needs
-  // to refresh their memory before walking back in (what was discussed,
-  // any objection, what was left off) without digging through Performance.
-  const visitHistoryFor = (clientName) => visits
-    .filter((v) => v.client.toLowerCase().trim() === clientName.toLowerCase().trim())
-    .sort((a, b) => new Date(b.time) - new Date(a.time))
-    .slice(0, 5);
+  // The last few visits to this pharmacy, newest first — fetched only once
+  // its history panel is actually expanded, not held for every row.
+  useEffect(() => {
+    if (!historyId) { setHistoryRows([]); return; }
+    const c = clients.find((cl) => cl.id === historyId);
+    if (!c) return;
+    api.getVisits({ client: c.name, limit: 5 }).then((data) => setHistoryRows(data.visits || [])).catch(() => setHistoryRows([]));
+  }, [historyId]);
 
   // Same navigator.geolocation pattern used for Punch In / Check-In — a GPS
   // fix taken while standing at the pharmacy is more accurate than
@@ -3289,40 +3409,47 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
     setShowAdd(false);
   };
 
-  // What's actually been collected (post-discount), not the list-price
-  // total — a pharmacy's ordered value shouldn't look bigger than what it
-  // really paid.
-  const revenueFor = (clientName) => (orders || [])
-    .filter((o) => o.clientName.toLowerCase().trim() === clientName.toLowerCase().trim())
-    .reduce((sum, o) => sum + Number(o.netTotal ?? o.total ?? 0), 0);
-
-  // Filters raw clients by the search text FIRST, then only computes the
-  // expensive per-row stuff (last visit lookup, revenue, lead score) for
-  // whatever matched — computing all of that for every pharmacy on every
-  // keystroke (the old approach) meant a few thousand pharmacies times a
-  // few thousand visits/orders re-run on each character typed, which is
-  // exactly what made this search feel slow.
+  // Filters raw clients by the search text FIRST, then only fetches the
+  // expensive per-row stuff (last visit, revenue) for whatever matched, in
+  // one batched request — computing that for every pharmacy on every
+  // keystroke against a full in-memory visits/orders history (the old
+  // approach) is exactly what made this search feel slow, and holding that
+  // full history in the browser at all is exactly what this rework removes.
   const q = search.toLowerCase().trim();
-  const filteredRows = q
-    ? clients
-        .filter((c) =>
-          c.name.toLowerCase().includes(q) ||
-          (c.nameAr || "").includes(search.trim()) ||
-          (c.area || "").toLowerCase().includes(q) ||
-          (c.phone || "").toLowerCase().includes(q) ||
-          (c.registrationNumber || "").toLowerCase().includes(q)
-        )
-        .map((c) => {
-          const lv = lastVisitFor(c.name);
-          const days = lv ? daysSince(lv.time) : null;
-          const cadence = TIER_CADENCE[c.tier] || 30;
-          const overdue = days === null || days > cadence;
-          const revenue = revenueFor(c.name);
-          const leadScore = computeLeadScore({ tier: c.tier, days, cadence, revenue });
-          return { ...c, days, overdue, cadence, revenue, leadScore };
-        })
-        .sort((a, b) => b.leadScore - a.leadScore)
+  const nameMatches = q
+    ? clients.filter((c) =>
+        c.name.toLowerCase().includes(q) ||
+        (c.nameAr || "").includes(search.trim()) ||
+        (c.area || "").toLowerCase().includes(q) ||
+        (c.phone || "").toLowerCase().includes(q) ||
+        (c.registrationNumber || "").toLowerCase().includes(q)
+      )
     : [];
+  // Bounds the batch stats request even for a broad match (e.g. a whole
+  // area) — generous relative to the final render cap since this set gets
+  // sorted by leadScore before slicing down to LIST_DISPLAY_CAP.
+  const statsTargets = nameMatches.slice(0, LIST_DISPLAY_CAP * 2);
+  const statsKey = statsTargets.map((c) => c.name).join("|");
+
+  useEffect(() => {
+    if (statsTargets.length === 0) { setStatsByName({}); return; }
+    api.getClientVisitStats(statsTargets.map((c) => c.name))
+      .then((data) => setStatsByName(data.stats || {}))
+      .catch(() => setStatsByName({}));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statsKey]);
+
+  const filteredRows = statsTargets
+    .map((c) => {
+      const stat = statsByName[c.name.toLowerCase().trim()] || { lastVisit: null, revenue: 0 };
+      const days = stat.lastVisit ? daysSince(stat.lastVisit) : null;
+      const cadence = TIER_CADENCE[c.tier] || 30;
+      const overdue = days === null || days > cadence;
+      const revenue = stat.revenue || 0;
+      const leadScore = computeLeadScore({ tier: c.tier, days, cadence, revenue });
+      return { ...c, days, overdue, cadence, revenue, leadScore };
+    })
+    .sort((a, b) => b.leadScore - a.leadScore);
   const shownRows = filteredRows.slice(0, LIST_DISPLAY_CAP);
 
   const tierColor = { A: "#B33A3A", B: "#D9A441", C: "#6B7280" };
@@ -3504,7 +3631,7 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
             </div>
             {historyId === c.id && (
               <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-                {visitHistoryFor(c.name).map((v) => (
+                {historyRows.map((v) => (
                   <div key={v.id} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 10px", fontSize: 12 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", color: "#8A8272", fontSize: 11 }}>
                       <span>{v.repName || "unknown rep"}</span>
@@ -3519,7 +3646,7 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
                     {v.objectionTag && <div style={{ marginTop: 3, color: "#B33A3A" }}>{v.objectionTag}</div>}
                   </div>
                 ))}
-                {visitHistoryFor(c.name).length === 0 && <EmptyState text="No visits logged yet." />}
+                {historyRows.length === 0 && <EmptyState text="No visits logged yet." />}
               </div>
             )}
             {role === "rep" && completingId === c.id && (
@@ -3635,14 +3762,18 @@ function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
     setProgress({ done: 0, total: newDoctors.length });
     try {
       let added = 0;
+      let serverSkipped = 0;
       for (let i = 0; i < newDoctors.length; i += IMPORT_CHUNK_SIZE) {
         const chunk = newDoctors.slice(i, i + IMPORT_CHUNK_SIZE);
         const data = await importChunkWithRetry(() => api.importDoctorsBulk({ toAdd: chunk }));
         added += data?.added ?? chunk.length;
+        serverSkipped += data?.skipped ?? 0;
         setProgress({ done: Math.min(i + IMPORT_CHUNK_SIZE, newDoctors.length), total: newDoctors.length });
       }
       await onImport({ toAdd: [] }); // one refresh now that every chunk is in, instead of one per chunk
-      setResult({ added, skipped: skippedCount });
+      // Server dedup is authoritative (checks the live sheet) — report it
+      // alongside what this preview already caught as in-file duplicates.
+      setResult({ added, skipped: skippedCount + serverSkipped });
       setWorkbook(null);
       setHeaders([]);
       setRows([]);
@@ -3775,9 +3906,10 @@ const DOCTOR_FILLABLE_FIELDS = [
   { key: "registrationNumber", label: "Registration number" },
 ];
 
-function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkImport, onCompleteInfo }) {
+function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteInfo }) {
   const [completingId, setCompletingId] = useState(null);
   const [historyId, setHistoryId] = useState(null);
+  const [historyRows, setHistoryRows] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [name, setName] = useState("");
@@ -3792,17 +3924,14 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
   const [coords, setCoords] = useState(null);
   const [locating, setLocating] = useState(false);
   const [locError, setLocError] = useState("");
+  const [statsByName, setStatsByName] = useState({});
 
-  const lastVisitFor = (doctorName) => {
-    const matches = visits.filter((v) => v.client.toLowerCase().trim() === doctorName.toLowerCase().trim());
-    if (matches.length === 0) return null;
-    return matches.reduce((latest, v) => (new Date(v.time) > new Date(latest.time) ? v : latest), matches[0]);
-  };
-
-  const visitHistoryFor = (doctorName) => visits
-    .filter((v) => v.client.toLowerCase().trim() === doctorName.toLowerCase().trim())
-    .sort((a, b) => new Date(b.time) - new Date(a.time))
-    .slice(0, 5);
+  useEffect(() => {
+    if (!historyId) { setHistoryRows([]); return; }
+    const d = doctors.find((doc) => doc.id === historyId);
+    if (!d) return;
+    api.getVisits({ client: d.name, limit: 5 }).then((data) => setHistoryRows(data.visits || [])).catch(() => setHistoryRows([]));
+  }, [historyId]);
 
   // Same navigator.geolocation pattern used for Punch In / Check-In / Add
   // Pharmacy — a GPS fix taken on-site beats geocoding a typed address.
@@ -3816,16 +3945,6 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
     });
   };
 
-  const pendingSamplesFor = (doctorName) => {
-    const matches = (samples || []).filter((s) => s.doctorName.toLowerCase().trim() === doctorName.toLowerCase().trim());
-    const latestByProduct = new Map();
-    matches.forEach((s) => {
-      const existing = latestByProduct.get(s.productId);
-      if (!existing || new Date(s.date) > new Date(existing.date)) latestByProduct.set(s.productId, s);
-    });
-    return [...latestByProduct.values()].filter((s) => s.status === "next_visit");
-  };
-
   const addDoctor = () => {
     if (!name) return;
     onAdd({ name, hospital, area, phone, specialty, tier, address, registrationNumber, coordsLat: coords?.lat || "", coordsLng: coords?.lng || "" });
@@ -3834,31 +3953,42 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
   };
 
   // Same fix as Pharmacies: filter the raw list by the search text first,
-  // then only run the expensive per-doctor lookups (last visit, pending
-  // samples, lead score) on whatever matched, instead of on every doctor
-  // on every keystroke.
+  // then fetch the expensive per-doctor stuff (last visit, pending samples,
+  // lead score) for whatever matched in one batched request, instead of
+  // scanning a full visits/samples history held in the browser.
   const q = search.toLowerCase().trim();
-  const filteredRows = q
-    ? doctors
-        .filter((d) =>
-          d.name.toLowerCase().includes(q) ||
-          (d.specialty || "").toLowerCase().includes(q) ||
-          (d.area || "").toLowerCase().includes(q) ||
-          (d.hospital || "").toLowerCase().includes(q) ||
-          (d.phone || "").toLowerCase().includes(q) ||
-          (d.registrationNumber || "").toLowerCase().includes(q)
-        )
-        .map((d) => {
-          const lv = lastVisitFor(d.name);
-          const days = lv ? daysSince(lv.time) : null;
-          const cadence = TIER_CADENCE[d.tier] || 30;
-          const overdue = days === null || days > cadence;
-          const pendingSamples = pendingSamplesFor(d.name);
-          const leadScore = computeLeadScore({ tier: d.tier, days, cadence, engagement: pendingSamples.length });
-          return { ...d, days, overdue, cadence, pendingSamples, leadScore };
-        })
-        .sort((a, b) => b.leadScore - a.leadScore)
+  const nameMatches = q
+    ? doctors.filter((d) =>
+        d.name.toLowerCase().includes(q) ||
+        (d.specialty || "").toLowerCase().includes(q) ||
+        (d.area || "").toLowerCase().includes(q) ||
+        (d.hospital || "").toLowerCase().includes(q) ||
+        (d.phone || "").toLowerCase().includes(q) ||
+        (d.registrationNumber || "").toLowerCase().includes(q)
+      )
     : [];
+  const statsTargets = nameMatches.slice(0, LIST_DISPLAY_CAP * 2);
+  const statsKey = statsTargets.map((d) => d.name).join("|");
+
+  useEffect(() => {
+    if (statsTargets.length === 0) { setStatsByName({}); return; }
+    api.getDoctorVisitStats(statsTargets.map((d) => d.name))
+      .then((data) => setStatsByName(data.stats || {}))
+      .catch(() => setStatsByName({}));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statsKey]);
+
+  const filteredRows = statsTargets
+    .map((d) => {
+      const stat = statsByName[d.name.toLowerCase().trim()] || { lastVisit: null, pendingSamples: [] };
+      const days = stat.lastVisit ? daysSince(stat.lastVisit) : null;
+      const cadence = TIER_CADENCE[d.tier] || 30;
+      const overdue = days === null || days > cadence;
+      const pendingSamples = stat.pendingSamples || [];
+      const leadScore = computeLeadScore({ tier: d.tier, days, cadence, engagement: pendingSamples.length });
+      return { ...d, days, overdue, cadence, pendingSamples, leadScore };
+    })
+    .sort((a, b) => b.leadScore - a.leadScore);
   const shownRows = filteredRows.slice(0, LIST_DISPLAY_CAP);
   const tierColor = { A: "#B33A3A", B: "#D9A441", C: "#6B7280" };
   const scoreColor = (s) => (s >= 65 ? "#B33A3A" : s >= 40 ? "#C17817" : "#6B7280");
@@ -3993,7 +4123,7 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
             </div>
             {historyId === d.id && (
               <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-                {visitHistoryFor(d.name).map((v) => (
+                {historyRows.map((v) => (
                   <div key={v.id} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 10px", fontSize: 12 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", color: "#8A8272", fontSize: 11 }}>
                       <span>{v.repName || "unknown rep"}</span>
@@ -4008,7 +4138,7 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
                     {v.objectionTag && <div style={{ marginTop: 3, color: "#B33A3A" }}>{v.objectionTag}</div>}
                   </div>
                 ))}
-                {visitHistoryFor(d.name).length === 0 && <EmptyState text="No visits logged yet." />}
+                {historyRows.length === 0 && <EmptyState text="No visits logged yet." />}
               </div>
             )}
             {role === "rep" && completingId === d.id && (
@@ -4500,7 +4630,7 @@ function TrainingView() {
 }
 
 // ---------- Route View (simple nearest-neighbor route ordering) ----------
-function RouteView({ clients, doctors, visits }) {
+function RouteView({ clients, doctors }) {
   const [entityType, setEntityType] = useState("pharmacy"); // pharmacy | doctor
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState([]);
@@ -4508,6 +4638,7 @@ function RouteView({ clients, doctors, visits }) {
   const [myLoc, setMyLoc] = useState(null);
   const [locating, setLocating] = useState(false);
   const [ordered, setOrdered] = useState(null);
+  const [optimizing, setOptimizing] = useState(false);
 
   const entities = entityType === "pharmacy" ? clients : doctors;
   const filteredEntities = entities.filter((e) =>
@@ -4519,13 +4650,14 @@ function RouteView({ clients, doctors, visits }) {
 
   // Prefers the pharmacy/doctor's own saved location (GPS capture or
   // geocoded address) — falls back to wherever the last visit happened to
-  // be logged from, for entries added before that existed.
-  const coordsFor = (entity) => {
+  // be logged from, for entries added before that existed. Fetched on
+  // demand for just the handful of stops actually picked for today's
+  // route, instead of scanning a full visits history held in state.
+  const coordsFor = async (entity) => {
     if (entity.coordsLat && entity.coordsLng) return { lat: entity.coordsLat, lng: entity.coordsLng };
-    const matches = visits.filter((v) => v.client.toLowerCase().trim() === entity.name.toLowerCase().trim() && v.coords);
-    if (matches.length === 0) return null;
-    const latest = matches.reduce((a, b) => (new Date(b.time) > new Date(a.time) ? b : a), matches[0]);
-    return latest.coords;
+    const data = await api.getVisits({ client: entity.name, limit: 5 }).catch(() => ({ visits: [] }));
+    const latestWithCoords = (data.visits || []).find((v) => v.coords);
+    return latestWithCoords ? latestWithCoords.coords : null;
   };
 
   const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -4538,11 +4670,14 @@ function RouteView({ clients, doctors, visits }) {
     });
   };
 
-  const optimize = () => {
-    const stops = selected.map((id) => entities.find((c) => c.id === id)).filter(Boolean).map((c) => {
-      const coords = coordsFor(c);
+  const optimize = async () => {
+    setOptimizing(true);
+    const selectedEntities = selected.map((id) => entities.find((c) => c.id === id)).filter(Boolean);
+    const stops = await Promise.all(selectedEntities.map(async (c) => {
+      const coords = await coordsFor(c);
       return { ...c, coords: coords ? { lat: parseFloat(coords.lat), lng: parseFloat(coords.lng) } : null };
-    });
+    }));
+    setOptimizing(false);
     const withCoords = stops.filter((s) => s.coords);
     const withoutCoords = stops.filter((s) => !s.coords);
 
@@ -4646,11 +4781,11 @@ function RouteView({ clients, doctors, visits }) {
         </div>
       )}
 
-      <button onClick={optimize} disabled={selected.length === 0} style={{
+      <button onClick={optimize} disabled={selected.length === 0 || optimizing} style={{
         padding: "9px 18px", borderRadius: 8, border: "none",
         background: selected.length ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500, marginBottom: 20,
       }}>
-        Optimize order ({selected.length} selected)
+        {optimizing ? "Optimizing…" : `Optimize order (${selected.length} selected)`}
       </button>
 
       {ordered && (
@@ -4690,11 +4825,23 @@ function RouteView({ clients, doctors, visits }) {
   );
 }
 
-function DashboardView({ zoned, visits }) {
+function DashboardView({ zoned }) {
   const urgent = zoned.filter((p) => p.zone.key === "red");
   const slow = zoned.filter((p) => p.slowMover);
   const watch = zoned.filter((p) => p.zone.key === "yellow");
   const atRisk = zoned.filter((p) => p.atRisk);
+
+  // Fetched once when this tab is opened (manager-only, not polled) instead
+  // of the whole visits history riding along in every 30s bootstrap poll —
+  // the recent-8 list plus a true total count, not the full table.
+  const [recentVisits, setRecentVisits] = useState([]);
+  const [totalVisits, setTotalVisits] = useState(0);
+  useEffect(() => {
+    api.getVisits({ limit: 8 }).then((data) => {
+      setRecentVisits(data.visits || []);
+      setTotalVisits(data.total || 0);
+    }).catch(() => {});
+  }, []);
 
   return (
     <div>
@@ -4705,12 +4852,12 @@ function DashboardView({ zoned, visits }) {
         <StatCard label="Plan-ahead window" value={watch.length} color="#D9A441" icon={<Clock size={16} />} />
         <StatCard label="At risk of not selling through" value={atRisk.length} color="#C17817" icon={<AlertTriangle size={16} />} />
         <StatCard label="Slow movers" value={slow.length} color="#6B7280" icon={<TrendingDown size={16} />} />
-        <StatCard label="Visits logged" value={visits.length} color="#4C7A5E" icon={<MapPin size={16} />} />
+        <StatCard label="Visits logged" value={totalVisits} color="#4C7A5E" icon={<MapPin size={16} />} />
       </div>
 
       <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 10px", color: "#8A8272" }}>Recent rep visits</h3>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {visits.slice(0, 8).map((v) => (
+        {recentVisits.map((v) => (
           <div key={v.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div>
               <div style={{ fontWeight: 600, fontSize: 13.5 }}>{v.client}</div>
@@ -4721,7 +4868,7 @@ function DashboardView({ zoned, visits }) {
             </span>
           </div>
         ))}
-        {visits.length === 0 && <EmptyState text="No visits logged by reps yet." />}
+        {recentVisits.length === 0 && <EmptyState text="No visits logged by reps yet." />}
       </div>
     </div>
   );
@@ -4843,11 +4990,30 @@ function RepPerformanceCard({ title, visits, monthlyVisitTarget, orders = [], mo
 // discussed, what they noted, and what came out of it (order/offers,
 // samples, competitor intel) — the things the aggregate stats above don't
 // show.
-function RepActivityToday({ visits, orders, samples, competitorSightings, repNames }) {
+function RepActivityToday({ repNames }) {
   const [selectedRep, setSelectedRep] = useState("");
-  const todayVisits = (selectedRep ? visits.filter((v) => v.repName === selectedRep) : [])
-    .filter((v) => new Date(v.time).toDateString() === new Date().toDateString())
-    .sort((a, b) => new Date(b.time) - new Date(a.time));
+  // Deliberately its own small, per-rep, per-day fetch rather than piggy-
+  // backing on PerformanceView's full-history one — one rep's one day is
+  // always small, however big the total visits/orders/samples tables get.
+  const [todayVisits, setTodayVisits] = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [samples, setSamples] = useState([]);
+  const [competitorSightings, setCompetitorSightings] = useState([]);
+
+  useEffect(() => {
+    if (!selectedRep) { setTodayVisits([]); setOrders([]); setSamples([]); setCompetitorSightings([]); return; }
+    api.getVisits({ repName: selectedRep, limit: 50 }).then((data) => {
+      const todayStr = new Date().toDateString();
+      const today = (data.visits || []).filter((v) => new Date(v.time).toDateString() === todayStr);
+      setTodayVisits(today);
+      if (today.length === 0) { setOrders([]); setSamples([]); setCompetitorSightings([]); return; }
+      api.getOrders({ repName: selectedRep, limit: 100 }).then((d) => setOrders(d.orders || [])).catch(() => setOrders([]));
+      Promise.all(today.map((v) => api.getSamples({ visitId: v.id }).catch(() => ({ samples: [] }))))
+        .then((results) => setSamples(results.flatMap((r) => r.samples || [])));
+      Promise.all(today.map((v) => api.getCompetitorSightings({ visitId: v.id, limit: 5 }).catch(() => ({ sightings: [] }))))
+        .then((results) => setCompetitorSightings(results.flatMap((r) => r.sightings || [])));
+    }).catch(() => setTodayVisits([]));
+  }, [selectedRep]);
 
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
@@ -4920,9 +5086,19 @@ function RepActivityToday({ visits, orders, samples, competitorSightings, repNam
   );
 }
 
-function PerformanceView({ visits, orders, samples, competitorSightings, clients, doctors, repNames, monthlyVisitTarget, setMonthlyVisitTarget, monthlyRevenueTarget, setMonthlyRevenueTarget }) {
+function PerformanceView({ clients, doctors, repNames, monthlyVisitTarget, setMonthlyVisitTarget, monthlyRevenueTarget, setMonthlyRevenueTarget }) {
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  // Fetched once when this tab is opened (manager/supervisor-only, not
+  // polled) instead of the whole visits/orders history riding along in
+  // every 30s bootstrap poll for every rep in the field.
+  const [visits, setVisits] = useState([]);
+  const [orders, setOrders] = useState([]);
+  useEffect(() => {
+    api.getVisits({ all: true }).then((data) => setVisits(data.visits || [])).catch(() => {});
+    api.getOrders({ all: true }).then((data) => setOrders(data.orders || [])).catch(() => {});
+  }, []);
 
   const accountsWithStatus = accountStatusList(clients, doctors, visits);
   const totalOverdue = accountsWithStatus.filter((a) => a.overdue).length;
@@ -5017,7 +5193,7 @@ function PerformanceView({ visits, orders, samples, competitorSightings, clients
         </div>
       )}
 
-      <RepActivityToday visits={visits} orders={orders} samples={samples} competitorSightings={competitorSightings} repNames={repNames} />
+      <RepActivityToday repNames={repNames} />
 
       <RepPerformanceCard title="All reps combined" visits={visits} monthlyVisitTarget={monthlyVisitTarget}
         orders={orders} monthlyRevenueTarget={revenueTargetTotal} clients={clients} />
@@ -5213,11 +5389,18 @@ function BroadcastView({ zoned, clients }) {
 }
 
 // ---------- Outreach View ----------
-function OutreachView({ dailyTarget, contactedToday, templates, outreachLog, todayStr, onLog }) {
+function OutreachView({ dailyTarget, contactedToday, templates, todayStr, onLog }) {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [templateIdx, setTemplateIdx] = useState(0);
   const [copied, setCopied] = useState(false);
+  // The full outreach log grows forever and nothing else in the app reads
+  // past "today" — so this view owns its own scoped fetch instead of
+  // holding the whole history in App() state.
+  const [todayEntries, setTodayEntries] = useState([]);
+
+  const loadToday = () => api.getOutreachLogToday().then((data) => setTodayEntries(data.entries || [])).catch(() => {});
+  useEffect(() => { loadToday(); }, []);
 
   const rawTemplate = templates[templateIdx] || templates[0] || "";
   const message = rawTemplate.replace(/\{name\}/g, name || "[pharmacy name]");
@@ -5232,10 +5415,11 @@ function OutreachView({ dailyTarget, contactedToday, templates, outreachLog, tod
 
   const nextTemplate = () => setTemplateIdx((templateIdx + 1) % Math.max(templates.length, 1));
 
-  const logContact = () => {
-    onLog({ name: name || "Unnamed", date: todayStr, templateIndex: templateIdx });
+  const logContact = async () => {
+    await onLog({ name: name || "Unnamed", date: todayStr, templateIndex: templateIdx });
     setName(""); setPhone("");
     nextTemplate();
+    loadToday();
   };
 
   return (
@@ -5292,7 +5476,7 @@ function OutreachView({ dailyTarget, contactedToday, templates, outreachLog, tod
 
       <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 10px", color: "#8A8272" }}>Contacted today</h3>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {outreachLog.filter((o) => o.date === todayStr).map((o) => (
+        {todayEntries.map((o) => (
           <div key={o.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>
             {o.name}
           </div>
