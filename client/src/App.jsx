@@ -2029,20 +2029,72 @@ function NextVisitSampleStep({ clientName, products, suggestedItems, saving, err
 // stock actually gets offered to pharmacies first.
 const batchLabel = (p) => `${p.name} — exp ${fmtDate(p.expiry)} (${p.qty} in stock)`;
 
+// Given exactly what the rep entered (never mutated for offers), works out
+// which single offer — if any — the order qualifies for, and automatically
+// carves its free unit(s) out of whichever already-ordered line is closest
+// to the rounded-down average price. Pure/derived, so it's always correct
+// no matter what gets added or removed afterward — nothing to keep in sync.
+function applyOfferToItems(rawItems, offers) {
+  const totalQty = rawItems.reduce((sum, it) => sum + it.qty, 0);
+  if (totalQty === 0) return { displayItems: rawItems, appliedOffer: null, avg: 0, roundedAvg: 0 };
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const activeOffers = offers.filter((o) => o.active && (!o.expiresAt || o.expiresAt >= todayStr));
+  // The rep enters every physical unit (buyQty + getQty, e.g. all 8 for a
+  // 7+1 deal) — the free unit comes out of that set, never tacked on extra.
+  // If more than one offer's threshold is met at once, the biggest wins.
+  const qualifying = activeOffers
+    .filter((o) => totalQty >= o.buyQty + o.getQty)
+    .sort((a, b) => (b.buyQty + b.getQty) - (a.buyQty + a.getQty));
+  const offer = qualifying[0];
+  if (!offer) return { displayItems: rawItems, appliedOffer: null, avg: 0, roundedAvg: 0 };
+
+  const totalValue = rawItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
+  const avg = totalValue / totalQty;
+  const roundedAvg = Math.floor(avg);
+
+  const priced = rawItems.filter((it) => it.unitPrice > 0);
+  if (priced.length === 0) return { displayItems: rawItems, appliedOffer: null, avg, roundedAvg };
+
+  // Closest to the rounded-down average by plain distance — not restricted
+  // to prices at or below it. A tie breaks toward the lower price, the more
+  // conservative choice.
+  const chosen = priced.reduce((best, it) => {
+    const d = Math.abs(it.unitPrice - roundedAvg);
+    const bd = Math.abs(best.unitPrice - roundedAvg);
+    if (d < bd) return it;
+    if (d === bd && it.unitPrice < best.unitPrice) return it;
+    return best;
+  }, priced[0]);
+
+  const freeQty = Math.min(offer.getQty, chosen.qty);
+  const remainingQty = chosen.qty - freeQty;
+  const displayItems = rawItems
+    .map((it) => (it === chosen ? { ...it, qty: remainingQty } : it))
+    .filter((it) => it.qty > 0);
+  displayItems.push({
+    ...chosen,
+    qty: freeQty,
+    unitPrice: 0,
+    originalPrice: chosen.unitPrice,
+    isFree: true,
+    viaOfferId: offer.id,
+  });
+
+  return { displayItems, appliedOffer: offer, avg, roundedAvg, freeItem: chosen, freeQty };
+}
+
 function OrderBuilder({ clientName, visitId, products, offers, orders, clients, onCreateOrder, onDone }) {
   const [productQuery, setProductQuery] = useState("");
   const [qty, setQty] = useState("");
   const [items, setItems] = useState([]);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const [appliedOfferIds, setAppliedOfferIds] = useState(new Set());
-  const [applyingOfferId, setApplyingOfferId] = useState(null);
-  const [freeProductQuery, setFreeProductQuery] = useState("");
-  // Picked before adding items, so the rep knows the target ("4 of 7 items
-  // added") instead of an offer just silently appearing once they happen to
-  // cross the threshold. Purely a guide — items don't have to match any one
-  // offer, so hitting a different offer's threshold still works below.
+  // Picked before adding items, so the rep knows the target ("4 of 8 items
+  // added") — purely a preview. It doesn't gate anything: whichever offer's
+  // threshold is actually met applies automatically regardless of this pick.
   const [targetOfferId, setTargetOfferId] = useState("");
+  const nextKeyRef = useRef(0);
 
   // Pre-filled from the pharmacy's own negotiated rate, but editable per
   // order — discounts aren't uniform across pharmacies, and even a given
@@ -2066,147 +2118,47 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
     const q = Number(qty);
     if (!q || q <= 0) { setError("Enter a quantity greater than 0."); return; }
 
-    const newItem = {
-      productId: matchedProduct.id,
-      name: matchedProduct.name,
-      qty: q,
-      unitPrice: matchedProduct.price || 0,
-      availableQty: matchedProduct.qty,
-      expiry: matchedProduct.expiry,
-      isFree: false,
-    };
-
-    // Offers share the same running total (regularQty), so crossing into a
-    // bigger offer's threshold means a smaller one already applied is now
-    // superseded, not stacked on top of — its free item comes back out
-    // automatically instead of leaving both on the order.
-    const newRegularQty = regularQty + q;
-    const supersededOfferIds = [...appliedOfferIds].filter((id) => {
-      const applied = offers.find((o) => o.id === id);
-      return applied && activeOffers.some((o) => o.id !== id && o.buyQty > applied.buyQty && newRegularQty >= o.buyQty);
-    });
-
     setItems((prev) => {
-      const withNewItem = [...prev, newItem];
-      return supersededOfferIds.length
-        ? withNewItem.filter((it) => !it.isFree || !supersededOfferIds.includes(it.viaOfferId))
-        : withNewItem;
+      // Merge into an existing line for the same batch instead of adding a
+      // duplicate row — otherwise 2 units of the same batch entered as two
+      // separate clicks would sit in two different lines of qty 1 each,
+      // and the automatic offer engine could only ever carve a free unit
+      // out of one line at a time, short-changing what was actually ordered.
+      const existingIdx = prev.findIndex((it) => it.productId === matchedProduct.id);
+      if (existingIdx >= 0) {
+        return prev.map((it, i) => (i === existingIdx ? { ...it, qty: it.qty + q } : it));
+      }
+      return [...prev, {
+        key: nextKeyRef.current++,
+        productId: matchedProduct.id,
+        name: matchedProduct.name,
+        qty: q,
+        unitPrice: matchedProduct.price || 0,
+        availableQty: matchedProduct.qty,
+        expiry: matchedProduct.expiry,
+        isFree: false,
+      }];
     });
-    if (supersededOfferIds.length) {
-      setAppliedOfferIds((prev) => {
-        const next = new Set(prev);
-        supersededOfferIds.forEach((id) => next.delete(id));
-        return next;
-      });
-      if (supersededOfferIds.includes(targetOfferId)) setTargetOfferId("");
-    }
-
     setProductQuery("");
     setQty("");
   };
 
-  const removeItem = (idx) => {
-    setItems((prev) => {
-      const removed = prev[idx];
-      if (removed?.isFree && removed.viaOfferId) {
-        setAppliedOfferIds((ids) => { const next = new Set(ids); next.delete(removed.viaOfferId); return next; });
-      }
-      return prev.filter((_, i) => i !== idx);
-    });
-  };
+  const removeItem = (key) => setItems((prev) => prev.filter((it) => it.key !== key));
 
-  const regularItems = items.filter((it) => !it.isFree);
-  const regularQty = regularItems.reduce((sum, it) => sum + it.qty, 0);
-  // The average of one unit's price from each distinct line on the order —
-  // not weighted by how many units of each were bought, so a big quantity
-  // of one cheap item doesn't drag down what a "typical" free item should
-  // cost. Mirrors doing it by hand: line up one of each item and average those.
-  const weightedAvgPrice = regularItems.length > 0
-    ? regularItems.reduce((sum, it) => sum + it.unitPrice, 0) / regularItems.length
-    : 0;
-  const total = items.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
-  const netTotal = total * (1 - (Number(discountRate) || 0) / 100);
-
+  const regularQty = items.reduce((sum, it) => sum + it.qty, 0);
   const todayStr = new Date().toISOString().slice(0, 10);
   const activeOffers = offers.filter((o) => o.active && (!o.expiresAt || o.expiresAt >= todayStr));
-  // If the rep picked a target offer up front, only that one counts toward
-  // eligibility (a cleaner "N of buyQty added" story than surfacing every
-  // offer whose threshold happens to be crossed). No pre-pick falls back to
-  // the old behavior — whichever offers the items on the table now qualify for.
-  const eligibleOffers = (targetOfferId ? activeOffers.filter((o) => o.id === targetOfferId) : activeOffers)
-    .filter((o) => regularQty >= o.buyQty && !appliedOfferIds.has(o.id));
-  const eligibleFreeProducts = products.filter((p) => p.qty > 0 && p.price > 0 && p.price <= weightedAvgPrice);
-  // The closest match to the average price without going over it — the
-  // highest-priced eligible item is exactly that, since eligibility already
-  // excludes anything above the average.
-  const suggestedFreeProduct = eligibleFreeProducts.length > 0
-    ? eligibleFreeProducts.reduce((best, p) => (p.price > best.price ? p : best), eligibleFreeProducts[0])
-    : null;
-  const matchedFreeProduct = eligibleFreeProducts.find((p) => batchLabel(p) === freeProductQuery.trim());
-  const freeProductOptions = (freeProductQuery.trim()
-    ? eligibleFreeProducts.filter((p) => p.name.toLowerCase().includes(freeProductQuery.toLowerCase().trim()))
-    : eligibleFreeProducts
-  ).slice(0, 50);
 
-  const startApplyingOffer = (offerId) => {
-    setApplyingOfferId(offerId);
-    setFreeProductQuery(suggestedFreeProduct ? batchLabel(suggestedFreeProduct) : "");
-  };
+  const { displayItems, appliedOffer, avg, roundedAvg, freeItem, freeQty } = useMemo(
+    () => applyOfferToItems(items, offers),
+    [items, offers]
+  );
 
-  const applyOffer = (offer) => {
-    if (!matchedFreeProduct) return;
-    // Same supersession rule as addItem — applying a bigger-threshold offer
-    // replaces a smaller one already on the order rather than adding to it.
-    const supersededOfferIds = [...appliedOfferIds].filter((id) => {
-      const applied = offers.find((o) => o.id === id);
-      return applied && offer.buyQty > applied.buyQty;
-    });
-    setItems((prev) => {
-      let cleaned = supersededOfferIds.length
-        ? prev.filter((it) => !it.isFree || !supersededOfferIds.includes(it.viaOfferId))
-        : [...prev];
-
-      // If the free item is the very same batch already sitting in the
-      // cart as a paid line, carve the free unit(s) out of that line
-      // instead of listing the same product twice on the invoice — "3
-      // purchased" becomes "2 purchased" + "1 free". Only do this when the
-      // order still clears the offer's own buyQty afterward — otherwise
-      // the carve-out would un-qualify the very order that earned it, so
-      // it falls back to adding a genuinely extra free unit instead.
-      const paidIdx = cleaned.findIndex((it) => !it.isFree && it.productId === matchedFreeProduct.id);
-      const paidQtyTotal = cleaned.filter((it) => !it.isFree).reduce((sum, it) => sum + it.qty, 0);
-      if (paidIdx >= 0 && cleaned[paidIdx].qty >= offer.getQty && paidQtyTotal - offer.getQty >= offer.buyQty) {
-        const remainingQty = cleaned[paidIdx].qty - offer.getQty;
-        cleaned = remainingQty > 0
-          ? cleaned.map((it, i) => (i === paidIdx ? { ...it, qty: remainingQty } : it))
-          : cleaned.filter((_, i) => i !== paidIdx);
-      }
-
-      return [...cleaned, {
-        productId: matchedFreeProduct.id,
-        name: matchedFreeProduct.name,
-        qty: offer.getQty,
-        unitPrice: 0,
-        originalPrice: matchedFreeProduct.price,
-        availableQty: matchedFreeProduct.qty,
-        expiry: matchedFreeProduct.expiry,
-        isFree: true,
-        viaOfferId: offer.id,
-      }];
-    });
-    setAppliedOfferIds((prev) => {
-      const next = new Set(prev);
-      supersededOfferIds.forEach((id) => next.delete(id));
-      next.add(offer.id);
-      return next;
-    });
-    setApplyingOfferId(null);
-    setFreeProductQuery("");
-    if (offer.id === targetOfferId) setTargetOfferId("");
-  };
+  const total = displayItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
+  const netTotal = total * (1 - (Number(discountRate) || 0) / 100);
 
   const doCreateOrder = async () => {
-    if (items.length === 0) { setError("Add at least one item first."); return; }
+    if (displayItems.length === 0) { setError("Add at least one item first."); return; }
     setError("");
     setSaving(true);
     try {
@@ -2215,7 +2167,7 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
       // the point where it actually gets enforced rather than just shown.
       const stockWarnings = [];
       const finalItems = [];
-      for (const it of items) {
+      for (const it of displayItems) {
         if (it.isFree || it.qty <= it.availableQty) {
           finalItems.push(it);
           continue;
@@ -2292,11 +2244,11 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
           </div>
           {targetOfferId && (() => {
             const offer = activeOffers.find((o) => o.id === targetOfferId);
-            if (!offer) return null;
-            const reached = regularQty >= offer.buyQty;
+            if (!offer || appliedOffer?.id === offer.id) return null;
+            const threshold = offer.buyQty + offer.getQty;
             return (
-              <div style={{ fontSize: 12, marginTop: 6, color: reached ? "#4C7A5E" : "#8A8272", fontWeight: reached ? 600 : 400 }}>
-                {reached ? `Threshold reached — ${regularQty} of ${offer.buyQty} items added.` : `${regularQty} of ${offer.buyQty} items added toward this offer.`}
+              <div style={{ fontSize: 12, marginTop: 6, color: "#8A8272" }}>
+                {regularQty} of {threshold} items added toward this offer — the free item is picked automatically once you're there.
               </div>
             );
           })()}
@@ -2330,60 +2282,13 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
 
       {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
 
-      {eligibleOffers.length > 0 && !applyingOfferId && (
-        <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 8, padding: 10, marginBottom: 10 }}>
-          {eligibleOffers.map((o) => (
-            <div key={o.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5, marginBottom: 6, flexWrap: "wrap", gap: 6 }}>
-              <span>🎉 Qualifies for <strong>{o.label}</strong> — {o.getQty} free item{o.getQty === 1 ? "" : "s"}, up to {weightedAvgPrice.toFixed(2)} each</span>
-              <button onClick={() => startApplyingOffer(o.id)} style={{ padding: "5px 10px", borderRadius: 6, border: "none", background: "#C17817", color: "#fff", fontSize: 11.5, fontWeight: 500 }}>
-                Apply
-              </button>
-            </div>
-          ))}
+      {appliedOffer && freeItem && (
+        <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12.5 }}>
+          🎉 <strong>{appliedOffer.label}</strong> applied automatically — average unit price {avg.toFixed(2)}, rounded down to {roundedAvg}. <strong>{freeItem.name}</strong> is free ({freeQty} unit{freeQty === 1 ? "" : "s"}).
         </div>
       )}
 
-      {applyingOfferId && (() => {
-        const offer = offers.find((o) => o.id === applyingOfferId);
-        if (!offer) return null;
-        return (
-          <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 8, padding: 10, marginBottom: 10 }}>
-            <div style={{ fontSize: 12.5, marginBottom: 6 }}>Free item for "{offer.label}" — average price of items added is {weightedAvgPrice.toFixed(2)}:</div>
-            {suggestedFreeProduct && (
-              <div style={{ fontSize: 12, color: "#4C7A5E", marginBottom: 6 }}>
-                Suggested (closest price without going over): <strong>{suggestedFreeProduct.name}</strong> — {suggestedFreeProduct.price.toFixed(2)}. Search below to pick a different item instead.
-              </div>
-            )}
-            <input
-              value={freeProductQuery}
-              onChange={(e) => setFreeProductQuery(e.target.value)}
-              placeholder="Search eligible items — pick the batch by expiry…"
-              list="free-item-options"
-              style={inputStyle}
-            />
-            <datalist id="free-item-options">
-              {freeProductOptions.map((p) => <option key={p.id} value={batchLabel(p)} />)}
-            </datalist>
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              <button
-                disabled={!matchedFreeProduct}
-                onClick={() => applyOffer(offer)}
-                style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: matchedFreeProduct ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
-              >
-                Add {offer.getQty} free
-              </button>
-              <button onClick={() => setApplyingOfferId(null)} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
-                Cancel
-              </button>
-            </div>
-            {eligibleFreeProducts.length === 0 && (
-              <div style={{ fontSize: 11.5, color: "#B33A3A", marginTop: 6 }}>No in-stock items priced at or below {weightedAvgPrice.toFixed(2)}.</div>
-            )}
-          </div>
-        );
-      })()}
-
-      {items.length > 0 && (
+      {displayItems.length > 0 && (
         <div style={{ marginBottom: 12 }}>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
@@ -2399,8 +2304,8 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
                 </tr>
               </thead>
               <tbody>
-                {items.map((it, i) => (
-                  <tr key={i} style={{ borderTop: "1px solid #E5DFD3" }}>
+                {displayItems.map((it, i) => (
+                  <tr key={it.isFree ? `${it.key}-free` : it.key} style={{ borderTop: "1px solid #E5DFD3" }}>
                     <td style={{ padding: "4px 6px" }}>
                       {it.name}{it.isFree && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 600, padding: "1px 6px", borderRadius: 4, background: "#4C7A5E1A", color: "#4C7A5E" }}>FREE</span>}
                     </td>
@@ -2412,7 +2317,9 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
                     <td style={{ padding: "4px 6px" }}>{it.isFree ? "FREE" : it.unitPrice.toFixed(2)}</td>
                     <td style={{ padding: "4px 6px" }}>{it.isFree ? "0.00" : (it.qty * it.unitPrice).toFixed(2)}</td>
                     <td style={{ padding: "4px 6px" }}>
-                      <button onClick={() => removeItem(i)} style={{ background: "none", border: "none", color: "#B7AF9E" }}><X size={13} /></button>
+                      {!it.isFree && (
+                        <button onClick={() => removeItem(it.key)} style={{ background: "none", border: "none", color: "#B7AF9E" }}><X size={13} /></button>
+                      )}
                     </td>
                   </tr>
                 ))}
