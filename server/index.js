@@ -735,20 +735,6 @@ app.post("/api/visits", async (req, res) => {
       }
     }
 
-    const sampleRows = visit.mentionedItems
-      .filter((it) => it.sampleStatus === "gave" || it.sampleStatus === "next_visit")
-      .map((it) => ({
-        id: `s${crypto.randomUUID()}`,
-        doctorName: visit.client,
-        productName: it.name,
-        productId: it.productId,
-        status: it.sampleStatus,
-        repName: req.repName || "",
-        visitId: visit.id,
-        date: visit.time,
-      }));
-    if (sampleRows.length) await db.appendRows("Samples", sampleRows);
-
     if (competitorName && String(competitorName).trim()) {
       await db.appendRow("CompetitorSightings", {
         id: `cs${crypto.randomUUID()}`,

@@ -89,6 +89,7 @@ export default function App() {
   const [repNames, setRepNames] = useState([]);
   const [offers, setOffers] = useState([]);
   const [samples, setSamples] = useState([]);
+  const [followUps, setFollowUps] = useState([]);
   const [punchLog, setPunchLog] = useState([]);
   const [competitors, setCompetitors] = useState([]);
   const [competitorSightings, setCompetitorSightings] = useState([]);
@@ -127,6 +128,7 @@ export default function App() {
       setRepNames(data.repNames || []);
       setOffers(data.offers || []);
       setSamples(data.samples || []);
+      setFollowUps(data.followUps || []);
       setPunchLog(data.punchLog || []);
       setCompetitors(data.competitors || []);
       setCompetitorSightings(data.competitorSightings || []);
@@ -421,7 +423,7 @@ export default function App() {
               <DoctorsView
                 doctors={doctors}
                 visits={visits}
-                samples={samples}
+                followUps={followUps}
                 role={role}
                 onAdd={addDoctor}
                 onRemove={removeDoctor}
@@ -1004,7 +1006,6 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
   const [exportSheetId, setExportSheetId] = useState("");
   const [mentionedItems, setMentionedItems] = useState([]);
   const [itemQuery, setItemQuery] = useState("");
-  const [sampleMenuFor, setSampleMenuFor] = useState(null);
   const [sawCompetitor, setSawCompetitor] = useState(false);
   const [competitorName, setCompetitorName] = useState("");
   const [competitorNotes, setCompetitorNotes] = useState("");
@@ -1099,14 +1100,10 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
   ).slice(0, 50);
   const addMentionedItem = () => {
     if (!matchedItem || mentionedItems.some((it) => it.productId === matchedItem.id)) return;
-    setMentionedItems((prev) => [...prev, { productId: matchedItem.id, name: matchedItem.name, sampleStatus: null }]);
+    setMentionedItems((prev) => [...prev, { productId: matchedItem.id, name: matchedItem.name }]);
     setItemQuery("");
   };
   const removeMentionedItem = (productId) => setMentionedItems((prev) => prev.filter((it) => it.productId !== productId));
-  const setSampleStatus = (productId, status) => {
-    setMentionedItems((prev) => prev.map((it) => (it.productId === productId ? { ...it, sampleStatus: status } : it)));
-    setSampleMenuFor(null);
-  };
 
   const myPunches = punchLog.filter((p) => p.repName === repName).sort((a, b) => new Date(b.time) - new Date(a.time));
   const lastPunch = myPunches[0] || null;
@@ -1146,7 +1143,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
         competitorNotes: sawCompetitor ? competitorNotes : "",
       });
       setLastVisit(created || { client: visitClient });
-      setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
+      setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery("");
       setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
       setFollowUpStatus(null);
       setFollowUpError("");
@@ -1177,7 +1174,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
       queuedAt: new Date().toISOString(),
     });
     setLastVisit({ client, pending: true });
-    setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
+    setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery("");
     setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
     setVisitError(""); setLocError("");
     setFollowUpStatus(null);
@@ -1475,31 +1472,6 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
                         background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 10, padding: "6px 8px 6px 10px",
                       }}>
                         <span style={{ fontWeight: 500 }}>{it.name}</span>
-
-                        {it.sampleStatus === "gave" && (
-                          <span style={{ fontSize: 10.5, color: "#4C7A5E", fontWeight: 600 }}>✓ Sample given</span>
-                        )}
-                        {it.sampleStatus === "next_visit" && (
-                          <span style={{ fontSize: 10.5, color: "#C17817", fontWeight: 600 }}>→ Give next visit</span>
-                        )}
-
-                        {sampleMenuFor === it.productId ? (
-                          <div style={{ display: "flex", gap: 4 }}>
-                            <button type="button" onClick={() => setSampleStatus(it.productId, "gave")} style={{ fontSize: 10.5, border: "none", background: "#4C7A5E", color: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
-                              Gave
-                            </button>
-                            <button type="button" onClick={() => setSampleStatus(it.productId, "next_visit")} style={{ fontSize: 10.5, border: "none", background: "#C17817", color: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
-                              Give next visit
-                            </button>
-                            <button type="button" onClick={() => setSampleMenuFor(null)} style={{ fontSize: 10.5, border: "1px solid #E5DFD3", background: "#fff", borderRadius: 5, padding: "3px 8px" }}>
-                              Cancel
-                            </button>
-                          </div>
-                        ) : (
-                          <button type="button" onClick={() => setSampleMenuFor(it.productId)} style={{ fontSize: 10.5, border: "1px solid #D8D2C4", background: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
-                            {it.sampleStatus ? "Change" : "Sample"}
-                          </button>
-                        )}
 
                         <button
                           type="button"
@@ -4019,7 +3991,7 @@ const DOCTOR_FILLABLE_FIELDS = [
   { key: "registrationNumber", label: "Registration number" },
 ];
 
-function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkImport, onCompleteInfo }) {
+function DoctorsView({ doctors, visits, followUps, role, onAdd, onRemove, onBulkImport, onCompleteInfo }) {
   const [completingId, setCompletingId] = useState(null);
   const [historyId, setHistoryId] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
@@ -4060,14 +4032,24 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
     });
   };
 
+  // Sourced from the follow-up a rep flagged as needing a sample (Check-In's
+  // "next visit" question), not the old per-item Samples tagging — that's
+  // what actually drives the manager's 2-days-before Telegram reminder now,
+  // so this badge should reflect the same thing rather than a separate,
+  // disconnected record.
   const pendingSamplesFor = (doctorName) => {
-    const matches = (samples || []).filter((s) => s.doctorName.toLowerCase().trim() === doctorName.toLowerCase().trim());
-    const latestByProduct = new Map();
-    matches.forEach((s) => {
-      const existing = latestByProduct.get(s.productId);
-      if (!existing || new Date(s.date) > new Date(existing.date)) latestByProduct.set(s.productId, s);
+    const matches = (followUps || []).filter((f) =>
+      f.entityName.toLowerCase().trim() === doctorName.toLowerCase().trim() &&
+      f.needsSample === "true" &&
+      f.status === "pending"
+    );
+    const items = [];
+    matches.forEach((f) => {
+      let sampleItems = [];
+      try { sampleItems = JSON.parse(f.sampleItems || "[]"); } catch { sampleItems = []; }
+      sampleItems.forEach((it) => items.push({ productName: it.name }));
     });
-    return [...latestByProduct.values()].filter((s) => s.status === "next_visit");
+    return items;
   };
 
   const addDoctor = () => {
