@@ -423,7 +423,7 @@ export default function App() {
               <DoctorsView
                 doctors={doctors}
                 visits={visits}
-                followUps={followUps}
+                samples={samples}
                 role={role}
                 onAdd={addDoctor}
                 onRemove={removeDoctor}
@@ -996,16 +996,10 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
   const [followUpStatus, setFollowUpStatus] = useState(null); // null | "set" | "skipped"
   const [followUpSaving, setFollowUpSaving] = useState(false);
   const [followUpError, setFollowUpError] = useState("");
-  // Doctor-only: items given this visit (carried into the "next visit"
-  // sample question as a suggestion), and the just-scheduled follow-up's id
-  // so a "yes" answer there has something to attach the flag to.
-  const [givenSampleItems, setGivenSampleItems] = useState([]);
-  const [pendingFollowUpId, setPendingFollowUpId] = useState(null);
-  const [nextSampleSaving, setNextSampleSaving] = useState(false);
-  const [nextSampleError, setNextSampleError] = useState("");
   const [exportSheetId, setExportSheetId] = useState("");
   const [mentionedItems, setMentionedItems] = useState([]);
   const [itemQuery, setItemQuery] = useState("");
+  const [sampleMenuFor, setSampleMenuFor] = useState(null);
   const [sawCompetitor, setSawCompetitor] = useState(false);
   const [competitorName, setCompetitorName] = useState("");
   const [competitorNotes, setCompetitorNotes] = useState("");
@@ -1100,10 +1094,14 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
   ).slice(0, 50);
   const addMentionedItem = () => {
     if (!matchedItem || mentionedItems.some((it) => it.productId === matchedItem.id)) return;
-    setMentionedItems((prev) => [...prev, { productId: matchedItem.id, name: matchedItem.name }]);
+    setMentionedItems((prev) => [...prev, { productId: matchedItem.id, name: matchedItem.name, sampleStatus: null }]);
     setItemQuery("");
   };
   const removeMentionedItem = (productId) => setMentionedItems((prev) => prev.filter((it) => it.productId !== productId));
+  const setSampleStatus = (productId, status) => {
+    setMentionedItems((prev) => prev.map((it) => (it.productId === productId ? { ...it, sampleStatus: status } : it)));
+    setSampleMenuFor(null);
+  };
 
   const myPunches = punchLog.filter((p) => p.repName === repName).sort((a, b) => new Date(b.time) - new Date(a.time));
   const lastPunch = myPunches[0] || null;
@@ -1143,16 +1141,15 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
         competitorNotes: sawCompetitor ? competitorNotes : "",
       });
       setLastVisit(created || { client: visitClient });
-      setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery("");
+      setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
       setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
       setFollowUpStatus(null);
       setFollowUpError("");
-      setGivenSampleItems([]);
-      setPendingFollowUpId(null);
-      // Doctors don't buy stock — they get samples, not an order — so their
-      // wizard skips straight to the sample question instead of asking
-      // "did they place an order?"
-      setStep(entityType === "pharmacy" ? "orderPrompt" : "sample");
+      // Doctors don't buy stock, and sample-giving is already captured
+      // per-item above (in "Items mentioned") — nothing left to ask, so
+      // their check-in ends right here. Pharmacies still go on to the
+      // order question.
+      setStep(entityType === "pharmacy" ? "orderPrompt" : "done");
     } catch (e) {
       setVisitError(e?.message || "Couldn't save the visit.");
     } finally {
@@ -1174,34 +1171,27 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
       queuedAt: new Date().toISOString(),
     });
     setLastVisit({ client, pending: true });
-    setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery("");
+    setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
     setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
     setVisitError(""); setLocError("");
     setFollowUpStatus(null);
-    setGivenSampleItems([]); setPendingFollowUpId(null);
     setStep("done");
   };
 
+  // Pharmacy-only now — doctors never reach this step, their check-in ends
+  // right after logging the visit.
   const scheduleFollowUp = async (presetKey) => {
     setFollowUpSaving(true);
     setFollowUpError("");
     try {
-      const created = await api.scheduleFollowUp({
+      await api.scheduleFollowUp({
         entityName: lastVisit.client,
         entityType,
         presetKey,
         visitId: lastVisit.id,
       });
       setFollowUpStatus("set");
-      // Only doctors get asked about a next-visit sample — a follow-up date
-      // is required for the "2 days before" reminder to count down from,
-      // which this now has.
-      if (entityType === "doctor" && created?.id) {
-        setPendingFollowUpId(created.id);
-        setStep("nextSample");
-      } else {
-        setStep("done");
-      }
+      setStep("done");
     } catch (e) {
       setFollowUpError(e?.message || "Couldn't schedule follow-up.");
     } finally {
@@ -1214,38 +1204,20 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     setStep("done");
   };
 
-  const confirmNextSample = async (needsSample, items) => {
-    if (!needsSample || !pendingFollowUpId) { setStep("done"); return; }
-    setNextSampleSaving(true);
-    setNextSampleError("");
-    try {
-      await api.setFollowUpSample(pendingFollowUpId, items && items.length ? items : givenSampleItems);
-      setStep("done");
-    } catch (e) {
-      setNextSampleError(e?.message || "Couldn't save.");
-    } finally {
-      setNextSampleSaving(false);
-    }
-  };
-
   const startNewVisit = () => {
     setLastVisit(null);
     setFollowUpStatus(null);
     setFollowUpError("");
     setVisitError("");
-    setGivenSampleItems([]);
-    setPendingFollowUpId(null);
-    setNextSampleError("");
     setStep("checkin");
   };
 
   // Pharmacies place orders, so they get order -> sample -> follow-up.
-  // Doctors don't buy stock — sample-giving replaces the order question
-  // entirely — and get one more step after follow-up asking whether a
-  // sample needs to be ready for the next visit.
+  // Doctors don't buy stock, and sample-giving is captured per-item right
+  // in step 1 — there's nothing left to ask after logging the visit.
   const STEP_KEYS = entityType === "pharmacy"
     ? ["checkin", "orderPrompt", "order", "sample", "followup"]
-    : ["checkin", "sample", "followup", "nextSample"];
+    : ["checkin"];
   const STEP_INFO = entityType === "pharmacy" ? {
     checkin: { n: 1, title: "Log the visit" },
     orderPrompt: { n: 2, title: "Did they place an order?" },
@@ -1254,9 +1226,6 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     followup: { n: 5, title: "Schedule a follow-up" },
   } : {
     checkin: { n: 1, title: "Log the visit" },
-    sample: { n: 2, title: "Did you give a sample?" },
-    followup: { n: 3, title: "Schedule a follow-up" },
-    nextSample: { n: 4, title: "Sample for next visit?" },
   };
 
   const todayVisits = visits.filter((v) => v.repName === repName && new Date(v.time).toDateString() === new Date().toDateString());
@@ -1473,6 +1442,31 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
                       }}>
                         <span style={{ fontWeight: 500 }}>{it.name}</span>
 
+                        {it.sampleStatus === "gave" && (
+                          <span style={{ fontSize: 10.5, color: "#4C7A5E", fontWeight: 600 }}>✓ Sample given</span>
+                        )}
+                        {it.sampleStatus === "next_visit" && (
+                          <span style={{ fontSize: 10.5, color: "#C17817", fontWeight: 600 }}>→ Give next visit</span>
+                        )}
+
+                        {sampleMenuFor === it.productId ? (
+                          <div style={{ display: "flex", gap: 4 }}>
+                            <button type="button" onClick={() => setSampleStatus(it.productId, "gave")} style={{ fontSize: 10.5, border: "none", background: "#4C7A5E", color: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
+                              Gave
+                            </button>
+                            <button type="button" onClick={() => setSampleStatus(it.productId, "next_visit")} style={{ fontSize: 10.5, border: "none", background: "#C17817", color: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
+                              Give next visit
+                            </button>
+                            <button type="button" onClick={() => setSampleMenuFor(null)} style={{ fontSize: 10.5, border: "1px solid #E5DFD3", background: "#fff", borderRadius: 5, padding: "3px 8px" }}>
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button type="button" onClick={() => setSampleMenuFor(it.productId)} style={{ fontSize: 10.5, border: "1px solid #D8D2C4", background: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
+                            {it.sampleStatus ? "Change" : "Sample"}
+                          </button>
+                        )}
+
                         <button
                           type="button"
                           onClick={() => removeMentionedItem(it.productId)}
@@ -1555,7 +1549,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
           orders={orders}
           clients={clients}
           onCreateOrder={onCreateOrder}
-          onDone={() => setStep(entityType === "pharmacy" ? "sample" : "followup")}
+          onDone={() => setStep("sample")}
         />
       )}
 
@@ -1564,7 +1558,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
           clientName={lastVisit.client}
           visitId={lastVisit.id}
           products={products}
-          onDone={(items) => { setGivenSampleItems(items || []); setStep("followup"); }}
+          onDone={() => setStep("followup")}
         />
       )}
 
@@ -1594,18 +1588,6 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
           </div>
           {followUpError && <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 8 }}>{followUpError}</div>}
         </div>
-      )}
-
-      {step === "nextSample" && lastVisit && (
-        <NextVisitSampleStep
-          clientName={lastVisit.client}
-          products={products}
-          suggestedItems={givenSampleItems}
-          saving={nextSampleSaving}
-          error={nextSampleError}
-          onConfirm={(items) => confirmNextSample(true, items)}
-          onSkip={() => confirmNextSample(false)}
-        />
       )}
 
       {step === "done" && lastVisit && lastVisit.pending && (
@@ -1911,110 +1893,6 @@ function PharmacySampleStep({ clientName, visitId, products, onDone }) {
       <div style={{ display: "flex", gap: 8 }}>
         <button disabled={saving} onClick={finish} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
           {saving ? "Saving…" : items.length > 0 ? "Save samples & continue" : "Continue"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ---------- Next-visit sample step (doctors, after scheduling a follow-up) ----------
-// A yes/no answer alone left the manager's prep reminder saying "a sample"
-// with no idea what to actually pull — this makes naming the item required
-// once the rep says yes, with a one-tap shortcut to reuse what was just
-// given today (the common case: same item again next time).
-function NextVisitSampleStep({ clientName, products, suggestedItems, saving, error, onConfirm, onSkip }) {
-  const [asked, setAsked] = useState(null); // null | "yes"
-  const [itemQuery, setItemQuery] = useState("");
-  const [qty, setQty] = useState("");
-  const [items, setItems] = useState([]);
-
-  const itemOptions = (itemQuery.trim()
-    ? products.filter((p) => p.name.toLowerCase().includes(itemQuery.toLowerCase().trim()))
-    : products
-  ).slice(0, 50);
-  const matchedItem = products.find((p) => p.name.toLowerCase().trim() === itemQuery.toLowerCase().trim());
-
-  const addItem = () => {
-    if (!matchedItem) return;
-    setItems((prev) => [...prev, { productId: matchedItem.id, name: matchedItem.name, qty: Number(qty) || 1 }]);
-    setItemQuery(""); setQty("");
-  };
-  const removeItem = (idx) => setItems((prev) => prev.filter((_, i) => i !== idx));
-
-  const useTodaysItems = () => {
-    setItems(suggestedItems.map((it) => ({ productId: it.productId, name: it.name, qty: it.qty || 1 })));
-  };
-
-  if (asked === null) {
-    return (
-      <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
-        <span style={{ fontSize: 13.5 }}>Do you need to bring a sample for <strong>{clientName}</strong>'s next visit?</span>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={() => setAsked("yes")} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
-            Yes
-          </button>
-          <button onClick={onSkip} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
-            No
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
-      <h3 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 6px" }}>Which item should be ready for {clientName}?</h3>
-      <p style={{ fontSize: 12, color: "#8A8272", margin: "0 0 10px" }}>
-        We'll tell the manager exactly what to prepare, 2 days before the visit.
-      </p>
-
-      {suggestedItems.length > 0 && (
-        <button
-          onClick={useTodaysItems}
-          style={{ fontSize: 12, color: "#4C7A5E", background: "none", border: "1px solid #4C7A5E55", borderRadius: 6, padding: "6px 10px", marginBottom: 10 }}
-        >
-          Use what I gave today ({suggestedItems.map((it) => it.name).join(", ")})
-        </button>
-      )}
-
-      <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-        <div style={{ flex: 2, minWidth: 160 }}>
-          <input
-            value={itemQuery}
-            onChange={(e) => setItemQuery(e.target.value)}
-            placeholder="Search item…"
-            list="next-sample-item-options"
-            style={inputStyle}
-          />
-          <datalist id="next-sample-item-options">
-            {itemOptions.map((p) => <option key={p.id} value={p.name} />)}
-          </datalist>
-        </div>
-        <input type="number" min="1" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Qty" style={{ ...inputStyle, flex: 1, minWidth: 80 }} />
-        <button onClick={addItem} style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
-          Add
-        </button>
-      </div>
-
-      {items.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
-          {items.map((it, i) => (
-            <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "6px 10px", fontSize: 12.5 }}>
-              <span>{it.name} × {it.qty}</span>
-              <button onClick={() => removeItem(i)} style={{ background: "none", border: "none", color: "#B7AF9E" }}><X size={13} /></button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
-
-      <div style={{ display: "flex", gap: 8 }}>
-        <button disabled={items.length === 0 || saving} onClick={() => onConfirm(items)} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: items.length > 0 && !saving ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
-          {saving ? "Saving…" : "Save & finish"}
-        </button>
-        <button onClick={onSkip} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>
-          Cancel
         </button>
       </div>
     </div>
@@ -3898,7 +3776,7 @@ const DOCTOR_FILLABLE_FIELDS = [
   { key: "registrationNumber", label: "Registration number" },
 ];
 
-function DoctorsView({ doctors, visits, followUps, role, onAdd, onRemove, onBulkImport, onCompleteInfo }) {
+function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkImport, onCompleteInfo }) {
   const [completingId, setCompletingId] = useState(null);
   const [historyId, setHistoryId] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
@@ -3939,24 +3817,14 @@ function DoctorsView({ doctors, visits, followUps, role, onAdd, onRemove, onBulk
     });
   };
 
-  // Sourced from the follow-up a rep flagged as needing a sample (Check-In's
-  // "next visit" question), not the old per-item Samples tagging — that's
-  // what actually drives the manager's 2-days-before Telegram reminder now,
-  // so this badge should reflect the same thing rather than a separate,
-  // disconnected record.
   const pendingSamplesFor = (doctorName) => {
-    const matches = (followUps || []).filter((f) =>
-      f.entityName.toLowerCase().trim() === doctorName.toLowerCase().trim() &&
-      f.needsSample === "true" &&
-      f.status === "pending"
-    );
-    const items = [];
-    matches.forEach((f) => {
-      let sampleItems = [];
-      try { sampleItems = JSON.parse(f.sampleItems || "[]"); } catch { sampleItems = []; }
-      sampleItems.forEach((it) => items.push({ productName: it.name }));
+    const matches = (samples || []).filter((s) => s.doctorName.toLowerCase().trim() === doctorName.toLowerCase().trim());
+    const latestByProduct = new Map();
+    matches.forEach((s) => {
+      const existing = latestByProduct.get(s.productId);
+      if (!existing || new Date(s.date) > new Date(existing.date)) latestByProduct.set(s.productId, s);
     });
-    return items;
+    return [...latestByProduct.values()].filter((s) => s.status === "next_visit");
   };
 
   const addDoctor = () => {
