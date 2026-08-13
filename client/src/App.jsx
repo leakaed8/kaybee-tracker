@@ -73,6 +73,16 @@ function getCurrentPositionSafe(onResult, timeoutMs = 8000) {
   );
 }
 
+// Where each role should land on login/session-restore, matching the tab
+// each one actually opens the app to do first — a manager reviews the
+// business, a supervisor checks the team, a rep goes straight to logging
+// a visit. Kept in sync with the nav order below (App() render).
+function defaultTabFor(role, isSupervisor) {
+  if (role === "manager") return "dashboard";
+  if (isSupervisor) return "performance";
+  return "checkin";
+}
+
 // ---------- main app ----------
 export default function App() {
   const [authState, setAuthState] = useState("checking"); // checking | out | in
@@ -105,7 +115,7 @@ export default function App() {
 
   useEffect(() => {
     api.getSession()
-      .then((data) => { setRole(data.role); setRepName(data.repName || ""); setIsSupervisor(!!data.isSupervisor); setAuthState("in"); })
+      .then((data) => { setRole(data.role); setRepName(data.repName || ""); setIsSupervisor(!!data.isSupervisor); setTab(defaultTabFor(data.role, !!data.isSupervisor)); setAuthState("in"); })
       .catch(() => setAuthState("out"));
   }, []);
 
@@ -297,7 +307,7 @@ export default function App() {
   }
 
   if (authState === "out") {
-    return <LoginView onSuccess={(r, rn, sup) => { setRole(r); setRepName(rn || ""); setIsSupervisor(!!sup); setAuthState("in"); }} />;
+    return <LoginView onSuccess={(r, rn, sup) => { setRole(r); setRepName(rn || ""); setIsSupervisor(!!sup); setTab(defaultTabFor(r, !!sup)); setAuthState("in"); }} />;
   }
 
   // Both derived from myLastPunch (the current rep's own last punch row —
@@ -359,22 +369,34 @@ export default function App() {
         </div>
       </header>
 
+      {/* Ordered by when it gets used in the workday, not by role — the same
+          list serves all three roles at once because each role's own tabs
+          just fall out of the existing visibility gates below:
+            manager:    Dashboard, Performance, Orders, Locations, Outreach,
+                        Broadcast, Stock, Expiry, Pharmacies, Doctors,
+                        Competitors, Knowledge, Training, Settings
+            supervisor: Performance, Orders, Locations, Check-In, Stock,
+                        Expiry, Pharmacies, Competitors, Knowledge
+            rep:        Check-In, Route, Stock, Expiry, Pharmacies, Doctors,
+                        Competitors, Knowledge, Training
+          Keep this comment's per-role lists in sync with defaultTabFor()
+          above and with any future visibility-gate change. */}
       <nav style={{ display: "flex", gap: 4, padding: "12px 24px 0", borderBottom: "1px solid #E5DFD3", overflowX: "auto" }}>
+        {role === "manager" && <TabBtn active={tab === "dashboard"} onClick={() => setTab("dashboard")} icon={<LayoutDashboard size={15} />} label="Dashboard" />}
+        {(role === "manager" || isSupervisor) && <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<Target size={15} />} label="Performance" />}
+        {(role === "manager" || isSupervisor) && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
+        {(role === "manager" || isSupervisor) && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<RadarIcon size={15} />} label="Locations" />}
+        {role === "manager" && <TabBtn active={tab === "outreach"} onClick={() => setTab("outreach")} icon={<MessageCircle size={15} />} label="Outreach" />}
+        {role === "manager" && <TabBtn active={tab === "broadcast"} onClick={() => setTab("broadcast")} icon={<Megaphone size={15} />} label="Broadcast" />}
         {role === "rep" && <TabBtn active={tab === "checkin"} onClick={() => setTab("checkin")} icon={<MapPin size={15} />} label="Check-In" />}
         {role === "rep" && !isSupervisor && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
         <TabBtn active={tab === "stock"} onClick={() => setTab("stock")} icon={<Boxes size={15} />} label="Stock" />
         <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />
         <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />
         {!isSupervisor && <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />}
+        {(role === "manager" || role === "rep") && <TabBtn active={tab === "competitors"} onClick={() => setTab("competitors")} icon={<Swords size={15} />} label="Competitors" />}
         <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />
         {!isSupervisor && <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />}
-        {role === "manager" && <TabBtn active={tab === "dashboard"} onClick={() => setTab("dashboard")} icon={<LayoutDashboard size={15} />} label="Dashboard" />}
-        {(role === "manager" || isSupervisor) && <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<Target size={15} />} label="Performance" />}
-        {role === "manager" && <TabBtn active={tab === "outreach"} onClick={() => setTab("outreach")} icon={<MessageCircle size={15} />} label="Outreach" />}
-        {role === "manager" && <TabBtn active={tab === "broadcast"} onClick={() => setTab("broadcast")} icon={<Megaphone size={15} />} label="Broadcast" />}
-        {(role === "manager" || isSupervisor) && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
-        {(role === "manager" || role === "rep") && <TabBtn active={tab === "competitors"} onClick={() => setTab("competitors")} icon={<Swords size={15} />} label="Competitors" />}
-        {(role === "manager" || isSupervisor) && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<RadarIcon size={15} />} label="Locations" />}
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
       </nav>
 
