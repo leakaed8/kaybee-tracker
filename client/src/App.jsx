@@ -1935,7 +1935,8 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
     if (!matchedProduct) { setError("Pick a product batch from the list."); return; }
     const q = Number(qty);
     if (!q || q <= 0) { setError("Enter a quantity greater than 0."); return; }
-    setItems((prev) => [...prev, {
+
+    const newItem = {
       productId: matchedProduct.id,
       name: matchedProduct.name,
       qty: q,
@@ -1943,7 +1944,33 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
       availableQty: matchedProduct.qty,
       expiry: matchedProduct.expiry,
       isFree: false,
-    }]);
+    };
+
+    // Offers share the same running total (regularQty), so crossing into a
+    // bigger offer's threshold means a smaller one already applied is now
+    // superseded, not stacked on top of — its free item comes back out
+    // automatically instead of leaving both on the order.
+    const newRegularQty = regularQty + q;
+    const supersededOfferIds = [...appliedOfferIds].filter((id) => {
+      const applied = offers.find((o) => o.id === id);
+      return applied && activeOffers.some((o) => o.id !== id && o.buyQty > applied.buyQty && newRegularQty >= o.buyQty);
+    });
+
+    setItems((prev) => {
+      const withNewItem = [...prev, newItem];
+      return supersededOfferIds.length
+        ? withNewItem.filter((it) => !it.isFree || !supersededOfferIds.includes(it.viaOfferId))
+        : withNewItem;
+    });
+    if (supersededOfferIds.length) {
+      setAppliedOfferIds((prev) => {
+        const next = new Set(prev);
+        supersededOfferIds.forEach((id) => next.delete(id));
+        return next;
+      });
+      if (supersededOfferIds.includes(targetOfferId)) setTargetOfferId("");
+    }
+
     setProductQuery("");
     setQty("");
   };
@@ -1992,18 +2019,34 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
 
   const applyOffer = (offer) => {
     if (!matchedFreeProduct) return;
-    setItems((prev) => [...prev, {
-      productId: matchedFreeProduct.id,
-      name: matchedFreeProduct.name,
-      qty: offer.getQty,
-      unitPrice: 0,
-      originalPrice: matchedFreeProduct.price,
-      availableQty: matchedFreeProduct.qty,
-      expiry: matchedFreeProduct.expiry,
-      isFree: true,
-      viaOfferId: offer.id,
-    }]);
-    setAppliedOfferIds((prev) => new Set(prev).add(offer.id));
+    // Same supersession rule as addItem — applying a bigger-threshold offer
+    // replaces a smaller one already on the order rather than adding to it.
+    const supersededOfferIds = [...appliedOfferIds].filter((id) => {
+      const applied = offers.find((o) => o.id === id);
+      return applied && offer.buyQty > applied.buyQty;
+    });
+    setItems((prev) => {
+      const cleaned = supersededOfferIds.length
+        ? prev.filter((it) => !it.isFree || !supersededOfferIds.includes(it.viaOfferId))
+        : prev;
+      return [...cleaned, {
+        productId: matchedFreeProduct.id,
+        name: matchedFreeProduct.name,
+        qty: offer.getQty,
+        unitPrice: 0,
+        originalPrice: matchedFreeProduct.price,
+        availableQty: matchedFreeProduct.qty,
+        expiry: matchedFreeProduct.expiry,
+        isFree: true,
+        viaOfferId: offer.id,
+      }];
+    });
+    setAppliedOfferIds((prev) => {
+      const next = new Set(prev);
+      supersededOfferIds.forEach((id) => next.delete(id));
+      next.add(offer.id);
+      return next;
+    });
     setApplyingOfferId(null);
     setFreeProductQuery("");
     if (offer.id === targetOfferId) setTargetOfferId("");
