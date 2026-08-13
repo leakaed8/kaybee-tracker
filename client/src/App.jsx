@@ -1007,6 +1007,71 @@ function Field({ label, children }) {
 
 const inputStyle = { width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #E5DFD3", fontSize: 13, background: "#FAF7F2" };
 
+// Every rep's own read-only visit history, reached from Check-In. Replaces
+// the old "View my visits sheet" link's role for reps who were never given
+// a Google Sheet export (that required a manager to manually create one
+// per rep) — this works for everyone immediately, no setup. Self-fetching,
+// scoped to the logged-in rep only (never another rep's visits), capped at
+// the same 200-row limit GET /api/visits already enforces — no delete/edit
+// actions, purely a lookup.
+function MyVisitsView({ repName, onClose }) {
+  const [visits, setVisits] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    setLoading(true);
+    api.getVisits({ repName, limit: 200 })
+      .then((data) => setVisits(data.visits || []))
+      .catch(() => setVisits([]))
+      .finally(() => setLoading(false));
+  }, [repName]);
+
+  const filtered = query.trim()
+    ? visits.filter((v) => v.client.toLowerCase().includes(query.toLowerCase().trim()))
+    : visits;
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>My visits</h3>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: "#8A8272", cursor: "pointer" }}><X size={16} /></button>
+      </div>
+      <input
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Search by pharmacy/doctor name…"
+        style={{ ...inputStyle, marginBottom: 10 }}
+      />
+      {loading && <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>}
+      {!loading && filtered.length === 0 && <EmptyState text={query ? "No visits match that search." : "No visits logged yet."} />}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 480, overflowY: "auto" }}>
+        {filtered.map((v) => (
+          <div key={v.id} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
+              <span style={{ fontWeight: 600, fontSize: 13 }}>{v.client}</span>
+              <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>
+                {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}{" "}
+                {new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
+              </span>
+            </div>
+            {v.notes && (
+              <div style={{ fontSize: 12, marginTop: 4 }}><strong style={{ color: "#8A8272", fontWeight: 600 }}>Notes: </strong>{v.notes}</div>
+            )}
+            {v.mentionedItems && v.mentionedItems.length > 0 && (
+              <div style={{ fontSize: 12, marginTop: 4 }}>
+                <strong style={{ color: "#8A8272", fontWeight: 600 }}>Items discussed: </strong>
+                {v.mentionedItems.map((it) => it.name).join(", ")}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      {visits.length >= 200 && <div style={{ fontSize: 11, color: "#8A8272", marginTop: 8 }}>Showing your 200 most recent visits.</div>}
+    </div>
+  );
+}
+
 // ---------- Check-In View (rep) ----------
 function CheckInView({ clients, doctors, products, offers, repName, onAddVisit, onCreateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors, myLastPunch }) {
   const [punching, setPunching] = useState(false);
@@ -1028,6 +1093,7 @@ function CheckInView({ clients, doctors, products, offers, repName, onAddVisit, 
   const [followUpSaving, setFollowUpSaving] = useState(false);
   const [followUpError, setFollowUpError] = useState("");
   const [exportSheetId, setExportSheetId] = useState("");
+  const [showMyVisits, setShowMyVisits] = useState(false);
   const [mentionedItems, setMentionedItems] = useState([]);
   const [itemQuery, setItemQuery] = useState("");
   const [sampleMenuFor, setSampleMenuFor] = useState(null);
@@ -1284,12 +1350,22 @@ function CheckInView({ clients, doctors, products, offers, repName, onAddVisit, 
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 10, marginBottom: 16 }}>
         <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Log a visit</h2>
-        {exportSheetId && (
-          <a href={`https://docs.google.com/spreadsheets/d/${exportSheetId}/edit`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: "#4C7A5E", textDecoration: "none", border: "1px solid #4C7A5E33", borderRadius: 6, padding: "5px 10px" }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            onClick={() => setShowMyVisits((v) => !v)}
+            style={{ fontSize: 12, color: "#5B5445", background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "5px 10px", cursor: "pointer" }}
+          >
+            {showMyVisits ? "Hide my visits" : "My Visits"}
+          </button>
+          {exportSheetId && (
+            <a href={`https://docs.google.com/spreadsheets/d/${exportSheetId}/edit`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: "#4C7A5E", textDecoration: "none", border: "1px solid #4C7A5E33", borderRadius: 6, padding: "5px 10px" }}>
             View my visits sheet
           </a>
-        )}
+          )}
+        </div>
       </div>
+
+      {showMyVisits && <MyVisitsView repName={repName} onClose={() => setShowMyVisits(false)} />}
 
       <div style={{
         display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10,
@@ -2015,12 +2091,13 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   const [productQuery, setProductQuery] = useState("");
   const [qty, setQty] = useState("");
   const [items, setItems] = useState([]);
+  // Which offer group the NEXT added item joins — "" means regular/no-offer.
+  // This is the one place a rep assigns a product to an offer; correcting a
+  // mistake is remove-and-re-add, matching how every other item edit in
+  // this form already works (there's no in-place qty edit either).
+  const [pendingOfferId, setPendingOfferId] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  // Picked before adding items, so the rep knows the target ("4 of 8 items
-  // added") — purely a preview. It doesn't gate anything: whichever offer's
-  // threshold is actually met applies automatically regardless of this pick.
-  const [targetOfferId, setTargetOfferId] = useState("");
   const nextKeyRef = useRef(0);
 
   // Pre-filled from the pharmacy's own negotiated rate, but editable per
@@ -2039,19 +2116,25 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     : products
   ).slice(0, 50);
 
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const activeOffers = offers.filter((o) => o.active && (!o.expiresAt || o.expiresAt >= todayStr));
+  const activeOfferIds = new Set(activeOffers.map((o) => o.id));
+
   const addItem = () => {
     setError("");
     if (!matchedProduct) { setError("Pick a product batch from the list."); return; }
     const q = Number(qty);
     if (!q || q <= 0) { setError("Enter a quantity greater than 0."); return; }
+    const offerId = pendingOfferId && activeOfferIds.has(pendingOfferId) ? pendingOfferId : "";
 
     setItems((prev) => {
-      // Merge into an existing line for the same batch instead of adding a
-      // duplicate row — otherwise 2 units of the same batch entered as two
-      // separate clicks would sit in two different lines of qty 1 each,
-      // and the automatic offer engine could only ever carve a free unit
-      // out of one line at a time, short-changing what was actually ordered.
-      const existingIdx = prev.findIndex((it) => it.productId === matchedProduct.id);
+      // Merge into an existing line for the same batch *within the same
+      // offer group* instead of adding a duplicate row — otherwise 2 units
+      // entered as two separate clicks would sit in two lines of qty 1
+      // each, and the free-item engine could only carve a free unit out of
+      // one line at a time. A product added to two different offer groups
+      // (or one offer group and also regular) deliberately stays separate.
+      const existingIdx = prev.findIndex((it) => it.productId === matchedProduct.id && it.offerId === offerId);
       if (existingIdx >= 0) {
         return prev.map((it, i) => (i === existingIdx ? { ...it, qty: it.qty + q } : it));
       }
@@ -2064,6 +2147,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
         availableQty: matchedProduct.qty,
         expiry: matchedProduct.expiry,
         isFree: false,
+        offerId,
       }];
     });
     setProductQuery("");
@@ -2072,31 +2156,75 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
 
   const removeItem = (key) => setItems((prev) => prev.filter((it) => it.key !== key));
 
-  const regularQty = items.reduce((sum, it) => sum + it.qty, 0);
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const activeOffers = offers.filter((o) => o.active && (!o.expiresAt || o.expiresAt >= todayStr));
+  // Reassigns every raw item currently in `fromOfferId` to `toOfferId` —
+  // used by the "Switch to next offer" suggestion below. Never touches
+  // qty/price/product, only which group a line belongs to.
+  const switchGroupOffer = (fromOfferId, toOfferId) => {
+    setItems((prev) => prev.map((it) => (it.offerId === fromOfferId ? { ...it, offerId: toOfferId } : it)));
+  };
 
-  const { displayItems, appliedOffer, avg, roundedAvg, freeItem, freeQty } = useMemo(
-    () => applyOfferToItems(items, offers),
-    [items, offers]
-  );
+  // Items whose offerId doesn't resolve to a currently-active offer (never
+  // assigned, or the offer was deactivated after assignment) fall back to
+  // "regular" rather than forming a dead, unvalidatable group.
+  const regularItems = items.filter((it) => !it.offerId || !activeOfferIds.has(it.offerId));
+  const groupIds = [];
+  items.forEach((it) => {
+    if (it.offerId && activeOfferIds.has(it.offerId) && !groupIds.includes(it.offerId)) groupIds.push(it.offerId);
+  });
 
-  const total = displayItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
+  // Each offer group is computed in total isolation — its own call to the
+  // existing, unmodified applyOfferToItems() with only its own items and
+  // its own single offer, so one group's average price / free-item pick
+  // can never see or affect another group's. A regular order (no offer
+  // groups at all) is just an empty array here, unchanged from before.
+  const offerGroups = groupIds.map((offerId) => {
+    const offer = activeOffers.find((o) => o.id === offerId);
+    const rawItems = items.filter((it) => it.offerId === offerId);
+    const totalQty = rawItems.reduce((sum, it) => sum + it.qty, 0);
+    const required = offer.buyQty + offer.getQty;
+    const { displayItems, appliedOffer, avg, roundedAvg, freeItem, freeQty } = applyOfferToItems(rawItems, [offer]);
+    return {
+      offerId,
+      offer,
+      rawItems,
+      totalQty,
+      required,
+      valid: totalQty === required,
+      taggedDisplayItems: displayItems.map((it) => ({ ...it, offerId })),
+      appliedOffer, avg, roundedAvg, freeItem, freeQty,
+    };
+  });
+
+  const regularTagged = regularItems.map((it) => ({ ...it, offerId: "" }));
+  const allDisplayItems = [...offerGroups.flatMap((g) => g.taggedDisplayItems), ...regularTagged];
+  const total = allDisplayItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
   const netTotal = total * (1 - (Number(discountRate) || 0) / 100);
 
-  // Strict quantity gate for the 7+1 offer specifically: it's "in play" the
-  // moment the rep taps it as their target, or the moment it auto-applies
-  // (whichever happens first) — matches the offer picker above, which lets
-  // items be added before or after picking a target. Every other offer is
-  // untouched: only buy-7-get-1 requires exactly 8 physical units.
-  const sevenPlusOneOffer = activeOffers.find((o) => o.buyQty === 7 && o.getQty === 1);
-  const sevenPlusOneInPlay = !!sevenPlusOneOffer && (targetOfferId === sevenPlusOneOffer.id || appliedOffer?.id === sevenPlusOneOffer.id);
-  const sevenPlusOneInvalid = sevenPlusOneInPlay && regularQty > 8;
-  const sevenPlusOneMessage = `Buy 7 + Get 1 Free requires exactly 8 units. You currently have ${regularQty} units. Please adjust the quantities to 8 units to continue.`;
+  const invalidGroups = offerGroups.filter((g) => !g.valid);
+  const allGroupsValid = invalidGroups.length === 0;
+  const regularUnitTotal = regularItems.reduce((sum, it) => sum + it.qty, 0);
+  const totalUnits = allDisplayItems.reduce((sum, it) => sum + it.qty, 0);
+  const totalFreeUnits = offerGroups.reduce((sum, g) => sum + (g.valid ? g.freeQty : 0), 0);
+
+  // "If you have 13 and 7+1 requires 8, the next offer that fits 13 is
+  // 12+2 (needs 14)" — the smallest-threshold active offer, other than the
+  // one already assigned, whose requirement is still >= what's been added.
+  // Only offered when the group is OVER its requirement; being under just
+  // needs more units added, not a different offer.
+  const nextOfferSuggestion = (group) => {
+    if (group.totalQty <= group.required) return null;
+    return activeOffers
+      .filter((o) => o.id !== group.offerId && o.buyQty + o.getQty >= group.totalQty)
+      .sort((a, b) => (a.buyQty + a.getQty) - (b.buyQty + b.getQty))[0] || null;
+  };
 
   const doCreateOrder = async () => {
-    if (displayItems.length === 0) { setError("Add at least one item first."); return; }
-    if (sevenPlusOneInvalid) { setError(sevenPlusOneMessage); return; }
+    if (allDisplayItems.length === 0) { setError("Add at least one item first."); return; }
+    if (!allGroupsValid) {
+      const names = invalidGroups.map((g) => g.offer.label).join(", ");
+      setError(`Fix the quantity for: ${names}. Every offer group must total exactly its required units before this order can be placed.`);
+      return;
+    }
     setError("");
     setSaving(true);
     try {
@@ -2105,7 +2233,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
       // the point where it actually gets enforced rather than just shown.
       const stockWarnings = [];
       const finalItems = [];
-      for (const it of displayItems) {
+      for (const it of allDisplayItems) {
         if (it.isFree || it.qty <= it.availableQty) {
           finalItems.push(it);
           continue;
@@ -2135,8 +2263,8 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
       const payload = {
         clientName,
         visitId,
-        items: finalItems.map(({ productId, name, qty, unitPrice, isFree, originalPrice, expiry }) => ({
-          productId, name, qty, unitPrice, isFree: !!isFree, originalPrice: originalPrice || 0, expiry: expiry || "",
+        items: finalItems.map(({ productId, name, qty, unitPrice, isFree, originalPrice, expiry, offerId }) => ({
+          productId, name, qty, unitPrice, isFree: !!isFree, originalPrice: originalPrice || 0, expiry: expiry || "", offerId: offerId || "",
         })),
         discountRate: finalDiscountRate,
       };
@@ -2150,61 +2278,11 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     }
   };
 
+  const groupCardStyle = { border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, marginBottom: 8 };
+
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
       <h3 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 10px" }}>Order for {clientName}</h3>
-
-      {activeOffers.length > 0 && (
-        <div style={{ marginBottom: 14 }}>
-          <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 6 }}>Is this order taking an offer?</label>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            <button
-              onClick={() => setTargetOfferId("")}
-              style={{
-                padding: "6px 12px", borderRadius: 16, fontSize: 12, fontWeight: 500,
-                border: targetOfferId === "" ? "1px solid #1F2A24" : "1px solid #E5DFD3",
-                background: targetOfferId === "" ? "#1F2A24" : "#fff", color: targetOfferId === "" ? "#FAF7F2" : "#5B5445",
-              }}
-            >
-              No offer
-            </button>
-            {activeOffers.map((o) => (
-              <button
-                key={o.id}
-                onClick={() => setTargetOfferId(o.id)}
-                style={{
-                  padding: "6px 12px", borderRadius: 16, fontSize: 12, fontWeight: 500,
-                  border: targetOfferId === o.id ? "1px solid #C17817" : "1px solid #E5DFD3",
-                  background: targetOfferId === o.id ? "#C17817" : "#fff", color: targetOfferId === o.id ? "#fff" : "#5B5445",
-                }}
-              >
-                {o.label} (buy {o.buyQty}, get {o.getQty})
-              </button>
-            ))}
-          </div>
-          {targetOfferId && (() => {
-            const offer = activeOffers.find((o) => o.id === targetOfferId);
-            if (!offer || appliedOffer?.id === offer.id) return null;
-            if (offer.buyQty === 7 && offer.getQty === 1) return null; // dedicated 7+1 readout below
-            const threshold = offer.buyQty + offer.getQty;
-            return (
-              <div style={{ fontSize: 12, marginTop: 6, color: "#8A8272" }}>
-                {regularQty} of {threshold} items added toward this offer — the free item is picked automatically once you're there.
-              </div>
-            );
-          })()}
-          {sevenPlusOneInPlay && (
-            <div style={{ marginTop: 6 }}>
-              <div className="kb-font-mono" style={{ fontSize: 12, fontWeight: sevenPlusOneInvalid ? 600 : 400, color: sevenPlusOneInvalid ? "#B33A3A" : "#8A8272" }}>
-                Current: {regularQty} / 8 units
-              </div>
-              {sevenPlusOneInvalid && (
-                <div style={{ fontSize: 12, marginTop: 4, color: "#B33A3A" }}>{sevenPlusOneMessage}</div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
         <div style={{ flex: 2, minWidth: 160 }}>
@@ -2220,6 +2298,12 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
           </datalist>
         </div>
         <input type="number" min="1" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Qty" style={{ ...inputStyle, flex: 1, minWidth: 80 }} />
+        {activeOffers.length > 0 && (
+          <select aria-label="Assign to offer" value={pendingOfferId} onChange={(e) => setPendingOfferId(e.target.value)} style={{ ...inputStyle, flex: 1.4, minWidth: 150 }}>
+            <option value="">No offer (regular)</option>
+            {activeOffers.map((o) => <option key={o.id} value={o.id}>{o.label} (buy {o.buyQty}, get {o.getQty})</option>)}
+          </select>
+        )}
         <button onClick={addItem} style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
           Add item
         </button>
@@ -2233,13 +2317,70 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
 
       {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
 
-      {appliedOffer && freeItem && (
-        <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12.5 }}>
-          🎉 <strong>{appliedOffer.label}</strong> applied automatically — average unit price {avg.toFixed(2)}, rounded down to {roundedAvg}. <strong>{freeItem.name}</strong> is free ({freeQty} unit{freeQty === 1 ? "" : "s"}).
+      {offerGroups.map((g) => {
+        const suggestion = nextOfferSuggestion(g);
+        const statusColor = g.valid ? "#4C7A5E" : "#B33A3A";
+        return (
+          <div key={g.offerId} style={{ ...groupCardStyle, background: g.valid ? "#F7FBF8" : "#FBF3F0", borderColor: g.valid ? "#C7DFCE" : "#E5B8B0" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+              <span style={{ fontSize: 13, fontWeight: 600 }}>{g.offer.label}</span>
+              <span className="kb-font-mono" style={{ fontSize: 12, fontWeight: 600, color: statusColor }}>
+                {g.totalQty} / {g.required} units {g.valid ? "✓" : "⚠"}
+              </span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+              {g.rawItems.map((it) => (
+                <div key={it.key} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
+                  <span>{it.name} × {it.qty}</span>
+                  <button onClick={() => removeItem(it.key)} style={{ background: "none", border: "none", color: "#B7AF9E" }}><X size={12} /></button>
+                </div>
+              ))}
+            </div>
+            {g.valid && g.freeItem && (
+              <div style={{ fontSize: 11.5, color: "#4C7A5E", marginTop: 6 }}>
+                Free: {g.freeItem.name} × {g.freeQty} (auto-selected)
+              </div>
+            )}
+            {!g.valid && g.totalQty < g.required && (
+              <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 6 }}>⚠ Add {g.required - g.totalQty} more unit{g.required - g.totalQty === 1 ? "" : "s"} to reach {g.required}.</div>
+            )}
+            {!g.valid && g.totalQty > g.required && (
+              <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 6 }}>
+                ⚠ {g.offer.label} requires exactly {g.required} units. You have {g.totalQty - g.required} unit{g.totalQty - g.required === 1 ? "" : "s"} above this offer.
+                {suggestion && (
+                  <div style={{ marginTop: 4 }}>
+                    If you want to order {g.totalQty} units, the next available offer is <strong>{suggestion.label}</strong>, which requires {suggestion.buyQty + suggestion.getQty} units.
+                    <div style={{ marginTop: 4 }}>
+                      <button
+                        onClick={() => switchGroupOffer(g.offerId, suggestion.id)}
+                        style={{ fontSize: 11.5, fontWeight: 600, color: "#C17817", background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 6, padding: "4px 8px", cursor: "pointer" }}
+                      >
+                        Switch to {suggestion.label}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {regularItems.length > 0 && (
+        <div style={groupCardStyle}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#8A8272", marginBottom: 6 }}>Regular items (no offer)</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            {regularItems.map((it) => (
+              <div key={it.key} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
+                <span>{it.name} × {it.qty}</span>
+                <button onClick={() => removeItem(it.key)} style={{ background: "none", border: "none", color: "#B7AF9E" }}><X size={12} /></button>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
-      {displayItems.length > 0 && (
+      {allDisplayItems.length > 0 && (
         <div style={{ marginBottom: 12 }}>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
@@ -2251,12 +2392,11 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
                   <th style={{ padding: "4px 6px" }}>Expiry</th>
                   <th style={{ padding: "4px 6px" }}>Unit price</th>
                   <th style={{ padding: "4px 6px" }}>Total</th>
-                  <th></th>
                 </tr>
               </thead>
               <tbody>
-                {displayItems.map((it, i) => (
-                  <tr key={it.isFree ? `${it.key}-free` : it.key} style={{ borderTop: "1px solid #E5DFD3" }}>
+                {allDisplayItems.map((it) => (
+                  <tr key={`${it.offerId || "reg"}-${it.key}-${it.isFree ? "free" : "paid"}`} style={{ borderTop: "1px solid #E5DFD3" }}>
                     <td style={{ padding: "4px 6px" }}>
                       {it.name}{it.isFree && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 600, padding: "1px 6px", borderRadius: 4, background: "#4C7A5E1A", color: "#4C7A5E" }}>FREE</span>}
                     </td>
@@ -2267,11 +2407,6 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
                     <td className="kb-font-mono" style={{ padding: "4px 6px" }}>{it.expiry ? fmtDate(it.expiry) : "-"}</td>
                     <td style={{ padding: "4px 6px" }}>{it.isFree ? "FREE" : it.unitPrice.toFixed(2)}</td>
                     <td style={{ padding: "4px 6px" }}>{it.isFree ? "0.00" : (it.qty * it.unitPrice).toFixed(2)}</td>
-                    <td style={{ padding: "4px 6px" }}>
-                      {!it.isFree && (
-                        <button onClick={() => removeItem(it.key)} style={{ background: "none", border: "none", color: "#B7AF9E" }}><X size={13} /></button>
-                      )}
-                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -2297,11 +2432,26 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
         </div>
       )}
 
+      {(offerGroups.length > 0 || regularItems.length > 0) && (
+        <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 10 }}>
+          {offerGroups.length} offer group{offerGroups.length === 1 ? "" : "s"} · {totalFreeUnits} free unit{totalFreeUnits === 1 ? "" : "s"} · {regularUnitTotal} regular unit{regularUnitTotal === 1 ? "" : "s"} · {totalUnits} total units
+          {offerGroups.length > 0 && (
+            <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {offerGroups.map((g) => (
+                <span key={g.offerId} style={{ color: g.valid ? "#4C7A5E" : "#B33A3A", fontWeight: 500 }}>
+                  {g.valid ? "✓" : "⚠"} {g.offer.label}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 8 }}>
         <button
-          disabled={saving || items.length === 0 || sevenPlusOneInvalid}
+          disabled={saving || allDisplayItems.length === 0 || !allGroupsValid}
           onClick={doCreateOrder}
-          style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: !saving && items.length > 0 && !sevenPlusOneInvalid ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+          style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: !saving && allDisplayItems.length > 0 && allGroupsValid ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
         >
           {saving ? "Creating…" : "Create order & download PDF"}
         </button>

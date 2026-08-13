@@ -1252,25 +1252,35 @@ app.post("/api/orders", async (req, res) => {
       isFree: !!it.isFree,
       originalPrice: Number(it.originalPrice) || 0,
       expiry: it.expiry || "",
+      offerId: it.offerId || "",
     }));
 
-    // Re-derives which offer (if any) this order's total quantity would
-    // qualify for, independently of whatever isFree flags the client sent
-    // — so this can't be bypassed by calling the API directly. Mirrors
-    // only the "which offer's threshold is met, biggest wins" selection
-    // step from applyOfferToItems (client/src/App.jsx) — not the price-
-    // averaging/free-item-picking step, which stays client-only.
-    const totalQty = cleanItems.reduce((sum, it) => sum + it.qty, 0);
+    // An order can carry several independent offers at once (e.g. 8 units
+    // under 7+1 plus 14 units under 12+2 plus plain items), so each item
+    // is tagged client-side with which offer group it belongs to ("" for
+    // regular/no-offer). Re-derive validity per group, purely from
+    // submitted quantities — never from client-sent isFree flags — so a
+    // crafted API payload can't bypass it. Groups referencing an offer
+    // that isn't currently active are rejected outright (fail closed)
+    // rather than silently skipped, since a rep could otherwise strip
+    // offerId to dodge the check entirely.
     const offerRows = await db.getAllRows("Offers");
     const todayStr = new Date().toISOString().slice(0, 10);
     const activeOffers = offerRows.map(parseOffer).filter((o) => o.active && (!o.expiresAt || o.expiresAt >= todayStr));
-    const qualifyingOffer = activeOffers
-      .filter((o) => totalQty >= o.buyQty + o.getQty)
-      .sort((a, b) => (b.buyQty + b.getQty) - (a.buyQty + a.getQty))[0];
-    if (qualifyingOffer && qualifyingOffer.buyQty === 7 && qualifyingOffer.getQty === 1 && totalQty !== 8) {
-      return res.status(400).json({
-        error: `Buy 7 + Get 1 Free requires exactly 8 units. You currently have ${totalQty} units. Please adjust the quantities to 8 units to continue.`,
-      });
+    const activeOfferById = new Map(activeOffers.map((o) => [o.id, o]));
+    const groupIds = [...new Set(cleanItems.map((it) => it.offerId).filter(Boolean))];
+    for (const offerId of groupIds) {
+      const offer = activeOfferById.get(offerId);
+      if (!offer) {
+        return res.status(400).json({ error: "One of the selected offers is no longer available. Please review this order's offer groups." });
+      }
+      const groupQty = cleanItems.filter((it) => it.offerId === offerId).reduce((sum, it) => sum + it.qty, 0);
+      const required = offer.buyQty + offer.getQty;
+      if (groupQty !== required) {
+        return res.status(400).json({
+          error: `${offer.label} requires exactly ${required} units. This order currently has ${groupQty} units assigned to it. Please adjust the quantities to ${required} units to continue.`,
+        });
+      }
     }
 
     const total = cleanItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
