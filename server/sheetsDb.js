@@ -17,7 +17,7 @@ const SCHEMAS = {
   PunchLog: ["id", "repName", "type", "time", "coordsLat", "coordsLng", "auto", "confirmed"],
   StockMovement: ["id", "productName", "year", "month", "qty"],
   MonthlyDigests: ["id", "month", "status", "payload", "createdAt"],
-  FollowUps: ["id", "entityName", "entityType", "repName", "dueDate", "status", "visitId", "createdAt"],
+  FollowUps: ["id", "entityName", "entityType", "repName", "dueDate", "status", "visitId", "createdAt", "needsSample", "sampleItems", "sampleReminded"],
   PharmacySales: ["id", "productName", "pharmacyName", "expiry", "qty"],
   Competitors: ["id", "name", "supplierName", "supplierContact", "offerDetails", "notes", "createdAt"],
   CompetitorSightings: ["id", "visitId", "client", "repName", "competitorName", "notes", "date"],

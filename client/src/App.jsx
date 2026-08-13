@@ -994,6 +994,13 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
   const [followUpStatus, setFollowUpStatus] = useState(null); // null | "set" | "skipped"
   const [followUpSaving, setFollowUpSaving] = useState(false);
   const [followUpError, setFollowUpError] = useState("");
+  // Doctor-only: items given this visit (carried into the "next visit"
+  // sample question as a suggestion), and the just-scheduled follow-up's id
+  // so a "yes" answer there has something to attach the flag to.
+  const [givenSampleItems, setGivenSampleItems] = useState([]);
+  const [pendingFollowUpId, setPendingFollowUpId] = useState(null);
+  const [nextSampleSaving, setNextSampleSaving] = useState(false);
+  const [nextSampleError, setNextSampleError] = useState("");
   const [exportSheetId, setExportSheetId] = useState("");
   const [mentionedItems, setMentionedItems] = useState([]);
   const [itemQuery, setItemQuery] = useState("");
@@ -1143,7 +1150,12 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
       setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
       setFollowUpStatus(null);
       setFollowUpError("");
-      setStep("orderPrompt");
+      setGivenSampleItems([]);
+      setPendingFollowUpId(null);
+      // Doctors don't buy stock — they get samples, not an order — so their
+      // wizard skips straight to the sample question instead of asking
+      // "did they place an order?"
+      setStep(entityType === "pharmacy" ? "orderPrompt" : "sample");
     } catch (e) {
       setVisitError(e?.message || "Couldn't save the visit.");
     } finally {
@@ -1169,6 +1181,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
     setVisitError(""); setLocError("");
     setFollowUpStatus(null);
+    setGivenSampleItems([]); setPendingFollowUpId(null);
     setStep("done");
   };
 
@@ -1176,14 +1189,22 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     setFollowUpSaving(true);
     setFollowUpError("");
     try {
-      await api.scheduleFollowUp({
+      const created = await api.scheduleFollowUp({
         entityName: lastVisit.client,
         entityType,
         presetKey,
         visitId: lastVisit.id,
       });
       setFollowUpStatus("set");
-      setStep("done");
+      // Only doctors get asked about a next-visit sample — a follow-up date
+      // is required for the "2 days before" reminder to count down from,
+      // which this now has.
+      if (entityType === "doctor" && created?.id) {
+        setPendingFollowUpId(created.id);
+        setStep("nextSample");
+      } else {
+        setStep("done");
+      }
     } catch (e) {
       setFollowUpError(e?.message || "Couldn't schedule follow-up.");
     } finally {
@@ -1196,19 +1217,38 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     setStep("done");
   };
 
+  const confirmNextSample = async (needsSample) => {
+    if (!needsSample || !pendingFollowUpId) { setStep("done"); return; }
+    setNextSampleSaving(true);
+    setNextSampleError("");
+    try {
+      await api.setFollowUpSample(pendingFollowUpId, givenSampleItems);
+      setStep("done");
+    } catch (e) {
+      setNextSampleError(e?.message || "Couldn't save.");
+    } finally {
+      setNextSampleSaving(false);
+    }
+  };
+
   const startNewVisit = () => {
     setLastVisit(null);
     setFollowUpStatus(null);
     setFollowUpError("");
     setVisitError("");
+    setGivenSampleItems([]);
+    setPendingFollowUpId(null);
+    setNextSampleError("");
     setStep("checkin");
   };
 
-  // Pharmacies get an extra step (sample-giving) that doctors don't, since
-  // doctors already track samples via the "items mentioned" list in step 1.
+  // Pharmacies place orders, so they get order -> sample -> follow-up.
+  // Doctors don't buy stock — sample-giving replaces the order question
+  // entirely — and get one more step after follow-up asking whether a
+  // sample needs to be ready for the next visit.
   const STEP_KEYS = entityType === "pharmacy"
     ? ["checkin", "orderPrompt", "order", "sample", "followup"]
-    : ["checkin", "orderPrompt", "order", "followup"];
+    : ["checkin", "sample", "followup", "nextSample"];
   const STEP_INFO = entityType === "pharmacy" ? {
     checkin: { n: 1, title: "Log the visit" },
     orderPrompt: { n: 2, title: "Did they place an order?" },
@@ -1217,9 +1257,9 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     followup: { n: 5, title: "Schedule a follow-up" },
   } : {
     checkin: { n: 1, title: "Log the visit" },
-    orderPrompt: { n: 2, title: "Did they place an order?" },
-    order: { n: 3, title: "Order details" },
-    followup: { n: 4, title: "Schedule a follow-up" },
+    sample: { n: 2, title: "Did you give a sample?" },
+    followup: { n: 3, title: "Schedule a follow-up" },
+    nextSample: { n: 4, title: "Sample for next visit?" },
   };
 
   const todayVisits = visits.filter((v) => v.repName === repName && new Date(v.time).toDateString() === new Date().toDateString());
@@ -1552,7 +1592,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
           clientName={lastVisit.client}
           visitId={lastVisit.id}
           products={products}
-          onDone={() => setStep("followup")}
+          onDone={(items) => { setGivenSampleItems(items || []); setStep("followup"); }}
         />
       )}
 
@@ -1581,6 +1621,28 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
             </button>
           </div>
           {followUpError && <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 8 }}>{followUpError}</div>}
+        </div>
+      )}
+
+      {step === "nextSample" && lastVisit && (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+          <div style={{ fontSize: 13.5, marginBottom: 6 }}>
+            Do you need to bring a sample for <strong>{lastVisit.client}</strong>'s next visit?
+          </div>
+          <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>
+            {givenSampleItems.length > 0
+              ? `If yes, we'll remind the manager to have ${givenSampleItems.map((it) => it.name).join(", ")} ready — 2 days before the visit.`
+              : "If yes, we'll remind the manager to have a sample ready 2 days before the visit."}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button disabled={nextSampleSaving} onClick={() => confirmNextSample(true)} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+              Yes
+            </button>
+            <button disabled={nextSampleSaving} onClick={() => confirmNextSample(false)} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
+              No
+            </button>
+          </div>
+          {nextSampleError && <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 8 }}>{nextSampleError}</div>}
         </div>
       )}
 
@@ -1789,10 +1851,12 @@ function downloadOrderPdf(order, stockWarnings = []) {
   doc.save(`order-${order.clientName.replace(/\s+/g, "_")}-${order.date.slice(0, 10)}.pdf`);
 }
 
-// ---------- Pharmacy sample step (used from Check-In, pharmacies only) ----
-// Doctors already track sample-giving via the "items mentioned" list in
-// step 1 of Check-In; pharmacies had no equivalent until now, and this is
-// also the first place quantity gets recorded alongside the item.
+// ---------- Sample step (used from Check-In for both pharmacies and doctors) ----
+// The primary "did they place an order" replacement for doctors — they
+// don't buy stock, they get samples — and also available to pharmacies as
+// an extra add-on after their order. onDone is called with whatever items
+// were actually given (possibly empty), so the caller can suggest the same
+// items when asking about the next visit's sample need.
 function PharmacySampleStep({ clientName, visitId, products, onDone }) {
   const [asked, setAsked] = useState(null); // null | "yes" | "no"
   const [itemQuery, setItemQuery] = useState("");
@@ -1818,12 +1882,12 @@ function PharmacySampleStep({ clientName, visitId, products, onDone }) {
   const removeItem = (idx) => setItems((prev) => prev.filter((_, i) => i !== idx));
 
   const finish = async () => {
-    if (items.length === 0) { onDone(); return; }
+    if (items.length === 0) { onDone([]); return; }
     setSaving(true);
     setError("");
     try {
       await api.addSamples({ entityName: clientName, visitId, items });
-      onDone();
+      onDone(items);
     } catch (e) {
       setError(e?.message || "Couldn't save the samples.");
     } finally {
@@ -1839,7 +1903,7 @@ function PharmacySampleStep({ clientName, visitId, products, onDone }) {
           <button onClick={() => setAsked("yes")} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
             Yes
           </button>
-          <button onClick={onDone} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
+          <button onClick={() => onDone([])} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
             No
           </button>
         </div>

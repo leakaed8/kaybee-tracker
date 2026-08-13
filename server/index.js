@@ -830,6 +830,27 @@ app.post("/api/followups", async (req, res) => {
   }
 });
 
+// Flags a scheduled follow-up as needing a sample brought along, so
+// checkSampleReminders can nudge the manager to have it ready a couple of
+// days ahead of the visit — asked right after the follow-up date is set,
+// since that's what the "2 days before" countdown is measured against.
+app.patch("/api/followups/:id/sample", async (req, res) => {
+  try {
+    if (!req.repName) return res.status(403).json({ error: "Only reps can update their follow-ups." });
+    const { items } = req.body;
+    const patch = {
+      needsSample: "true",
+      sampleItems: Array.isArray(items) && items.length ? JSON.stringify(items) : "",
+    };
+    const ok = await db.updateRowById("FollowUps", req.params.id, patch);
+    if (!ok) return res.status(404).json({ error: "Follow-up not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.delete("/api/visits/:id", requireManager, async (req, res) => {
   try {
     await db.deleteRowById("Visits", req.params.id);
@@ -2093,6 +2114,48 @@ async function createVisitFromFollowUp(followUp) {
   return visit;
 }
 
+// A separate, earlier heads-up than checkFollowUpReminders — that one tells
+// the REP the visit is due today; this tells the MANAGER a couple of days
+// out that a sample needs to be ready, since prep (ordering it in, pulling
+// it from stock) can't happen same-day. sampleReminded guards against
+// re-sending if the interval catches the same follow-up more than once
+// inside its 2-day window.
+async function checkSampleReminders() {
+  if (!telegram.isConfigured()) return;
+  try {
+    const settings = await db.getSettings();
+    if (!settings.managerTelegramChatId) return;
+    const followUps = await db.getAllRows("FollowUps");
+    const due = followUps.filter((f) =>
+      f.needsSample === "true" &&
+      !f.sampleReminded &&
+      f.status !== "stopped" && f.status !== "done" &&
+      daysUntilFromToday(f.dueDate) <= 2 && daysUntilFromToday(f.dueDate) >= 0
+    );
+    for (const f of due) {
+      let items = [];
+      try { items = JSON.parse(f.sampleItems || "[]"); } catch { items = []; }
+      const itemsText = items.length ? items.map((it) => it.name).join(", ") : "a sample";
+      try {
+        await telegram.sendMessage(
+          settings.managerTelegramChatId,
+          `🎁 Sample reminder: <b>${escapeHtml(f.repName)}</b> is due to visit <b>${escapeHtml(f.entityName)}</b> on ${f.dueDate} and will need to bring <b>${escapeHtml(itemsText)}</b> — please have it ready.`
+        );
+        notifyManagers({
+          title: "Sample needed soon",
+          body: `${f.repName} visits ${f.entityName} on ${f.dueDate} — needs ${itemsText}`,
+          url: "/",
+        }).catch(() => {});
+        await db.updateRowById("FollowUps", f.id, { sampleReminded: "true" });
+      } catch (e) {
+        console.error(`failed to send sample reminder for ${f.entityName}`, e);
+      }
+    }
+  } catch (e) {
+    console.error("checkSampleReminders failed", e);
+  }
+}
+
 async function checkFollowUpReminders() {
   if (!telegram.isConfigured()) return;
   try {
@@ -2341,9 +2404,11 @@ setInterval(checkMissedPunchOuts, PUNCH_AUTO_CLOSE_CHECK_INTERVAL_MS);
 if (telegram.isConfigured()) {
   checkMonthlyDigest();
   checkFollowUpReminders();
+  checkSampleReminders();
   checkMonthlyVisitsSummary();
   setInterval(checkMonthlyDigest, MONTHLY_DIGEST_CHECK_INTERVAL_MS);
   setInterval(checkFollowUpReminders, FOLLOWUP_CHECK_INTERVAL_MS);
+  setInterval(checkSampleReminders, FOLLOWUP_CHECK_INTERVAL_MS);
   setInterval(checkMonthlyVisitsSummary, MONTHLY_DIGEST_CHECK_INTERVAL_MS);
   telegram.getMe().then((me) => { telegramBotUsername = me.username; }).catch((e) => console.error("telegram getMe failed", e));
   if (process.env.RENDER_EXTERNAL_URL) {
