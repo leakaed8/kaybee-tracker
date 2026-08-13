@@ -1063,6 +1063,16 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     : doctors.find((d) => d.name.toLowerCase().trim() === client.toLowerCase().trim());
   const unknownEntity = client.trim().length > 0 && !matchedEntity;
 
+  // The last couple of visits to whoever's just been picked — a memory
+  // refresher right in the flow so a rep isn't walking in blind on what was
+  // discussed or promised last time, without having to leave Check-In first.
+  const recentVisitsForEntity = matchedEntity
+    ? visits
+        .filter((v) => v.client.toLowerCase().trim() === matchedEntity.name.toLowerCase().trim())
+        .sort((a, b) => new Date(b.time) - new Date(a.time))
+        .slice(0, 3)
+    : [];
+
   // Cross-checks the GPS just captured against the pharmacy/doctor's own
   // saved location, if it has one — this is how you'd know a rep's check-in
   // GPS actually matches the place they say they visited, not just that
@@ -1304,6 +1314,24 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
             {unknownEntity && (
               <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", color: "#7A5B2E", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 10, fontWeight: 500 }}>
                 ⚠ "{client}" isn't in the system yet. Go to the {entityType === "pharmacy" ? "Pharmacies" : "Doctors"} tab and add it there first (with full details{entityType === "pharmacy" ? ", including registration number" : ""}), then come back to check in.
+              </div>
+            )}
+            {recentVisitsForEntity.length > 0 && (
+              <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, marginBottom: 10 }}>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", marginBottom: 6 }}>Last time — a quick refresher</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {recentVisitsForEntity.map((v) => (
+                    <div key={v.id} style={{ fontSize: 12 }}>
+                      <span className="kb-font-mono" style={{ color: "#8A8272" }}>
+                        {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}{v.repName && v.repName !== repName ? ` · ${v.repName}` : ""}
+                      </span>
+                      {v.notes && <div>{v.notes}</div>}
+                      {v.mentionedItems && v.mentionedItems.length > 0 && (
+                        <div style={{ color: "#5B5445" }}><strong style={{ fontWeight: 600 }}>Discussed: </strong>{v.mentionedItems.map((it) => it.name).join(", ")}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
             <Field label="Visit notes">
@@ -1880,6 +1908,11 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
   const [appliedOfferIds, setAppliedOfferIds] = useState(new Set());
   const [applyingOfferId, setApplyingOfferId] = useState(null);
   const [freeProductQuery, setFreeProductQuery] = useState("");
+  // Picked before adding items, so the rep knows the target ("4 of 7 items
+  // added") instead of an offer just silently appearing once they happen to
+  // cross the threshold. Purely a guide — items don't have to match any one
+  // offer, so hitting a different offer's threshold still works below.
+  const [targetOfferId, setTargetOfferId] = useState("");
 
   // Pre-filled from the pharmacy's own negotiated rate, but editable per
   // order — discounts aren't uniform across pharmacies, and even a given
@@ -1932,15 +1965,30 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
   const netTotal = total * (1 - (Number(discountRate) || 0) / 100);
 
   const todayStr = new Date().toISOString().slice(0, 10);
-  const eligibleOffers = offers.filter((o) =>
-    o.active && (!o.expiresAt || o.expiresAt >= todayStr) && regularQty >= o.buyQty && !appliedOfferIds.has(o.id)
-  );
+  const activeOffers = offers.filter((o) => o.active && (!o.expiresAt || o.expiresAt >= todayStr));
+  // If the rep picked a target offer up front, only that one counts toward
+  // eligibility (a cleaner "N of buyQty added" story than surfacing every
+  // offer whose threshold happens to be crossed). No pre-pick falls back to
+  // the old behavior — whichever offers the items on the table now qualify for.
+  const eligibleOffers = (targetOfferId ? activeOffers.filter((o) => o.id === targetOfferId) : activeOffers)
+    .filter((o) => regularQty >= o.buyQty && !appliedOfferIds.has(o.id));
   const eligibleFreeProducts = products.filter((p) => p.qty > 0 && p.price > 0 && p.price <= weightedAvgPrice);
+  // The closest match to the average price without going over it — the
+  // highest-priced eligible item is exactly that, since eligibility already
+  // excludes anything above the average.
+  const suggestedFreeProduct = eligibleFreeProducts.length > 0
+    ? eligibleFreeProducts.reduce((best, p) => (p.price > best.price ? p : best), eligibleFreeProducts[0])
+    : null;
   const matchedFreeProduct = eligibleFreeProducts.find((p) => batchLabel(p) === freeProductQuery.trim());
   const freeProductOptions = (freeProductQuery.trim()
     ? eligibleFreeProducts.filter((p) => p.name.toLowerCase().includes(freeProductQuery.toLowerCase().trim()))
     : eligibleFreeProducts
   ).slice(0, 50);
+
+  const startApplyingOffer = (offerId) => {
+    setApplyingOfferId(offerId);
+    setFreeProductQuery(suggestedFreeProduct ? batchLabel(suggestedFreeProduct) : "");
+  };
 
   const applyOffer = (offer) => {
     if (!matchedFreeProduct) return;
@@ -1958,6 +2006,7 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
     setAppliedOfferIds((prev) => new Set(prev).add(offer.id));
     setApplyingOfferId(null);
     setFreeProductQuery("");
+    if (offer.id === targetOfferId) setTargetOfferId("");
   };
 
   const doCreateOrder = async () => {
@@ -2017,6 +2066,47 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
       <h3 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 10px" }}>Order for {clientName}</h3>
 
+      {activeOffers.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 6 }}>Is this order taking an offer?</label>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <button
+              onClick={() => setTargetOfferId("")}
+              style={{
+                padding: "6px 12px", borderRadius: 16, fontSize: 12, fontWeight: 500,
+                border: targetOfferId === "" ? "1px solid #1F2A24" : "1px solid #E5DFD3",
+                background: targetOfferId === "" ? "#1F2A24" : "#fff", color: targetOfferId === "" ? "#FAF7F2" : "#5B5445",
+              }}
+            >
+              No offer
+            </button>
+            {activeOffers.map((o) => (
+              <button
+                key={o.id}
+                onClick={() => setTargetOfferId(o.id)}
+                style={{
+                  padding: "6px 12px", borderRadius: 16, fontSize: 12, fontWeight: 500,
+                  border: targetOfferId === o.id ? "1px solid #C17817" : "1px solid #E5DFD3",
+                  background: targetOfferId === o.id ? "#C17817" : "#fff", color: targetOfferId === o.id ? "#fff" : "#5B5445",
+                }}
+              >
+                {o.label} (buy {o.buyQty}, get {o.getQty})
+              </button>
+            ))}
+          </div>
+          {targetOfferId && (() => {
+            const offer = activeOffers.find((o) => o.id === targetOfferId);
+            if (!offer) return null;
+            const reached = regularQty >= offer.buyQty;
+            return (
+              <div style={{ fontSize: 12, marginTop: 6, color: reached ? "#4C7A5E" : "#8A8272", fontWeight: reached ? 600 : 400 }}>
+                {reached ? `Threshold reached — ${regularQty} of ${offer.buyQty} items added.` : `${regularQty} of ${offer.buyQty} items added toward this offer.`}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
         <div style={{ flex: 2, minWidth: 160 }}>
           <input
@@ -2049,7 +2139,7 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
           {eligibleOffers.map((o) => (
             <div key={o.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5, marginBottom: 6, flexWrap: "wrap", gap: 6 }}>
               <span>🎉 Qualifies for <strong>{o.label}</strong> — {o.getQty} free item{o.getQty === 1 ? "" : "s"}, up to {weightedAvgPrice.toFixed(2)} each</span>
-              <button onClick={() => { setApplyingOfferId(o.id); setFreeProductQuery(""); }} style={{ padding: "5px 10px", borderRadius: 6, border: "none", background: "#C17817", color: "#fff", fontSize: 11.5, fontWeight: 500 }}>
+              <button onClick={() => startApplyingOffer(o.id)} style={{ padding: "5px 10px", borderRadius: 6, border: "none", background: "#C17817", color: "#fff", fontSize: 11.5, fontWeight: 500 }}>
                 Apply
               </button>
             </div>
@@ -2062,7 +2152,12 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
         if (!offer) return null;
         return (
           <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 8, padding: 10, marginBottom: 10 }}>
-            <div style={{ fontSize: 12.5, marginBottom: 6 }}>Pick a free item (up to {weightedAvgPrice.toFixed(2)}) for "{offer.label}":</div>
+            <div style={{ fontSize: 12.5, marginBottom: 6 }}>Free item for "{offer.label}" — average price of items added is {weightedAvgPrice.toFixed(2)}:</div>
+            {suggestedFreeProduct && (
+              <div style={{ fontSize: 12, color: "#4C7A5E", marginBottom: 6 }}>
+                Suggested (closest price without going over): <strong>{suggestedFreeProduct.name}</strong> — {suggestedFreeProduct.price.toFixed(2)}. Search below to pick a different item instead.
+              </div>
+            )}
             <input
               value={freeProductQuery}
               onChange={(e) => setFreeProductQuery(e.target.value)}
@@ -3163,6 +3258,7 @@ const CLIENT_FILLABLE_FIELDS = [
 
 function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onCompleteInfo }) {
   const [completingId, setCompletingId] = useState(null);
+  const [historyId, setHistoryId] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [name, setName] = useState("");
@@ -3184,6 +3280,14 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
     if (matches.length === 0) return null;
     return matches.reduce((latest, v) => (new Date(v.time) > new Date(latest.time) ? v : latest), matches[0]);
   };
+
+  // The last few visits to this pharmacy, newest first — what a rep needs
+  // to refresh their memory before walking back in (what was discussed,
+  // any objection, what was left off) without digging through Performance.
+  const visitHistoryFor = (clientName) => visits
+    .filter((v) => v.client.toLowerCase().trim() === clientName.toLowerCase().trim())
+    .sort((a, b) => new Date(b.time) - new Date(a.time))
+    .slice(0, 5);
 
   // Same navigator.geolocation pattern used for Punch In / Check-In — a GPS
   // fix taken while standing at the pharmacy is more accurate than
@@ -3404,6 +3508,9 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
               <a href={mapsLinkFor(c)} target="_blank" rel="noreferrer" style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#4C7A5E", textDecoration: "none" }}>
                 <MapPin size={11} /> Get directions
               </a>
+              <button onClick={() => setHistoryId(historyId === c.id ? null : c.id)} style={{ background: "none", border: "none", color: "#5B5445", fontSize: 11, fontWeight: 500 }}>
+                {historyId === c.id ? "Hide history" : "History"}
+              </button>
               {role === "rep" && (() => {
                 const missing = CLIENT_FILLABLE_FIELDS.filter((f) => !c[f.key]);
                 if (missing.length === 0) return null;
@@ -3415,6 +3522,26 @@ function ClientsView({ clients, visits, orders, role, repName, repNames, onAdd, 
               })()}
               <button onClick={() => onRemove(c.id)} style={{ background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
             </div>
+            {historyId === c.id && (
+              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                {visitHistoryFor(c.name).map((v) => (
+                  <div key={v.id} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 10px", fontSize: 12 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", color: "#8A8272", fontSize: 11 }}>
+                      <span>{v.repName || "unknown rep"}</span>
+                      <span className="kb-font-mono">{new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</span>
+                    </div>
+                    {v.notes && <div style={{ marginTop: 3 }}>{v.notes}</div>}
+                    {v.mentionedItems && v.mentionedItems.length > 0 && (
+                      <div style={{ marginTop: 3, color: "#5B5445" }}>
+                        <strong style={{ fontWeight: 600 }}>Discussed: </strong>{v.mentionedItems.map((it) => it.name).join(", ")}
+                      </div>
+                    )}
+                    {v.objectionTag && <div style={{ marginTop: 3, color: "#B33A3A" }}>{v.objectionTag}</div>}
+                  </div>
+                ))}
+                {visitHistoryFor(c.name).length === 0 && <EmptyState text="No visits logged yet." />}
+              </div>
+            )}
             {role === "rep" && completingId === c.id && (
               <CompleteInfoForm
                 fields={CLIENT_FILLABLE_FIELDS.filter((f) => !c[f.key])}
@@ -3670,6 +3797,7 @@ const DOCTOR_FILLABLE_FIELDS = [
 
 function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkImport, onCompleteInfo }) {
   const [completingId, setCompletingId] = useState(null);
+  const [historyId, setHistoryId] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [name, setName] = useState("");
@@ -3690,6 +3818,11 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
     if (matches.length === 0) return null;
     return matches.reduce((latest, v) => (new Date(v.time) > new Date(latest.time) ? v : latest), matches[0]);
   };
+
+  const visitHistoryFor = (doctorName) => visits
+    .filter((v) => v.client.toLowerCase().trim() === doctorName.toLowerCase().trim())
+    .sort((a, b) => new Date(b.time) - new Date(a.time))
+    .slice(0, 5);
 
   // Same navigator.geolocation pattern used for Punch In / Check-In / Add
   // Pharmacy — a GPS fix taken on-site beats geocoding a typed address.
@@ -3873,8 +4006,31 @@ function DoctorsView({ doctors, visits, samples, role, onAdd, onRemove, onBulkIm
                   </button>
                 );
               })()}
+              <button onClick={() => setHistoryId(historyId === d.id ? null : d.id)} style={{ background: "none", border: "none", color: "#5B5445", fontSize: 11, fontWeight: 500 }}>
+                {historyId === d.id ? "Hide history" : "History"}
+              </button>
               <button onClick={() => onRemove(d.id)} style={{ background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
             </div>
+            {historyId === d.id && (
+              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                {visitHistoryFor(d.name).map((v) => (
+                  <div key={v.id} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 10px", fontSize: 12 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", color: "#8A8272", fontSize: 11 }}>
+                      <span>{v.repName || "unknown rep"}</span>
+                      <span className="kb-font-mono">{new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</span>
+                    </div>
+                    {v.notes && <div style={{ marginTop: 3 }}>{v.notes}</div>}
+                    {v.mentionedItems && v.mentionedItems.length > 0 && (
+                      <div style={{ marginTop: 3, color: "#5B5445" }}>
+                        <strong style={{ fontWeight: 600 }}>Discussed: </strong>{v.mentionedItems.map((it) => it.name).join(", ")}
+                      </div>
+                    )}
+                    {v.objectionTag && <div style={{ marginTop: 3, color: "#B33A3A" }}>{v.objectionTag}</div>}
+                  </div>
+                ))}
+                {visitHistoryFor(d.name).length === 0 && <EmptyState text="No visits logged yet." />}
+              </div>
+            )}
             {role === "rep" && completingId === d.id && (
               <CompleteInfoForm
                 fields={DOCTOR_FILLABLE_FIELDS.filter((f) => !d[f.key])}
