@@ -1146,10 +1146,10 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
       setFollowUpStatus(null);
       setFollowUpError("");
       // Doctors don't buy stock, and sample-giving is already captured
-      // per-item above (in "Items mentioned") — nothing left to ask, so
-      // their check-in ends right here. Pharmacies still go on to the
-      // order question.
-      setStep(entityType === "pharmacy" ? "orderPrompt" : "done");
+      // per-item above (in "Items mentioned") — so they skip straight to
+      // scheduling a follow-up. Pharmacies still go on to the order question
+      // first, then their own follow-up step later.
+      setStep(entityType === "pharmacy" ? "orderPrompt" : "followup");
     } catch (e) {
       setVisitError(e?.message || "Couldn't save the visit.");
     } finally {
@@ -1178,8 +1178,6 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     setStep("done");
   };
 
-  // Pharmacy-only now — doctors never reach this step, their check-in ends
-  // right after logging the visit.
   const scheduleFollowUp = async (presetKey) => {
     setFollowUpSaving(true);
     setFollowUpError("");
@@ -1214,10 +1212,10 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
 
   // Pharmacies place orders, so they get order -> sample -> follow-up.
   // Doctors don't buy stock, and sample-giving is captured per-item right
-  // in step 1 — there's nothing left to ask after logging the visit.
+  // in step 1, so they go straight from logging the visit to follow-up.
   const STEP_KEYS = entityType === "pharmacy"
     ? ["checkin", "orderPrompt", "order", "sample", "followup"]
-    : ["checkin"];
+    : ["checkin", "followup"];
   const STEP_INFO = entityType === "pharmacy" ? {
     checkin: { n: 1, title: "Log the visit" },
     orderPrompt: { n: 2, title: "Did they place an order?" },
@@ -1226,6 +1224,7 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     followup: { n: 5, title: "Schedule a follow-up" },
   } : {
     checkin: { n: 1, title: "Log the visit" },
+    followup: { n: 2, title: "Schedule a follow-up" },
   };
 
   const todayVisits = visits.filter((v) => v.repName === repName && new Date(v.time).toDateString() === new Date().toDateString());
