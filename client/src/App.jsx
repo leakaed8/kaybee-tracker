@@ -1987,7 +1987,13 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
 
   const regularItems = items.filter((it) => !it.isFree);
   const regularQty = regularItems.reduce((sum, it) => sum + it.qty, 0);
-  const weightedAvgPrice = regularQty > 0 ? regularItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0) / regularQty : 0;
+  // The average of one unit's price from each distinct line on the order —
+  // not weighted by how many units of each were bought, so a big quantity
+  // of one cheap item doesn't drag down what a "typical" free item should
+  // cost. Mirrors doing it by hand: line up one of each item and average those.
+  const weightedAvgPrice = regularItems.length > 0
+    ? regularItems.reduce((sum, it) => sum + it.unitPrice, 0) / regularItems.length
+    : 0;
   const total = items.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
   const netTotal = total * (1 - (Number(discountRate) || 0) / 100);
 
@@ -2026,9 +2032,26 @@ function OrderBuilder({ clientName, visitId, products, offers, orders, clients, 
       return applied && offer.buyQty > applied.buyQty;
     });
     setItems((prev) => {
-      const cleaned = supersededOfferIds.length
+      let cleaned = supersededOfferIds.length
         ? prev.filter((it) => !it.isFree || !supersededOfferIds.includes(it.viaOfferId))
-        : prev;
+        : [...prev];
+
+      // If the free item is the very same batch already sitting in the
+      // cart as a paid line, carve the free unit(s) out of that line
+      // instead of listing the same product twice on the invoice — "3
+      // purchased" becomes "2 purchased" + "1 free". Only do this when the
+      // order still clears the offer's own buyQty afterward — otherwise
+      // the carve-out would un-qualify the very order that earned it, so
+      // it falls back to adding a genuinely extra free unit instead.
+      const paidIdx = cleaned.findIndex((it) => !it.isFree && it.productId === matchedFreeProduct.id);
+      const paidQtyTotal = cleaned.filter((it) => !it.isFree).reduce((sum, it) => sum + it.qty, 0);
+      if (paidIdx >= 0 && cleaned[paidIdx].qty >= offer.getQty && paidQtyTotal - offer.getQty >= offer.buyQty) {
+        const remainingQty = cleaned[paidIdx].qty - offer.getQty;
+        cleaned = remainingQty > 0
+          ? cleaned.map((it, i) => (i === paidIdx ? { ...it, qty: remainingQty } : it))
+          : cleaned.filter((_, i) => i !== paidIdx);
+      }
+
       return [...cleaned, {
         productId: matchedFreeProduct.id,
         name: matchedFreeProduct.name,
