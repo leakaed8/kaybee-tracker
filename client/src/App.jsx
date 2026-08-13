@@ -1217,12 +1217,12 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
     setStep("done");
   };
 
-  const confirmNextSample = async (needsSample) => {
+  const confirmNextSample = async (needsSample, items) => {
     if (!needsSample || !pendingFollowUpId) { setStep("done"); return; }
     setNextSampleSaving(true);
     setNextSampleError("");
     try {
-      await api.setFollowUpSample(pendingFollowUpId, givenSampleItems);
+      await api.setFollowUpSample(pendingFollowUpId, items && items.length ? items : givenSampleItems);
       setStep("done");
     } catch (e) {
       setNextSampleError(e?.message || "Couldn't save.");
@@ -1625,25 +1625,15 @@ function CheckInView({ visits, clients, doctors, products, offers, orders, punch
       )}
 
       {step === "nextSample" && lastVisit && (
-        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
-          <div style={{ fontSize: 13.5, marginBottom: 6 }}>
-            Do you need to bring a sample for <strong>{lastVisit.client}</strong>'s next visit?
-          </div>
-          <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>
-            {givenSampleItems.length > 0
-              ? `If yes, we'll remind the manager to have ${givenSampleItems.map((it) => it.name).join(", ")} ready — 2 days before the visit.`
-              : "If yes, we'll remind the manager to have a sample ready 2 days before the visit."}
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button disabled={nextSampleSaving} onClick={() => confirmNextSample(true)} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
-              Yes
-            </button>
-            <button disabled={nextSampleSaving} onClick={() => confirmNextSample(false)} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
-              No
-            </button>
-          </div>
-          {nextSampleError && <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 8 }}>{nextSampleError}</div>}
-        </div>
+        <NextVisitSampleStep
+          clientName={lastVisit.client}
+          products={products}
+          suggestedItems={givenSampleItems}
+          saving={nextSampleSaving}
+          error={nextSampleError}
+          onConfirm={(items) => confirmNextSample(true, items)}
+          onSkip={() => confirmNextSample(false)}
+        />
       )}
 
       {step === "done" && lastVisit && lastVisit.pending && (
@@ -1949,6 +1939,110 @@ function PharmacySampleStep({ clientName, visitId, products, onDone }) {
       <div style={{ display: "flex", gap: 8 }}>
         <button disabled={saving} onClick={finish} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
           {saving ? "Saving…" : items.length > 0 ? "Save samples & continue" : "Continue"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Next-visit sample step (doctors, after scheduling a follow-up) ----------
+// A yes/no answer alone left the manager's prep reminder saying "a sample"
+// with no idea what to actually pull — this makes naming the item required
+// once the rep says yes, with a one-tap shortcut to reuse what was just
+// given today (the common case: same item again next time).
+function NextVisitSampleStep({ clientName, products, suggestedItems, saving, error, onConfirm, onSkip }) {
+  const [asked, setAsked] = useState(null); // null | "yes"
+  const [itemQuery, setItemQuery] = useState("");
+  const [qty, setQty] = useState("");
+  const [items, setItems] = useState([]);
+
+  const itemOptions = (itemQuery.trim()
+    ? products.filter((p) => p.name.toLowerCase().includes(itemQuery.toLowerCase().trim()))
+    : products
+  ).slice(0, 50);
+  const matchedItem = products.find((p) => p.name.toLowerCase().trim() === itemQuery.toLowerCase().trim());
+
+  const addItem = () => {
+    if (!matchedItem) return;
+    setItems((prev) => [...prev, { productId: matchedItem.id, name: matchedItem.name, qty: Number(qty) || 1 }]);
+    setItemQuery(""); setQty("");
+  };
+  const removeItem = (idx) => setItems((prev) => prev.filter((_, i) => i !== idx));
+
+  const useTodaysItems = () => {
+    setItems(suggestedItems.map((it) => ({ productId: it.productId, name: it.name, qty: it.qty || 1 })));
+  };
+
+  if (asked === null) {
+    return (
+      <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <span style={{ fontSize: 13.5 }}>Do you need to bring a sample for <strong>{clientName}</strong>'s next visit?</span>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => setAsked("yes")} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+            Yes
+          </button>
+          <button onClick={onSkip} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
+            No
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+      <h3 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 6px" }}>Which item should be ready for {clientName}?</h3>
+      <p style={{ fontSize: 12, color: "#8A8272", margin: "0 0 10px" }}>
+        We'll tell the manager exactly what to prepare, 2 days before the visit.
+      </p>
+
+      {suggestedItems.length > 0 && (
+        <button
+          onClick={useTodaysItems}
+          style={{ fontSize: 12, color: "#4C7A5E", background: "none", border: "1px solid #4C7A5E55", borderRadius: 6, padding: "6px 10px", marginBottom: 10 }}
+        >
+          Use what I gave today ({suggestedItems.map((it) => it.name).join(", ")})
+        </button>
+      )}
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+        <div style={{ flex: 2, minWidth: 160 }}>
+          <input
+            value={itemQuery}
+            onChange={(e) => setItemQuery(e.target.value)}
+            placeholder="Search item…"
+            list="next-sample-item-options"
+            style={inputStyle}
+          />
+          <datalist id="next-sample-item-options">
+            {itemOptions.map((p) => <option key={p.id} value={p.name} />)}
+          </datalist>
+        </div>
+        <input type="number" min="1" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Qty" style={{ ...inputStyle, flex: 1, minWidth: 80 }} />
+        <button onClick={addItem} style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+          Add
+        </button>
+      </div>
+
+      {items.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+          {items.map((it, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "6px 10px", fontSize: 12.5 }}>
+              <span>{it.name} × {it.qty}</span>
+              <button onClick={() => removeItem(i)} style={{ background: "none", border: "none", color: "#B7AF9E" }}><X size={13} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <button disabled={items.length === 0 || saving} onClick={() => onConfirm(items)} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: items.length > 0 && !saving ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
+          {saving ? "Saving…" : "Save & finish"}
+        </button>
+        <button onClick={onSkip} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>
+          Cancel
         </button>
       </div>
     </div>

@@ -2135,7 +2135,7 @@ async function checkSampleReminders() {
     for (const f of due) {
       let items = [];
       try { items = JSON.parse(f.sampleItems || "[]"); } catch { items = []; }
-      const itemsText = items.length ? items.map((it) => it.name).join(", ") : "a sample";
+      const itemsText = items.length ? items.map((it) => (it.qty > 1 ? `${it.name} ×${it.qty}` : it.name)).join(", ") : "a sample";
       try {
         await telegram.sendMessage(
           settings.managerTelegramChatId,
