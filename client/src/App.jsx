@@ -533,7 +533,7 @@ export default function App() {
                 templates={settings.templates} setTemplates={(v) => updateSettingsField({ templates: v })}
                 onBulkImport={bulkImportProducts}
                 productCount={products.length}
-                onRepsChanged={refresh}
+                onRepsChanged={refreshLive}
                 offers={offers}
                 onAddOffer={addOffer}
                 onToggleOfferActive={toggleOfferActive}
