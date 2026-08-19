@@ -266,7 +266,6 @@ export default function App() {
   const addVisit = (visit) => withSync(() => api.addVisit(visit), { touchesReference: true }); // can silently set a client's assignedRep server-side
   const removeVisit = (id) => withSync(() => api.removeVisit(id));
   const punch = (type, coords) => withSync(() => api.punch(type, coords));
-  const confirmPunch = (id, correctedTime) => withSync(() => api.confirmPunch(id, correctedTime));
   const createOrder = (order) => withSync(() => api.createOrder(order));
   const addClient = (client) => withSync(() => api.addClient(client), { touchesReference: true });
   const removeClient = (id) => withSync(() => api.removeClient(id), { touchesReference: true });
@@ -310,27 +309,20 @@ export default function App() {
     return <LoginView onSuccess={(r, rn, sup) => { setRole(r); setRepName(rn || ""); setIsSupervisor(!!sup); setTab(defaultTabFor(r, !!sup)); setAuthState("in"); }} />;
   }
 
-  // Both derived from myLastPunch (the current rep's own last punch row —
-  // see buildLiveBootstrapPayload server-side) rather than scanning a full
-  // team punch history: an unconfirmed auto-punch-out is, by construction,
-  // always that rep's chronologically last punch (PunchInGate blocks a new
-  // punch-in until it's confirmed), so "the single latest row" is enough.
+  // Derived from myLastPunch (the current rep's own last punch row — see
+  // buildLiveBootstrapPayload server-side) rather than scanning a full team
+  // punch history. A punch-out the system auto-recorded (missed by the
+  // rep, or by the scheduled 9pm Beirut auto-close — see
+  // checkMissedPunchOuts server-side) is just accepted as-is: there used to
+  // be a confirm-or-correct step required before punching in again, but it
+  // checked the rep's *entire* punch history server-side while only ever
+  // showing a confirm screen for the single latest row client-side — an
+  // older unconfirmed entry left some reps permanently stuck with an error
+  // the UI had no way to resolve. Removed entirely; punch-in is simply
+  // allowed whenever the rep isn't already punched in today.
   const punchedInToday = myLastPunch?.type === "in" && new Date(myLastPunch.time).toDateString() === new Date().toDateString();
-  // A punch-out the system auto-recorded because the rep never tapped it
-  // themselves (see checkMissedPunchOuts server-side) — they have to confirm
-  // or correct that time before punching in again, so it's not just silently
-  // trusted.
-  const unconfirmedAutoPunch = myLastPunch?.type === "out" && myLastPunch.auto && !myLastPunch.confirmed ? myLastPunch : null;
-  if (loaded && role === "rep" && (!punchedInToday || unconfirmedAutoPunch)) {
-    return (
-      <PunchInGate
-        repName={repName}
-        onPunch={punch}
-        onLogout={logout}
-        unconfirmedAutoPunch={unconfirmedAutoPunch}
-        onConfirmPunch={confirmPunch}
-      />
-    );
+  if (loaded && role === "rep" && !punchedInToday) {
+    return <PunchInGate repName={repName} onPunch={punch} onLogout={logout} />;
   }
 
   return (
@@ -596,13 +588,9 @@ function LoginView({ onSuccess }) {
 // hasn't punched in yet today — no header, no nav, nothing else reachable —
 // so the first thing that happens every day is a punch-in, not something a
 // rep can scroll past or forget.
-function PunchInGate({ repName, onPunch, onLogout, unconfirmedAutoPunch, onConfirmPunch }) {
+function PunchInGate({ repName, onPunch, onLogout }) {
   const [punching, setPunching] = useState(false);
   const [error, setError] = useState("");
-  const [correcting, setCorrecting] = useState(false);
-  const [correctedTime, setCorrectedTime] = useState("");
-  const [confirming, setConfirming] = useState(false);
-  const [confirmError, setConfirmError] = useState("");
 
   const doPunchIn = () => {
     setPunching(true);
@@ -613,77 +601,6 @@ function PunchInGate({ repName, onPunch, onLogout, unconfirmedAutoPunch, onConfi
         .finally(() => setPunching(false));
     });
   };
-
-  const confirmAsIs = () => {
-    setConfirming(true);
-    setConfirmError("");
-    onConfirmPunch(unconfirmedAutoPunch.id)
-      .catch((e) => setConfirmError(e?.message || "Couldn't confirm. Try again."))
-      .finally(() => setConfirming(false));
-  };
-
-  const submitCorrection = () => {
-    if (!correctedTime) { setConfirmError("Enter the time you actually left."); return; }
-    setConfirming(true);
-    setConfirmError("");
-    onConfirmPunch(unconfirmedAutoPunch.id, new Date(correctedTime).toISOString())
-      .catch((e) => setConfirmError(e?.message || "Couldn't save. Try again."))
-      .finally(() => setConfirming(false));
-  };
-
-  if (unconfirmedAutoPunch) {
-    const autoTimeStr = new Date(unconfirmedAutoPunch.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
-    return (
-      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#FAF7F2", fontFamily: "'IBM Plex Sans', system-ui, sans-serif", padding: 16 }}>
-        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 14, padding: 32, width: "100%", maxWidth: 360, textAlign: "center" }}>
-          <div className="kb-font-display" style={{ fontSize: 19, fontWeight: 600, marginBottom: 8 }}>
-            You didn't punch out
-          </div>
-          <p style={{ fontSize: 13.5, color: "#8A8272", marginBottom: 20 }}>
-            We auto-recorded <strong>{autoTimeStr}</strong> since you never tapped Punch out. Is that about right?
-          </p>
-          {!correcting ? (
-            <>
-              <button
-                onClick={confirmAsIs}
-                disabled={confirming}
-                style={{ width: "100%", padding: "13px 18px", borderRadius: 10, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 14.5, fontWeight: 600, marginBottom: 10 }}
-              >
-                {confirming ? "Saving…" : "Yes, that's right"}
-              </button>
-              <button
-                onClick={() => setCorrecting(true)}
-                disabled={confirming}
-                style={{ width: "100%", padding: "13px 18px", borderRadius: 10, border: "1px solid #E5DFD3", background: "#fff", fontSize: 14.5, fontWeight: 500 }}
-              >
-                No, let me fix it
-              </button>
-            </>
-          ) : (
-            <>
-              <input
-                type="datetime-local"
-                value={correctedTime}
-                onChange={(e) => setCorrectedTime(e.target.value)}
-                style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 14, marginBottom: 12 }}
-              />
-              <button
-                onClick={submitCorrection}
-                disabled={confirming}
-                style={{ width: "100%", padding: "13px 18px", borderRadius: 10, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 14.5, fontWeight: 600 }}
-              >
-                {confirming ? "Saving…" : "Save actual time"}
-              </button>
-            </>
-          )}
-          {confirmError && <div style={{ fontSize: 12.5, color: "#B33A3A", marginTop: 12 }}>{confirmError}</div>}
-          <button onClick={onLogout} style={{ marginTop: 18, fontSize: 11.5, color: "#8A8272", background: "none", border: "none" }}>
-            Not you? Log out
-          </button>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#FAF7F2", fontFamily: "'IBM Plex Sans', system-ui, sans-serif", padding: 16 }}>

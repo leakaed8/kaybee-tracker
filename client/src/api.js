@@ -101,7 +101,6 @@ export const api = {
   addSamples: (payload) => request("/samples", { method: "POST", body: JSON.stringify(payload) }),
   getPharmacySalesStatus: () => request("/pharmacy-sales/status"),
   importPharmacySales: (rows) => request("/pharmacy-sales/import", { method: "POST", body: JSON.stringify({ rows }) }),
-  confirmPunch: (id, correctedTime) => request(`/punch/${id}/confirm`, { method: "PATCH", body: JSON.stringify({ correctedTime }) }),
   addCompetitor: (competitor) => request("/competitors", { method: "POST", body: JSON.stringify(competitor) }),
   updateCompetitor: (id, patch) => request(`/competitors/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   removeCompetitor: (id) => request(`/competitors/${id}`, { method: "DELETE" }),

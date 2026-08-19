@@ -1152,18 +1152,21 @@ app.post("/api/punch", async (req, res) => {
     const log = await db.getAllRows("PunchLog");
     const mine = log.filter((p) => p.repName === req.repName).sort((a, b) => new Date(b.time) - new Date(a.time));
     let currentlyIn = mine.length > 0 && mine[0].type === "in";
-    // Only a pre-existing unconfirmed auto-close should hold up a new punch-in
-    // — not one this same request is about to create below (see next block).
-    const hadPreexistingUnconfirmedAutoOut = mine.some((p) => p.type === "out" && p.auto === "true" && p.confirmed !== "true");
 
     // A dangling "in" from a previous day (missed by the scheduled 9pm
     // auto-close — the free-tier server can be asleep at that exact hour,
     // or it just hasn't run yet today) would otherwise block every future
     // punch-in forever: the server refuses a new "in" while the last one is
     // still open, but the app requires a fresh punch specifically for
-    // today. Close it out right now instead of leaving the rep stuck — the
-    // rep still ends up seeing a "confirm your punch-out time" prompt for
-    // it next time, just not one that blocks getting into today's app.
+    // today. Close it out right now instead of leaving the rep stuck.
+    // Previously this — and the scheduled 9pm auto-close — flagged the
+    // closed entry as needing the rep's confirmation before a new punch-in
+    // was allowed, checked against their *entire* punch history. That
+    // full-history check was the actual bug: the client only ever showed a
+    // confirm screen for the single latest punch, so an older unconfirmed
+    // entry (e.g. from an earlier stale-close) left a rep permanently
+    // blocked here with no UI able to resolve it. Auto-closes are now just
+    // accepted outright — no confirmation step, nothing to get stuck on.
     if (type === "in" && currentlyIn && beirutDateStr(new Date(mine[0].time)) !== beirutDateStr(new Date())) {
       const staleClose = {
         id: `pl${crypto.randomUUID()}`,
@@ -1173,7 +1176,7 @@ app.post("/api/punch", async (req, res) => {
         coordsLat: "",
         coordsLng: "",
         auto: "true",
-        confirmed: "",
+        confirmed: "true",
       };
       await db.appendRow("PunchLog", staleClose);
       currentlyIn = false;
@@ -1181,9 +1184,6 @@ app.post("/api/punch", async (req, res) => {
 
     if (type === "in" && currentlyIn) return res.status(400).json({ error: "Already punched in." });
     if (type === "out" && !currentlyIn) return res.status(400).json({ error: "Not punched in." });
-    if (type === "in" && hadPreexistingUnconfirmedAutoOut) {
-      return res.status(400).json({ error: "Confirm yesterday's punch-out time before punching in." });
-    }
     const entry = {
       id: `pl${crypto.randomUUID()}`,
       repName: req.repName,
@@ -1204,34 +1204,6 @@ app.post("/api/punch", async (req, res) => {
       }).catch((e) => console.error("punch-in telegram notify failed", e));
     }
     res.json(entry);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// A rep confirms (or corrects) a punch-out the system auto-recorded because
-// they never tapped "Punch out" themselves. Required before they can punch
-// in for a new day — see checkMissedPunchOuts below for how these get
-// created in the first place.
-app.patch("/api/punch/:id/confirm", async (req, res) => {
-  try {
-    if (!req.repName) return res.status(403).json({ error: "Reps only." });
-    const log = await db.getAllRows("PunchLog");
-    const entry = log.find((p) => p.id === req.params.id);
-    if (!entry) return res.status(404).json({ error: "Punch record not found." });
-    if (entry.repName !== req.repName) return res.status(403).json({ error: "Not your punch record." });
-    if (entry.auto !== "true") return res.status(400).json({ error: "Only auto-recorded punches need confirming." });
-    const patch = { confirmed: "true" };
-    const { correctedTime } = req.body;
-    if (correctedTime) {
-      const d = new Date(correctedTime);
-      if (isNaN(d.getTime())) return res.status(400).json({ error: "Invalid corrected time." });
-      patch.time = d.toISOString();
-    }
-    const ok = await db.updateRowById("PunchLog", req.params.id, patch);
-    if (!ok) return res.status(404).json({ error: "Punch record not found." });
-    res.json({ ok: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -2753,9 +2725,11 @@ async function checkMonthlyVisitsSummary() {
 // A rep who forgets to punch out leaves an open "in" forever, which quietly
 // breaks anything relying on punch state (and just looks like the app is
 // stuck). Once a day, past the cutoff hour, close out anyone still open —
-// flagged "auto" and unconfirmed so PunchInGate makes them confirm or
-// correct that time before they can punch in for a new day (see
-// /api/punch and /api/punch/:id/confirm above).
+// flagged "auto" for the audit trail/manager Telegram note below. This used
+// to also require the rep to confirm or correct that time before punching
+// in again (a blocking screen in PunchInGate) — removed because it was
+// itself becoming a stuck screen for reps: confirmed:"true" from the start
+// means the auto-close is just accepted, no gate, no correction step.
 const PUNCH_AUTO_CLOSE_HOUR = 21; // 9pm Beirut
 const PUNCH_AUTO_CLOSE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 function beirutDateStr(date) {
@@ -2782,7 +2756,7 @@ async function checkMissedPunchOuts() {
         coordsLat: "",
         coordsLng: "",
         auto: "true",
-        confirmed: "",
+        confirmed: "true",
       };
       await db.appendRow("PunchLog", entry);
       if (settings.managerTelegramChatId) {
