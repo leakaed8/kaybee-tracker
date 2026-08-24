@@ -52,6 +52,7 @@ export const api = {
   getCompetitorSightings: (params) => request(`/competitor-sightings${qs(params)}`),
   getCompetitorProducts: (params) => request(`/competitor-products${qs(params)}`),
   getClientVisitStats: (names) => request("/clients/visit-stats", { method: "POST", body: JSON.stringify({ names }) }),
+  getVisitCadence: () => request("/visit-cadence"),
   getDoctorVisitStats: (names) => request("/doctors/visit-stats", { method: "POST", body: JSON.stringify({ names }) }),
   addProduct: (product) => request("/products", { method: "POST", body: JSON.stringify(product) }),
   removeProduct: (id) => request(`/products/${id}`, { method: "DELETE" }),

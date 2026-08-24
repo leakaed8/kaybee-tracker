@@ -10,7 +10,7 @@ import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
   TrendingDown, TrendingUp, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
   Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar as RadarIcon, Search, BookOpen,
-  GraduationCap, Boxes, Swords,
+  GraduationCap, Boxes, Swords, History,
 } from "lucide-react";
 import { api } from "./api.js";
 import {
@@ -386,6 +386,7 @@ export default function App() {
         <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />
         <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />
         {!isSupervisor && <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />}
+        {(role === "manager" || role === "rep") && <TabBtn active={tab === "cadence"} onClick={() => setTab("cadence")} icon={<History size={15} />} label="Visit Cadence" />}
         {(role === "manager" || role === "rep") && <TabBtn active={tab === "competitors"} onClick={() => setTab("competitors")} icon={<Swords size={15} />} label="Competitors" />}
         <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />
         {!isSupervisor && <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />}
@@ -455,6 +456,9 @@ export default function App() {
                 onBulkImport={bulkImportDoctors}
                 onCompleteInfo={completeDoctorInfo}
               />
+            )}
+            {tab === "cadence" && (role === "manager" || role === "rep") && (
+              <VisitCadenceView role={role} isSupervisor={isSupervisor} repNames={repNames} />
             )}
             {tab === "knowledge" && <KnowledgeView />}
             {tab === "training" && !isSupervisor && <TrainingView />}
@@ -3274,6 +3278,136 @@ function CompetitorProductExcelImportSection({ competitors, onImport, onDone }) 
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------- Visit Cadence View ----------
+// Answers "should I be visiting this pharmacy/doctor more or less often" —
+// total visits, days since the last one, and the average gap between
+// visits, against the same Tier A/B/C cadence already shown on Pharmacies/
+// Doctors. Manager/supervisor gets the whole team; a plain rep gets only
+// their own scope (the server already filters this — see GET
+// /api/visit-cadence), matching "each rep sees their own visits."
+function VisitCadenceView({ role, isSupervisor, repNames }) {
+  const isTeamWide = role === "manager" || isSupervisor;
+  const [cadence, setCadence] = useState(null);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [repFilter, setRepFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState("all"); // all | pharmacy | doctor
+  const [sortBy, setSortBy] = useState("overdue"); // overdue | totalVisits | avgGap | name
+
+  useEffect(() => {
+    api.getVisitCadence()
+      .then((data) => setCadence(data.cadence || []))
+      .catch((e) => setError(e.message || "Couldn't load visit cadence."));
+  }, []);
+
+  const rows = (cadence || []).map((c) => {
+    const days = c.lastVisit ? daysSince(c.lastVisit) : null;
+    const cadenceDays = TIER_CADENCE[c.tier] || 30;
+    const overdue = !c.stopped && (days === null || days > cadenceDays);
+    return { ...c, days, cadenceDays, overdue };
+  });
+
+  const filtered = rows
+    .filter((r) => (typeFilter === "all" ? true : r.entityType === typeFilter))
+    .filter((r) => (isTeamWide && repFilter !== "all" ? r.assignedRep === repFilter : true))
+    .filter((r) => r.entityName.toLowerCase().includes(search.toLowerCase().trim()));
+
+  const sorted = [...filtered].sort((a, b) => {
+    if (sortBy === "name") return a.entityName.localeCompare(b.entityName);
+    if (sortBy === "totalVisits") return b.totalVisits - a.totalVisits;
+    if (sortBy === "avgGap") return (b.avgDaysBetweenVisits ?? -1) - (a.avgDaysBetweenVisits ?? -1);
+    // Most overdue (or never-visited) first, stopped entities pushed to the bottom.
+    if (a.stopped !== b.stopped) return a.stopped ? 1 : -1;
+    return (b.days ?? 99999) - (a.days ?? 99999);
+  });
+
+  const shown = sorted.slice(0, LIST_DISPLAY_CAP);
+
+  if (error) return <div style={{ fontSize: 12.5, color: "#B33A3A" }}>{error}</div>;
+  if (cadence === null) return <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>;
+
+  return (
+    <div>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Visit cadence</h2>
+      <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
+        {isTeamWide
+          ? `How often each pharmacy and doctor is actually being visited, across the whole team. Same Tier A/B/C cadence as Pharmacies/Doctors (A: ${TIER_CADENCE.A}d · B: ${TIER_CADENCE.B}d · C: ${TIER_CADENCE.C}d) — use it to spot who's overdue, who's stopped, and where visit frequency should go up or down.`
+          : `How often you're actually visiting your own pharmacies and doctors, based on your logged visits. Same cadence targets as Pharmacies/Doctors (A: ${TIER_CADENCE.A}d · B: ${TIER_CADENCE.B}d · C: ${TIER_CADENCE.C}d).`}
+      </p>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name…" style={{ ...inputStyle, maxWidth: 220 }} />
+        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} style={{ ...inputStyle, maxWidth: 160 }}>
+          <option value="all">All types</option>
+          <option value="pharmacy">Pharmacies</option>
+          <option value="doctor">Doctors</option>
+        </select>
+        {isTeamWide && (
+          <select value={repFilter} onChange={(e) => setRepFilter(e.target.value)} style={{ ...inputStyle, maxWidth: 200 }}>
+            <option value="all">All reps</option>
+            {repNames.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        )}
+        <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} style={{ ...inputStyle, maxWidth: 200 }}>
+          <option value="overdue">Sort: Most overdue first</option>
+          <option value="totalVisits">Sort: Most visits first</option>
+          <option value="avgGap">Sort: Widest gap first</option>
+          <option value="name">Sort: Name</option>
+        </select>
+      </div>
+
+      {sorted.length > LIST_DISPLAY_CAP && (
+        <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>
+          Showing {LIST_DISPLAY_CAP} of {sorted.length.toLocaleString()} — narrow with search or filters.
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {shown.map((r) => (
+          <div
+            key={`${r.entityType}-${r.entityName}`}
+            style={{
+              background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "10px 12px", fontSize: 12.5,
+              borderLeft: `3px solid ${r.stopped ? "#B33A3A" : r.overdue ? "#C17817" : "#4C7A5E"}`,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 6 }}>
+              <div>
+                <strong>{r.entityName}</strong>{" "}
+                <span style={{ color: "#8A8272" }}>
+                  · {r.entityType === "doctor" ? "Doctor" : "Pharmacy"}{r.tier ? ` · Tier ${r.tier}` : ""}
+                  {isTeamWide && r.assignedRep ? ` · ${r.assignedRep}` : ""}
+                </span>
+              </div>
+              <div>
+                {r.stopped ? (
+                  <span style={{ color: "#B33A3A", fontWeight: 600 }}>🚫 Stopped</span>
+                ) : r.overdue ? (
+                  <span style={{ color: "#C17817", fontWeight: 600 }}>⚠ Overdue</span>
+                ) : (
+                  <span style={{ color: "#4C7A5E", fontWeight: 600 }}>On track</span>
+                )}
+              </div>
+            </div>
+            <div style={{ color: "#5B5445", marginTop: 4 }}>
+              {r.totalVisits === 0
+                ? "Never visited"
+                : `${r.totalVisits} visit${r.totalVisits === 1 ? "" : "s"} · last ${r.days}d ago${r.avgDaysBetweenVisits !== null ? ` · avg every ${r.avgDaysBetweenVisits}d` : ""} · target every ${r.cadenceDays}d`}
+            </div>
+            {r.stopped && (
+              <div style={{ color: "#B33A3A", marginTop: 4 }}>
+                Stopped {new Date(r.stopDate).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}
+                {r.stopReason ? ` — "${r.stopReason}"` : ""}
+              </div>
+            )}
+          </div>
+        ))}
+        {shown.length === 0 && <div style={{ fontSize: 12.5, color: "#8A8272" }}>Nothing to show.</div>}
+      </div>
     </div>
   );
 }
