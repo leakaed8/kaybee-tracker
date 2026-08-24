@@ -1049,17 +1049,30 @@ app.post("/api/samples", async (req, res) => {
 app.post("/api/followups", async (req, res) => {
   try {
     if (!req.repName) return res.status(403).json({ error: "Only reps can schedule follow-ups." });
-    const { entityName, entityType, presetKey, visitId } = req.body;
-    const preset = FOLLOWUP_PRESETS[presetKey];
-    if (!entityName || !entityType || !preset) {
-      return res.status(400).json({ error: "entityName, entityType and a valid presetKey are required" });
+    const { entityName, entityType, presetKey, days: customDays, visitId } = req.body;
+    if (!entityName || !entityType) {
+      return res.status(400).json({ error: "entityName and entityType are required" });
+    }
+    // Either a preset (2d/1w/1m/…) or a rep-typed custom day count — never
+    // both. Custom is capped at a year out so a typo (e.g. an extra digit)
+    // can't silently schedule a follow-up decades in the future.
+    let days;
+    if (presetKey) {
+      const preset = FOLLOWUP_PRESETS[presetKey];
+      if (!preset) return res.status(400).json({ error: "Invalid presetKey" });
+      days = preset.days;
+    } else {
+      days = Number(customDays);
+      if (!Number.isInteger(days) || days < 1 || days > 365) {
+        return res.status(400).json({ error: "Custom follow-up must be a whole number of days between 1 and 365." });
+      }
     }
     const followUp = {
       id: `fu${crypto.randomUUID()}`,
       entityName,
       entityType,
       repName: req.repName,
-      dueDate: addDaysToTodayStr(preset.days),
+      dueDate: addDaysToTodayStr(days),
       status: "pending",
       visitId: visitId || "",
       createdAt: new Date().toISOString(),
@@ -1090,6 +1103,37 @@ app.post("/api/followups", async (req, res) => {
       }
     }
 
+    res.json(followUp);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Recorded as its own FollowUps row (status "stopped") rather than mutating
+// an existing one, same as the Telegram "🚫 Not interested — stop" path —
+// keeps a full timeline per entity instead of overwriting history. The
+// optional reason is what lets the visit-frequency analysis later explain
+// *why* a pharmacy/doctor dropped off, not just that it did.
+app.post("/api/followups/stop", async (req, res) => {
+  try {
+    if (!req.repName) return res.status(403).json({ error: "Only reps can do this." });
+    const { entityName, entityType, reason, visitId } = req.body;
+    if (!entityName || !entityType) {
+      return res.status(400).json({ error: "entityName and entityType are required" });
+    }
+    const followUp = {
+      id: `fu${crypto.randomUUID()}`,
+      entityName,
+      entityType,
+      repName: req.repName,
+      dueDate: "",
+      status: "stopped",
+      visitId: visitId || "",
+      createdAt: new Date().toISOString(),
+      stopReason: (reason || "").trim(),
+    };
+    await db.appendRow("FollowUps", followUp);
     res.json(followUp);
   } catch (e) {
     console.error(e);
@@ -2003,6 +2047,107 @@ app.post("/api/doctors/visit-stats", async (req, res) => {
       stats[key].pendingSamples.push({ productName: s.productName });
     });
     res.json({ stats });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Per-entity visit cadence — total visits, when last, and the average gap
+// between visits — the numbers behind "am I visiting this pharmacy/doctor
+// too often or not enough." Deliberately hands back raw numbers rather than
+// an "overdue" verdict: Pharmacies/Doctors already compute that client-side
+// from TIER_CADENCE (helpers.js), so this stays the one source of truth
+// rather than a second, possibly-drifting copy of that logic.
+//
+// Scope: manager/supervisor gets every entity across the whole team; a
+// plain rep gets only their own — anything they've personally logged a
+// visit to, plus any pharmacy assigned to them (even one they haven't
+// visited yet, since "never visited" is exactly the kind of gap this is
+// for). Doctors have no assignedRep field, so a rep's doctor list here is
+// visit-history-only.
+app.get("/api/visit-cadence", async (req, res) => {
+  try {
+    const isTeamWide = req.role === "manager" || req.isSupervisor;
+    if (!isTeamWide && !req.repName) return res.status(403).json({ error: "Reps only." });
+
+    const [visitRows, followUpRows, clients, doctors] = await Promise.all([
+      db.getAllRows("Visits"),
+      db.getAllRows("FollowUps"),
+      db.getAllRows("Clients"),
+      db.getAllRows("Doctors"),
+    ]);
+
+    const visitsByEntity = new Map(); // key -> { name, times: [] }
+    visitRows.forEach((v) => {
+      if (!isTeamWide && v.repName !== req.repName) return;
+      const key = String(v.client || "").toLowerCase().trim();
+      if (!key) return;
+      if (!visitsByEntity.has(key)) visitsByEntity.set(key, { name: v.client, times: [] });
+      visitsByEntity.get(key).times.push(v.time);
+    });
+
+    // Latest "stopped" event per entity, only counted if nothing has been
+    // visited since — a later visit means the rep resumed, so it reads as
+    // active again rather than stuck showing a stale stop reason forever.
+    const stopByEntity = new Map();
+    followUpRows.filter((f) => f.status === "stopped").forEach((f) => {
+      const key = String(f.entityName || "").toLowerCase().trim();
+      const existing = stopByEntity.get(key);
+      if (!existing || new Date(f.createdAt) > new Date(existing.createdAt)) stopByEntity.set(key, f);
+    });
+
+    const entities = new Map(); // key -> { name, type, assignedRep, tier }
+    visitsByEntity.forEach((v, key) => {
+      const client = clients.find((c) => c.name.toLowerCase().trim() === key);
+      const doctor = !client && doctors.find((d) => d.name.toLowerCase().trim() === key);
+      entities.set(key, {
+        name: v.name,
+        type: client ? "pharmacy" : doctor ? "doctor" : "pharmacy",
+        assignedRep: client?.assignedRep || "",
+        tier: client?.tier || doctor?.tier || "",
+      });
+    });
+    clients.forEach((c) => {
+      if (!isTeamWide && c.assignedRep !== req.repName) return;
+      const key = c.name.toLowerCase().trim();
+      if (!entities.has(key)) entities.set(key, { name: c.name, type: "pharmacy", assignedRep: c.assignedRep || "", tier: c.tier || "" });
+    });
+    if (isTeamWide) {
+      doctors.forEach((d) => {
+        const key = d.name.toLowerCase().trim();
+        if (!entities.has(key)) entities.set(key, { name: d.name, type: "doctor", assignedRep: "", tier: d.tier || "" });
+      });
+    }
+
+    const cadence = [...entities.entries()].map(([key, info]) => {
+      const times = (visitsByEntity.get(key)?.times || []).slice().sort((a, b) => new Date(a) - new Date(b));
+      const totalVisits = times.length;
+      const firstVisit = totalVisits ? times[0] : null;
+      const lastVisit = totalVisits ? times[times.length - 1] : null;
+      let avgDaysBetweenVisits = null;
+      if (totalVisits >= 2) {
+        const spanDays = (new Date(lastVisit) - new Date(firstVisit)) / 86400000;
+        avgDaysBetweenVisits = Math.round((spanDays / (totalVisits - 1)) * 10) / 10;
+      }
+      const stop = stopByEntity.get(key);
+      const stopped = !!stop && (!lastVisit || new Date(stop.createdAt) > new Date(lastVisit));
+      return {
+        entityName: info.name,
+        entityType: info.type,
+        tier: info.tier,
+        assignedRep: info.assignedRep,
+        totalVisits,
+        firstVisit,
+        lastVisit,
+        avgDaysBetweenVisits,
+        stopped,
+        stopReason: stopped ? (stop.stopReason || "") : "",
+        stopDate: stopped ? stop.createdAt : "",
+      };
+    });
+
+    res.json({ cadence });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
