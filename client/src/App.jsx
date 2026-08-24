@@ -1006,9 +1006,12 @@ function CheckInView({ clients, doctors, products, offers, repName, onAddVisit, 
   // visits, recent orders) sit outside this flow since they aren't part of
   // logging any one specific visit.
   const [step, setStep] = useState("checkin");
-  const [followUpStatus, setFollowUpStatus] = useState(null); // null | "set" | "skipped"
+  const [followUpStatus, setFollowUpStatus] = useState(null); // null | "set" | "stopped"
   const [followUpSaving, setFollowUpSaving] = useState(false);
   const [followUpError, setFollowUpError] = useState("");
+  const [customFollowUpDays, setCustomFollowUpDays] = useState("");
+  const [showStopFollowUp, setShowStopFollowUp] = useState(false);
+  const [stopFollowUpReason, setStopFollowUpReason] = useState("");
   const [exportSheetId, setExportSheetId] = useState("");
   const [showMyVisits, setShowMyVisits] = useState(false);
   const [mentionedItems, setMentionedItems] = useState([]);
@@ -1180,6 +1183,9 @@ function CheckInView({ clients, doctors, products, offers, repName, onAddVisit, 
       setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
       setFollowUpStatus(null);
       setFollowUpError("");
+      setCustomFollowUpDays("");
+      setShowStopFollowUp(false);
+      setStopFollowUpReason("");
       loadTodayVisits();
       // Doctors don't buy stock, and sample-giving is already captured
       // per-item above (in "Items mentioned") — so they skip straight to
@@ -1233,9 +1239,50 @@ function CheckInView({ clients, doctors, products, offers, repName, onAddVisit, 
     }
   };
 
-  const skipFollowUp = () => {
-    setFollowUpStatus("skipped");
-    setStep("done");
+  const scheduleCustomFollowUp = async () => {
+    const days = Number(customFollowUpDays);
+    if (!Number.isInteger(days) || days < 1 || days > 365) {
+      setFollowUpError("Enter a whole number of days, between 1 and 365.");
+      return;
+    }
+    setFollowUpSaving(true);
+    setFollowUpError("");
+    try {
+      await api.scheduleFollowUp({
+        entityName: lastVisit.client,
+        entityType,
+        days,
+        visitId: lastVisit.id,
+      });
+      setFollowUpStatus("set");
+      setStep("done");
+    } catch (e) {
+      setFollowUpError(e?.message || "Couldn't schedule follow-up.");
+    } finally {
+      setFollowUpSaving(false);
+    }
+  };
+
+  // Persisted (unlike the old silent "skip"), with an optional reason, so
+  // the manager/rep can later see why a pharmacy or doctor dropped off —
+  // and so it counts toward visit-frequency history instead of vanishing.
+  const stopFollowUp = async () => {
+    setFollowUpSaving(true);
+    setFollowUpError("");
+    try {
+      await api.stopFollowUp({
+        entityName: lastVisit.client,
+        entityType,
+        reason: stopFollowUpReason.trim(),
+        visitId: lastVisit.id,
+      });
+      setFollowUpStatus("stopped");
+      setStep("done");
+    } catch (e) {
+      setFollowUpError(e?.message || "Couldn't save that.");
+    } finally {
+      setFollowUpSaving(false);
+    }
   };
 
   const startNewVisit = () => {
@@ -1243,6 +1290,9 @@ function CheckInView({ clients, doctors, products, offers, repName, onAddVisit, 
     setFollowUpStatus(null);
     setFollowUpError("");
     setVisitError("");
+    setCustomFollowUpDays("");
+    setShowStopFollowUp(false);
+    setStopFollowUpReason("");
     setStep("checkin");
   };
 
@@ -1609,7 +1659,7 @@ function CheckInView({ clients, doctors, products, offers, repName, onAddVisit, 
           <div style={{ fontSize: 13.5, marginBottom: 10 }}>
             Schedule a follow-up for <strong>{lastVisit.client}</strong>?
           </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
             {FOLLOWUP_PRESETS.map((p) => (
               <button
                 key={p.key}
@@ -1620,14 +1670,66 @@ function CheckInView({ clients, doctors, products, offers, repName, onAddVisit, 
                 {p.label}
               </button>
             ))}
+          </div>
+
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+            <span style={{ fontSize: 12.5, color: "#5B5445" }}>Or in</span>
+            <input
+              type="number"
+              min="1"
+              max="365"
+              value={customFollowUpDays}
+              onChange={(e) => setCustomFollowUpDays(e.target.value)}
+              placeholder="e.g. 10"
+              style={{ ...inputStyle, width: 80, padding: "6px 8px", fontSize: 12.5 }}
+            />
+            <span style={{ fontSize: 12.5, color: "#5B5445" }}>days</span>
             <button
-              disabled={followUpSaving}
-              onClick={skipFollowUp}
-              style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}
+              disabled={followUpSaving || !customFollowUpDays}
+              onClick={scheduleCustomFollowUp}
+              style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #1F2A24", background: "#fff", color: "#1F2A24", fontSize: 12.5, fontWeight: 500 }}
             >
-              No follow-up needed
+              Schedule
             </button>
           </div>
+
+          {!showStopFollowUp ? (
+            <button
+              disabled={followUpSaving}
+              onClick={() => setShowStopFollowUp(true)}
+              style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#B33A3A", fontSize: 12.5 }}
+            >
+              🚫 Stop visiting this {entityType === "doctor" ? "doctor" : "pharmacy"}
+            </button>
+          ) : (
+            <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
+              <div style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 6 }}>
+                Why are you stopping? (optional, but helps later — e.g. "no budget", "switched supplier", "closed down")
+              </div>
+              <textarea
+                value={stopFollowUpReason}
+                onChange={(e) => setStopFollowUpReason(e.target.value)}
+                rows={2}
+                style={{ ...inputStyle, width: "100%", resize: "vertical", marginBottom: 8 }}
+              />
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  disabled={followUpSaving}
+                  onClick={stopFollowUp}
+                  style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#B33A3A", color: "#fff", fontSize: 12.5, fontWeight: 500 }}
+                >
+                  Confirm — stop visiting
+                </button>
+                <button
+                  disabled={followUpSaving}
+                  onClick={() => { setShowStopFollowUp(false); setStopFollowUpReason(""); }}
+                  style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
           {followUpError && <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 8 }}>{followUpError}</div>}
         </div>
       )}
@@ -1653,6 +1755,8 @@ function CheckInView({ clients, doctors, products, offers, repName, onAddVisit, 
           <div style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 16 }}>
             {followUpStatus === "set"
               ? "Follow-up scheduled — you'll get a Telegram reminder when it's due."
+              : followUpStatus === "stopped"
+              ? "Marked as stopped — no more reminders for this one."
               : "No follow-up scheduled for this visit."}
           </div>
           <button onClick={startNewVisit} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>

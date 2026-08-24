@@ -1049,17 +1049,30 @@ app.post("/api/samples", async (req, res) => {
 app.post("/api/followups", async (req, res) => {
   try {
     if (!req.repName) return res.status(403).json({ error: "Only reps can schedule follow-ups." });
-    const { entityName, entityType, presetKey, visitId } = req.body;
-    const preset = FOLLOWUP_PRESETS[presetKey];
-    if (!entityName || !entityType || !preset) {
-      return res.status(400).json({ error: "entityName, entityType and a valid presetKey are required" });
+    const { entityName, entityType, presetKey, days: customDays, visitId } = req.body;
+    if (!entityName || !entityType) {
+      return res.status(400).json({ error: "entityName and entityType are required" });
+    }
+    // Either a preset (2d/1w/1m/…) or a rep-typed custom day count — never
+    // both. Custom is capped at a year out so a typo (e.g. an extra digit)
+    // can't silently schedule a follow-up decades in the future.
+    let days;
+    if (presetKey) {
+      const preset = FOLLOWUP_PRESETS[presetKey];
+      if (!preset) return res.status(400).json({ error: "Invalid presetKey" });
+      days = preset.days;
+    } else {
+      days = Number(customDays);
+      if (!Number.isInteger(days) || days < 1 || days > 365) {
+        return res.status(400).json({ error: "Custom follow-up must be a whole number of days between 1 and 365." });
+      }
     }
     const followUp = {
       id: `fu${crypto.randomUUID()}`,
       entityName,
       entityType,
       repName: req.repName,
-      dueDate: addDaysToTodayStr(preset.days),
+      dueDate: addDaysToTodayStr(days),
       status: "pending",
       visitId: visitId || "",
       createdAt: new Date().toISOString(),
@@ -1090,6 +1103,37 @@ app.post("/api/followups", async (req, res) => {
       }
     }
 
+    res.json(followUp);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Recorded as its own FollowUps row (status "stopped") rather than mutating
+// an existing one, same as the Telegram "🚫 Not interested — stop" path —
+// keeps a full timeline per entity instead of overwriting history. The
+// optional reason is what lets the visit-frequency analysis later explain
+// *why* a pharmacy/doctor dropped off, not just that it did.
+app.post("/api/followups/stop", async (req, res) => {
+  try {
+    if (!req.repName) return res.status(403).json({ error: "Only reps can do this." });
+    const { entityName, entityType, reason, visitId } = req.body;
+    if (!entityName || !entityType) {
+      return res.status(400).json({ error: "entityName and entityType are required" });
+    }
+    const followUp = {
+      id: `fu${crypto.randomUUID()}`,
+      entityName,
+      entityType,
+      repName: req.repName,
+      dueDate: "",
+      status: "stopped",
+      visitId: visitId || "",
+      createdAt: new Date().toISOString(),
+      stopReason: (reason || "").trim(),
+    };
+    await db.appendRow("FollowUps", followUp);
     res.json(followUp);
   } catch (e) {
     console.error(e);
