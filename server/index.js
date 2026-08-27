@@ -897,7 +897,10 @@ app.post("/api/visits", async (req, res) => {
     // no location proves nothing about whether the rep was actually there.
     // (The Telegram "Sign in" follow-up flow creates visits through a
     // separate internal path, not this route, so it's unaffected.)
-    if (!coords || !coords.lat || !coords.lng) {
+    // TEMPORARY: the Head of Sales (isSupervisor) is exempted while Rabih's
+    // phone's location permissions get sorted out — remove this carve-out
+    // (and the matching one in CheckInView client-side) once that's fixed.
+    if ((!coords || !coords.lat || !coords.lng) && !req.isSupervisor) {
       return res.status(400).json({ error: "GPS location is required to log a visit." });
     }
 

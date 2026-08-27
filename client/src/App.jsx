@@ -421,6 +421,7 @@ export default function App() {
                 products={products}
                 offers={offers}
                 repName={repName}
+                isSupervisor={isSupervisor}
                 onAddVisit={addVisit}
                 onCreateOrder={createOrder}
                 onRequestDeleteOrder={requestDeleteOrder}
@@ -990,7 +991,7 @@ function MyVisitsView({ repName, onClose }) {
 }
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ clients, doctors, products, offers, repName, onAddVisit, onCreateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors, myLastPunch }) {
+function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, onAddVisit, onCreateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors, myLastPunch }) {
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
   const [entityType, setEntityType] = useState("pharmacy"); // pharmacy | doctor
@@ -1531,7 +1532,7 @@ function CheckInView({ clients, doctors, products, offers, repName, onAddVisit, 
                 border: "1px solid #E5DFD3", background: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
               }}>
                 {locating ? <Loader2 size={14} className="spin" /> : <MapPin size={14} />}
-                {locating ? "Locating…" : coords ? "Update location" : "Capture GPS location (required)"}
+                {locating ? "Locating…" : coords ? "Update location" : isSupervisor ? "Capture GPS location (optional)" : "Capture GPS location (required)"}
               </button>
               {coords && <span className="kb-font-mono" style={{ fontSize: 11.5, color: "#4C7A5E" }}><Check size={12} style={{ verticalAlign: -1 }} /> {coords.lat}, {coords.lng}</span>}
             </div>
@@ -1557,11 +1558,16 @@ function CheckInView({ clients, doctors, products, offers, repName, onAddVisit, 
               </div>
             )}
             {visitError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{visitError}</div>}
-            {!coords && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>Capture your GPS location before saving — this is how a visit gets confirmed as real.</div>}
+            {/* GPS is required for everyone except the Head of Sales (isSupervisor)
+                — a temporary exception while Rabih's phone location permissions
+                get sorted out. Remove the isSupervisor carve-out below (both here
+                and server-side in POST /api/visits) once that's fixed. */}
+            {!coords && !isSupervisor && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>Capture your GPS location before saving — this is how a visit gets confirmed as real.</div>}
+            {!coords && isSupervisor && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>Location isn't required for your account right now — you can save without it.</div>}
 
-            <button disabled={!client || !coords || !matchedEntity || saving} onClick={submit} style={{
+            <button disabled={!client || (!coords && !isSupervisor) || !matchedEntity || saving} onClick={submit} style={{
               padding: "9px 18px", borderRadius: 8, border: "none",
-              background: client && coords && matchedEntity && !saving ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500,
+              background: client && (coords || isSupervisor) && matchedEntity && !saving ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500,
             }}>
               {saving ? "Saving…" : "Save visit & continue"}
             </button>
