@@ -1892,7 +1892,11 @@ function RepTelegramLinkSection() {
 // ---------- Proforma invoice PDF ----------
 // stockWarnings: items whose requested qty exceeded stock and got capped at
 // save time — printed as a flagged section so the manager sees it even
-// though the rep saw the on-screen ⚠ and moved on. Each warning also lists
+// though the rep saw the on-screen ⚠ and moved on. Each warning lists two
+// separate things reps otherwise had no way to find out mid-order: any
+// OTHER BATCH of the exact same product (a different expiry, its own row
+// in the Products sheet) that still has stock — so a low count on the one
+// batch picked doesn't read as "this product is out" when it isn't — and
 // any other pharmacies with recent orders for the same product, since
 // Products.qty isn't live-decremented per order — two reps could both see
 // "40 in stock" and both order against it, and this is how that surfaces.
@@ -1936,6 +1940,10 @@ function downloadOrderPdf(order, stockWarnings = []) {
         w.cappedQty > 0
           ? `All remaining stock of this item has been allocated to ${order.clientName}.`
           : `No stock was available — this item was removed from the order entirely.`,
+        `OTHER BATCHES of this same product (different expiry) with stock:`,
+        ...((w.otherBatches || []).length > 0
+          ? w.otherBatches.map((b) => `  - ${b.qty} in stock, exp ${fmtDate(b.expiry)}`)
+          : [`  - None — this was the only batch of this product with any stock.`]),
         `DOUBLE CHECK if any other pharmacies have also ordered this item:`,
         ...(w.otherOrders.length > 0
           ? w.otherOrders.map((o) => `  - ${o.clientName} — ${o.qty} units on ${new Date(o.date).toLocaleDateString("en-GB")}`)
@@ -2231,6 +2239,17 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   const total = allDisplayItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
   const netTotal = total * (1 - (Number(discountRate) || 0) / 100);
 
+  // Same product, a different batch (different expiry, its own row in the
+  // Products sheet) with stock left — surfaced whenever a line runs short,
+  // so a rep isn't only told "1 left" for the batch they happened to pick
+  // without ever finding out a later-expiring batch of the same item has
+  // plenty. Never auto-switches or auto-splits a line across batches —
+  // that's the rep's call, same as the "switch offer" suggestion above.
+  const siblingBatchesFor = (productName, excludeProductId) =>
+    products
+      .filter((p) => p.name === productName && p.id !== excludeProductId && p.qty > 0)
+      .sort((a, b) => new Date(a.expiry) - new Date(b.expiry));
+
   const invalidGroups = offerGroups.filter((g) => !g.valid);
   const allGroupsValid = invalidGroups.length === 0;
   const regularUnitTotal = regularItems.reduce((sum, it) => sum + it.qty, 0);
@@ -2281,7 +2300,8 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
             qty: o.items.find((oi) => oi.productId === it.productId)?.qty || 0,
             date: o.date,
           }));
-        stockWarnings.push({ productName: it.name, requestedQty: it.qty, cappedQty, otherOrders });
+        const otherBatches = siblingBatchesFor(it.name, it.productId).map((s) => ({ qty: s.qty, expiry: s.expiry }));
+        stockWarnings.push({ productName: it.name, requestedQty: it.qty, cappedQty, otherOrders, otherBatches });
         if (cappedQty > 0) finalItems.push({ ...it, qty: cappedQty });
       }
       if (finalItems.length === 0) {
@@ -2426,20 +2446,38 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
                 </tr>
               </thead>
               <tbody>
-                {allDisplayItems.map((it) => (
-                  <tr key={`${it.offerId || "reg"}-${it.key}-${it.isFree ? "free" : "paid"}`} style={{ borderTop: "1px solid #E5DFD3" }}>
-                    <td style={{ padding: "4px 6px" }}>
-                      {it.name}{it.isFree && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 600, padding: "1px 6px", borderRadius: 4, background: "#4C7A5E1A", color: "#4C7A5E" }}>FREE</span>}
-                    </td>
-                    <td style={{ padding: "4px 6px" }}>{it.qty}</td>
-                    <td style={{ padding: "4px 6px", color: it.qty > it.availableQty ? "#B33A3A" : "#4C7A5E" }}>
-                      {it.availableQty}{it.qty > it.availableQty ? " ⚠" : ""}
-                    </td>
-                    <td className="kb-font-mono" style={{ padding: "4px 6px" }}>{it.expiry ? fmtDate(it.expiry) : "-"}</td>
-                    <td style={{ padding: "4px 6px" }}>{it.isFree ? "FREE" : it.unitPrice.toFixed(2)}</td>
-                    <td style={{ padding: "4px 6px" }}>{it.isFree ? "0.00" : (it.qty * it.unitPrice).toFixed(2)}</td>
-                  </tr>
-                ))}
+                {allDisplayItems.map((it) => {
+                  const short = !it.isFree && it.qty > it.availableQty;
+                  const siblings = short ? siblingBatchesFor(it.name, it.productId) : [];
+                  return (
+                    <React.Fragment key={`${it.offerId || "reg"}-${it.key}-${it.isFree ? "free" : "paid"}`}>
+                      <tr style={{ borderTop: "1px solid #E5DFD3" }}>
+                        <td style={{ padding: "4px 6px" }}>
+                          {it.name}{it.isFree && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 600, padding: "1px 6px", borderRadius: 4, background: "#4C7A5E1A", color: "#4C7A5E" }}>FREE</span>}
+                        </td>
+                        <td style={{ padding: "4px 6px" }}>{it.qty}</td>
+                        <td style={{ padding: "4px 6px", color: it.qty > it.availableQty ? "#B33A3A" : "#4C7A5E" }}>
+                          {it.availableQty}{it.qty > it.availableQty ? " ⚠" : ""}
+                        </td>
+                        <td className="kb-font-mono" style={{ padding: "4px 6px" }}>{it.expiry ? fmtDate(it.expiry) : "-"}</td>
+                        <td style={{ padding: "4px 6px" }}>{it.isFree ? "FREE" : it.unitPrice.toFixed(2)}</td>
+                        <td style={{ padding: "4px 6px" }}>{it.isFree ? "0.00" : (it.qty * it.unitPrice).toFixed(2)}</td>
+                      </tr>
+                      {short && (
+                        <tr>
+                          <td colSpan={6} style={{ padding: "2px 6px 8px", fontSize: 11, color: "#B33A3A" }}>
+                            Only {it.availableQty} of this exact batch (exp {it.expiry ? fmtDate(it.expiry) : "unknown"}) — the order will be capped here unless you adjust it.
+                            {siblings.length > 0 ? (
+                              <> Other batches of <strong>{it.name}</strong> with stock: {siblings.map((s) => `${s.qty} in stock (exp ${fmtDate(s.expiry)})`).join(", ")}. Remove this line and re-add from one of those instead if you need more.</>
+                            ) : (
+                              <> No other batch of <strong>{it.name}</strong> currently has stock.</>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
