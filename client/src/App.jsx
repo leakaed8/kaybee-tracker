@@ -929,6 +929,121 @@ function Field({ label, children }) {
 
 const inputStyle = { width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #E5DFD3", fontSize: 13, background: "#FAF7F2" };
 
+// Replaces native <input list="..."><datalist> search boxes, which is what
+// was actually making pharmacy/product search feel slow — not the
+// filtering itself (a plain JS .filter() over even a few thousand rows
+// takes a few milliseconds), but two things a native datalist forces:
+// (1) the browser's own suggestion popup, which measurably lags on mobile
+// (especially mid-range Android) every time its option list changes, and
+// (2) every keystroke immediately updating the parent's state, which for
+// a big field like this one (client, matchedClient, otherRepWarning, etc.
+// all re-derived) re-runs a lot of otherwise-unrelated work in the parent
+// component on every single character typed.
+// This fixes both: the dropdown is plain React-rendered DOM (no native
+// popup), filtering is memoized and capped, and the parent only gets the
+// committed value on an explicit pick or shortly after typing pauses
+// (COMMIT_DEBOUNCE_MS) — not on every keystroke — while the input itself
+// stays fully local, so typing never waits on the parent's re-render.
+const SEARCHABLE_SELECT_MAX_RESULTS = 8;
+const SEARCHABLE_SELECT_COMMIT_DEBOUNCE_MS = 150;
+function SearchableSelect({ value, onChange, options, getLabel, placeholder, style, onFocus }) {
+  const [query, setQuery] = useState(value || "");
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  const commitTimerRef = useRef(null);
+
+  // Keeps the field in sync when the parent resets it from elsewhere (e.g.
+  // switching the Pharmacy/Doctor toggle clears `client`) without fighting
+  // the debounce above — only applies when the parent's value actually
+  // diverges from what's locally typed.
+  useEffect(() => { if (value !== query) setQuery(value || ""); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [value]);
+
+  const q = query.toLowerCase().trim();
+  const matches = useMemo(
+    () => (q ? options.filter((o) => getLabel(o).toLowerCase().includes(q)) : options),
+    [q, options, getLabel]
+  );
+  const shown = matches.slice(0, SEARCHABLE_SELECT_MAX_RESULTS);
+
+  useEffect(() => {
+    const onOutside = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", onOutside);
+    document.addEventListener("touchstart", onOutside);
+    return () => {
+      document.removeEventListener("mousedown", onOutside);
+      document.removeEventListener("touchstart", onOutside);
+    };
+  }, []);
+  useEffect(() => () => clearTimeout(commitTimerRef.current), []);
+
+  const scheduleCommit = (text) => {
+    clearTimeout(commitTimerRef.current);
+    commitTimerRef.current = setTimeout(() => onChange(text), SEARCHABLE_SELECT_COMMIT_DEBOUNCE_MS);
+  };
+  // If a rep types the exact value by hand (skipping the dropdown) and
+  // immediately taps another button — "Add item", "Save visit" — that
+  // click must never race ahead of the debounced commit above and see a
+  // stale (empty) parent value. A button click blurs this input first, so
+  // flushing here guarantees the parent is caught up before that button's
+  // own handler runs.
+  const flushPendingCommit = () => {
+    if (!commitTimerRef.current) return;
+    clearTimeout(commitTimerRef.current);
+    commitTimerRef.current = null;
+    onChange(query);
+  };
+
+  const pick = (o) => {
+    const label = getLabel(o);
+    clearTimeout(commitTimerRef.current);
+    setQuery(label);
+    onChange(label);
+    setOpen(false);
+  };
+
+  return (
+    <div ref={wrapRef} style={{ position: "relative" }}>
+      <input
+        value={query}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true); scheduleCommit(e.target.value); }}
+        onFocus={() => { setOpen(true); onFocus?.(); }}
+        onBlur={flushPendingCommit}
+        placeholder={placeholder}
+        style={style}
+        autoComplete="off"
+      />
+      {open && shown.length > 0 && (
+        <div style={{
+          position: "absolute", zIndex: 30, top: "100%", left: 0, right: 0, marginTop: 4,
+          background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, maxHeight: 280,
+          overflowY: "auto", boxShadow: "0 6px 18px rgba(31,42,36,0.12)",
+        }}>
+          {shown.map((o, i) => (
+            <button
+              key={getLabel(o) + i}
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => pick(o)}
+              style={{
+                display: "block", width: "100%", textAlign: "left", padding: "9px 12px",
+                background: "none", border: "none", borderBottom: i < shown.length - 1 ? "1px solid #F0EBE0" : "none",
+                fontSize: 13, cursor: "pointer", color: "#1F2A24",
+              }}
+            >
+              {getLabel(o)}
+            </button>
+          ))}
+          {matches.length > shown.length && (
+            <div style={{ padding: "6px 12px", fontSize: 11, color: "#8A8272" }}>
+              +{matches.length - shown.length} more — keep typing to narrow it down
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Every rep's own read-only visit history, reached from Check-In. Replaces
 // the old "View my visits sheet" link's role for reps who were never given
 // a Google Sheet export (that required a manager to manually create one
@@ -994,6 +1109,18 @@ function MyVisitsView({ repName, onClose }) {
   );
 }
 
+function BackStepButton({ onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "#5B5445", background: "none", border: "none", padding: "0 0 12px", cursor: "pointer" }}
+    >
+      ← Back
+    </button>
+  );
+}
+
 // ---------- Check-In View (rep) ----------
 function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, onAddVisit, onCreateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors, myLastPunch }) {
   const [punching, setPunching] = useState(false);
@@ -1011,6 +1138,25 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   // visits, recent orders) sit outside this flow since they aren't part of
   // logging any one specific visit.
   const [step, setStep] = useState("checkin");
+  // Tracks the actual path taken through the wizard (not a fixed step
+  // order — "No, no order" skips straight past order/sample, so "back"
+  // has to return to wherever this specific visit actually came from, not
+  // just "the previous entry in a fixed list"). A ref, not state — it's
+  // pure bookkeeping for goBack() and never drives its own render.
+  const stepHistoryRef = useRef([]);
+  const goToStep = (next) => { stepHistoryRef.current.push(step); setStep(next); };
+  // Never steps back onto "checkin" — that form was already submitted
+  // (the visit is saved by the time any later step exists), so re-showing
+  // it with the same fields still filled in risks creating a second,
+  // duplicate visit if "Save visit" gets tapped again. A doctor visit
+  // reaches "followup" directly from "checkin" (no order/sample steps in
+  // between), so this guard is what makes Back a no-op there specifically,
+  // rather than only on the pharmacy path where it's obviously needed.
+  const canGoBack = stepHistoryRef.current.length > 0 && stepHistoryRef.current[stepHistoryRef.current.length - 1] !== "checkin";
+  const goBack = () => {
+    if (!canGoBack) return;
+    setStep(stepHistoryRef.current.pop());
+  };
   const [followUpStatus, setFollowUpStatus] = useState(null); // null | "set" | "stopped"
   const [followUpSaving, setFollowUpSaving] = useState(false);
   const [followUpError, setFollowUpError] = useState("");
@@ -1032,6 +1178,27 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   // whatever action would change them, instead of held in App() state.
   const [todayVisits, setTodayVisits] = useState([]);
   const [recentOrders, setRecentOrders] = useState([]);
+  // A rep who forgot to add an order or a sample mid-visit can go back into
+  // any of today's own visits and add it after the fact — reuses the exact
+  // same OrderBuilder / PharmacySampleStep already used inline in the
+  // wizard above, just launched from here instead. Never lets them touch
+  // an order that already exists (that's the separate request-delete flow)
+  // — this is purely "add what's missing," nothing else.
+  const [expandedTodayVisitId, setExpandedTodayVisitId] = useState(null);
+  const [addingOrderForVisitId, setAddingOrderForVisitId] = useState(null);
+  const [addingSampleForVisitId, setAddingSampleForVisitId] = useState(null);
+  const [samplesByVisitId, setSamplesByVisitId] = useState({});
+
+  const loadSamplesForVisit = (visitId) => {
+    api.getSamples({ visitId }).then((data) => {
+      setSamplesByVisitId((prev) => ({ ...prev, [visitId]: data.samples || [] }));
+    }).catch(() => {});
+  };
+  const toggleTodayVisit = (v) => {
+    const opening = expandedTodayVisitId !== v.id;
+    setExpandedTodayVisitId(opening ? v.id : null);
+    if (opening && samplesByVisitId[v.id] === undefined) loadSamplesForVisit(v.id);
+  };
 
   const loadTodayVisits = useCallback(() => {
     api.getVisits({ repName, limit: 50 })
@@ -1080,11 +1247,10 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   ];
   const appendTemplate = (t) => setNotes((prev) => (prev ? `${prev}. ${t}` : t));
 
+  // Filtering/capping now happens inside SearchableSelect itself (memoized,
+  // decoupled from this component's re-renders) — this is just which raw
+  // list it searches.
   const nameOptionsSource = entityType === "pharmacy" ? clients : doctors;
-  const nameOptions = (client.trim()
-    ? nameOptionsSource.filter((c) => c.name.toLowerCase().includes(client.toLowerCase().trim()))
-    : nameOptionsSource
-  ).slice(0, 50);
 
   // Pharmacies are auto-assigned to whichever rep logs their first visit.
   // If this one already belongs to someone else, flag it before the rep
@@ -1196,7 +1362,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
       // per-item above (in "Items mentioned") — so they skip straight to
       // scheduling a follow-up. Pharmacies still go on to the order question
       // first, then their own follow-up step later.
-      setStep(entityType === "pharmacy" ? "orderPrompt" : "followup");
+      goToStep(entityType === "pharmacy" ? "orderPrompt" : "followup");
     } catch (e) {
       setVisitError(e?.message || "Couldn't save the visit.");
     } finally {
@@ -1298,6 +1464,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
     setCustomFollowUpDays("");
     setShowStopFollowUp(false);
     setStopFollowUpReason("");
+    stepHistoryRef.current = [];
     setStep("checkin");
   };
 
@@ -1399,16 +1566,14 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
 
           <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
             <Field label={entityType === "pharmacy" ? "Pharmacy name" : "Doctor name"}>
-              <input
+              <SearchableSelect
                 value={client}
-                onChange={(e) => setClient(e.target.value)}
+                onChange={setClient}
+                options={nameOptionsSource}
+                getLabel={(c) => c.name}
                 placeholder={entityType === "pharmacy" ? "e.g. Pharmacie Al Nour" : "e.g. Dr. Nour Khalil"}
-                list="checkin-client-options"
                 style={{ ...inputStyle, marginBottom: 10 }}
               />
-              <datalist id="checkin-client-options">
-                {nameOptions.map((c) => <option key={c.id} value={c.name} />)}
-              </datalist>
             </Field>
             {otherRepWarning && (
               <div style={{ background: "#FBF0F0", border: "1px solid #E5B8B0", color: "#7A3B3B", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 10, fontWeight: 500 }}>
@@ -1633,10 +1798,10 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
           <span style={{ fontSize: 13.5 }}>Did <strong>{lastVisit.client}</strong> place an order?</span>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => setStep("order")} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+            <button onClick={() => goToStep("order")} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
               Yes, add order
             </button>
-            <button onClick={() => setStep(entityType === "pharmacy" ? "sample" : "followup")} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
+            <button onClick={() => goToStep(entityType === "pharmacy" ? "sample" : "followup")} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
               No
             </button>
           </div>
@@ -1644,28 +1809,35 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
       )}
 
       {step === "order" && lastVisit && (
-        <OrderBuilder
-          clientName={lastVisit.client}
-          visitId={lastVisit.id}
-          products={products}
-          offers={offers}
-          clients={clients}
-          onCreateOrder={onCreateOrder}
-          onDone={() => { loadRecentOrders(); setStep("sample"); }}
-        />
+        <>
+          {canGoBack && <BackStepButton onClick={goBack} />}
+          <OrderBuilder
+            clientName={lastVisit.client}
+            visitId={lastVisit.id}
+            products={products}
+            offers={offers}
+            clients={clients}
+            onCreateOrder={onCreateOrder}
+            onDone={() => { loadRecentOrders(); goToStep("sample"); }}
+          />
+        </>
       )}
 
       {step === "sample" && lastVisit && (
-        <PharmacySampleStep
-          clientName={lastVisit.client}
-          visitId={lastVisit.id}
-          products={products}
-          onDone={() => setStep("followup")}
-        />
+        <>
+          {canGoBack && <BackStepButton onClick={goBack} />}
+          <PharmacySampleStep
+            clientName={lastVisit.client}
+            visitId={lastVisit.id}
+            products={products}
+            onDone={() => goToStep("followup")}
+          />
+        </>
       )}
 
       {step === "followup" && lastVisit && (
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+          {canGoBack && <BackStepButton onClick={goBack} />}
           <div style={{ fontSize: 13.5, marginBottom: 10 }}>
             Schedule a follow-up for <strong>{lastVisit.client}</strong>?
           </div>
@@ -1775,32 +1947,99 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
         </div>
       )}
 
-      <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 10px", color: "#8A8272" }}>Today's visits ({todayVisits.length})</h3>
+      <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 4px", color: "#8A8272" }}>Today's visits ({todayVisits.length})</h3>
+      <p style={{ fontSize: 11.5, color: "#8A8272", margin: "0 0 10px" }}>Tap a visit to add an order or sample you forgot at the time.</p>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {todayVisits.map((v) => (
-          <div key={v.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
-              <span style={{ fontWeight: 600, fontSize: 13.5 }}>{v.client}</span>
-              <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>{new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span>
+        {todayVisits.map((v) => {
+          const isExpanded = expandedTodayVisitId === v.id;
+          const isPharmacyVisit = clients.some((c) => c.name.toLowerCase().trim() === v.client.toLowerCase().trim());
+          const existingOrder = recentOrders.find((o) => o.visitId === v.id);
+          const samples = samplesByVisitId[v.id];
+          return (
+            <div key={v.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
+              <button
+                type="button"
+                onClick={() => toggleTodayVisit(v)}
+                style={{ display: "flex", width: "100%", justifyContent: "space-between", alignItems: "flex-start", gap: 8, background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer" }}
+              >
+                <span style={{ fontWeight: 600, fontSize: 13.5 }}>{isExpanded ? "▾" : "▸"} {v.client}</span>
+                <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>{new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span>
+              </button>
+              {v.notes && <div style={{ fontSize: 12.5, color: "#5B5445", marginTop: 4 }}>{v.notes}</div>}
+              {v.mentionedItems && v.mentionedItems.length > 0 && (
+                <div style={{ fontSize: 11.5, color: "#4C7A5E", marginTop: 4 }}>
+                  Mentioned: {v.mentionedItems.map((it) => (
+                    it.sampleStatus === "gave" ? `${it.name} (sample given)`
+                    : it.sampleStatus === "next_visit" ? `${it.name} (sample next visit)`
+                    : it.name
+                  )).join(", ")}
+                </div>
+              )}
+              {v.coords && <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 4 }}><MapPin size={11} style={{ verticalAlign: -1 }} /> {v.coords.lat}, {v.coords.lng}</div>}
+              {(v.comments || []).map((c) => (
+                <div key={c.id} style={{ fontSize: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "6px 10px", marginTop: 6 }}>
+                  <strong>{c.authorName}</strong>: {c.text}
+                </div>
+              ))}
+
+              {isExpanded && (
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3", display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: "#8A8272", marginBottom: 4 }}>ORDER</div>
+                    {existingOrder ? (
+                      <div style={{ fontSize: 12.5 }}>
+                        {existingOrder.items.map((it) => `${it.name} ×${it.qty}${it.isFree ? " (free)" : ""}`).join(", ")}
+                        {" — "}{Number(existingOrder.netTotal ?? existingOrder.total).toFixed(2)} collected
+                      </div>
+                    ) : addingOrderForVisitId === v.id ? (
+                      <OrderBuilder
+                        clientName={v.client}
+                        visitId={v.id}
+                        products={products}
+                        offers={offers}
+                        clients={clients}
+                        onCreateOrder={onCreateOrder}
+                        onDone={() => { loadRecentOrders(); setAddingOrderForVisitId(null); }}
+                      />
+                    ) : (
+                      <button
+                        onClick={() => setAddingOrderForVisitId(v.id)}
+                        style={{ fontSize: 12, fontWeight: 500, color: "#C17817", background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 6, padding: "6px 10px", cursor: "pointer" }}
+                      >
+                        + Add order
+                      </button>
+                    )}
+                  </div>
+
+                  {isPharmacyVisit && (
+                    <div>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: "#8A8272", marginBottom: 4 }}>SAMPLE</div>
+                      {samples === undefined ? (
+                        <div style={{ fontSize: 12, color: "#8A8272" }}>Loading…</div>
+                      ) : samples.length > 0 ? (
+                        <div style={{ fontSize: 12.5 }}>{samples.map((s) => `${s.productName}${s.qty ? ` ×${s.qty}` : ""}`).join(", ")}</div>
+                      ) : addingSampleForVisitId === v.id ? (
+                        <PharmacySampleStep
+                          clientName={v.client}
+                          visitId={v.id}
+                          products={products}
+                          onDone={() => { loadSamplesForVisit(v.id); setAddingSampleForVisitId(null); }}
+                        />
+                      ) : (
+                        <button
+                          onClick={() => setAddingSampleForVisitId(v.id)}
+                          style={{ fontSize: 12, fontWeight: 500, color: "#C17817", background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 6, padding: "6px 10px", cursor: "pointer" }}
+                        >
+                          + Add sample
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-            {v.notes && <div style={{ fontSize: 12.5, color: "#5B5445", marginTop: 4 }}>{v.notes}</div>}
-            {v.mentionedItems && v.mentionedItems.length > 0 && (
-              <div style={{ fontSize: 11.5, color: "#4C7A5E", marginTop: 4 }}>
-                Mentioned: {v.mentionedItems.map((it) => (
-                  it.sampleStatus === "gave" ? `${it.name} (sample given)`
-                  : it.sampleStatus === "next_visit" ? `${it.name} (sample next visit)`
-                  : it.name
-                )).join(", ")}
-              </div>
-            )}
-            {v.coords && <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 4 }}><MapPin size={11} style={{ verticalAlign: -1 }} /> {v.coords.lat}, {v.coords.lng}</div>}
-            {(v.comments || []).map((c) => (
-              <div key={c.id} style={{ fontSize: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "6px 10px", marginTop: 6 }}>
-                <strong>{c.authorName}</strong>: {c.text}
-              </div>
-            ))}
-          </div>
-        ))}
+          );
+        })}
         {todayVisits.length === 0 && <EmptyState text="No visits logged yet today." />}
       </div>
 
@@ -2146,14 +2385,6 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   const [discountRate, setDiscountRate] = useState(matchedClient?.discountRate || "");
 
   const matchedProduct = products.find((p) => batchLabel(p) === productQuery.trim());
-  // Filtered + capped instead of dumping every batch of every product into
-  // the datalist on every keystroke — with hundreds of products (each
-  // possibly listed multiple times for separate batches) that unfiltered
-  // list was the main cause of laggy typing while searching for an item.
-  const productOptions = (productQuery.trim()
-    ? products.filter((p) => p.name.toLowerCase().includes(productQuery.toLowerCase().trim()))
-    : products
-  ).slice(0, 50);
 
   const todayStr = new Date().toISOString().slice(0, 10);
   const activeOffers = offers.filter((o) => o.active && (!o.expiresAt || o.expiresAt >= todayStr));
@@ -2337,16 +2568,14 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
 
       <div style={{ display: "flex", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
         <div style={{ flex: 2, minWidth: 160 }}>
-          <input
+          <SearchableSelect
             value={productQuery}
-            onChange={(e) => setProductQuery(e.target.value)}
+            onChange={setProductQuery}
+            options={products}
+            getLabel={batchLabel}
             placeholder="Search product — pick the batch by expiry…"
-            list="order-product-options"
             style={inputStyle}
           />
-          <datalist id="order-product-options">
-            {productOptions.map((p) => <option key={p.id} value={batchLabel(p)} />)}
-          </datalist>
         </div>
         <input type="number" min="1" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Qty" style={{ ...inputStyle, flex: 1, minWidth: 80 }} />
         {activeOffers.length > 0 && (
