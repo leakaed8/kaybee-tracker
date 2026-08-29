@@ -62,6 +62,7 @@ export const api = {
   removeVisit: (id) => request(`/visits/${id}`, { method: "DELETE" }),
   punch: (type, coords) => request("/punch", { method: "POST", body: JSON.stringify({ type, coords }) }),
   createOrder: (order) => request("/orders", { method: "POST", body: JSON.stringify(order) }),
+  updateOrder: (id, patch) => request(`/orders/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteOrder: (id) => request(`/orders/${id}`, { method: "DELETE" }),
   requestDeleteOrder: (id) => request(`/orders/${id}/request-delete`, { method: "POST" }),
   approveDeleteOrder: (id) => request(`/orders/${id}/approve-delete`, { method: "POST" }),

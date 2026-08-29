@@ -267,6 +267,7 @@ export default function App() {
   const removeVisit = (id) => withSync(() => api.removeVisit(id));
   const punch = (type, coords) => withSync(() => api.punch(type, coords));
   const createOrder = (order) => withSync(() => api.createOrder(order));
+  const updateOrder = (id, patch) => withSync(() => api.updateOrder(id, patch));
   const addClient = (client) => withSync(() => api.addClient(client), { touchesReference: true });
   const removeClient = (id) => withSync(() => api.removeClient(id), { touchesReference: true });
   const bulkImportClients = (payload) => withSync(() => api.importClientsBulk(payload), { touchesReference: true });
@@ -425,6 +426,7 @@ export default function App() {
                 isSupervisor={isSupervisor}
                 onAddVisit={addVisit}
                 onCreateOrder={createOrder}
+                onUpdateOrder={updateOrder}
                 onRequestDeleteOrder={requestDeleteOrder}
                 onPunch={punch}
                 onQueueOffline={queueVisitOffline}
@@ -1122,7 +1124,7 @@ function BackStepButton({ onClick }) {
 }
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, onAddVisit, onCreateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors, myLastPunch }) {
+function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, onAddVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors, myLastPunch }) {
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
   const [entityType, setEntityType] = useState("pharmacy"); // pharmacy | doctor
@@ -1196,11 +1198,13 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   // A rep who forgot to add an order or a sample mid-visit can go back into
   // any of today's own visits and add it after the fact — reuses the exact
   // same OrderBuilder / PharmacySampleStep already used inline in the
-  // wizard above, just launched from here instead. Never lets them touch
-  // an order that already exists (that's the separate request-delete flow)
-  // — this is purely "add what's missing," nothing else.
+  // wizard above, just launched from here instead. An order that already
+  // exists can also be corrected in place (wrong qty, missing item) via
+  // editingOrderId — but only until the Head of Sales has marked it POS
+  // entered, at which point the server rejects the edit outright.
   const [expandedTodayVisitId, setExpandedTodayVisitId] = useState(null);
   const [addingOrderForVisitId, setAddingOrderForVisitId] = useState(null);
+  const [editingOrderId, setEditingOrderId] = useState(null);
   const [addingSampleForVisitId, setAddingSampleForVisitId] = useState(null);
   const [samplesByVisitId, setSamplesByVisitId] = useState({});
 
@@ -2001,10 +2005,35 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                 <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3", display: "flex", flexDirection: "column", gap: 10 }}>
                   <div>
                     <div style={{ fontSize: 11, fontWeight: 600, color: "#8A8272", marginBottom: 4 }}>ORDER</div>
-                    {existingOrder ? (
+                    {existingOrder && editingOrderId === existingOrder.id ? (
+                      <OrderBuilder
+                        clientName={v.client}
+                        visitId={v.id}
+                        products={products}
+                        offers={offers}
+                        clients={clients}
+                        editOrder={existingOrder}
+                        onUpdateOrder={onUpdateOrder}
+                        onDone={() => { loadRecentOrders(); loadTodayOrders(); setEditingOrderId(null); }}
+                      />
+                    ) : existingOrder ? (
                       <div style={{ fontSize: 12.5 }}>
-                        {existingOrder.items.map((it) => `${it.name} ×${it.qty}${it.isFree ? " (free)" : ""}`).join(", ")}
-                        {" — "}{Number(existingOrder.netTotal ?? existingOrder.total).toFixed(2)} collected
+                        <div>
+                          {existingOrder.items.map((it) => `${it.name} ×${it.qty}${it.isFree ? " (free)" : ""}`).join(", ")}
+                          {" — "}{Number(existingOrder.netTotal ?? existingOrder.total).toFixed(2)} collected
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+                          {existingOrder.posEntered ? (
+                            <span style={{ fontSize: 11, fontWeight: 600, color: "#4C7A5E" }}>✓ POS Entered — no longer editable</span>
+                          ) : (
+                            <button
+                              onClick={() => setEditingOrderId(existingOrder.id)}
+                              style={{ fontSize: 11.5, fontWeight: 500, color: "#5B5445", background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "5px 10px", cursor: "pointer" }}
+                            >
+                              Edit order
+                            </button>
+                          )}
+                        </div>
                       </div>
                     ) : addingOrderForVisitId === v.id ? (
                       <OrderBuilder
@@ -2380,10 +2409,20 @@ function applyOfferToItems(rawItems, offers) {
   return { displayItems, appliedOffer: offer, avg, roundedAvg, freeItem: chosen, freeQty };
 }
 
-function OrderBuilder({ clientName, visitId, products, offers, clients, onCreateOrder, onDone }) {
+function OrderBuilder({ clientName, visitId, products, offers, clients, onCreateOrder, onUpdateOrder, editOrder, onDone }) {
   const [productQuery, setProductQuery] = useState("");
   const [qty, setQty] = useState("");
-  const [items, setItems] = useState([]);
+  // Editing an existing order pre-fills its items — matched back to a
+  // current product batch by id for stock re-validation where possible;
+  // a batch that's since been removed just skips the stock cap rather than
+  // blocking the edit.
+  const [items, setItems] = useState(() => {
+    if (!editOrder) return [];
+    return editOrder.items.map((it, i) => {
+      const matched = products.find((p) => p.id === it.productId);
+      return { key: i, ...it, availableQty: matched ? matched.qty : Infinity };
+    });
+  });
   // Which offer group the NEXT added item joins — "" means regular/no-offer.
   // This is the one place a rep assigns a product to an offer; correcting a
   // mistake is remove-and-re-add, matching how every other item edit in
@@ -2391,13 +2430,15 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   const [pendingOfferId, setPendingOfferId] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const nextKeyRef = useRef(0);
+  const nextKeyRef = useRef(editOrder ? editOrder.items.length : 0);
 
   // Pre-filled from the pharmacy's own negotiated rate, but editable per
   // order — discounts aren't uniform across pharmacies, and even a given
-  // pharmacy's standard rate sometimes has a one-off exception.
+  // pharmacy's standard rate sometimes has a one-off exception. Editing an
+  // existing order instead pre-fills that order's own discount, not the
+  // pharmacy's current default.
   const matchedClient = (clients || []).find((c) => c.name.toLowerCase().trim() === clientName.toLowerCase().trim());
-  const [discountRate, setDiscountRate] = useState(matchedClient?.discountRate || "");
+  const [discountRate, setDiscountRate] = useState(editOrder ? editOrder.discountRate || "" : matchedClient?.discountRate || "");
 
   const matchedProduct = products.find((p) => batchLabel(p) === productQuery.trim());
 
@@ -2565,8 +2606,8 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
         })),
         discountRate: finalDiscountRate,
       };
-      const created = await onCreateOrder(payload);
-      downloadOrderPdf(created || { ...payload, date: new Date().toISOString(), total: finalTotal, netTotal: finalTotal * (1 - finalDiscountRate / 100) }, stockWarnings);
+      const saved = editOrder ? await onUpdateOrder(editOrder.id, payload) : await onCreateOrder(payload);
+      downloadOrderPdf(saved || { ...payload, date: editOrder ? editOrder.date : new Date().toISOString(), total: finalTotal, netTotal: finalTotal * (1 - finalDiscountRate / 100) }, stockWarnings);
       onDone();
     } catch (e) {
       setError(e.message || "Couldn't save the order.");
@@ -2579,7 +2620,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
 
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
-      <h3 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 10px" }}>Order for {clientName}</h3>
+      <h3 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 10px" }}>{editOrder ? `Edit order for ${clientName}` : `Order for ${clientName}`}</h3>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
         <div style={{ flex: 2, minWidth: 160 }}>
@@ -2766,7 +2807,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
           onClick={doCreateOrder}
           style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: !saving && allDisplayItems.length > 0 && allGroupsValid ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
         >
-          {saving ? "Creating…" : "Create order & download PDF"}
+          {saving ? (editOrder ? "Saving…" : "Creating…") : editOrder ? "Save changes & download PDF" : "Create order & download PDF"}
         </button>
         <button onClick={onDone} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>Cancel</button>
       </div>

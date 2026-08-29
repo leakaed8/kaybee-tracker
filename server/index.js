@@ -226,6 +226,70 @@ function parseOrder(o) {
   };
 }
 
+function buildCleanOrderItems(items) {
+  return (items || []).map((it) => ({
+    productId: it.productId || "",
+    name: String(it.name || "").trim(),
+    qty: Number(it.qty) || 0,
+    unitPrice: Number(it.unitPrice) || 0,
+    isFree: !!it.isFree,
+    originalPrice: Number(it.originalPrice) || 0,
+    expiry: it.expiry || "",
+    offerId: it.offerId || "",
+  }));
+}
+
+// An order can carry several independent offers at once (e.g. 8 units under
+// 7+1 plus 14 units under 12+2 plus plain items), so each item is tagged
+// client-side with which offer group it belongs to ("" for regular/no-offer).
+// Re-derive validity per group purely from submitted quantities — never from
+// client-sent isFree flags — so a crafted payload can't bypass it. Groups
+// referencing an offer that isn't currently active are rejected outright
+// (fail closed) rather than silently skipped. Returns an error string, or
+// null if every group is valid. Shared by order creation and order editing
+// so the two can never drift apart.
+async function validateOfferGroups(cleanItems) {
+  const offerRows = await db.getAllRows("Offers");
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const activeOffers = offerRows.map(parseOffer).filter((o) => o.active && (!o.expiresAt || o.expiresAt >= todayStr));
+  const activeOfferById = new Map(activeOffers.map((o) => [o.id, o]));
+  const groupIds = [...new Set(cleanItems.map((it) => it.offerId).filter(Boolean))];
+  for (const offerId of groupIds) {
+    const offer = activeOfferById.get(offerId);
+    if (!offer) return "One of the selected offers is no longer available. Please review this order's offer groups.";
+    const groupQty = cleanItems.filter((it) => it.offerId === offerId).reduce((sum, it) => sum + it.qty, 0);
+    const required = offer.buyQty + offer.getQty;
+    if (groupQty !== required) {
+      return `${offer.label} requires exactly ${required} units. This order currently has ${groupQty} units assigned to it. Please adjust the quantities to ${required} units to continue.`;
+    }
+  }
+  return null;
+}
+
+function posEntryButtons(orderId) {
+  return {
+    inline_keyboard: [[
+      { text: "✅ Entered in POS", callback_data: `posenter:${orderId}` },
+      { text: "⏳ Not yet", callback_data: `posnotyet:${orderId}` },
+    ]],
+  };
+}
+
+// The Head of Sales doesn't use the in-app "Pending POS" list, so every
+// order (new or edited) is pushed to his Telegram with the figures he needs
+// plus one-tap buttons — this is his only real workflow for confirming POS
+// entry. Fire-and-forget: a missing/unlinked supervisor or a Telegram outage
+// should never block the order itself.
+function notifySupervisorOrderTelegram(order, cleanItems, total, discountRate, netTotal, headline) {
+  db.getAllRows("Reps").then((reps) => {
+    const supervisor = reps.find((r) => r.isSupervisor === "true" && r.telegramChatId);
+    if (!supervisor) return;
+    const itemLines = cleanItems.map((it) => `• ${escapeHtml(it.name)} × ${it.qty}${it.isFree ? " (free)" : ""}`).join("\n");
+    const msg = `${headline} <b>${escapeHtml(order.clientName)}</b>\nRep: ${escapeHtml(order.repName || "")}\n${itemLines}\n\nList total: ${total.toFixed(2)}\nDiscount: ${discountRate}%\nCollected: <b>${netTotal.toFixed(2)}</b>`;
+    telegram.sendMessage(supervisor.telegramChatId, msg, posEntryButtons(order.id)).catch((e) => console.error("order telegram notify failed", e));
+  }).catch((e) => console.error("order telegram notify failed", e));
+}
+
 function parseOffer(o) {
   return {
     id: o.id,
@@ -373,6 +437,8 @@ app.post("/api/telegram/webhook", async (req, res) => {
         await handleFollowUpCallback(update.callback_query);
       } else if (data.startsWith("orddel") || data.startsWith("ordkeep")) {
         await handleOrderDeleteCallback(update.callback_query);
+      } else if (data.startsWith("posenter") || data.startsWith("posnotyet")) {
+        await handlePosEntryCallback(update.callback_query);
       } else if (data.startsWith("keeprep") || data.startsWith("changerep")) {
         await handleReassignmentCallback(update.callback_query);
       } else {
@@ -1263,44 +1329,10 @@ app.post("/api/orders", async (req, res) => {
     if (!clientName || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "clientName and at least one item are required" });
     }
-    const cleanItems = items.map((it) => ({
-      productId: it.productId || "",
-      name: String(it.name || "").trim(),
-      qty: Number(it.qty) || 0,
-      unitPrice: Number(it.unitPrice) || 0,
-      isFree: !!it.isFree,
-      originalPrice: Number(it.originalPrice) || 0,
-      expiry: it.expiry || "",
-      offerId: it.offerId || "",
-    }));
+    const cleanItems = buildCleanOrderItems(items);
 
-    // An order can carry several independent offers at once (e.g. 8 units
-    // under 7+1 plus 14 units under 12+2 plus plain items), so each item
-    // is tagged client-side with which offer group it belongs to ("" for
-    // regular/no-offer). Re-derive validity per group, purely from
-    // submitted quantities — never from client-sent isFree flags — so a
-    // crafted API payload can't bypass it. Groups referencing an offer
-    // that isn't currently active are rejected outright (fail closed)
-    // rather than silently skipped, since a rep could otherwise strip
-    // offerId to dodge the check entirely.
-    const offerRows = await db.getAllRows("Offers");
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const activeOffers = offerRows.map(parseOffer).filter((o) => o.active && (!o.expiresAt || o.expiresAt >= todayStr));
-    const activeOfferById = new Map(activeOffers.map((o) => [o.id, o]));
-    const groupIds = [...new Set(cleanItems.map((it) => it.offerId).filter(Boolean))];
-    for (const offerId of groupIds) {
-      const offer = activeOfferById.get(offerId);
-      if (!offer) {
-        return res.status(400).json({ error: "One of the selected offers is no longer available. Please review this order's offer groups." });
-      }
-      const groupQty = cleanItems.filter((it) => it.offerId === offerId).reduce((sum, it) => sum + it.qty, 0);
-      const required = offer.buyQty + offer.getQty;
-      if (groupQty !== required) {
-        return res.status(400).json({
-          error: `${offer.label} requires exactly ${required} units. This order currently has ${groupQty} units assigned to it. Please adjust the quantities to ${required} units to continue.`,
-        });
-      }
-    }
+    const offerError = await validateOfferGroups(cleanItems);
+    if (offerError) return res.status(400).json({ error: offerError });
 
     const total = cleanItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
 
@@ -1332,7 +1364,54 @@ app.post("/api/orders", async (req, res) => {
     };
     await db.appendRow("Orders", order);
     notifyManagers({ title: "New order placed", body: `${clientName} — ${netTotal.toFixed(2)} collected (list ${total.toFixed(2)})`, url: "/" });
+    notifySupervisorOrderTelegram(order, cleanItems, total, appliedDiscountRate, netTotal, "🧾 New order —");
     res.json(parseOrder(order));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Lets the rep who placed an order fix a mistake themselves — wrong
+// quantity, missing item, wrong discount — without going through the
+// manager-approval delete flow. Only allowed while the Head of Sales hasn't
+// entered it in the POS yet: once posEntered is true the order is locked,
+// since by then it may already be reflected in real accounting/inventory.
+app.patch("/api/orders/:id", async (req, res) => {
+  try {
+    const orders = await db.getAllRows("Orders");
+    const order = orders.find((o) => o.id === req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (order.posEntered === "true") {
+      return res.status(403).json({ error: "This order has already been entered in POS and can no longer be edited." });
+    }
+    if (order.status === "deletion_requested") {
+      return res.status(400).json({ error: "This order has a pending deletion request — resolve that first." });
+    }
+    if (req.role !== "manager" && order.repName !== req.repName) {
+      return res.status(403).json({ error: "You can only edit your own orders." });
+    }
+
+    const { items, discountRate } = req.body;
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "At least one item is required" });
+    }
+    const cleanItems = buildCleanOrderItems(items);
+
+    const offerError = await validateOfferGroups(cleanItems);
+    if (offerError) return res.status(400).json({ error: offerError });
+
+    const total = cleanItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
+    const appliedDiscountRate = discountRate === undefined || discountRate === null || discountRate === ""
+      ? Number(order.discountRate) || 0
+      : Number(discountRate) || 0;
+    const netTotal = total * (1 - appliedDiscountRate / 100);
+
+    const patch = { items: JSON.stringify(cleanItems), total, discountRate: appliedDiscountRate, netTotal };
+    await db.updateRowById("Orders", order.id, patch);
+    const updated = { ...order, ...patch };
+    notifySupervisorOrderTelegram(updated, cleanItems, total, appliedDiscountRate, netTotal, "✏️ Order updated —");
+    res.json(parseOrder(updated));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -2485,6 +2564,32 @@ async function handleOrderDeleteCallback(callbackQuery) {
     await db.updateRowById("Orders", order.id, { status: "confirmed" });
     await telegram.answerCallbackQuery(id, "Kept.");
     if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `Kept the order for ${order.clientName}.`);
+  }
+}
+
+// The Head of Sales's one-tap confirmation that an order has (or hasn't
+// yet) been keyed into the real POS system — his actual workflow, since he
+// doesn't use the in-app "Pending POS" list. "Not yet" just acknowledges;
+// the order is already in the pending state by default, nothing to change.
+async function handlePosEntryCallback(callbackQuery) {
+  const { id, data, message } = callbackQuery;
+  const [action, orderId] = (data || "").split(":");
+  const orders = await db.getAllRows("Orders");
+  const order = orders.find((o) => o.id === orderId);
+  if (!order) { await telegram.answerCallbackQuery(id, "This order is no longer available."); return; }
+
+  if (action === "posenter") {
+    if (order.posEntered === "true") { await telegram.answerCallbackQuery(id, "Already marked as entered."); return; }
+    const requester = await resolveTelegramRequester(message?.chat?.id);
+    await db.updateRowById("Orders", order.id, {
+      posEntered: "true",
+      posEnteredAt: new Date().toISOString(),
+      posEnteredBy: requester?.repName || "Telegram",
+    });
+    await telegram.answerCallbackQuery(id, "Marked as entered in POS ✅");
+    if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `✅ Order for ${order.clientName} marked as entered in POS.`);
+  } else if (action === "posnotyet") {
+    await telegram.answerCallbackQuery(id, "Okay — noted as not entered yet.");
   }
 }
 
