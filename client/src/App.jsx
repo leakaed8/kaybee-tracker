@@ -1178,6 +1178,21 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   // whatever action would change them, instead of held in App() state.
   const [todayVisits, setTodayVisits] = useState([]);
   const [recentOrders, setRecentOrders] = useState([]);
+  // recentOrders is capped at 10 and isn't date-scoped — fine for the
+  // "Your recent orders" reference list below, but wrong for "does this
+  // visit already have an order": on any day busier than 10 orders total,
+  // an earlier visit's order silently falls outside that window and the
+  // Today's Visits panel would wrongly show "+ Add order" for a visit that
+  // already has one, risking a duplicate. This is its own fetch, scoped to
+  // today specifically with a limit no real day comes close to.
+  const [todayOrders, setTodayOrders] = useState([]);
+  const loadTodayOrders = useCallback(() => {
+    const todayStr = new Date().toISOString().slice(0, 10);
+    api.getOrders({ repName, from: todayStr, to: todayStr, limit: 100 })
+      .then((data) => setTodayOrders(data.orders || []))
+      .catch(() => {});
+  }, [repName]);
+  useEffect(() => { loadTodayOrders(); }, [loadTodayOrders]);
   // A rep who forgot to add an order or a sample mid-visit can go back into
   // any of today's own visits and add it after the fact — reuses the exact
   // same OrderBuilder / PharmacySampleStep already used inline in the
@@ -1818,7 +1833,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
             offers={offers}
             clients={clients}
             onCreateOrder={onCreateOrder}
-            onDone={() => { loadRecentOrders(); goToStep("sample"); }}
+            onDone={() => { loadRecentOrders(); loadTodayOrders(); goToStep("sample"); }}
           />
         </>
       )}
@@ -1953,7 +1968,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
         {todayVisits.map((v) => {
           const isExpanded = expandedTodayVisitId === v.id;
           const isPharmacyVisit = clients.some((c) => c.name.toLowerCase().trim() === v.client.toLowerCase().trim());
-          const existingOrder = recentOrders.find((o) => o.visitId === v.id);
+          const existingOrder = todayOrders.find((o) => o.visitId === v.id);
           const samples = samplesByVisitId[v.id];
           return (
             <div key={v.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
@@ -1999,7 +2014,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                         offers={offers}
                         clients={clients}
                         onCreateOrder={onCreateOrder}
-                        onDone={() => { loadRecentOrders(); setAddingOrderForVisitId(null); }}
+                        onDone={() => { loadRecentOrders(); loadTodayOrders(); setAddingOrderForVisitId(null); }}
                       />
                     ) : (
                       <button
