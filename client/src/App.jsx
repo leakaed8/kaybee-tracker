@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
 import {
   LineChart, Line, BarChart, Bar, RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend,
@@ -338,6 +340,7 @@ export default function App() {
         ::placeholder { color: #9CA3AF; }
         .spin { animation: kb-spin 1s linear infinite; }
         @keyframes kb-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        .kb-route-marker-label { background: none; border: none; box-shadow: none; font-size: 11px; font-weight: 700; color: #fff; }
       `}</style>
 
       <header style={{ borderBottom: "1px solid #E5DFD3", padding: "18px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
@@ -3742,12 +3745,59 @@ function VisitCadenceView({ role, isSupervisor, repNames }) {
 }
 
 // ---------- Locations View (manager, check-in GPS history + punch in/out) ----------
+// Plots one rep's day chronologically — visits and punches, in the order
+// they happened — as numbered markers joined by a route line. Leaflet +
+// OpenStreetMap tiles rather than Google Maps: free, no API key or billing,
+// and this is read-only display (no geocoding/search), so there's nothing
+// the paid Google APIs would add here. Deliberately single rep/single day —
+// overlapping several reps' routes on one map would just be spaghetti.
+function RepRouteMap({ points }) {
+  const containerRef = useRef(null);
+  const mapRef = useRef(null);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const map = L.map(containerRef.current, { scrollWheelZoom: true }).setView([33.89, 35.5], 12);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap contributors",
+      maxZoom: 19,
+    }).addTo(map);
+    mapRef.current = map;
+    return () => { map.remove(); mapRef.current = null; };
+  }, []);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    // Redrawing (a new rep/date picked) — clear everything but the base
+    // tile layer rather than tearing down and recreating the whole map.
+    map.eachLayer((layer) => { if (!(layer instanceof L.TileLayer)) map.removeLayer(layer); });
+    if (points.length === 0) return;
+
+    const latlngs = points.map((p) => [Number(p.coords.lat), Number(p.coords.lng)]);
+    L.polyline(latlngs, { color: "#2B6FCB", weight: 3, opacity: 0.75 }).addTo(map);
+    points.forEach((p, i) => {
+      const color = p.kind === "punch" ? (p.punchType === "in" ? "#4C7A5E" : "#B33A3A") : "#2B6FCB";
+      const marker = L.circleMarker(latlngs[i], { radius: 10, color: "#fff", weight: 2, fillColor: color, fillOpacity: 1 }).addTo(map);
+      marker.bindTooltip(String(i + 1), { permanent: true, direction: "center", className: "kb-route-marker-label" });
+      marker.bindPopup(`<b>${i + 1}. ${p.label}</b><br/>${new Date(p.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`);
+    });
+
+    if (latlngs.length === 1) map.setView(latlngs[0], 15);
+    else map.fitBounds(latlngs, { padding: [30, 30] });
+  }, [points]);
+
+  return <div ref={containerRef} style={{ height: 420, borderRadius: 10, border: "1px solid #E5DFD3" }} />;
+}
+
 function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemoveVisit, onAddComment }) {
   const [selectedRep, setSelectedRep] = useState("all");
   const [confirmId, setConfirmId] = useState(null);
   const [commentingId, setCommentingId] = useState(null);
   const [commentText, setCommentText] = useState("");
   const [commentSaving, setCommentSaving] = useState(false);
+  const [viewMode, setViewMode] = useState("list"); // list | map
+  const [routeDate, setRouteDate] = useState(() => new Date().toISOString().slice(0, 10));
   const canComment = role === "manager" || isSupervisor;
 
   // Both self-fetched here, scoped to the selected rep, instead of riding
@@ -3806,6 +3856,17 @@ function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemov
 
   const shownEvents = allEvents.slice(0, LIST_DISPLAY_CAP);
 
+  // The route map only ever makes sense for one rep on one day — plotting
+  // several reps' movements on the same map would just overlap into an
+  // unreadable tangle. Points are ordered oldest-first (the direction the
+  // rep actually moved), and anything without a captured GPS is dropped
+  // rather than plotted at a wrong/default spot.
+  const routePoints = selectedRep !== "all"
+    ? [...visitEvents, ...punchEvents]
+        .filter((e) => e.coords && new Date(e.time).toDateString() === new Date(routeDate).toDateString())
+        .sort((a, b) => new Date(a.time) - new Date(b.time))
+    : [];
+
   const doDelete = (id) => { onRemoveVisit(id).then(loadEvents); setConfirmId(null); };
 
   return (
@@ -3816,21 +3877,63 @@ function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemov
         {role === "manager" && " You can delete a mistaken visit here."}
       </p>
 
-      <div style={{ marginBottom: 14 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
         <select value={selectedRep} onChange={(e) => setSelectedRep(e.target.value)} style={{ ...inputStyle, maxWidth: 240 }}>
           <option value="all">All reps</option>
           {repNames.map((n) => <option key={n} value={n}>{n}</option>)}
         </select>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            onClick={() => setViewMode("list")}
+            style={{
+              padding: "6px 14px", borderRadius: 16, fontSize: 12.5, fontWeight: 500,
+              border: viewMode === "list" ? "1px solid #1F2A24" : "1px solid #E5DFD3",
+              background: viewMode === "list" ? "#1F2A24" : "#fff", color: viewMode === "list" ? "#FAF7F2" : "#5B5445",
+            }}
+          >
+            List
+          </button>
+          <button
+            onClick={() => setViewMode("map")}
+            style={{
+              padding: "6px 14px", borderRadius: 16, fontSize: 12.5, fontWeight: 500,
+              border: viewMode === "map" ? "1px solid #2B6FCB" : "1px solid #E5DFD3",
+              background: viewMode === "map" ? "#2B6FCB" : "#fff", color: viewMode === "map" ? "#fff" : "#5B5445",
+            }}
+          >
+            Route map
+          </button>
+        </div>
+        {viewMode === "map" && (
+          <input type="date" value={routeDate} onChange={(e) => setRouteDate(e.target.value)} style={{ ...inputStyle, maxWidth: 170 }} />
+        )}
       </div>
 
-      {allEvents.length > LIST_DISPLAY_CAP && (
-        <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>
-          Showing the most recent {LIST_DISPLAY_CAP} of {allEvents.length.toLocaleString()} — pick a rep to narrow the list.
-        </div>
-      )}
+      {viewMode === "map" ? (
+        selectedRep === "all" ? (
+          <EmptyState text="Pick a specific rep above to see their route for a day." />
+        ) : (
+          <div>
+            <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 10px" }}>
+              {selectedRep}'s {new Date(routeDate).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })} — numbered in the order it happened. Green = punched in, red = punched out, blue = pharmacy/doctor visit.
+            </p>
+            {routePoints.length === 0 ? (
+              <EmptyState text="No GPS-tagged events for this rep on this day." />
+            ) : (
+              <RepRouteMap points={routePoints} />
+            )}
+          </div>
+        )
+      ) : (
+        <>
+          {allEvents.length > LIST_DISPLAY_CAP && (
+            <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>
+              Showing the most recent {LIST_DISPLAY_CAP} of {allEvents.length.toLocaleString()} — pick a rep to narrow the list.
+            </div>
+          )}
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {shownEvents.map((e) => (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {shownEvents.map((e) => (
           <div key={`${e.kind}-${e.id}`} style={{
             background: e.kind === "punch" ? (e.punchType === "in" ? "#EFF6F1" : "#FBF1EF") : "#fff",
             border: `1px solid ${e.kind === "punch" ? (e.punchType === "in" ? "#4C7A5E55" : "#B33A3A55") : "#E5DFD3"}`,
@@ -3901,9 +4004,11 @@ function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemov
               </div>
             )}
           </div>
-        ))}
-        {allEvents.length === 0 && <EmptyState text="No check-ins or punches yet." />}
-      </div>
+            ))}
+            {allEvents.length === 0 && <EmptyState text="No check-ins or punches yet." />}
+          </div>
+        </>
+      )}
     </div>
   );
 }
