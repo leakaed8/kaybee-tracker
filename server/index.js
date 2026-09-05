@@ -2,6 +2,8 @@ const path = require("path");
 const crypto = require("crypto");
 const express = require("express");
 const webpush = require("web-push");
+const { S3Client, HeadObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const db = require("./sheetsDb");
 const telegram = require("./telegram");
 const { importedInventory, defaultTemplates } = require("./seedData");
@@ -301,65 +303,62 @@ function parseOffer(o) {
   };
 }
 
-// --- Training videos (Cloudflare Stream) ---------------------------------
-// The video files themselves live only on Cloudflare Stream — never in
-// GitHub, Render, or this app's own database. Only cloudflareStreamVideoId
-// (a string) and a cached copy of Stream's own HLS playback URL for that
-// video are stored, so playback-url requests only need one Cloudflare API
-// call (the token) instead of two.
-const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
-const CLOUDFLARE_STREAM_API_TOKEN = process.env.CLOUDFLARE_STREAM_API_TOKEN;
+// --- Training videos (Cloudflare R2) --------------------------------------
+// The video files themselves live only in a private Cloudflare R2 bucket —
+// never in GitHub, Render, or this app's own database. Only the object's
+// key (its filename/path in the bucket) is stored. R2 is S3-compatible, so
+// signed URLs are generated with the standard AWS SDK against Cloudflare's
+// R2 endpoint — no Cloudflare Stream subscription needed.
+const R2_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
+const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME;
 // A playback URL is only ever handed to a logged-in employee's own browser
 // for one sitting, never persisted or shared — 4 hours comfortably covers
 // watching a short video plus the quiz without being a standing, reusable
 // link. Reopening the tab later just signs a fresh one.
 const TRAINING_PLAYBACK_TOKEN_TTL_SECONDS = 4 * 60 * 60;
 
-async function cfStreamRequest(path, options = {}) {
-  if (!CLOUDFLARE_ACCOUNT_ID || !CLOUDFLARE_STREAM_API_TOKEN) {
-    throw new Error("Cloudflare Stream isn't configured — set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_STREAM_API_TOKEN.");
+let r2Client = null;
+function getR2Client() {
+  if (!R2_ACCOUNT_ID || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY) {
+    throw new Error("R2 isn't configured — set CLOUDFLARE_ACCOUNT_ID, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY.");
   }
-  const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/stream${path}`, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${CLOUDFLARE_STREAM_API_TOKEN}`,
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
-  });
-  const data = await res.json();
-  if (!data.success) {
-    const msg = (data.errors || []).map((e) => e.message).join("; ") || `Cloudflare Stream API error on ${path}`;
-    throw new Error(msg);
+  if (!r2Client) {
+    r2Client = new S3Client({
+      region: "auto",
+      endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY },
+    });
   }
-  return data.result;
+  return r2Client;
 }
 
-// Locks the video down to signed playback only — this is what actually
-// makes hard constraint #2 (never a public/unsigned URL) hold, rather than
-// relying on someone remembering to flip a toggle in the Cloudflare
-// dashboard. Then grabs Stream's own HLS base URL (customer subdomain
-// included) once, up front, so every future playback-url request only
-// needs the token call, not this lookup too.
-async function enableSignedPlaybackAndGetHlsBase(videoId) {
-  await cfStreamRequest(`/${videoId}`, { method: "POST", body: JSON.stringify({ requireSignedURLs: true }) });
-  const details = await cfStreamRequest(`/${videoId}`, { method: "GET" });
-  const hlsBaseUrl = details?.playback?.hls || "";
-  if (!hlsBaseUrl) throw new Error("Cloudflare Stream didn't return an HLS playback URL for this video yet — it may still be processing.");
-  return hlsBaseUrl;
+// Confirms the pasted object key is real before saving it — catches a typo
+// in the admin form immediately instead of only surfacing it the first time
+// an employee tries to watch.
+async function verifyR2ObjectExists(key) {
+  if (!R2_BUCKET_NAME) throw new Error("R2 isn't configured — set R2_BUCKET_NAME.");
+  const client = getR2Client();
+  try {
+    await client.send(new HeadObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key }));
+  } catch (e) {
+    if (e.name === "NotFound" || e.$metadata?.httpStatusCode === 404) {
+      throw new Error(`No object named "${key}" was found in the R2 bucket. Check the file name matches exactly what you uploaded.`);
+    }
+    throw e;
+  }
 }
 
-// The video's raw id sits in the middle of its own cached HLS base URL
-// (".../<video_id>/manifest/video.m3u8") — swapping in a short-lived signed
-// token in its place is exactly how Cloudflare's signed-URL playback works.
+// Presigned R2 URLs are computed locally (AWS SigV4 over the object key +
+// expiry) — no network round-trip to Cloudflare needed to mint one, unlike
+// Stream's token API.
 async function createTrainingPlaybackUrl(video) {
-  const exp = Math.floor(Date.now() / 1000) + TRAINING_PLAYBACK_TOKEN_TTL_SECONDS;
-  const { token } = await cfStreamRequest(`/${video.cloudflareStreamVideoId}/token`, {
-    method: "POST",
-    body: JSON.stringify({ exp }),
-  });
-  const url = video.hlsBaseUrl.split(video.cloudflareStreamVideoId).join(token);
-  return { url, expiresAt: exp * 1000 };
+  if (!R2_BUCKET_NAME) throw new Error("R2 isn't configured — set R2_BUCKET_NAME.");
+  const client = getR2Client();
+  const command = new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: video.r2ObjectKey });
+  const url = await getSignedUrl(client, command, { expiresIn: TRAINING_PLAYBACK_TOKEN_TTL_SECONDS });
+  return { url, expiresAt: Date.now() + TRAINING_PLAYBACK_TOKEN_TTL_SECONDS * 1000 };
 }
 
 function validateTrainingQuiz(quiz) {
@@ -382,9 +381,9 @@ function validateTrainingQuiz(quiz) {
   return null;
 }
 
-// cloudflareStreamVideoId and hlsBaseUrl are deliberately left out of every
-// client-facing response — the client only ever gets a short-lived signed
-// playback URL, never the raw video id or a durable playback link.
+// r2ObjectKey is deliberately left out of every client-facing response —
+// the client only ever gets a short-lived signed playback URL, never the
+// raw bucket key or a durable playback link.
 function parseTrainingVideo(v, { includeQuiz = false } = {}) {
   const out = { id: v.id, title: v.title, createdAt: v.createdAt };
   if (includeQuiz) {
@@ -1643,11 +1642,11 @@ app.delete("/api/offers/:id", requireManager, async (req, res) => {
 });
 
 // --- Training videos ------------------------------------------------------
-// Video files are never uploaded through this app — a manager (or whoever
-// runs NotebookLM) uploads to Cloudflare Stream directly and pastes the
-// resulting video id here along with the quiz JSON generated the same way.
-// This app never stores or serves the video itself, only that id, a cached
-// Stream playback URL, and the quiz.
+// Video files are never uploaded through this app — a manager uploads the
+// file directly into the private R2 bucket via the Cloudflare dashboard,
+// then pastes its object key (filename) here along with the quiz JSON.
+// This app never stores or serves the video itself, only that key and the
+// quiz.
 app.get("/api/training-videos", async (req, res) => {
   try {
     const rows = await db.getAllRows("TrainingVideos");
@@ -1673,24 +1672,21 @@ app.get("/api/training-videos/:id", async (req, res) => {
 
 app.post("/api/admin/training-videos", requireManager, async (req, res) => {
   try {
-    const { title, cloudflareStreamVideoId, quiz } = req.body;
+    const { title, r2ObjectKey, quiz } = req.body;
     if (!title || !String(title).trim()) return res.status(400).json({ error: "title is required" });
-    if (!cloudflareStreamVideoId || !String(cloudflareStreamVideoId).trim()) {
-      return res.status(400).json({ error: "cloudflareStreamVideoId is required" });
+    if (!r2ObjectKey || !String(r2ObjectKey).trim()) {
+      return res.status(400).json({ error: "r2ObjectKey is required" });
     }
     const quizError = validateTrainingQuiz(quiz);
     if (quizError) return res.status(400).json({ error: quizError });
 
-    // Enforced here, not left as a manual Cloudflare dashboard toggle, so a
-    // video can never end up reachable by an unsigned URL just because
-    // someone forgot a checkbox.
-    const hlsBaseUrl = await enableSignedPlaybackAndGetHlsBase(String(cloudflareStreamVideoId).trim());
+    const cleanKey = String(r2ObjectKey).trim();
+    await verifyR2ObjectExists(cleanKey);
 
     const video = {
       id: `tv${crypto.randomUUID()}`,
       title: String(title).trim(),
-      cloudflareStreamVideoId: String(cloudflareStreamVideoId).trim(),
-      hlsBaseUrl,
+      r2ObjectKey: cleanKey,
       quiz: JSON.stringify(quiz),
       createdAt: new Date().toISOString(),
     };

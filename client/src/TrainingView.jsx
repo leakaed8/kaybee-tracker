@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import Hls from "hls.js";
 import { Check, X, Loader2, Play } from "lucide-react";
 import { api } from "./api.js";
 
@@ -10,15 +9,18 @@ function EmptyState({ text }) {
   return <div style={{ textAlign: "center", padding: "30px 0", color: "#B7AF9E", fontSize: 13 }}>{text}</div>;
 }
 
-// Plays a signed, short-expiry Cloudflare Stream URL fetched fresh from our
-// own backend for this logged-in employee — never a public/unsigned link,
-// and the URL is never persisted anywhere on the client past this session.
-// Native download UI, right-click, and Picture-in-Picture are all disabled;
-// the name+timestamp watermark is a deterrent/traceability layer on top,
-// not real DRM — nothing here claims to make the video uncopiable.
+// Plays a signed, short-expiry R2 URL fetched fresh from our own backend
+// for this logged-in employee — never a public/unsigned link, and the URL
+// is never persisted anywhere on the client past this session. It's a
+// plain MP4 served with normal HTTP range requests (R2 supports these
+// natively, so scrubbing/seeking works), not adaptive-bitrate streaming —
+// fine for short internal training clips, and means no streaming library
+// is needed on the client at all. Native download UI, right-click, and
+// Picture-in-Picture are all disabled; the name+timestamp watermark is a
+// deterrent/traceability layer on top, not real DRM — nothing here claims
+// to make the video uncopiable.
 function TrainingVideoPlayer({ videoId, repName, onEnded }) {
-  const videoRef = useRef(null);
-  const hlsRef = useRef(null);
+  const [videoSrc, setVideoSrc] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [watermarkAt, setWatermarkAt] = useState(() => new Date());
@@ -32,29 +34,11 @@ function TrainingVideoPlayer({ videoId, repName, onEnded }) {
     let cancelled = false;
     setLoading(true);
     setError("");
+    setVideoSrc("");
     api.getTrainingPlaybackUrl(videoId)
-      .then(({ url }) => {
-        if (cancelled) return;
-        const video = videoRef.current;
-        if (!video) return;
-        if (Hls.isSupported()) {
-          const hls = new Hls();
-          hlsRef.current = hls;
-          hls.loadSource(url);
-          hls.attachMedia(video);
-        } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-          // Safari plays HLS natively — no hls.js needed there.
-          video.src = url;
-        } else {
-          setError("This browser can't play the training video format. Try Chrome, Firefox, or Safari.");
-        }
-        setLoading(false);
-      })
+      .then(({ url }) => { if (!cancelled) { setVideoSrc(url); setLoading(false); } })
       .catch((e) => { if (!cancelled) { setError(e.message); setLoading(false); } });
-    return () => {
-      cancelled = true;
-      if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
-    };
+    return () => { cancelled = true; };
   }, [videoId]);
 
   return (
@@ -68,7 +52,7 @@ function TrainingVideoPlayer({ videoId, repName, onEnded }) {
       {!error && (
         <>
           <video
-            ref={videoRef}
+            src={videoSrc}
             controls
             playsInline
             controlsList="nodownload noremoteplayback"
@@ -249,13 +233,14 @@ function TrainingVideoSession({ videoId, repName, onDone }) {
   );
 }
 
-// Admin-only: paste the Cloudflare Stream video id and the quiz JSON
-// generated once in NotebookLM. No AI calls happen here — this is a plain
-// data-entry form, exactly per the hard constraint that quiz content is
-// static and pasted in, never generated live.
+// Admin-only: paste the R2 object key (the file name/path as uploaded to
+// the bucket) and the quiz JSON generated once in NotebookLM. No AI calls
+// happen here — this is a plain data-entry form, exactly per the hard
+// constraint that quiz content is static and pasted in, never generated
+// live.
 function AddTrainingVideoForm({ onAdded }) {
   const [title, setTitle] = useState("");
-  const [videoId, setVideoId] = useState("");
+  const [objectKey, setObjectKey] = useState("");
   const [quizText, setQuizText] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -271,11 +256,11 @@ function AddTrainingVideoForm({ onAdded }) {
       setError("Quiz isn't valid JSON — paste either a JSON array of questions, or the { \"quiz\": [...] } object.");
       return;
     }
-    if (!title.trim() || !videoId.trim()) { setError("Title and Cloudflare Stream video id are required."); return; }
+    if (!title.trim() || !objectKey.trim()) { setError("Title and the R2 object key are required."); return; }
     setSaving(true);
     try {
-      await api.addTrainingVideo({ title: title.trim(), cloudflareStreamVideoId: videoId.trim(), quiz });
-      setTitle(""); setVideoId(""); setQuizText("");
+      await api.addTrainingVideo({ title: title.trim(), r2ObjectKey: objectKey.trim(), quiz });
+      setTitle(""); setObjectKey(""); setQuizText("");
       onAdded();
     } catch (e) {
       setError(e.message);
@@ -288,11 +273,11 @@ function AddTrainingVideoForm({ onAdded }) {
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
       <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 10px" }}>Add a training video</h3>
       <p style={{ fontSize: 12, color: "#8A8272", margin: "0 0 10px" }}>
-        Upload the video to Cloudflare Stream first (this app never stores video files). Then paste its video id here, plus the quiz JSON from NotebookLM.
+        Upload the video file to the R2 bucket first, via the Cloudflare dashboard (this app never stores video files itself). Then paste its exact file name below, plus the quiz JSON from NotebookLM.
       </p>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Video title" style={inputStyle} />
-        <input value={videoId} onChange={(e) => setVideoId(e.target.value)} placeholder="Cloudflare Stream video id" style={inputStyle} />
+        <input value={objectKey} onChange={(e) => setObjectKey(e.target.value)} placeholder="R2 object key (e.g. handling-price-objections.mp4)" style={inputStyle} />
         <textarea value={quizText} onChange={(e) => setQuizText(e.target.value)} placeholder='Paste quiz JSON, e.g. { "quiz": [ ... ] }' rows={6} style={{ ...inputStyle, resize: "vertical", fontFamily: "'IBM Plex Mono', monospace" }} />
         {error && <div style={{ fontSize: 12, color: "#B33A3A" }}>{error}</div>}
         <div>

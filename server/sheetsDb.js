@@ -23,7 +23,7 @@ const SCHEMAS = {
   CompetitorSightings: ["id", "visitId", "client", "repName", "competitorName", "notes", "date"],
   VisitComments: ["id", "visitId", "authorName", "text", "createdAt"],
   CompetitorProducts: ["id", "competitorName", "productName", "genericName", "form", "dosage", "packSize", "price", "discountRate", "notes", "createdAt"],
-  TrainingVideos: ["id", "title", "cloudflareStreamVideoId", "hlsBaseUrl", "quiz", "createdAt"],
+  TrainingVideos: ["id", "title", "r2ObjectKey", "quiz", "createdAt"],
   TrainingProgress: ["id", "employeeId", "videoId", "completedAt", "quizResponses"],
 };
 

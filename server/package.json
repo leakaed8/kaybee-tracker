@@ -8,6 +8,8 @@
     "dev": "node index.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1127.0",
+    "@aws-sdk/s3-request-presigner": "^3.1127.0",
     "express": "^4.19.2",
     "googleapis": "^140.0.1",
     "web-push": "^3.6.7"
