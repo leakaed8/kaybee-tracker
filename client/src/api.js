@@ -112,4 +112,10 @@ export const api = {
   updateCompetitorProduct: (id, patch) => request(`/competitor-products/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   removeCompetitorProduct: (id) => request(`/competitor-products/${id}`, { method: "DELETE" }),
   addVisitComment: (visitId, text) => request(`/visits/${visitId}/comments`, { method: "POST", body: JSON.stringify({ text }) }),
+  getTrainingVideos: () => request("/training-videos"),
+  getTrainingVideo: (id) => request(`/training-videos/${id}`),
+  addTrainingVideo: (payload) => request("/admin/training-videos", { method: "POST", body: JSON.stringify(payload) }),
+  getTrainingPlaybackUrl: (id) => request(`/training-videos/${id}/playback-url`),
+  completeTrainingVideo: (id, quizResponses) => request(`/training-videos/${id}/complete`, { method: "POST", body: JSON.stringify({ quizResponses }) }),
+  getTrainingProgress: () => request("/training-progress"),
 };

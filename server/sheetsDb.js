@@ -23,6 +23,8 @@ const SCHEMAS = {
   CompetitorSightings: ["id", "visitId", "client", "repName", "competitorName", "notes", "date"],
   VisitComments: ["id", "visitId", "authorName", "text", "createdAt"],
   CompetitorProducts: ["id", "competitorName", "productName", "genericName", "form", "dosage", "packSize", "price", "discountRate", "notes", "createdAt"],
+  TrainingVideos: ["id", "title", "cloudflareStreamVideoId", "hlsBaseUrl", "quiz", "createdAt"],
+  TrainingProgress: ["id", "employeeId", "videoId", "completedAt", "quizResponses"],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];

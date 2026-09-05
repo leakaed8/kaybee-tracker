@@ -301,6 +301,104 @@ function parseOffer(o) {
   };
 }
 
+// --- Training videos (Cloudflare Stream) ---------------------------------
+// The video files themselves live only on Cloudflare Stream — never in
+// GitHub, Render, or this app's own database. Only cloudflareStreamVideoId
+// (a string) and a cached copy of Stream's own HLS playback URL for that
+// video are stored, so playback-url requests only need one Cloudflare API
+// call (the token) instead of two.
+const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
+const CLOUDFLARE_STREAM_API_TOKEN = process.env.CLOUDFLARE_STREAM_API_TOKEN;
+// A playback URL is only ever handed to a logged-in employee's own browser
+// for one sitting, never persisted or shared — 4 hours comfortably covers
+// watching a short video plus the quiz without being a standing, reusable
+// link. Reopening the tab later just signs a fresh one.
+const TRAINING_PLAYBACK_TOKEN_TTL_SECONDS = 4 * 60 * 60;
+
+async function cfStreamRequest(path, options = {}) {
+  if (!CLOUDFLARE_ACCOUNT_ID || !CLOUDFLARE_STREAM_API_TOKEN) {
+    throw new Error("Cloudflare Stream isn't configured — set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_STREAM_API_TOKEN.");
+  }
+  const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/stream${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${CLOUDFLARE_STREAM_API_TOKEN}`,
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  });
+  const data = await res.json();
+  if (!data.success) {
+    const msg = (data.errors || []).map((e) => e.message).join("; ") || `Cloudflare Stream API error on ${path}`;
+    throw new Error(msg);
+  }
+  return data.result;
+}
+
+// Locks the video down to signed playback only — this is what actually
+// makes hard constraint #2 (never a public/unsigned URL) hold, rather than
+// relying on someone remembering to flip a toggle in the Cloudflare
+// dashboard. Then grabs Stream's own HLS base URL (customer subdomain
+// included) once, up front, so every future playback-url request only
+// needs the token call, not this lookup too.
+async function enableSignedPlaybackAndGetHlsBase(videoId) {
+  await cfStreamRequest(`/${videoId}`, { method: "POST", body: JSON.stringify({ requireSignedURLs: true }) });
+  const details = await cfStreamRequest(`/${videoId}`, { method: "GET" });
+  const hlsBaseUrl = details?.playback?.hls || "";
+  if (!hlsBaseUrl) throw new Error("Cloudflare Stream didn't return an HLS playback URL for this video yet — it may still be processing.");
+  return hlsBaseUrl;
+}
+
+// The video's raw id sits in the middle of its own cached HLS base URL
+// (".../<video_id>/manifest/video.m3u8") — swapping in a short-lived signed
+// token in its place is exactly how Cloudflare's signed-URL playback works.
+async function createTrainingPlaybackUrl(video) {
+  const exp = Math.floor(Date.now() / 1000) + TRAINING_PLAYBACK_TOKEN_TTL_SECONDS;
+  const { token } = await cfStreamRequest(`/${video.cloudflareStreamVideoId}/token`, {
+    method: "POST",
+    body: JSON.stringify({ exp }),
+  });
+  const url = video.hlsBaseUrl.split(video.cloudflareStreamVideoId).join(token);
+  return { url, expiresAt: exp * 1000 };
+}
+
+function validateTrainingQuiz(quiz) {
+  if (!Array.isArray(quiz) || quiz.length === 0) return "quiz must be a non-empty array";
+  for (let i = 0; i < quiz.length; i++) {
+    const q = quiz[i];
+    if (!q || typeof q !== "object") return `quiz[${i}] must be an object`;
+    if (!q.question || typeof q.question !== "string") return `quiz[${i}] is missing a question`;
+    if (q.type === "scenario") {
+      if (!q.model_answer || typeof q.model_answer !== "string") return `quiz[${i}] (scenario) is missing model_answer`;
+    } else if (q.type === "multiple_choice") {
+      if (!Array.isArray(q.options) || q.options.length < 2) return `quiz[${i}] (multiple_choice) needs at least 2 options`;
+      if (!Number.isInteger(q.correct_answer) || q.correct_answer < 0 || q.correct_answer >= q.options.length) {
+        return `quiz[${i}] (multiple_choice) correct_answer must be a valid index into options`;
+      }
+    } else {
+      return `quiz[${i}] has an unknown type "${q.type}" — expected "scenario" or "multiple_choice"`;
+    }
+  }
+  return null;
+}
+
+// cloudflareStreamVideoId and hlsBaseUrl are deliberately left out of every
+// client-facing response — the client only ever gets a short-lived signed
+// playback URL, never the raw video id or a durable playback link.
+function parseTrainingVideo(v, { includeQuiz = false } = {}) {
+  const out = { id: v.id, title: v.title, createdAt: v.createdAt };
+  if (includeQuiz) {
+    try { out.quiz = JSON.parse(v.quiz || "[]"); } catch { out.quiz = []; }
+  }
+  return out;
+}
+
+function parseTrainingProgress(p) {
+  let quizResponses = [];
+  try { quizResponses = JSON.parse(p.quizResponses || "[]"); } catch { quizResponses = []; }
+  return { id: p.id, employeeId: p.employeeId, videoId: p.videoId, completedAt: p.completedAt, quizResponses };
+}
+
 function parsePunch(p) {
   const coords = p.coordsLat && p.coordsLng ? { lat: p.coordsLat, lng: p.coordsLng } : null;
   return {
@@ -1538,6 +1636,131 @@ app.delete("/api/offers/:id", requireManager, async (req, res) => {
   try {
     await db.deleteRowById("Offers", req.params.id);
     res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// --- Training videos ------------------------------------------------------
+// Video files are never uploaded through this app — a manager (or whoever
+// runs NotebookLM) uploads to Cloudflare Stream directly and pastes the
+// resulting video id here along with the quiz JSON generated the same way.
+// This app never stores or serves the video itself, only that id, a cached
+// Stream playback URL, and the quiz.
+app.get("/api/training-videos", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("TrainingVideos");
+    const videos = rows.map((v) => parseTrainingVideo(v)).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    res.json({ videos });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/training-videos/:id", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("TrainingVideos");
+    const video = rows.find((v) => v.id === req.params.id);
+    if (!video) return res.status(404).json({ error: "Training video not found" });
+    res.json(parseTrainingVideo(video, { includeQuiz: true }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/admin/training-videos", requireManager, async (req, res) => {
+  try {
+    const { title, cloudflareStreamVideoId, quiz } = req.body;
+    if (!title || !String(title).trim()) return res.status(400).json({ error: "title is required" });
+    if (!cloudflareStreamVideoId || !String(cloudflareStreamVideoId).trim()) {
+      return res.status(400).json({ error: "cloudflareStreamVideoId is required" });
+    }
+    const quizError = validateTrainingQuiz(quiz);
+    if (quizError) return res.status(400).json({ error: quizError });
+
+    // Enforced here, not left as a manual Cloudflare dashboard toggle, so a
+    // video can never end up reachable by an unsigned URL just because
+    // someone forgot a checkbox.
+    const hlsBaseUrl = await enableSignedPlaybackAndGetHlsBase(String(cloudflareStreamVideoId).trim());
+
+    const video = {
+      id: `tv${crypto.randomUUID()}`,
+      title: String(title).trim(),
+      cloudflareStreamVideoId: String(cloudflareStreamVideoId).trim(),
+      hlsBaseUrl,
+      quiz: JSON.stringify(quiz),
+      createdAt: new Date().toISOString(),
+    };
+    await db.appendRow("TrainingVideos", video);
+    res.json(parseTrainingVideo(video));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Any logged-in employee (rep or manager) can request a playback URL for
+// any training video — there's no per-employee video assignment, everyone
+// sees the same catalog. What's actually restricted is that this is the
+// ONLY way to get a working URL at all: the token is short-lived and minted
+// fresh per request, tied to nothing but "someone with a valid session
+// asked for it right now."
+app.get("/api/training-videos/:id/playback-url", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("TrainingVideos");
+    const video = rows.find((v) => v.id === req.params.id);
+    if (!video) return res.status(404).json({ error: "Training video not found" });
+    const { url, expiresAt } = await createTrainingPlaybackUrl(video);
+    res.json({ url, expiresAt });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/training-videos/:id/complete", async (req, res) => {
+  try {
+    if (!req.repName) return res.status(403).json({ error: "Employees only." });
+    const videos = await db.getAllRows("TrainingVideos");
+    const video = videos.find((v) => v.id === req.params.id);
+    if (!video) return res.status(404).json({ error: "Training video not found" });
+    const { quizResponses } = req.body;
+    if (!Array.isArray(quizResponses)) return res.status(400).json({ error: "quizResponses must be an array" });
+
+    // Retaking a video's quiz overwrites the same progress row rather than
+    // piling up duplicates — "completed" is a single current fact per
+    // employee per video, and the latest attempt is what matters.
+    const progressRows = await db.getAllRows("TrainingProgress");
+    const existing = progressRows.find((p) => p.employeeId === req.repName && p.videoId === video.id);
+    const patch = { completedAt: new Date().toISOString(), quizResponses: JSON.stringify(quizResponses) };
+    if (existing) {
+      await db.updateRowById("TrainingProgress", existing.id, patch);
+      return res.json(parseTrainingProgress({ ...existing, ...patch }));
+    }
+    const progress = { id: `tp${crypto.randomUUID()}`, employeeId: req.repName, videoId: video.id, ...patch };
+    await db.appendRow("TrainingProgress", progress);
+    res.json(parseTrainingProgress(progress));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Reps see only their own completion history (their quiz answers are their
+// own); managers/supervisors get the team-wide view needed to actually
+// track who completed what, matching the same access rule used for
+// Locations and Performance.
+app.get("/api/training-progress", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("TrainingProgress");
+    let progress = rows.map(parseTrainingProgress);
+    if (!(req.role === "manager" || req.isSupervisor)) {
+      progress = progress.filter((p) => p.employeeId === req.repName);
+    }
+    res.json({ progress });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

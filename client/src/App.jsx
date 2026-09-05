@@ -15,6 +15,7 @@ import {
   GraduationCap, Boxes, Swords, History,
 } from "lucide-react";
 import { api } from "./api.js";
+import { TrainingVideosView } from "./TrainingView.jsx";
 import {
   daysUntil, fmtDate, turnoverPct, zoneFor, isSlowMover, isAtRisk, effectiveSold90, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
   computeLeadScore,
@@ -372,9 +373,13 @@ export default function App() {
                         Broadcast, Stock, Expiry, Pharmacies, Doctors,
                         Competitors, Knowledge, Training, Settings
             supervisor: Performance, Orders, Locations, Check-In, Stock,
-                        Expiry, Pharmacies, Competitors, Knowledge
+                        Expiry, Pharmacies, Competitors, Knowledge, Training
             rep:        Check-In, Route, Stock, Expiry, Pharmacies, Doctors,
                         Competitors, Knowledge, Training
+          Training itself has two sub-tabs (see TrainingTabView): the
+          curriculum reader is hidden from supervisors as before, but the
+          video/quiz tracker applies to every role, so the nav tab itself is
+          no longer gated on !isSupervisor.
           Keep this comment's per-role lists in sync with defaultTabFor()
           above and with any future visibility-gate change. */}
       <nav style={{ display: "flex", gap: 4, padding: "12px 24px 0", borderBottom: "1px solid #E5DFD3", overflowX: "auto" }}>
@@ -393,7 +398,7 @@ export default function App() {
         {(role === "manager" || role === "rep") && <TabBtn active={tab === "cadence"} onClick={() => setTab("cadence")} icon={<History size={15} />} label="Visit Cadence" />}
         {(role === "manager" || role === "rep") && <TabBtn active={tab === "competitors"} onClick={() => setTab("competitors")} icon={<Swords size={15} />} label="Competitors" />}
         <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />
-        {!isSupervisor && <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />}
+        <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
       </nav>
 
@@ -467,7 +472,9 @@ export default function App() {
               <VisitCadenceView role={role} isSupervisor={isSupervisor} repNames={repNames} />
             )}
             {tab === "knowledge" && <KnowledgeView />}
-            {tab === "training" && !isSupervisor && <TrainingView />}
+            {tab === "training" && (
+              <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
+            )}
             {tab === "route" && role === "rep" && !isSupervisor && <RouteView clients={clients} doctors={doctors} />}
             {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} />}
             {tab === "orders" && (role === "manager" || isSupervisor) && (
@@ -5262,8 +5269,43 @@ function KnowledgeView() {
   );
 }
 
-// ---------- Training View ----------
-function TrainingView() {
+// ---------- Training tab (curriculum reader + video/quiz tracker) ----------
+// Two unrelated features share one nav tab: the pre-existing static
+// curriculum reader (sales methodology, no tracking) and the newer
+// video+quiz tracker (Cloudflare Stream videos, per-employee completion).
+// The curriculum stays hidden from supervisors exactly as before; the
+// video tracker is for every role, since it's about employee completion
+// tracking, not rep-only sales technique reading.
+function TrainingTabView({ role, repName, isSupervisor, repNames }) {
+  const [subTab, setSubTab] = useState(isSupervisor ? "videos" : "curriculum");
+  const pillStyle = (active) => ({
+    padding: "6px 14px", borderRadius: 16, fontSize: 12.5, fontWeight: 500,
+    border: active ? "1px solid #1F2A24" : "1px solid #E5DFD3",
+    background: active ? "#1F2A24" : "#fff", color: active ? "#FAF7F2" : "#5B5445",
+  });
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+        {!isSupervisor && (
+          <button onClick={() => setSubTab("curriculum")} style={pillStyle(subTab === "curriculum")}>Curriculum</button>
+        )}
+        <button onClick={() => setSubTab("videos")} style={pillStyle(subTab === "videos")}>Videos</button>
+      </div>
+      {subTab === "curriculum" && !isSupervisor ? (
+        <TrainingCurriculumView />
+      ) : (
+        <TrainingVideosView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
+      )}
+    </div>
+  );
+}
+
+// ---------- Training curriculum (static reading material) ----------
+// Distinct from the video+quiz Training sub-tab (TrainingVideosView, in its
+// own file) — this is the older sales-methodology reader, kept under the
+// same "Training" nav tab as a second sub-tab rather than its own slot.
+function TrainingCurriculumView() {
   const [section, setSection] = useState("overview"); // overview | mindset | profiling | framework | objections | value | growth
 
   const sectionBtn = (key, label) => (
