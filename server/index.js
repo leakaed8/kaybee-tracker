@@ -381,14 +381,16 @@ function validateTrainingQuiz(quiz) {
   return null;
 }
 
-// r2ObjectKey is deliberately left out of every client-facing response —
-// the client only ever gets a short-lived signed playback URL, never the
-// raw bucket key or a durable playback link.
-function parseTrainingVideo(v, { includeQuiz = false } = {}) {
+// r2ObjectKey is left out of every response by default — reps only ever
+// get a short-lived signed playback URL, never the raw bucket key. A
+// manager editing a video is the one exception (includeR2Key), since they
+// need to see/change which file a video points to.
+function parseTrainingVideo(v, { includeQuiz = false, includeR2Key = false } = {}) {
   const out = { id: v.id, title: v.title, createdAt: v.createdAt };
   if (includeQuiz) {
     try { out.quiz = JSON.parse(v.quiz || "[]"); } catch { out.quiz = []; }
   }
+  if (includeR2Key) out.r2ObjectKey = v.r2ObjectKey;
   return out;
 }
 
@@ -1663,7 +1665,7 @@ app.get("/api/training-videos/:id", async (req, res) => {
     const rows = await db.getAllRows("TrainingVideos");
     const video = rows.find((v) => v.id === req.params.id);
     if (!video) return res.status(404).json({ error: "Training video not found" });
-    res.json(parseTrainingVideo(video, { includeQuiz: true }));
+    res.json(parseTrainingVideo(video, { includeQuiz: true, includeR2Key: req.role === "manager" }));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -1692,6 +1694,59 @@ app.post("/api/admin/training-videos", requireManager, async (req, res) => {
     };
     await db.appendRow("TrainingVideos", video);
     res.json(parseTrainingVideo(video));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Lets a manager fix a mistake — a typo in the title, the wrong file
+// pasted, a correction to the quiz JSON — without deleting and re-adding
+// the video (which would lose its completion history, since progress rows
+// reference this video's id). Each field is optional; only what's sent
+// gets changed.
+app.patch("/api/admin/training-videos/:id", requireManager, async (req, res) => {
+  try {
+    const rows = await db.getAllRows("TrainingVideos");
+    const video = rows.find((v) => v.id === req.params.id);
+    if (!video) return res.status(404).json({ error: "Training video not found" });
+
+    const { title, r2ObjectKey, quiz } = req.body;
+    const patch = {};
+    if (title !== undefined) {
+      if (!String(title).trim()) return res.status(400).json({ error: "title can't be empty" });
+      patch.title = String(title).trim();
+    }
+    if (r2ObjectKey !== undefined) {
+      const cleanKey = String(r2ObjectKey).trim();
+      if (!cleanKey) return res.status(400).json({ error: "r2ObjectKey can't be empty" });
+      await verifyR2ObjectExists(cleanKey);
+      patch.r2ObjectKey = cleanKey;
+    }
+    if (quiz !== undefined) {
+      const quizError = validateTrainingQuiz(quiz);
+      if (quizError) return res.status(400).json({ error: quizError });
+      patch.quiz = JSON.stringify(quiz);
+    }
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
+
+    await db.updateRowById("TrainingVideos", video.id, patch);
+    res.json(parseTrainingVideo({ ...video, ...patch }, { includeQuiz: true, includeR2Key: true }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Deliberately doesn't touch TrainingProgress rows referencing this video —
+// completion history stays as a record of what an employee actually did,
+// same as deleting an Offer doesn't retroactively change past orders that
+// used it.
+app.delete("/api/admin/training-videos/:id", requireManager, async (req, res) => {
+  try {
+    const ok = await db.deleteRowById("TrainingVideos", req.params.id);
+    if (!ok) return res.status(404).json({ error: "Training video not found" });
+    res.json({ ok: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

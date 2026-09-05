@@ -294,12 +294,87 @@ function AddTrainingVideoForm({ onAdded }) {
   );
 }
 
+// Admin-only: fix a mistake in an existing video's title, R2 object key, or
+// quiz JSON. Fetches the video's own current values first — the list view
+// never carries the quiz or object key, only this manager-only detail
+// fetch does.
+function EditTrainingVideoForm({ video, onSaved, onCancel }) {
+  const [title, setTitle] = useState(video.title);
+  const [objectKey, setObjectKey] = useState("");
+  const [quizText, setQuizText] = useState("");
+  const [loadingDetail, setLoadingDetail] = useState(true);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api.getTrainingVideo(video.id)
+      .then((v) => {
+        setTitle(v.title);
+        setObjectKey(v.r2ObjectKey || "");
+        setQuizText(JSON.stringify(v.quiz || [], null, 2));
+        setLoadingDetail(false);
+      })
+      .catch((e) => { setError(e.message); setLoadingDetail(false); });
+  }, [video.id]);
+
+  const submit = async () => {
+    setError("");
+    let quiz;
+    try {
+      const parsed = JSON.parse(quizText);
+      quiz = Array.isArray(parsed) ? parsed : parsed.quiz;
+      if (!Array.isArray(quiz)) throw new Error("not an array");
+    } catch {
+      setError("Quiz isn't valid JSON — paste either a JSON array of questions, or the { \"quiz\": [...] } object.");
+      return;
+    }
+    if (!title.trim() || !objectKey.trim()) { setError("Title and the R2 object key are required."); return; }
+    setSaving(true);
+    try {
+      await api.updateTrainingVideo(video.id, { title: title.trim(), r2ObjectKey: objectKey.trim(), quiz });
+      onSaved();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loadingDetail) return <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Video title" style={inputStyle} />
+      <input value={objectKey} onChange={(e) => setObjectKey(e.target.value)} placeholder="R2 object key" style={inputStyle} />
+      <textarea value={quizText} onChange={(e) => setQuizText(e.target.value)} rows={8} style={{ ...inputStyle, resize: "vertical", fontFamily: "'IBM Plex Mono', monospace" }} />
+      {error && <div style={{ fontSize: 12, color: "#B33A3A" }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          onClick={submit}
+          disabled={saving}
+          style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: saving ? "#D8D2C4" : "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+        >
+          {saving ? "Saving…" : "Save changes"}
+        </button>
+        <button onClick={onCancel} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 export function TrainingVideosView({ role, repName, isSupervisor, repNames }) {
   const [videos, setVideos] = useState(null);
   const [progress, setProgress] = useState([]);
   const [activeVideoId, setActiveVideoId] = useState(null);
   const [expandedVideoId, setExpandedVideoId] = useState(null);
+  const [editingVideoId, setEditingVideoId] = useState(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const isManagerView = role === "manager" || isSupervisor;
+  // Editing/deleting is manager-only (not supervisors) — matches the
+  // requireManager gate on the server for these routes.
+  const canEditVideos = role === "manager";
 
   const load = useCallback(() => {
     Promise.all([api.getTrainingVideos(), api.getTrainingProgress()])
@@ -311,6 +386,20 @@ export function TrainingVideosView({ role, repName, isSupervisor, repNames }) {
   const myCompletion = (videoId) => progress.find((p) => p.employeeId === repName && p.videoId === videoId);
   const completersFor = (videoId) => progress.filter((p) => p.videoId === videoId);
 
+  const doDelete = async (id) => {
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await api.removeTrainingVideo(id);
+      setConfirmDeleteId(null);
+      load();
+    } catch (e) {
+      setDeleteError(e.message);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Training</h2>
@@ -318,7 +407,11 @@ export function TrainingVideosView({ role, repName, isSupervisor, repNames }) {
         Watch each video, then answer the questions that follow.
       </p>
 
-      {isManagerView && <AddTrainingVideoForm onAdded={load} />}
+      {/* POST /api/admin/training-videos is requireManager-gated server-side
+          (a supervisor is a rep account, not a manager) — canEditVideos,
+          not isManagerView, so a supervisor never sees a form that would
+          403 on submit. */}
+      {canEditVideos && <AddTrainingVideoForm onAdded={load} />}
 
       {videos === null && <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>}
       {videos && videos.length === 0 && <EmptyState text="No training videos yet." />}
@@ -329,8 +422,17 @@ export function TrainingVideosView({ role, repName, isSupervisor, repNames }) {
           const completers = completersFor(v.id);
           const isActive = activeVideoId === v.id;
           const isExpanded = expandedVideoId === v.id;
+          const isEditing = editingVideoId === v.id;
           return (
             <div key={v.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
+              {isEditing ? (
+                <EditTrainingVideoForm
+                  video={v}
+                  onSaved={() => { setEditingVideoId(null); load(); }}
+                  onCancel={() => setEditingVideoId(null)}
+                />
+              ) : (
+                <>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 14 }}>{v.title}</div>
@@ -380,6 +482,36 @@ export function TrainingVideosView({ role, repName, isSupervisor, repNames }) {
                 </div>
               )}
 
+              {canEditVideos && !isActive && (
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3", display: "flex", alignItems: "center", gap: 8 }}>
+                  {confirmDeleteId === v.id ? (
+                    <>
+                      <span style={{ fontSize: 11.5, color: "#B33A3A" }}>Delete this video? Employee completion history is kept.</span>
+                      <button
+                        onClick={() => doDelete(v.id)}
+                        disabled={deleting}
+                        style={{ fontSize: 11.5, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}
+                      >
+                        {deleting ? "Deleting…" : "Yes, delete"}
+                      </button>
+                      <button onClick={() => { setConfirmDeleteId(null); setDeleteError(""); }} style={{ fontSize: 11.5, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button onClick={() => setEditingVideoId(v.id)} style={{ fontSize: 11.5, color: "#5B5445", background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>
+                        Edit
+                      </button>
+                      <button onClick={() => setConfirmDeleteId(v.id)} style={{ fontSize: 11.5, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "6px 10px" }}>
+                        Delete
+                      </button>
+                    </>
+                  )}
+                  {deleteError && confirmDeleteId === v.id && <span style={{ fontSize: 11.5, color: "#B33A3A" }}>{deleteError}</span>}
+                </div>
+              )}
+
               {isActive && (
                 <div style={{ marginTop: 12 }}>
                   <TrainingVideoSession
@@ -388,6 +520,8 @@ export function TrainingVideosView({ role, repName, isSupervisor, repNames }) {
                     onDone={() => { setActiveVideoId(null); load(); }}
                   />
                 </div>
+              )}
+              </>
               )}
             </div>
           );
