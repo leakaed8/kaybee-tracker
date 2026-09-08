@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Check, X, Loader2, Play } from "lucide-react";
+import { Check, X, Loader2, Play, ExternalLink } from "lucide-react";
 import { api } from "./api.js";
 
 // Kept local (not imported from App.jsx) to avoid a circular import between
@@ -526,6 +526,186 @@ export function TrainingVideosView({ role, repName, isSupervisor, repNames }) {
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+// Admin-only: paste a study's title, URL, and an optional note on why it's
+// relevant. No file is hosted here — just a link out.
+function AddTrainingStudyForm({ onAdded }) {
+  const [title, setTitle] = useState("");
+  const [url, setUrl] = useState("");
+  const [notes, setNotes] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const submit = async () => {
+    setError("");
+    if (!title.trim() || !url.trim()) { setError("Title and URL are required."); return; }
+    setSaving(true);
+    try {
+      await api.addTrainingStudy({ title: title.trim(), url: url.trim(), notes: notes.trim() });
+      setTitle(""); setUrl(""); setNotes("");
+      onAdded();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+      <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 10px" }}>Add a study</h3>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Study title" style={inputStyle} />
+        <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="Link (e.g. https://pubmed.ncbi.nlm.nih.gov/...)" style={inputStyle} />
+        <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Why it's relevant (optional)" rows={2} style={{ ...inputStyle, resize: "vertical" }} />
+        {error && <div style={{ fontSize: 12, color: "#B33A3A" }}>{error}</div>}
+        <div>
+          <button
+            onClick={submit}
+            disabled={saving}
+            style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: saving ? "#D8D2C4" : "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+          >
+            {saving ? "Adding…" : "Add study"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditTrainingStudyForm({ study, onSaved, onCancel }) {
+  const [title, setTitle] = useState(study.title);
+  const [url, setUrl] = useState(study.url);
+  const [notes, setNotes] = useState(study.notes || "");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const submit = async () => {
+    setError("");
+    if (!title.trim() || !url.trim()) { setError("Title and URL are required."); return; }
+    setSaving(true);
+    try {
+      await api.updateTrainingStudy(study.id, { title: title.trim(), url: url.trim(), notes: notes.trim() });
+      onSaved();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Study title" style={inputStyle} />
+      <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="Link" style={inputStyle} />
+      <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Why it's relevant (optional)" rows={2} style={{ ...inputStyle, resize: "vertical" }} />
+      {error && <div style={{ fontSize: 12, color: "#B33A3A" }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          onClick={submit}
+          disabled={saving}
+          style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: saving ? "#D8D2C4" : "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+        >
+          {saving ? "Saving…" : "Save changes"}
+        </button>
+        <button onClick={onCancel} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+export function TrainingStudiesView({ role }) {
+  const [studies, setStudies] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const canEdit = role === "manager";
+
+  const load = useCallback(() => {
+    api.getTrainingStudies().then((d) => setStudies(d.studies || [])).catch(() => setStudies([]));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const doDelete = async (id) => {
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await api.removeTrainingStudy(id);
+      setConfirmDeleteId(null);
+      load();
+    } catch (e) {
+      setDeleteError(e.message);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <div>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Studies</h2>
+      <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
+        Reference studies to cite with doctors and pharmacists — tap through to read the source.
+      </p>
+
+      {canEdit && <AddTrainingStudyForm onAdded={load} />}
+
+      {studies === null && <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>}
+      {studies && studies.length === 0 && <EmptyState text="No studies added yet." />}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {studies && studies.map((s) => (
+          <div key={s.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
+            {editingId === s.id ? (
+              <EditTrainingStudyForm study={s} onSaved={() => { setEditingId(null); load(); }} onCancel={() => setEditingId(null)} />
+            ) : (
+              <>
+                <a
+                  href={s.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14, fontWeight: 600, color: "#4C7A5E", textDecoration: "none" }}
+                >
+                  {s.title} <ExternalLink size={13} />
+                </a>
+                {s.notes && <div style={{ fontSize: 12.5, color: "#5B5445", marginTop: 4 }}>{s.notes}</div>}
+                {canEdit && (
+                  <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3", display: "flex", alignItems: "center", gap: 8 }}>
+                    {confirmDeleteId === s.id ? (
+                      <>
+                        <span style={{ fontSize: 11.5, color: "#B33A3A" }}>Delete this study?</span>
+                        <button
+                          onClick={() => doDelete(s.id)}
+                          disabled={deleting}
+                          style={{ fontSize: 11.5, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}
+                        >
+                          {deleting ? "Deleting…" : "Yes, delete"}
+                        </button>
+                        <button onClick={() => { setConfirmDeleteId(null); setDeleteError(""); }} style={{ fontSize: 11.5, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={() => setEditingId(s.id)} style={{ fontSize: 11.5, color: "#5B5445", background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>
+                          Edit
+                        </button>
+                        <button onClick={() => setConfirmDeleteId(s.id)} style={{ fontSize: 11.5, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "6px 10px" }}>
+                          Delete
+                        </button>
+                      </>
+                    )}
+                    {deleteError && confirmDeleteId === s.id && <span style={{ fontSize: 11.5, color: "#B33A3A" }}>{deleteError}</span>}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   );

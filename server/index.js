@@ -400,6 +400,10 @@ function parseTrainingProgress(p) {
   return { id: p.id, employeeId: p.employeeId, videoId: p.videoId, completedAt: p.completedAt, quizResponses };
 }
 
+function parseTrainingStudy(s) {
+  return { id: s.id, title: s.title, url: s.url, notes: s.notes || "", createdAt: s.createdAt };
+}
+
 function parsePunch(p) {
   const coords = p.coordsLat && p.coordsLng ? { lat: p.coordsLat, lng: p.coordsLng } : null;
   return {
@@ -1812,6 +1816,87 @@ app.get("/api/training-progress", async (req, res) => {
       progress = progress.filter((p) => p.employeeId === req.repName);
     }
     res.json({ progress });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// --- Training studies ------------------------------------------------------
+// A manager-curated reference list of external study links (PubMed, journal
+// pages, etc.) reps can consult while pitching a product — no content is
+// hosted here, just a title, the URL, and an optional note on why it's
+// relevant.
+app.get("/api/training-studies", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("TrainingStudies");
+    const studies = rows.map(parseTrainingStudy).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    res.json({ studies });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/admin/training-studies", requireManager, async (req, res) => {
+  try {
+    const { title, url, notes } = req.body;
+    if (!title || !String(title).trim()) return res.status(400).json({ error: "title is required" });
+    if (!url || !String(url).trim()) return res.status(400).json({ error: "url is required" });
+    let cleanUrl = String(url).trim();
+    if (!/^https?:\/\//i.test(cleanUrl)) cleanUrl = `https://${cleanUrl}`;
+    try { new URL(cleanUrl); } catch { return res.status(400).json({ error: "That doesn't look like a valid URL." }); }
+
+    const study = {
+      id: `ts${crypto.randomUUID()}`,
+      title: String(title).trim(),
+      url: cleanUrl,
+      notes: notes ? String(notes).trim() : "",
+      createdAt: new Date().toISOString(),
+    };
+    await db.appendRow("TrainingStudies", study);
+    res.json(parseTrainingStudy(study));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/admin/training-studies/:id", requireManager, async (req, res) => {
+  try {
+    const rows = await db.getAllRows("TrainingStudies");
+    const study = rows.find((s) => s.id === req.params.id);
+    if (!study) return res.status(404).json({ error: "Study not found" });
+
+    const { title, url, notes } = req.body;
+    const patch = {};
+    if (title !== undefined) {
+      if (!String(title).trim()) return res.status(400).json({ error: "title can't be empty" });
+      patch.title = String(title).trim();
+    }
+    if (url !== undefined) {
+      let cleanUrl = String(url).trim();
+      if (!cleanUrl) return res.status(400).json({ error: "url can't be empty" });
+      if (!/^https?:\/\//i.test(cleanUrl)) cleanUrl = `https://${cleanUrl}`;
+      try { new URL(cleanUrl); } catch { return res.status(400).json({ error: "That doesn't look like a valid URL." }); }
+      patch.url = cleanUrl;
+    }
+    if (notes !== undefined) patch.notes = String(notes).trim();
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
+
+    await db.updateRowById("TrainingStudies", study.id, patch);
+    res.json(parseTrainingStudy({ ...study, ...patch }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/admin/training-studies/:id", requireManager, async (req, res) => {
+  try {
+    const ok = await db.deleteRowById("TrainingStudies", req.params.id);
+    if (!ok) return res.status(404).json({ error: "Study not found" });
+    res.json({ ok: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

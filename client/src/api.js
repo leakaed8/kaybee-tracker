@@ -120,4 +120,8 @@ export const api = {
   getTrainingPlaybackUrl: (id) => request(`/training-videos/${id}/playback-url`),
   completeTrainingVideo: (id, quizResponses) => request(`/training-videos/${id}/complete`, { method: "POST", body: JSON.stringify({ quizResponses }) }),
   getTrainingProgress: () => request("/training-progress"),
+  getTrainingStudies: () => request("/training-studies"),
+  addTrainingStudy: (payload) => request("/admin/training-studies", { method: "POST", body: JSON.stringify(payload) }),
+  updateTrainingStudy: (id, patch) => request(`/admin/training-studies/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  removeTrainingStudy: (id) => request(`/admin/training-studies/${id}`, { method: "DELETE" }),
 };

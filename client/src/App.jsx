@@ -15,7 +15,7 @@ import {
   GraduationCap, Boxes, Swords, History, Brain, ClipboardList, CheckCircle2, ChevronDown,
 } from "lucide-react";
 import { api } from "./api.js";
-import { TrainingVideosView } from "./TrainingView.jsx";
+import { TrainingVideosView, TrainingStudiesView } from "./TrainingView.jsx";
 import {
   daysUntil, fmtDate, turnoverPct, zoneFor, isSlowMover, isAtRisk, effectiveSold90, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
   computeLeadScore,
@@ -5264,13 +5264,13 @@ function KnowledgeView() {
   );
 }
 
-// ---------- Training tab (curriculum reader + video/quiz tracker) ----------
-// Two unrelated features share one nav tab: the pre-existing static
-// curriculum reader (sales methodology, no tracking) and the newer
-// video+quiz tracker (Cloudflare Stream videos, per-employee completion).
-// The curriculum stays hidden from supervisors exactly as before; the
-// video tracker is for every role, since it's about employee completion
-// tracking, not rep-only sales technique reading.
+// ---------- Training tab (curriculum reader + video/quiz tracker + studies) ----------
+// Three sub-tabs share one nav tab: the pre-existing static curriculum
+// reader (sales methodology, no tracking), the video+quiz tracker
+// (Cloudflare R2 videos, per-employee completion), and a manager-curated
+// list of study links reps can cite with doctors/pharmacists. The
+// curriculum stays hidden from supervisors exactly as before; Videos and
+// Studies are for every role, since neither is rep-only content.
 function TrainingTabView({ role, repName, isSupervisor, repNames }) {
   const [subTab, setSubTab] = useState(isSupervisor ? "videos" : "curriculum");
   const pillStyle = (active) => ({
@@ -5286,9 +5286,12 @@ function TrainingTabView({ role, repName, isSupervisor, repNames }) {
           <button onClick={() => setSubTab("curriculum")} style={pillStyle(subTab === "curriculum")}>Curriculum</button>
         )}
         <button onClick={() => setSubTab("videos")} style={pillStyle(subTab === "videos")}>Videos</button>
+        <button onClick={() => setSubTab("studies")} style={pillStyle(subTab === "studies")}>Studies</button>
       </div>
       {subTab === "curriculum" && !isSupervisor ? (
         <TrainingCurriculumView />
+      ) : subTab === "studies" ? (
+        <TrainingStudiesView role={role} />
       ) : (
         <TrainingVideosView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
       )}
