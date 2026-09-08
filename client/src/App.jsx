@@ -12,7 +12,7 @@ import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
   TrendingDown, TrendingUp, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
   Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar as RadarIcon, Search, BookOpen,
-  GraduationCap, Boxes, Swords, History,
+  GraduationCap, Boxes, Swords, History, Brain, ClipboardList, CheckCircle2, ChevronDown,
 } from "lucide-react";
 import { api } from "./api.js";
 import { TrainingVideosView } from "./TrainingView.jsx";
@@ -24,11 +24,6 @@ import {
   DRUG_NUTRIENT_DATA, CONDITION_TALKING_POINTS, SPECIALTY_TALKING_POINTS,
   BCOMPLEX_INFO, DIABETES_SUPPLEMENT_INTERACTIONS, TALKING_POINTS_NOTES,
 } from "./repKnowledge.js";
-import {
-  TRAINING_INTRO, DIABETES_LANDSCAPE, MODULE1_MINDSET, COLOR_ENERGIES, PHYSICIAN_TYPES,
-  ADOPTION_STYLES, CALL_FRAMEWORK, MOM_STRATEGY, APACT_EXAMPLES, VALUE_PROPOSITION,
-  POST_CALL_ANALYSIS, LEAG_PHILOSOPHY,
-} from "./repTraining.js";
 
 const POLL_INTERVAL_MS = 30000; // Sheets API's per-user read quota is fixed and shared across every session — keep this conservative
 const LIST_DISPLAY_CAP = 200; // cap rendered rows so huge imported lists (30k+) don't freeze the browser — use search to narrow
@@ -5301,305 +5296,146 @@ function TrainingTabView({ role, repName, isSupervisor, repNames }) {
   );
 }
 
-// ---------- Training curriculum (static reading material) ----------
+// ---------- Training curriculum (MedRep Training Guide) ----------
 // Distinct from the video+quiz Training sub-tab (TrainingVideosView, in its
-// own file) — this is the older sales-methodology reader, kept under the
-// same "Training" nav tab as a second sub-tab rather than its own slot.
+// own file) — this is a static, always-available reading guide (six
+// collapsible steps), kept under the same "Training" nav tab as a second
+// sub-tab rather than its own slot. Content lives entirely in the `steps`
+// array below — add/remove/reorder points there without touching the
+// layout. Styled with this app's usual inline-style convention (not
+// Tailwind) to match every other view, but keeps the navy/gold palette it
+// was designed with rather than the app's default green/rust, since this
+// reads as its own branded reference sheet.
+const TRAINING_CURRICULUM_STEPS = [
+  {
+    icon: Brain,
+    label: "1. How to think",
+    summary: "The one idea everything else is built on",
+    points: [
+      "Doctors don't reject vitamins because the science is weak. They reject them because no one has connected the science to a problem the doctor already manages in his own patients.",
+      "Your job on every visit: connect one specific drug side effect or deficiency risk the doctor already deals with, to one specific product you carry.",
+      "Never open with the product. Open with the problem.",
+    ],
+  },
+  {
+    icon: ClipboardList,
+    label: "2. How to prepare",
+    summary: "What to know before you knock",
+    points: [
+      "Know the doctor's specialty and which of his routine prescriptions creates the deficiency risk you're about to raise (e.g. a cardiologist and statins, a GP and metformin).",
+      "Pick ONE product for this visit. One product, one mechanism, one piece of evidence. Do not try to cover your whole catalog in one meeting.",
+      "Have the evidence ready — a real study, a real number. If you can't back a claim with a source, don't make the claim.",
+    ],
+  },
+  {
+    icon: Users,
+    label: "3. How to approach doctors",
+    summary: "Reading the person in front of you",
+    points: [
+      "The Skeptical Clinician — sees supplements as unregulated marketing. Lead with the mechanism and the citation. Never lead with the brand.",
+      "The Overloaded GP — has 90 seconds, not hostile, just busy. One brand, one benefit, one line.",
+      "The Cost-Conscious — protective of what patients can afford. Talk cost-per-day, never cost-per-box.",
+      "The Already-Prescribing — says he recommends supplements but is vague or uses a competitor. Find out what he's using it for, then offer the angle he isn't covering.",
+      "Match your pace to theirs: analytical doctors want data and time, warm doctors want a relationship, fast doctors want the headline, decisive doctors want the outcome, not the mechanism.",
+    ],
+  },
+  {
+    icon: Target,
+    label: "4. What to focus on",
+    summary: "The call, step by step",
+    points: [
+      "Open with a patient question, not a pitch: \"How many of your patients are on [drug] long-term?\"",
+      "Let him name the problem before you name the solution: \"What's your biggest challenge managing that?\"",
+      "Deliver one product, one mechanism, one citation, tied to the exact problem he just named.",
+      "If he pushes back: acknowledge it, ask what's really behind the objection, answer with evidence, then check he's satisfied before moving on. Never argue — let the data do the arguing.",
+    ],
+  },
+  {
+    icon: CheckCircle2,
+    label: "5. How to close a meeting",
+    summary: "Asking for something specific",
+    points: [
+      "Never close with \"start recommending this.\" Close with a specific, small commitment: \"Try it with your next 5 relevant patients.\"",
+      "Summarize what you both agreed on before you leave — say it out loud, don't assume he remembers it the way you do.",
+      "Always leave with a next step: a follow-up date, a sample, or a specific question you'll come back with an answer to.",
+    ],
+  },
+  {
+    icon: TrendingUp,
+    label: "6. How to increment",
+    summary: "Growing the relationship over repeat visits",
+    points: [
+      "One good meeting doesn't make a prescriber. Trust builds in steps — awareness, first trial, repeat use, then advocacy. Don't expect step 4 on visit 1.",
+      "After every visit, log three things: what worked, what he pushed back on, and what his personality type was. Use it to prepare the next visit — don't start from zero each time.",
+      "Each follow-up should raise the ask slightly: from \"try it with 5 patients\" to \"what did you notice?\" to \"would you recommend it as first-line for that group?\"",
+      "If a visit goes badly, that's data too. Note it and adjust — don't avoid the doctor, come back with a better answer.",
+    ],
+  },
+];
+
 function TrainingCurriculumView() {
-  const [section, setSection] = useState("overview"); // overview | mindset | profiling | framework | objections | value | growth
-
-  const sectionBtn = (key, label) => (
-    <button onClick={() => setSection(key)} style={{
-      padding: "8px 12px", borderRadius: 8, border: section === key ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12, fontWeight: 500, whiteSpace: "nowrap",
-      background: section === key ? "#4C7A5E" : "#fff", color: section === key ? "#FAF7F2" : "#1F2A24",
-    }}>
-      {label}
-    </button>
-  );
-
-  const card = (children, key) => (
-    <div key={key} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
-      {children}
-    </div>
-  );
+  const [openIndex, setOpenIndex] = useState(0);
 
   return (
     <div>
-      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Rep training course</h2>
-      <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
-        Internal Training Manual: Transitioning to Medical Representative for SITAVITAE PLUS.
-      </p>
-
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", overflowX: "auto" }}>
-        {sectionBtn("overview", "Overview")}
-        {sectionBtn("mindset", "Customer-Centric Mindset")}
-        {sectionBtn("profiling", "Behavioral Profiling")}
-        {sectionBtn("framework", "6-Step Call Framework")}
-        {sectionBtn("objections", "Objection Handling")}
-        {sectionBtn("value", "Product Value")}
-        {sectionBtn("growth", "Post-Call & Growth")}
+      <div style={{ marginBottom: 22 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600, letterSpacing: 0.3, color: "#B08D57" }}>KayBee Pharma · MedRep Training</div>
+        <h2 className="kb-font-display" style={{ margin: "4px 0 0", fontSize: 22, fontWeight: 600, color: "#1F3864" }}>How to prepare, approach, and close</h2>
+        <p style={{ marginTop: 8, fontSize: 13, lineHeight: 1.5, color: "#5B6472" }}>
+          Read through all six steps once before your training session. Each one opens up — tap a step to expand it.
+        </p>
       </div>
 
-      {section === "overview" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {card(
-            <>
-              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>{TRAINING_INTRO.title}</div>
-              {TRAINING_INTRO.paragraphs.map((p, i) => (
-                <div key={i} style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6, marginBottom: 8 }}>{p}</div>
-              ))}
-            </>,
-            "intro"
-          )}
-          {card(
-            <>
-              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 6 }}>{DIABETES_LANDSCAPE.title}</div>
-              <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6, marginBottom: 10 }}>{DIABETES_LANDSCAPE.intro}</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {DIABETES_LANDSCAPE.stats.map((s, i) => (
-                  <div key={i} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 3 }}>{s.label}</div>
-                    <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.5 }}>{s.value}</div>
-                  </div>
-                ))}
-              </div>
-            </>,
-            "landscape"
-          )}
-        </div>
-      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {TRAINING_CURRICULUM_STEPS.map((step, index) => {
+          const isOpen = openIndex === index;
+          const Icon = step.icon;
+          return (
+            <div key={step.label} style={{ overflow: "hidden", borderRadius: 12, border: "1px solid #E2E5EA", background: "#fff" }}>
+              <button
+                type="button"
+                onClick={() => setOpenIndex(isOpen ? -1 : index)}
+                aria-expanded={isOpen}
+                style={{ display: "flex", width: "100%", alignItems: "center", gap: 12, padding: "13px 16px", textAlign: "left", background: "none", border: "none", cursor: "pointer" }}
+              >
+                <span style={{ display: "flex", height: 36, width: 36, flex: "0 0 auto", alignItems: "center", justifyContent: "center", borderRadius: "50%", background: "#1F386419" }}>
+                  <Icon size={18} color="#1F3864" />
+                </span>
+                <span style={{ flex: 1 }}>
+                  <span style={{ display: "block", fontSize: 14.5, fontWeight: 600, color: "#1F3864" }}>{step.label}</span>
+                  <span style={{ display: "block", fontSize: 12.5, color: "#8A93A3" }}>{step.summary}</span>
+                </span>
+                <ChevronDown
+                  size={19}
+                  color="#9AA3B2"
+                  style={{ flex: "0 0 auto", transition: "transform 0.2s", transform: isOpen ? "rotate(180deg)" : "none" }}
+                />
+              </button>
 
-      {section === "mindset" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {card(
-            <>
-              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 6 }}>{MODULE1_MINDSET.title}</div>
-              <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6 }}>{MODULE1_MINDSET.intro}</div>
-            </>,
-            "m1-intro"
-          )}
-          {card(
-            <>
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Needs, Wants, and Demands</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {MODULE1_MINDSET.needsWantsDemands.map((n) => (
-                  <div key={n.term} style={{ fontSize: 12.5, lineHeight: 1.5 }}>
-                    <strong>{n.term}:</strong> <span style={{ color: "#5B5445" }}>{n.detail}</span>
-                  </div>
-                ))}
-              </div>
-            </>,
-            "nwd"
-          )}
-          {card(
-            <>
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Avoiding "Marketing Myopia"</div>
-              <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6 }}>{MODULE1_MINDSET.marketingMyopia}</div>
-            </>,
-            "myopia"
-          )}
-          {card(
-            <>
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>Physician Needs Analysis</div>
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                  <thead>
-                    <tr style={{ textAlign: "left", color: "#8A8272" }}>
-                      <th style={{ padding: "4px 8px" }}>Clinical needs (patient-focused)</th>
-                      <th style={{ padding: "4px 8px" }}>Personal needs (physician-focused)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {MODULE1_MINDSET.physicianNeeds.map((r, i) => (
-                      <tr key={i} style={{ borderTop: "1px solid #E5DFD3" }}>
-                        <td style={{ padding: "6px 8px", color: "#5B5445" }}>{r.clinical}</td>
-                        <td style={{ padding: "6px 8px", color: "#5B5445" }}>{r.personal}</td>
-                      </tr>
+              {isOpen && (
+                <div style={{ borderTop: "1px solid #F0F1F3", padding: "2px 16px 16px" }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+                    {step.points.map((point, i) => (
+                      <div key={i} style={{ display: "flex", gap: 9, fontSize: 13.5, lineHeight: 1.5, color: "#374151" }}>
+                        <span style={{ marginTop: 7, height: 6, width: 6, flex: "0 0 auto", borderRadius: "50%", background: "#B08D57" }} />
+                        <span>{point}</span>
+                      </div>
                     ))}
-                  </tbody>
-                </table>
-              </div>
-            </>,
-            "needs-table"
-          )}
-        </div>
-      )}
-
-      {section === "profiling" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {card(
-            <>
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>The Four Color Energies</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {COLOR_ENERGIES.map((c) => (
-                  <div key={c.name} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 3 }}>{c.name}</div>
-                    <div style={{ fontSize: 12, color: "#5B5445", lineHeight: 1.5, marginBottom: 2 }}>{c.traits}</div>
-                    <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 2 }}>Fear: {c.fear}</div>
-                    <div style={{ fontSize: 12, color: "#4C7A5E" }}>Strategy: {c.strategy}</div>
                   </div>
-                ))}
-              </div>
-            </>,
-            "colors"
-          )}
-          {card(
-            <>
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Physician Classifications</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {PHYSICIAN_TYPES.map((p) => (
-                  <div key={p.type} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 3 }}>{p.type}</div>
-                    <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 4 }}>{p.description}</div>
-                    <div style={{ fontSize: 12, color: "#5B5445", lineHeight: 1.5 }}><strong>Strategy:</strong> {p.strategy}</div>
-                  </div>
-                ))}
-              </div>
-            </>,
-            "types"
-          )}
-          {card(
-            <>
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Adoption Styles</div>
-              <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6 }}>{ADOPTION_STYLES}</div>
-            </>,
-            "adoption"
-          )}
-        </div>
-      )}
-
-      {section === "framework" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {CALL_FRAMEWORK.map((f) => (
-            <div key={f.step} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14, display: "flex", gap: 12 }}>
-              <div style={{
-                flexShrink: 0, width: 26, height: 26, borderRadius: "50%", background: "#1F2A24", color: "#FAF7F2",
-                display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12.5, fontWeight: 700,
-              }}>
-                {f.step}
-              </div>
-              <div>
-                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>{f.title}</div>
-                <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6 }}>{f.detail}</div>
-              </div>
-            </div>
-          ))}
-          {card(
-            <>
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>{MOM_STRATEGY.title}</div>
-              <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6, marginBottom: 10 }}>{MOM_STRATEGY.intro}</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {MOM_STRATEGY.steps.map((s, i) => (
-                  <div key={i} style={{ fontSize: 12.5, lineHeight: 1.5 }}>
-                    <strong>{s.step}:</strong> <span style={{ color: "#5B5445" }}>{s.detail}</span>
-                  </div>
-                ))}
-              </div>
-            </>,
-            "mom"
-          )}
-        </div>
-      )}
-
-      {section === "objections" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 4px" }}>
-            Use the APACT model: Acknowledge, Probe, Answer, Confirm, Transmit.
-          </p>
-          {APACT_EXAMPLES.map((ex, i) => (
-            <div key={i} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>{ex.concern}</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <div style={{ fontSize: 12.5, lineHeight: 1.5 }}><strong style={{ color: "#4C7A5E" }}>Acknowledge:</strong> <span style={{ color: "#5B5445" }}>{ex.acknowledge}</span></div>
-                <div style={{ fontSize: 12.5, lineHeight: 1.5 }}><strong style={{ color: "#4C7A5E" }}>Probe:</strong> <span style={{ color: "#5B5445" }}>{ex.probe}</span></div>
-                <div style={{ fontSize: 12.5, lineHeight: 1.5 }}><strong style={{ color: "#4C7A5E" }}>Answer:</strong> <span style={{ color: "#5B5445" }}>{ex.answer}</span></div>
-                <div style={{ fontSize: 12.5, lineHeight: 1.5 }}><strong style={{ color: "#4C7A5E" }}>Confirm:</strong> <span style={{ color: "#5B5445" }}>{ex.confirm}</span></div>
-                <div style={{ fontSize: 12.5, lineHeight: 1.5 }}><strong style={{ color: "#4C7A5E" }}>Transmit:</strong> <span style={{ color: "#5B5445" }}>{ex.transmit}</span></div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {section === "value" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {card(
-            <>
-              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 6 }}>{VALUE_PROPOSITION.title}</div>
-              <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6, marginBottom: 10 }}>{VALUE_PROPOSITION.clinicalIntro}</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {VALUE_PROPOSITION.triggers.map((t) => (
-                  <div key={t.name} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 3 }}>{t.name}</div>
-                    <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.5 }}>{t.detail}</div>
-                  </div>
-                ))}
-              </div>
-            </>,
-            "triggers"
-          )}
-          {card(
-            <>
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Value Differentiation</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {VALUE_PROPOSITION.differentiation.map((d) => (
-                  <div key={d.name} style={{ fontSize: 12.5, lineHeight: 1.5 }}>
-                    <strong>{d.name}:</strong> <span style={{ color: "#5B5445" }}>{d.detail}</span>
-                  </div>
-                ))}
-              </div>
-            </>,
-            "diff"
-          )}
-          {card(
-            <>
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>Daily Treatment Cost breakdown</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {VALUE_PROPOSITION.priceBreakdown.map((r, i) => (
-                  <div key={i} style={{ fontSize: 12.5, lineHeight: 1.5, display: "flex", justifyContent: "space-between", gap: 12 }}>
-                    <span style={{ color: "#8A8272" }}>{r.label}</span>
-                    <span style={{ color: "#5B5445", fontWeight: 500, textAlign: "right" }}>{r.value}</span>
-                  </div>
-                ))}
-              </div>
-            </>,
-            "price"
-          )}
-        </div>
-      )}
-
-      {section === "growth" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {card(
-            <>
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>{POST_CALL_ANALYSIS.title}</div>
-              <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.6, marginBottom: 10 }}>{POST_CALL_ANALYSIS.intro}</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {POST_CALL_ANALYSIS.items.map((it) => (
-                  <div key={it.label} style={{ fontSize: 12.5, lineHeight: 1.5 }}>
-                    <strong>{it.label}:</strong> <span style={{ color: "#5B5445" }}>{it.detail}</span>
-                  </div>
-                ))}
-              </div>
-            </>,
-            "postcall"
-          )}
-          <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 10, padding: 14 }}>
-            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8, color: "#7A5B2E" }}>{LEAG_PHILOSOPHY.title}</div>
-            <div style={{ fontSize: 12.5, color: "#7A5B2E", lineHeight: 1.6, marginBottom: 10 }}>{LEAG_PHILOSOPHY.intro}</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {LEAG_PHILOSOPHY.pillars.map((p) => (
-                <div key={p.letter} style={{ fontSize: 12.5, lineHeight: 1.5, color: "#7A5B2E" }}>
-                  <strong>{p.letter} — {p.word}:</strong> {p.detail}
                 </div>
-              ))}
+              )}
             </div>
-          </div>
-        </div>
-      )}
+          );
+        })}
+      </div>
+
+      <div style={{ marginTop: 22, borderRadius: 12, background: "#1F3864", padding: 15, fontSize: 12.5, lineHeight: 1.5, color: "rgba(255,255,255,0.9)" }}>
+        One core rule underneath all six steps: never make a claim you can't back with a real source. That's what separates you from a rep selling on brand name alone.
+      </div>
     </div>
   );
 }
+
 
 // ---------- Route View (simple nearest-neighbor route ordering) ----------
 function RouteView({ clients, doctors }) {
