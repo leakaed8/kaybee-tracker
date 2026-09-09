@@ -6,6 +6,3 @@ dist/
 
 client/package-lock.json
 server/package-lock.json
-
-al-chark-crm/client/package-lock.json
-al-chark-crm/server/package-lock.json
