@@ -2040,7 +2040,7 @@ app.delete("/api/competitor-products/:id", requireManager, async (req, res) => {
 
 app.post("/api/clients", async (req, res) => {
   try {
-    const { name, phone, tier, area, assignedRep, registrationNumber, address, coordsLat, coordsLng, discountRate, nameAr } = req.body;
+    const { name, phone, tier, area, assignedRep, registrationNumber, address, coordsLat, coordsLng, discountRate, nameAr, type } = req.body;
     if (!name) return res.status(400).json({ error: "name is required" });
     const resolvedAssignedRep = req.repName ? req.repName : (assignedRep || "");
 
@@ -2061,6 +2061,13 @@ app.post("/api/clients", async (req, res) => {
       coordsLng: coords ? coords.lng : "",
       discountRate: discountRate || "",
       nameAr: nameAr || "",
+      // "pharmacy" is the default for both new rows with no type sent and
+      // every pre-existing row (blank cell) — supplement stores are the
+      // only other value, kept in the same table/routes/order-flow so they
+      // get everything a pharmacy gets (orders, offers, discount, GPS
+      // check-in) for free, just filtered into their own tab and Check-In
+      // toggle by this field.
+      type: type === "supplement_store" ? "supplement_store" : "pharmacy",
     };
     await db.appendRow("Clients", client);
     res.json(client);
@@ -2298,8 +2305,12 @@ app.delete("/api/reps/:id", requireManager, async (req, res) => {
 
 app.post("/api/clients/import-bulk", requireManager, async (req, res) => {
   try {
-    const { toAdd } = req.body;
+    const { toAdd, type } = req.body;
     const addList = Array.isArray(toAdd) ? toAdd : [];
+    // One import batch is always one category — an Excel file of supplement
+    // stores has no per-row "type" column to map, so this applies to the
+    // whole batch rather than being read per row.
+    const resolvedType = type === "supplement_store" ? "supplement_store" : "pharmacy";
 
     // Dedup authoritatively here, not just in the browser — the client's
     // "existing pharmacies" copy is a snapshot that can lag behind (loaded
@@ -2327,6 +2338,7 @@ app.post("/api/clients/import-bulk", requireManager, async (req, res) => {
         registrationNumber: c.registrationNumber || "",
         address: c.address || "",
         nameAr: c.nameAr || "",
+        type: resolvedType,
       });
     });
 
@@ -3084,7 +3096,7 @@ async function createVisitFromFollowUp(followUp) {
   const reps = await db.getAllRows("Reps");
   const rep = reps.find((r) => r.name === followUp.repName);
   if (rep?.exportSheetId) await db.appendToRepExportSheet(rep.exportSheetId, row);
-  if (followUp.entityType === "pharmacy") {
+  if (followUp.entityType !== "doctor") {
     const clients = await db.getAllRows("Clients");
     const matchedClient = clients.find((c) => c.name.toLowerCase().trim() === followUp.entityName.toLowerCase().trim());
     if (matchedClient && !matchedClient.assignedRep) {

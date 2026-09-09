@@ -389,6 +389,7 @@ export default function App() {
         <TabBtn active={tab === "stock"} onClick={() => setTab("stock")} icon={<Boxes size={15} />} label="Stock" />
         <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />
         <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />
+        <TabBtn active={tab === "supplementStores"} onClick={() => setTab("supplementStores")} icon={<Boxes size={15} />} label="Supplement Stores" />
         {!isSupervisor && <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />}
         {(role === "manager" || role === "rep") && <TabBtn active={tab === "cadence"} onClick={() => setTab("cadence")} icon={<History size={15} />} label="Visit Cadence" />}
         {(role === "manager" || role === "rep") && <TabBtn active={tab === "competitors"} onClick={() => setTab("competitors")} icon={<Swords size={15} />} label="Competitors" />}
@@ -442,6 +443,22 @@ export default function App() {
             {tab === "clients" && (
               <ClientsView
                 clients={clients}
+                kind="pharmacy"
+                role={role}
+                repName={repName}
+                repNames={repNames}
+                onAdd={addClient}
+                onRemove={removeClient}
+                onBulkImport={bulkImportClients}
+                onAssignRep={assignClientRep}
+                onUpdateDiscount={updateClientDiscount}
+                onCompleteInfo={completeClientInfo}
+              />
+            )}
+            {tab === "supplementStores" && (
+              <ClientsView
+                clients={clients}
+                kind="supplement_store"
                 role={role}
                 repName={repName}
                 repNames={repNames}
@@ -1132,7 +1149,15 @@ function BackStepButton({ onClick }) {
 function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, onAddVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors, myLastPunch }) {
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
-  const [entityType, setEntityType] = useState("pharmacy"); // pharmacy | doctor
+  const [entityType, setEntityType] = useState("pharmacy"); // pharmacy | doctor | supplement_store
+  // Supplement stores work exactly like pharmacies throughout this wizard
+  // (GPS check-in, orders, offers, discount) — only the doctor path is
+  // actually different (no orders, per-item sample tagging instead). So
+  // most branches below just check "is this a doctor" rather than
+  // special-casing every non-doctor type individually.
+  const isDoctorEntity = entityType === "doctor";
+  const entityTypeLabel = entityType === "doctor" ? "Doctor" : entityType === "supplement_store" ? "Supplement store" : "Pharmacy";
+  const entityTabLabel = entityType === "doctor" ? "Doctors" : entityType === "supplement_store" ? "Supplement Stores" : "Pharmacies";
   const [client, setClient] = useState("");
   const [notes, setNotes] = useState("");
   const [coords, setCoords] = useState(null);
@@ -1273,25 +1298,30 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
 
   // Filtering/capping now happens inside SearchableSelect itself (memoized,
   // decoupled from this component's re-renders) — this is just which raw
-  // list it searches.
-  const nameOptionsSource = entityType === "pharmacy" ? clients : doctors;
+  // list it searches. Pharmacies and supplement stores are both rows in
+  // the same Clients list (a "type" field tells them apart), so each is
+  // searched within just its own slice, never mixed with the other.
+  const clientsOfCurrentType = clients.filter((c) => (c.type || "pharmacy") === entityType);
+  const nameOptionsSource = isDoctorEntity ? doctors : clientsOfCurrentType;
 
-  // Pharmacies are auto-assigned to whichever rep logs their first visit.
-  // If this one already belongs to someone else, flag it before the rep
-  // submits — visiting another rep's pharmacy is sometimes legitimate
-  // (covering, shared territory) but should never happen silently.
-  const matchedClient = entityType === "pharmacy"
-    ? clients.find((c) => c.name.toLowerCase().trim() === client.toLowerCase().trim())
+  // Pharmacies/supplement stores are auto-assigned to whichever rep logs
+  // their first visit. If this one already belongs to someone else, flag
+  // it before the rep submits — visiting another rep's account is
+  // sometimes legitimate (covering, shared territory) but should never
+  // happen silently.
+  const matchedClient = !isDoctorEntity
+    ? clientsOfCurrentType.find((c) => c.name.toLowerCase().trim() === client.toLowerCase().trim())
     : null;
   const otherRepWarning = matchedClient && matchedClient.assignedRep && matchedClient.assignedRep !== repName
     ? matchedClient.assignedRep
     : null;
 
-  // A visit must point at a real Pharmacies/Doctors record, not just
-  // whatever string got typed — otherwise it logs against a name with no
-  // tier, address, or assigned rep behind it. New clients get added
-  // properly (with full details) via their own tab, not invented here.
-  const matchedEntity = entityType === "pharmacy"
+  // A visit must point at a real Pharmacies/Doctors/Supplement Stores
+  // record, not just whatever string got typed — otherwise it logs
+  // against a name with no tier, address, or assigned rep behind it. New
+  // entities get added properly (with full details) via their own tab,
+  // not invented here.
+  const matchedEntity = !isDoctorEntity
     ? matchedClient
     : doctors.find((d) => d.name.toLowerCase().trim() === client.toLowerCase().trim());
   const unknownEntity = client.trim().length > 0 && !matchedEntity;
@@ -1386,7 +1416,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
       // per-item above (in "Items mentioned") — so they skip straight to
       // scheduling a follow-up. Pharmacies still go on to the order question
       // first, then their own follow-up step later.
-      goToStep(entityType === "pharmacy" ? "orderPrompt" : "followup");
+      goToStep(!isDoctorEntity ? "orderPrompt" : "followup");
     } catch (e) {
       setVisitError(e?.message || "Couldn't save the visit.");
     } finally {
@@ -1492,13 +1522,14 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
     setStep("checkin");
   };
 
-  // Pharmacies place orders, so they get order -> sample -> follow-up.
-  // Doctors don't buy stock, and sample-giving is captured per-item right
-  // in step 1, so they go straight from logging the visit to follow-up.
-  const STEP_KEYS = entityType === "pharmacy"
+  // Pharmacies and supplement stores place orders, so they get
+  // order -> sample -> follow-up. Doctors don't buy stock, and
+  // sample-giving is captured per-item right in step 1, so they go
+  // straight from logging the visit to follow-up.
+  const STEP_KEYS = !isDoctorEntity
     ? ["checkin", "orderPrompt", "order", "sample", "followup"]
     : ["checkin", "followup"];
-  const STEP_INFO = entityType === "pharmacy" ? {
+  const STEP_INFO = !isDoctorEntity ? {
     checkin: { n: 1, title: "Log the visit" },
     orderPrompt: { n: 2, title: "Did they place an order?" },
     order: { n: 3, title: "Order details" },
@@ -1580,6 +1611,12 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
             }}>
               Pharmacy
             </button>
+            <button onClick={() => { setEntityType("supplement_store"); setClient(""); }} style={{
+              flex: 1, padding: "8px 14px", borderRadius: 8, border: entityType === "supplement_store" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+              background: entityType === "supplement_store" ? "#4C7A5E" : "#fff", color: entityType === "supplement_store" ? "#FAF7F2" : "#1F2A24",
+            }}>
+              Supplement store
+            </button>
             <button onClick={() => { setEntityType("doctor"); setClient(""); }} style={{
               flex: 1, padding: "8px 14px", borderRadius: 8, border: entityType === "doctor" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
               background: entityType === "doctor" ? "#4C7A5E" : "#fff", color: entityType === "doctor" ? "#FAF7F2" : "#1F2A24",
@@ -1589,24 +1626,24 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
           </div>
 
           <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
-            <Field label={entityType === "pharmacy" ? "Pharmacy name" : "Doctor name"}>
+            <Field label={`${entityTypeLabel} name`}>
               <SearchableSelect
                 value={client}
                 onChange={setClient}
                 options={nameOptionsSource}
                 getLabel={(c) => c.name}
-                placeholder={entityType === "pharmacy" ? "e.g. Pharmacie Al Nour" : "e.g. Dr. Nour Khalil"}
+                placeholder={isDoctorEntity ? "e.g. Dr. Nour Khalil" : entityType === "supplement_store" ? "e.g. Vitamin World Hamra" : "e.g. Pharmacie Al Nour"}
                 style={{ ...inputStyle, marginBottom: 10 }}
               />
             </Field>
             {otherRepWarning && (
               <div style={{ background: "#FBF0F0", border: "1px solid #E5B8B0", color: "#7A3B3B", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 10, fontWeight: 500 }}>
-                ⚠ {client} is assigned to <strong>{otherRepWarning}</strong> — you're about to visit another rep's pharmacy.
+                ⚠ {client} is assigned to <strong>{otherRepWarning}</strong> — you're about to visit another rep's account.
               </div>
             )}
             {unknownEntity && (
               <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", color: "#7A5B2E", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 10, fontWeight: 500 }}>
-                ⚠ "{client}" isn't in the system yet. Go to the {entityType === "pharmacy" ? "Pharmacies" : "Doctors"} tab and add it there first (with full details{entityType === "pharmacy" ? ", including registration number" : ""}), then come back to check in.
+                ⚠ "{client}" isn't in the system yet. Go to the {entityTabLabel} tab and add it there first (with full details{!isDoctorEntity ? ", including registration number" : ""}), then come back to check in.
               </div>
             )}
             {recentVisitsForEntity.length > 0 && (
@@ -1665,7 +1702,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               </div>
             </Field>
 
-            {entityType === "pharmacy" && (
+            {!isDoctorEntity && (
               <Field label="Competitors">
                 <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#5B5445", marginBottom: sawCompetitor ? 8 : 0 }}>
                   <input type="checkbox" checked={sawCompetitor} onChange={(e) => setSawCompetitor(e.target.checked)} />
@@ -1825,7 +1862,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
             <button onClick={() => goToStep("order")} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
               Yes, add order
             </button>
-            <button onClick={() => goToStep(entityType === "pharmacy" ? "sample" : "followup")} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
+            <button onClick={() => goToStep(!isDoctorEntity ? "sample" : "followup")} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
               No
             </button>
           </div>
@@ -1905,7 +1942,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               onClick={() => setShowStopFollowUp(true)}
               style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#B33A3A", fontSize: 12.5 }}
             >
-              🚫 Stop visiting this {entityType === "doctor" ? "doctor" : "pharmacy"}
+              🚫 Stop visiting this {entityTypeLabel.toLowerCase()}
             </button>
           ) : (
             <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
@@ -4031,7 +4068,10 @@ async function importChunkWithRetry(fn, attempt = 1) {
   }
 }
 
-function ClientExcelImportSection({ existingClients, repNames, onImport, onDone }) {
+function ClientExcelImportSection({ existingClients, repNames, kind = "pharmacy", onImport, onDone }) {
+  const entityWord = kind === "supplement_store" ? "supplement store" : "pharmacy";
+  const entityWordPlural = kind === "supplement_store" ? "supplement stores" : "pharmacies";
+  const entityCount = (n) => `${n} ${n === 1 ? entityWord : entityWordPlural}`;
   const [sheetNames, setSheetNames] = useState([]);
   const [selectedSheet, setSelectedSheet] = useState("");
   const [workbook, setWorkbook] = useState(null);
@@ -4132,7 +4172,7 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
       let serverSkipped = 0;
       for (let i = 0; i < newClients.length; i += IMPORT_CHUNK_SIZE) {
         const chunk = newClients.slice(i, i + IMPORT_CHUNK_SIZE);
-        const data = await importChunkWithRetry(() => api.importClientsBulk({ toAdd: chunk }));
+        const data = await importChunkWithRetry(() => api.importClientsBulk({ toAdd: chunk, type: kind }));
         added += data?.added ?? chunk.length;
         serverSkipped += data?.skipped ?? 0;
         setProgress({ done: Math.min(i + IMPORT_CHUNK_SIZE, newClients.length), total: newClients.length });
@@ -4171,9 +4211,9 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
 
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
-      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Import pharmacies from Excel</label>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Import {entityWordPlural} from Excel</label>
       <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
-        Upload an .xlsx file of pharmacies — handles files with tens of thousands of rows. Names that already exist in the system are skipped automatically; only new names get added.
+        Upload an .xlsx file of {entityWordPlural} — handles files with tens of thousands of rows. Names that already exist in the system are skipped automatically; only new names get added.
       </p>
 
       <button
@@ -4187,7 +4227,7 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
       {error && <div style={{ fontSize: 12.5, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
       {result && (
         <div style={{ fontSize: 12.5, color: "#4C7A5E", display: "flex", alignItems: "center", gap: 5, marginBottom: 10 }}>
-          <Check size={14} /> Added {result.added} new pharmac{result.added === 1 ? "y" : "ies"}{result.skipped > 0 ? `, skipped ${result.skipped} already in the system` : ""}.
+          <Check size={14} /> Added {entityCount(result.added)}{result.skipped > 0 ? `, skipped ${result.skipped} already in the system` : ""}.
         </div>
       )}
 
@@ -4229,7 +4269,7 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
           {mapping.name && (
             <div style={{ marginTop: 12 }}>
               <div style={{ fontSize: 12, color: "#5B5445", marginBottom: 10 }}>
-                {newClients.length} new pharmac{newClients.length === 1 ? "y" : "ies"} will be added
+                {entityCount(newClients.length)} will be added
                 {skippedCount > 0 ? `, ${skippedCount} already exist and will be skipped` : ""}.
               </div>
 
@@ -4272,7 +4312,7 @@ function ClientExcelImportSection({ existingClients, repNames, onImport, onDone 
                 onClick={doImport}
                 style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: !importing && newClients.length > 0 ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
               >
-                {importing ? "Importing…" : `Import ${newClients.length} new pharmac${newClients.length === 1 ? "y" : "ies"}`}
+                {importing ? "Importing…" : `Import ${entityCount(newClients.length)}`}
               </button>
             </div>
           )}
@@ -4291,7 +4331,19 @@ const CLIENT_FILLABLE_FIELDS = [
   { key: "nameAr", label: "Name in Arabic" },
 ];
 
-function ClientsView({ clients, role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onCompleteInfo }) {
+// kind picks which slice of the Clients table this instance manages —
+// "pharmacy" (the original behavior) or "supplement_store" (a second,
+// symmetrical tab). Both live in the same underlying table/routes (a
+// "type" field tells them apart) so every existing capability here —
+// tiers, lead scoring, discount rate, GPS, bulk import, order/visit
+// history — works identically for supplement stores with no separate
+// component to maintain.
+function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onCompleteInfo }) {
+  const clients = useMemo(() => allClients.filter((c) => (c.type || "pharmacy") === kind), [allClients, kind]);
+  const isSupplementStore = kind === "supplement_store";
+  const entityWord = isSupplementStore ? "supplement store" : "pharmacy";
+  const entityWordPlural = isSupplementStore ? "supplement stores" : "pharmacies";
+  const entityWordCap = isSupplementStore ? "Supplement store" : "Pharmacy";
   const [completingId, setCompletingId] = useState(null);
   const [historyId, setHistoryId] = useState(null);
   const [historyRows, setHistoryRows] = useState([]);
@@ -4336,7 +4388,7 @@ function ClientsView({ clients, role, repName, repNames, onAdd, onRemove, onBulk
 
   const addClient = () => {
     if (!name) return;
-    onAdd({ name, nameAr, phone, tier, area, address, registrationNumber, assignedRep, discountRate, coordsLat: coords?.lat || "", coordsLng: coords?.lng || "" });
+    onAdd({ name, nameAr, phone, tier, area, address, registrationNumber, assignedRep, discountRate, coordsLat: coords?.lat || "", coordsLng: coords?.lng || "", type: kind });
     setName(""); setNameAr(""); setPhone(""); setArea(""); setAddress(""); setRegistrationNumber(""); setTier("B"); setAssignedRep(""); setDiscountRate(""); setCoords(null); setLocError("");
     setShowAdd(false);
   };
@@ -4391,9 +4443,9 @@ function ClientsView({ clients, role, repName, repNames, onAdd, onRemove, onBulk
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 18, flexWrap: "wrap", gap: 10 }}>
         <div>
-          <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Pharmacies & follow-up</h2>
+          <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>{isSupplementStore ? "Supplement stores & follow-up" : "Pharmacies & follow-up"}</h2>
           <p style={{ fontSize: 13, color: "#8A8272", margin: "4px 0 0" }}>
-            Tier A: visit every {TIER_CADENCE.A}d · B: {TIER_CADENCE.B}d · C: {TIER_CADENCE.C}d. Overdue pharmacies sort to the top.
+            Tier A: visit every {TIER_CADENCE.A}d · B: {TIER_CADENCE.B}d · C: {TIER_CADENCE.C}d. Overdue {entityWordPlural} sort to the top.
           </p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -4409,17 +4461,17 @@ function ClientsView({ clients, role, repName, repNames, onAdd, onRemove, onBulk
             display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
             background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500,
           }}>
-            <Plus size={15} /> Add pharmacy
+            <Plus size={15} /> Add {entityWord}
           </button>
         </div>
       </div>
 
-      {role === "manager" && showImport && <ClientExcelImportSection existingClients={clients} repNames={repNames} onImport={onBulkImport} onDone={() => setShowImport(false)} />}
+      {role === "manager" && showImport && <ClientExcelImportSection existingClients={clients} repNames={repNames} kind={kind} onImport={onBulkImport} onDone={() => setShowImport(false)} />}
 
       {showAdd && (
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-            <Field label="Pharmacy name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Pharmacie Al Nour" style={inputStyle} /></Field>
+            <Field label={`${entityWordCap} name`}><input value={name} onChange={(e) => setName(e.target.value)} placeholder={isSupplementStore ? "e.g. Vitamin World Hamra" : "e.g. Pharmacie Al Nour"} style={inputStyle} /></Field>
             <Field label="Name in Arabic (optional)"><input value={nameAr} onChange={(e) => setNameAr(e.target.value)} placeholder="مثال: صيدلية النور" dir="rtl" style={inputStyle} /></Field>
             <Field label="WhatsApp number"><input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+961 xx xxx xxx" style={inputStyle} /></Field>
             <Field label="Tier">
@@ -4462,7 +4514,7 @@ function ClientsView({ clients, role, repName, repNames, onAdd, onRemove, onBulk
           </div>
           {locError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{locError}</div>}
           <div style={{ display: "flex", gap: 8 }}>
-            <button disabled={!name} onClick={addClient} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>Add pharmacy</button>
+            <button disabled={!name} onClick={addClient} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>Add {entityWord}</button>
             <button onClick={() => setShowAdd(false)} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>Cancel</button>
           </div>
         </div>
@@ -4473,7 +4525,7 @@ function ClientsView({ clients, role, repName, repNames, onAdd, onRemove, onBulk
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by pharmacy name, area, phone, or registration number…"
+          placeholder={`Search by ${entityWord} name, area, phone, or registration number…`}
           style={{ ...inputStyle, paddingLeft: 34 }}
         />
       </div>
@@ -4591,10 +4643,10 @@ function ClientsView({ clients, role, repName, repNames, onAdd, onRemove, onBulk
           </div>
         ))}
         {!q && clients.length > 0 && (
-          <EmptyState text={`Search above to find a pharmacy — ${clients.length.toLocaleString()} in the system.`} />
+          <EmptyState text={`Search above to find a ${entityWord} — ${clients.length.toLocaleString()} in the system.`} />
         )}
-        {q && filteredRows.length === 0 && <EmptyState text="No pharmacies match your search." />}
-        {!q && clients.length === 0 && <EmptyState text="No pharmacies added yet." />}
+        {q && filteredRows.length === 0 && <EmptyState text={`No ${entityWordPlural} match your search.`} />}
+        {!q && clients.length === 0 && <EmptyState text={`No ${entityWordPlural} added yet.`} />}
       </div>
     </div>
   );
