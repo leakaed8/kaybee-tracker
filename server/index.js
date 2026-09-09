@@ -115,6 +115,7 @@ function requireAuth(req, res, next) {
     req.repName = null;
     req.isSupervisor = false;
     req.supplementStoresOnly = false;
+    req.medRepOnly = false;
   } else if (payload.startsWith("rep|")) {
     // A supervisor is a normal rep account with an extra flag set in
     // Settings — full rep experience (Check-In, Route, punch in/out, own
@@ -135,6 +136,10 @@ function requireAuth(req, res, next) {
     // access anywhere (Check-In, the Pharmacies/Doctors tabs, or the
     // underlying write routes).
     req.supplementStoresOnly = flags.includes("ssonly");
+    // A "med rep" restricted to doctors only — no pharmacy or supplement
+    // store access anywhere (Check-In, the Pharmacies/Supplement Stores
+    // tabs, or the underlying write routes).
+    req.medRepOnly = flags.includes("docsonly");
   } else {
     return res.status(401).json({ error: "Please log in." });
   }
@@ -501,9 +506,10 @@ app.post("/api/login", async (req, res) => {
     if (matched) {
       const isSupervisor = matched.isSupervisor === "true";
       const supplementStoresOnly = matched.supplementStoresOnly === "true";
-      const flags = [isSupervisor ? "sup" : "", supplementStoresOnly ? "ssonly" : ""].filter(Boolean).join(",");
+      const medRepOnly = matched.medRepOnly === "true";
+      const flags = [isSupervisor ? "sup" : "", supplementStoresOnly ? "ssonly" : "", medRepOnly ? "docsonly" : ""].filter(Boolean).join(",");
       setSessionCookie(res, signPayload(`rep|${encodeURIComponent(matched.name)}|${flags}`), 60 * 60 * 24 * 30);
-      return res.json({ ok: true, role: "rep", repName: matched.name, isSupervisor, supplementStoresOnly });
+      return res.json({ ok: true, role: "rep", repName: matched.name, isSupervisor, supplementStoresOnly, medRepOnly });
     }
 
     res.status(401).json({ error: "Incorrect passcode." });
@@ -565,7 +571,7 @@ app.post("/api/telegram/webhook", async (req, res) => {
 
 app.use("/api", requireAuth);
 
-app.get("/api/session", (req, res) => res.json({ role: req.role, repName: req.repName, isSupervisor: !!req.isSupervisor, supplementStoresOnly: !!req.supplementStoresOnly }));
+app.get("/api/session", (req, res) => res.json({ role: req.role, repName: req.repName, isSupervisor: !!req.isSupervisor, supplementStoresOnly: !!req.supplementStoresOnly, medRepOnly: !!req.medRepOnly }));
 
 app.get("/api/push/vapid-public-key", (req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY || "" }));
 
@@ -1101,6 +1107,12 @@ app.post("/api/visits", async (req, res) => {
         return res.status(403).json({ error: "Your account is limited to supplement stores." });
       }
     }
+    // Enforced here too, not just hidden in Check-In's toggle — a med rep
+    // restricted to doctors shouldn't be able to log a pharmacy or
+    // supplement store visit by calling the API directly either.
+    if (req.medRepOnly && !matchedDoctor) {
+      return res.status(403).json({ error: "Your account is limited to doctors." });
+    }
 
     const visit = {
       id: `v${crypto.randomUUID()}`,
@@ -1460,6 +1472,11 @@ app.post("/api/orders", async (req, res) => {
       if (!isAllowed) {
         return res.status(403).json({ error: "Your account is limited to supplement stores." });
       }
+    }
+    // A med rep restricted to doctors never has a pharmacy/supplement store
+    // to place an order against — doctors don't take orders at all.
+    if (req.medRepOnly) {
+      return res.status(403).json({ error: "Your account is limited to doctors and can't place orders." });
     }
     const cleanItems = buildCleanOrderItems(items);
 
@@ -2173,6 +2190,7 @@ app.get("/api/reps", requireManager, async (req, res) => {
       id: r.id, name: r.name, passcode: r.passcode, email: r.email || "", exportSheetId: r.exportSheetId || "",
       telegramLinked: Boolean(r.telegramChatId), isSupervisor: r.isSupervisor === "true",
       supplementStoresOnly: r.supplementStoresOnly === "true",
+      medRepOnly: r.medRepOnly === "true",
     })));
   } catch (e) {
     console.error(e);
@@ -2204,7 +2222,17 @@ app.patch("/api/reps/:id", requireManager, async (req, res) => {
     const patch = {};
     if (req.body.email !== undefined) patch.email = req.body.email.trim();
     if (req.body.isSupervisor !== undefined) patch.isSupervisor = req.body.isSupervisor ? "true" : "false";
-    if (req.body.supplementStoresOnly !== undefined) patch.supplementStoresOnly = req.body.supplementStoresOnly ? "true" : "false";
+    // Mutually exclusive — a rep restricted to supplement stores only can't
+    // also be restricted to doctors only, since that would leave nothing
+    // they're allowed to visit. Turning one on clears the other.
+    if (req.body.supplementStoresOnly !== undefined) {
+      patch.supplementStoresOnly = req.body.supplementStoresOnly ? "true" : "false";
+      if (req.body.supplementStoresOnly) patch.medRepOnly = "false";
+    }
+    if (req.body.medRepOnly !== undefined) {
+      patch.medRepOnly = req.body.medRepOnly ? "true" : "false";
+      if (req.body.medRepOnly) patch.supplementStoresOnly = "false";
+    }
     const ok = await db.updateRowById("Reps", req.params.id, patch);
     if (!ok) return res.status(404).json({ error: "Rep not found" });
     res.json({ ok: true });

@@ -91,6 +91,10 @@ export default function App() {
   // doctor access anywhere in the app (Check-In, the Pharmacies/Doctors
   // tabs, or the write routes underneath them). Set per-rep in Settings.
   const [supplementStoresOnly, setSupplementStoresOnly] = useState(false);
+  // A "med rep" account restricted to doctors only — no pharmacy or
+  // supplement store access anywhere (Check-In, those two tabs, or the
+  // write routes underneath them). Mutually exclusive with the above.
+  const [medRepOnly, setMedRepOnly] = useState(false);
   const [tab, setTab] = useState("expiry");
   // "Reference" tier — Products/Clients/Doctors — loaded once at login, then
   // refreshed on a slow timer (see REFERENCE_POLL_INTERVAL_MS below), not
@@ -117,7 +121,7 @@ export default function App() {
 
   useEffect(() => {
     api.getSession()
-      .then((data) => { setRole(data.role); setRepName(data.repName || ""); setIsSupervisor(!!data.isSupervisor); setSupplementStoresOnly(!!data.supplementStoresOnly); setTab(defaultTabFor(data.role, !!data.isSupervisor)); setAuthState("in"); })
+      .then((data) => { setRole(data.role); setRepName(data.repName || ""); setIsSupervisor(!!data.isSupervisor); setSupplementStoresOnly(!!data.supplementStoresOnly); setMedRepOnly(!!data.medRepOnly); setTab(defaultTabFor(data.role, !!data.isSupervisor)); setAuthState("in"); })
       .catch(() => setAuthState("out"));
   }, []);
 
@@ -309,7 +313,7 @@ export default function App() {
   }
 
   if (authState === "out") {
-    return <LoginView onSuccess={(r, rn, sup, ssOnly) => { setRole(r); setRepName(rn || ""); setIsSupervisor(!!sup); setSupplementStoresOnly(!!ssOnly); setTab(defaultTabFor(r, !!sup)); setAuthState("in"); }} />;
+    return <LoginView onSuccess={(r, rn, sup, ssOnly, docsOnly) => { setRole(r); setRepName(rn || ""); setIsSupervisor(!!sup); setSupplementStoresOnly(!!ssOnly); setMedRepOnly(!!docsOnly); setTab(defaultTabFor(r, !!sup)); setAuthState("in"); }} />;
   }
 
   // Derived from myLastPunch (the current rep's own last punch row — see
@@ -392,8 +396,8 @@ export default function App() {
         {role === "rep" && !isSupervisor && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
         <TabBtn active={tab === "stock"} onClick={() => setTab("stock")} icon={<Boxes size={15} />} label="Stock" />
         <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />
-        {!supplementStoresOnly && <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />}
-        <TabBtn active={tab === "supplementStores"} onClick={() => setTab("supplementStores")} icon={<Boxes size={15} />} label="Supplement Stores" />
+        {!supplementStoresOnly && !medRepOnly && <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />}
+        {!medRepOnly && <TabBtn active={tab === "supplementStores"} onClick={() => setTab("supplementStores")} icon={<Boxes size={15} />} label="Supplement Stores" />}
         {!isSupervisor && !supplementStoresOnly && <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />}
         {(role === "manager" || role === "rep") && <TabBtn active={tab === "cadence"} onClick={() => setTab("cadence")} icon={<History size={15} />} label="Visit Cadence" />}
         {(role === "manager" || role === "rep") && <TabBtn active={tab === "competitors"} onClick={() => setTab("competitors")} icon={<Swords size={15} />} label="Competitors" />}
@@ -433,6 +437,7 @@ export default function App() {
                 repName={repName}
                 isSupervisor={isSupervisor}
                 supplementStoresOnly={supplementStoresOnly}
+                medRepOnly={medRepOnly}
                 onAddVisit={addVisit}
                 onCreateOrder={createOrder}
                 onUpdateOrder={updateOrder}
@@ -445,7 +450,7 @@ export default function App() {
               />
             )}
             {tab === "stock" && <StockView products={sorted} />}
-            {tab === "clients" && !supplementStoresOnly && (
+            {tab === "clients" && !supplementStoresOnly && !medRepOnly && (
               <ClientsView
                 clients={clients}
                 kind="pharmacy"
@@ -460,7 +465,7 @@ export default function App() {
                 onCompleteInfo={completeClientInfo}
               />
             )}
-            {tab === "supplementStores" && (
+            {tab === "supplementStores" && !medRepOnly && (
               <ClientsView
                 clients={clients}
                 kind="supplement_store"
@@ -584,7 +589,7 @@ function LoginView({ onSuccess }) {
     setLoading(true);
     try {
       const data = await api.login(passcode);
-      onSuccess(data.role, data.repName, data.isSupervisor, data.supplementStoresOnly);
+      onSuccess(data.role, data.repName, data.isSupervisor, data.supplementStoresOnly, data.medRepOnly);
     } catch (err) {
       setError("Incorrect passcode.");
     } finally {
@@ -1151,12 +1156,13 @@ function BackStepButton({ onClick }) {
 }
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, supplementStoresOnly, onAddVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors, myLastPunch }) {
+function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, supplementStoresOnly, medRepOnly, onAddVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors, myLastPunch }) {
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
-  // A rep restricted to supplement stores only never sees the other two
-  // options at all, so they land directly on the one type they can use.
-  const [entityType, setEntityType] = useState(supplementStoresOnly ? "supplement_store" : "pharmacy"); // pharmacy | doctor | supplement_store
+  // A rep restricted to supplement stores only (or a med rep restricted to
+  // doctors only) never sees the other options at all, so they land
+  // directly on the one type they can use.
+  const [entityType, setEntityType] = useState(supplementStoresOnly ? "supplement_store" : medRepOnly ? "doctor" : "pharmacy"); // pharmacy | doctor | supplement_store
   // Supplement stores work exactly like pharmacies throughout this wizard
   // (GPS check-in, orders, offers, discount) — only the doctor path is
   // actually different (no orders, per-item sample tagging instead). So
@@ -1611,7 +1617,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
 
       {step === "checkin" && (
         <>
-          {!supplementStoresOnly && (
+          {!supplementStoresOnly && !medRepOnly && (
             <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
               <button onClick={() => { setEntityType("pharmacy"); setClient(""); }} style={{
                 flex: 1, padding: "8px 14px", borderRadius: 8, border: entityType === "pharmacy" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
@@ -6768,6 +6774,15 @@ function RepsManagementSection({ onRepsChanged }) {
     }
   };
 
+  const toggleMedRepOnly = async (rep) => {
+    try {
+      await api.updateRep(rep.id, { medRepOnly: !rep.medRepOnly });
+      await load();
+    } catch (e) {
+      setRowErrors((prev) => ({ ...prev, [rep.id]: e.message }));
+    }
+  };
+
   const saveEmailFor = async (rep) => {
     const emailToUse = (sheetEmails[rep.id] || "").trim();
     if (!emailToUse) return;
@@ -6824,6 +6839,10 @@ function RepsManagementSection({ onRepsChanged }) {
                   <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, color: "#5B5445" }} title="No Pharmacy or Doctor access anywhere — Check-In, the Pharmacies/Doctors tabs, and the underlying routes are all blocked. Only Supplement Stores.">
                     <input type="checkbox" checked={!!r.supplementStoresOnly} onChange={() => toggleSupplementStoresOnly(r)} />
                     Supplement stores only
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, color: "#5B5445" }} title="No Pharmacy or Supplement Store access anywhere — Check-In, those two tabs, and the underlying routes are all blocked. Only Doctors.">
+                    <input type="checkbox" checked={!!r.medRepOnly} onChange={() => toggleMedRepOnly(r)} />
+                    Med rep (doctors only)
                   </label>
                   <button onClick={() => removeRep(r.id)} style={{ background: "none", border: "none", color: "#B33A3A", fontSize: 11.5 }}>Remove</button>
                 </div>

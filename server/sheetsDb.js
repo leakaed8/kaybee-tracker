@@ -9,7 +9,7 @@ const SCHEMAS = {
   Doctors: ["id", "name", "hospital", "area", "phone", "specialty", "tier", "registrationNumber", "address", "coordsLat", "coordsLng"],
   OutreachLog: ["id", "name", "date", "templateIndex"],
   Orders: ["id", "clientName", "visitId", "repName", "date", "items", "total", "status", "discountRate", "netTotal", "posEntered", "posEnteredAt", "posEnteredBy"],
-  Reps: ["id", "name", "passcode", "email", "exportSheetId", "telegramChatId", "telegramLinkCode", "isSupervisor", "supplementStoresOnly"],
+  Reps: ["id", "name", "passcode", "email", "exportSheetId", "telegramChatId", "telegramLinkCode", "isSupervisor", "supplementStoresOnly", "medRepOnly"],
   Offers: ["id", "label", "buyQty", "getQty", "expiresAt", "active"],
   PushSubscriptions: ["id", "role", "repName", "endpoint", "p256dh", "auth"],
   Settings: ["key", "value"],
