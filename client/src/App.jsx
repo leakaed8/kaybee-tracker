@@ -3130,6 +3130,11 @@ function PendingPOSView({ isSupervisor }) {
 // what reps actually saw in the field, logged from Check-In. Neither table
 // changes the other; this is where a manager reads what's been collected.
 function CompetitorsView({ canEdit, competitors, onAdd, onUpdate, onRemove, onAddProduct, onUpdateProduct, onRemoveProduct, onImportProducts }) {
+  // Adding to the competitor price list is open to every employee, not just
+  // managers — it's the field's shared database, built from what reps spot
+  // on the ground. Editing/deleting existing entries and bulk Excel import
+  // stay manager-only (canEdit), same as the competitor list above.
+  const canAddProduct = true;
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({ name: "", supplierName: "", supplierContact: "", offerDetails: "", notes: "" });
   const [saving, setSaving] = useState(false);
@@ -3320,22 +3325,24 @@ function CompetitorsView({ canEdit, competitors, onAdd, onUpdate, onRemove, onAd
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "28px 0 10px", flexWrap: "wrap", gap: 8 }}>
         <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0, color: "#8A8272" }}>Competitor price list</h3>
-        {canEdit && (
-          <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8 }}>
+          {canEdit && (
             <button
               onClick={() => { setShowImportProducts((v) => !v); setShowAddProduct(false); }}
               style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 12.5, fontWeight: 500 }}
             >
               <Upload size={14} /> Import Excel
             </button>
+          )}
+          {canAddProduct && (
             <button
               onClick={() => { setShowAddProduct((v) => !v); setShowImportProducts(false); }}
               style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
             >
               <Plus size={14} /> Add product
             </button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
       <p style={{ fontSize: 12.5, color: "#8A8272", marginTop: -4, marginBottom: 12 }}>
         Search by generic name (e.g. "magnesium") to see every competitor brand that carries it, with pricing.
@@ -3355,7 +3362,7 @@ function CompetitorsView({ canEdit, competitors, onAdd, onUpdate, onRemove, onAd
         />
       )}
 
-      {canEdit && showAddProduct && (
+      {canAddProduct && showAddProduct && (
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
             <input value={productForm.competitorName} onChange={(e) => setProductForm({ ...productForm, competitorName: e.target.value })} placeholder="Competitor name" style={inputStyle} list="competitor-name-options" />

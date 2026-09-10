@@ -2008,7 +2008,10 @@ app.delete("/api/competitors/:id", requireManager, async (req, res) => {
 // the master list.
 const COMPETITOR_PRODUCT_FIELDS = ["competitorName", "productName", "genericName", "form", "dosage", "packSize", "price", "discountRate", "notes"];
 
-app.post("/api/competitor-products", requireManager, async (req, res) => {
+// Any logged-in employee (not just managers) can add a competitor product —
+// this is the field's shared price-list database, and reps are the ones
+// actually out there spotting new competitor products.
+app.post("/api/competitor-products", async (req, res) => {
   try {
     const { competitorName, productName, genericName, form, dosage, packSize, price, discountRate, notes } = req.body;
     if (!competitorName || !productName) return res.status(400).json({ error: "competitorName and productName are required" });
