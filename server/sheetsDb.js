@@ -22,7 +22,11 @@ const SCHEMAS = {
   Competitors: ["id", "name", "supplierName", "supplierContact", "offerDetails", "notes", "createdAt"],
   CompetitorSightings: ["id", "visitId", "client", "repName", "competitorName", "notes", "date"],
   VisitComments: ["id", "visitId", "authorName", "text", "createdAt"],
-  CompetitorProducts: ["id", "competitorName", "productName", "genericName", "form", "dosage", "packSize", "price", "discountRate", "notes", "createdAt"],
+  CompetitorProducts: [
+    "id", "competitorName", "productName", "genericName", "form", "dosage", "packSize", "price", "discountRate", "notes", "createdAt",
+    "unitsPerDay", "ingredients", "manufacturer", "manufacturingCountry", "ingredientOrigin", "gmp", "thirdPartyCertification",
+    "coaAvailability", "contaminantTesting", "expiryDate", "evidenceReferences", "otherIngredients", "createdBy", "updatedBy", "updatedAt",
+  ],
   TrainingVideos: ["id", "title", "r2ObjectKey", "quiz", "createdAt"],
   TrainingProgress: ["id", "employeeId", "videoId", "completedAt", "quizResponses"],
   TrainingStudies: ["id", "title", "url", "notes", "createdAt"],

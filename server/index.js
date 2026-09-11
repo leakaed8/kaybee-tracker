@@ -887,7 +887,8 @@ app.get("/api/competitor-products", async (req, res) => {
       products = products.filter((p) =>
         (p.genericName || "").toLowerCase().includes(key) ||
         (p.productName || "").toLowerCase().includes(key) ||
-        (p.competitorName || "").toLowerCase().includes(key)
+        (p.competitorName || "").toLowerCase().includes(key) ||
+        (p.ingredients || "").toLowerCase().includes(key)
       );
     }
     res.json({ competitorProducts: products.slice(0, clampLimit(limit, 200, 500)), total: products.length });
@@ -2010,28 +2011,101 @@ app.delete("/api/competitors/:id", requireManager, async (req, res) => {
 // brand that has one, with prices) instead of digging through free-text
 // offer notes. Same manager-curated / rep-read-and-search governance as
 // the master list.
-const COMPETITOR_PRODUCT_FIELDS = ["competitorName", "productName", "genericName", "form", "dosage", "packSize", "price", "discountRate", "notes"];
+const COMPETITOR_PRODUCT_FIELDS = [
+  "competitorName", "productName", "genericName", "form", "dosage", "packSize", "price", "discountRate", "notes", "unitsPerDay",
+];
+// Secondary/advanced fields — optional, shown behind "More product details"
+// client-side. Kept as plain strings; none of them feed the cost math.
+const COMPETITOR_PRODUCT_DETAIL_FIELDS = [
+  "manufacturer", "manufacturingCountry", "ingredientOrigin", "gmp", "thirdPartyCertification",
+  "coaAvailability", "contaminantTesting", "expiryDate", "evidenceReferences", "otherIngredients",
+];
+
+// `ingredients` is a JSON-encoded array of {name, form, amount, unit},
+// entered client-side via a repeatable ingredient list — validated and
+// re-stringified here rather than trusted verbatim from the request body.
+function normalizeIngredients(raw) {
+  const list = Array.isArray(raw) ? raw : [];
+  const cleaned = list
+    .filter((i) => i && String(i.name || "").trim())
+    .map((i) => ({
+      name: String(i.name).trim(),
+      form: String(i.form || "").trim(),
+      amount: i.amount === "" || i.amount === null || i.amount === undefined ? "" : Number(i.amount),
+      unit: String(i.unit || "").trim(),
+    }));
+  return cleaned.length ? JSON.stringify(cleaned) : "";
+}
+
+// Shared by both the required-fields (create) and partial (edit) checks —
+// only validates whichever numeric fields are actually present in `body`.
+function validateCompetitorProductNumbers(body) {
+  if (body.price !== undefined && body.price !== "" && body.price !== null) {
+    const price = Number(body.price);
+    if (!Number.isFinite(price) || price < 0) return "Public price can't be negative.";
+  }
+  if (body.packSize !== undefined && body.packSize !== "" && body.packSize !== null) {
+    const packSize = Number(body.packSize);
+    if (!Number.isFinite(packSize) || packSize <= 0) return "Pack size must be greater than zero.";
+  }
+  if (body.discountRate !== undefined && body.discountRate !== "" && body.discountRate !== null) {
+    const discount = Number(body.discountRate);
+    if (!Number.isFinite(discount) || discount < 0 || discount > 100) return "Supplier discount must be between 0 and 100.";
+  }
+  if (body.unitsPerDay !== undefined && body.unitsPerDay !== "" && body.unitsPerDay !== null) {
+    const upd = Number(body.unitsPerDay);
+    if (!Number.isFinite(upd) || upd <= 0) return "Units per day must be greater than zero.";
+  }
+  if (Array.isArray(body.ingredients)) {
+    for (const ing of body.ingredients) {
+      if (ing && ing.amount !== undefined && ing.amount !== "" && ing.amount !== null && !Number.isFinite(Number(ing.amount))) {
+        return `"${ing.name || "Ingredient"}" needs a valid numeric amount.`;
+      }
+    }
+  }
+  return null;
+}
+
+function validateCompetitorProductCreate(body) {
+  if (!body.competitorName || !String(body.competitorName).trim()) return "Brand is required.";
+  if (!body.productName || !String(body.productName).trim()) return "Product name is required.";
+  return validateCompetitorProductNumbers(body);
+}
 
 // Any logged-in employee (not just managers) can add a competitor product —
 // this is the field's shared price-list database, and reps are the ones
 // actually out there spotting new competitor products.
 app.post("/api/competitor-products", async (req, res) => {
   try {
-    const { competitorName, productName, genericName, form, dosage, packSize, price, discountRate, notes } = req.body;
-    if (!competitorName || !productName) return res.status(400).json({ error: "competitorName and productName are required" });
-    const product = {
-      id: `cp${crypto.randomUUID()}`,
-      competitorName: String(competitorName).trim(),
-      productName: String(productName).trim(),
-      genericName: genericName || "",
-      form: form || "",
-      dosage: dosage || "",
-      packSize: packSize || "",
-      price: price || "",
-      discountRate: discountRate || "",
-      notes: notes || "",
-      createdAt: new Date().toISOString(),
-    };
+    const validationError = validateCompetitorProductCreate(req.body);
+    if (validationError) return res.status(400).json({ error: validationError });
+
+    const { competitorName, productName, form, notes, ingredients } = req.body;
+    const ingredientsJson = normalizeIngredients(ingredients);
+    const parsedIngredients = ingredientsJson ? JSON.parse(ingredientsJson) : [];
+    // genericName/dosage stay populated from the first ingredient so
+    // existing search/sort (which key off genericName) and any old client
+    // code keep working — the structured `ingredients` field is the source
+    // of truth for anything with more than one active ingredient.
+    const genericName = req.body.genericName || parsedIngredients[0]?.name || "";
+    const dosage = req.body.dosage || (parsedIngredients[0]?.amount !== "" && parsedIngredients[0]?.amount != null
+      ? `${parsedIngredients[0].amount}${parsedIngredients[0].unit || ""}`
+      : "");
+
+    const product = { id: `cp${crypto.randomUUID()}`, createdAt: new Date().toISOString() };
+    for (const key of COMPETITOR_PRODUCT_FIELDS) product[key] = req.body[key] || "";
+    for (const key of COMPETITOR_PRODUCT_DETAIL_FIELDS) product[key] = req.body[key] || "";
+    product.competitorName = String(competitorName).trim();
+    product.productName = String(productName).trim();
+    product.form = form || "";
+    product.notes = notes || "";
+    product.genericName = genericName;
+    product.dosage = dosage;
+    product.ingredients = ingredientsJson;
+    product.createdBy = req.repName || (req.role === "manager" ? "Manager" : "");
+    product.updatedBy = "";
+    product.updatedAt = "";
+
     await db.appendRow("CompetitorProducts", product);
     res.json(product);
   } catch (e) {
@@ -2051,7 +2125,7 @@ app.post("/api/competitor-products/import-bulk", requireManager, async (req, res
     const newProducts = addList
       .filter((p) => p.competitorName && p.productName)
       .map((p) => {
-        const product = { id: `cp${crypto.randomUUID()}`, createdAt: new Date().toISOString() };
+        const product = { id: `cp${crypto.randomUUID()}`, createdAt: new Date().toISOString(), createdBy: `${req.repName || "Manager"} (Excel import)` };
         for (const key of COMPETITOR_PRODUCT_FIELDS) product[key] = p[key] || "";
         product.competitorName = String(product.competitorName).trim();
         product.productName = String(product.productName).trim();
@@ -2066,15 +2140,36 @@ app.post("/api/competitor-products/import-bulk", requireManager, async (req, res
   }
 });
 
-app.patch("/api/competitor-products/:id", requireManager, async (req, res) => {
+// Open to any logged-in employee, same as adding — editing/completing a
+// competitor product entry is part of building out the shared price list,
+// not a manager-only action. Every edit stamps who made it (updatedBy),
+// shown in the app so the team can see who last touched an entry.
+app.patch("/api/competitor-products/:id", async (req, res) => {
   try {
+    if (req.body.competitorName !== undefined && !String(req.body.competitorName).trim()) {
+      return res.status(400).json({ error: "Brand is required." });
+    }
+    if (req.body.productName !== undefined && !String(req.body.productName).trim()) {
+      return res.status(400).json({ error: "Product name is required." });
+    }
+    const validationError = validateCompetitorProductNumbers(req.body);
+    if (validationError) return res.status(400).json({ error: validationError });
     const patch = {};
     for (const key of COMPETITOR_PRODUCT_FIELDS) {
       if (req.body[key] !== undefined) patch[key] = req.body[key];
     }
+    for (const key of COMPETITOR_PRODUCT_DETAIL_FIELDS) {
+      if (req.body[key] !== undefined) patch[key] = req.body[key];
+    }
+    if (req.body.ingredients !== undefined) patch.ingredients = normalizeIngredients(req.body.ingredients);
+    if (patch.competitorName !== undefined) patch.competitorName = String(patch.competitorName).trim();
+    if (patch.productName !== undefined) patch.productName = String(patch.productName).trim();
+    patch.updatedBy = req.repName || (req.role === "manager" ? "Manager" : "");
+    patch.updatedAt = new Date().toISOString();
+
     const ok = await db.updateRowById("CompetitorProducts", req.params.id, patch);
     if (!ok) return res.status(404).json({ error: "Competitor product not found" });
-    res.json({ ok: true });
+    res.json({ ok: true, patch });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
