@@ -1155,10 +1155,159 @@ function BackStepButton({ onClick }) {
   );
 }
 
+// ---------- Pre-Call / Post-Call field checklists (doctor visits) ----------
+// Pure reference/self-check tools for the rep, not saved anywhere — the
+// checkbox state exists only while the modal is open, so re-opening always
+// starts fresh for the next call.
+const PRE_CALL_CHECKLIST_SECTIONS = [
+  {
+    heading: "1. Customer Profiling & Targeting",
+    items: [
+      { text: "Category Target (A-B-C Matrix):", sub: [
+        "Category Aa (Champion): Protect & defend from competitors.",
+        "Category Ab/Ac (Growth): Invest with high call frequency & heavy sampling.",
+        "Category B (Performer): Maintain steady visits.",
+        "Category C (Watchlist): Observe; keep short visits.",
+      ] },
+      { text: "Color Energy & Personality Match:", sub: [
+        "🔴 Fiery Red (Driver): Wants quick results, efficiency, and bold answers. Be direct.",
+        "🟡 Sunshine Yellow (Visionary): Values excitement, dreams, and new ideas.",
+        "🟢 Earth Green (Facilitator): Relationship-focused, fears risk/complaints. Build trust & offer low-risk trials.",
+        "🔵 Cool Blue (Analytical): Wants hard evidence, clinical trials, and EU quality specs.",
+      ] },
+      { text: "Adoption Style: Innovator, Early Adopter, Majority, or Late Adopter?" },
+    ],
+  },
+  {
+    heading: "2. Call Objective (SMARTI Goal)",
+    items: [
+      { text: "Set an Incremental SMARTI Goal: Specific, Measurable, Attainable, Realistic, Time-Bound, and Incremental.", sub: [
+        "Example: Secure commitment from Dr. [Name] to initiate SITAVITAE PLUS for 3 uncontrolled T2DM patients on metformin (A1C ≥ 7.5%) within 7 days.",
+      ] },
+    ],
+  },
+  {
+    heading: "3. Value Proposition & Materials Check",
+    items: [
+      { text: "Core Value Hook Ready: Spanish EU-GMP quality (Galenicum) + 75% affordability vs. Janumet XR (~LL 1.08M vs ~LL 4.78M) = removing the price barrier to long-term compliance." },
+      { text: "Materials in Hand: Samples, visual aid, clinical research reprints, package insert, and cost-per-day sheet." },
+    ],
+  },
+  {
+    heading: "4. MOM Flash Call Backup Plan (15–120 Seconds)",
+    items: [
+      { text: "Watch for Cues: Doctor checking watch, starting tasks, looking agitated, or saying \"I only have a minute\"." },
+      { text: "Switch to \"Directive Tell\":", sub: [
+        "M — Make every second count (no small talk).",
+        "O — One brand, One benefit (EU quality + 75% savings).",
+        "M — Be Memorable & Close on a 3-patient trial immediately.",
+      ] },
+    ],
+  },
+];
+
+const DURING_CALL_REMINDERS = [
+  "High-Ground Opener (HGO): Patient-focused icebreaker tied to compliance.",
+  "Needs Discovery (EAR): Explore (\"What % of your metformin patients hit A1C <7%?\"), Acknowledge pain point, Respond with SITAVITAE PLUS.",
+  "Objection Handling (APACT): Cushion ➔ Probe ➔ Answer (Factual) ➔ Check for agreement.",
+  "Close (ABC - Always Be Closing): Negotiate a specific patient trial, leave samples, and lock in the exact follow-up date.",
+];
+
+const POST_CALL_CHECKLIST_SECTIONS = [
+  {
+    heading: "1. Record Call Mechanics",
+    items: [
+      { text: "Action: What specific core message, data, or materials did I present?" },
+      { text: "Reaction: How did the physician respond? What buying signals (e.g., \"How is the delivery?\", \"Who else uses it?\") or warning signs did they give?" },
+      { text: "Commitment Secured: How many patient trials did the doctor agree to initiate this week?" },
+      { text: "Follow-Up Date: Is the next visit logged in the calendar (e.g., in 14 days)?" },
+    ],
+  },
+  {
+    heading: "2. Self-Reflection & Personal Coaching",
+    items: [
+      { text: "What did I do well on this call?" },
+      { text: "What would I do differently on the next visit?" },
+      { text: "What new insight did I learn about this doctor's clinic or prescribing habits?" },
+    ],
+  },
+  {
+    heading: "3. Territory & Pharmacy Pull-Through",
+    items: [
+      { text: "CRM Update: Update the doctor's profile notes immediately." },
+      { text: "Next SMARTI Objective: Set the incremental goal for the next call (e.g., move from 3 to 5 patients)." },
+      { text: "Pharmacy Visit: Visit the pharmacy next door/nearby to verify stock availability and ensure prescription pull-through." },
+    ],
+  },
+];
+
+function ChecklistItem({ item, checked, onToggle }) {
+  return (
+    <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 10, cursor: "pointer" }}>
+      <input type="checkbox" checked={checked} onChange={onToggle} style={{ marginTop: 3 }} />
+      <div style={{ fontSize: 12.5, lineHeight: 1.5, color: checked ? "#8A8272" : "#1F2A24", textDecoration: checked ? "line-through" : "none" }}>
+        {item.text}
+        {item.sub && (
+          <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+            {item.sub.map((s, i) => <li key={i} style={{ marginBottom: 2 }}>{s}</li>)}
+          </ul>
+        )}
+      </div>
+    </label>
+  );
+}
+
+function FieldChecklistModal({ icon, title, subtitle, sections, readOnlySection, onClose, closeLabel }) {
+  const [checked, setChecked] = useState({});
+  const toggle = (key) => setChecked((prev) => ({ ...prev, [key]: !prev[key] }));
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(31,42,36,0.55)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{ background: "#FAF7F2", borderRadius: "16px 16px 0 0", width: "100%", maxWidth: 560, maxHeight: "88vh", overflowY: "auto", padding: 20, boxShadow: "0 -4px 24px rgba(0,0,0,0.2)" }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 }}>
+          <h3 className="kb-font-display" style={{ fontSize: 17, fontWeight: 600, margin: 0 }}>{icon} {title}</h3>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#8A8272", padding: 2 }}><X size={20} /></button>
+        </div>
+        {subtitle && <p style={{ fontSize: 12, color: "#8A8272", margin: "0 0 16px" }}>{subtitle}</p>}
+
+        {sections.map((section) => (
+          <div key={section.heading} style={{ marginBottom: 18 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>{section.heading}</div>
+            {section.items.map((item, i) => {
+              const key = `${section.heading}::${i}`;
+              return <ChecklistItem key={key} item={item} checked={!!checked[key]} onToggle={() => toggle(key)} />;
+            })}
+          </div>
+        ))}
+
+        {readOnlySection && (
+          <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14, marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>{readOnlySection.heading}</div>
+            <ol style={{ margin: 0, paddingLeft: 18 }}>
+              {readOnlySection.items.map((s, i) => <li key={i} style={{ fontSize: 12.5, lineHeight: 1.5, marginBottom: 6 }}>{s}</li>)}
+            </ol>
+          </div>
+        )}
+
+        <button onClick={onClose} style={{ width: "100%", padding: "10px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
+          {closeLabel}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Check-In View (rep) ----------
 function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, supplementStoresOnly, medRepOnly, onAddVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors, myLastPunch }) {
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
+  // Doctor-visit self-coaching tools — pure client-side reminders, nothing
+  // saved. Pre-Call opens on demand before entering the clinic; Post-Call
+  // pops up automatically right after a doctor visit is saved.
+  const [showPreCallChecklist, setShowPreCallChecklist] = useState(false);
+  const [showPostCallChecklist, setShowPostCallChecklist] = useState(false);
   // A rep restricted to supplement stores only (or a med rep restricted to
   // doctors only) never sees the other options at all, so they land
   // directly on the one type they can use.
@@ -1430,6 +1579,10 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
       // scheduling a follow-up. Pharmacies still go on to the order question
       // first, then their own follow-up step later.
       goToStep(!isDoctorEntity ? "orderPrompt" : "followup");
+      // "Immediately after leaving a physician's clinic" — the moment the
+      // visit is saved, not tied to any later step, since the rep may not
+      // walk through the whole followup flow.
+      if (isDoctorEntity) setShowPostCallChecklist(true);
     } catch (e) {
       setVisitError(e?.message || "Couldn't save the visit.");
     } finally {
@@ -1638,6 +1791,16 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                 Doctor
               </button>
             </div>
+          )}
+
+          {isDoctorEntity && (
+            <button
+              type="button"
+              onClick={() => setShowPreCallChecklist(true)}
+              style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #4C7A5E", background: "#fff", color: "#4C7A5E", fontSize: 12.5, fontWeight: 600, marginBottom: 16 }}
+            >
+              📋 Quick Pre-Call reminder
+            </button>
           )}
 
           <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
@@ -2173,6 +2336,28 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
       <div style={{ marginTop: 12 }}>
         <RepTelegramLinkSection />
       </div>
+
+      {showPreCallChecklist && (
+        <FieldChecklistModal
+          icon="🛑"
+          title="Pre-Call Checklist"
+          subtitle="Before entering the clinic"
+          sections={PRE_CALL_CHECKLIST_SECTIONS}
+          readOnlySection={{ heading: "💬 During the Call — Mental Flow Reminder", items: DURING_CALL_REMINDERS }}
+          onClose={() => setShowPreCallChecklist(false)}
+          closeLabel="Ready — start the visit"
+        />
+      )}
+      {showPostCallChecklist && (
+        <FieldChecklistModal
+          icon="✅"
+          title="Post-Call Pocket Checklist"
+          subtitle="Immediately after leaving the clinic"
+          sections={POST_CALL_CHECKLIST_SECTIONS}
+          onClose={() => setShowPostCallChecklist(false)}
+          closeLabel="Done"
+        />
+      )}
     </div>
   );
 }
