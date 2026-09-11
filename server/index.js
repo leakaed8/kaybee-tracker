@@ -1252,7 +1252,7 @@ app.post("/api/samples", async (req, res) => {
 app.post("/api/followups", async (req, res) => {
   try {
     if (!req.repName) return res.status(403).json({ error: "Only reps can schedule follow-ups." });
-    const { entityName, entityType, presetKey, days: customDays, visitId } = req.body;
+    const { entityName, entityType, presetKey, days: customDays, visitId, smartiObjective } = req.body;
     if (!entityName || !entityType) {
       return res.status(400).json({ error: "entityName and entityType are required" });
     }
@@ -1279,6 +1279,10 @@ app.post("/api/followups", async (req, res) => {
       status: "pending",
       visitId: visitId || "",
       createdAt: new Date().toISOString(),
+      // Doctors only — the rep's own stated goal for the *next* visit,
+      // carried forward so the Telegram reminder when it comes due can
+      // remind them what they committed to, not just that a visit is due.
+      smartiObjective: entityType === "doctor" && smartiObjective ? String(smartiObjective).trim() : "",
     };
     await db.appendRow("FollowUps", followUp);
 
@@ -3221,9 +3225,12 @@ async function checkFollowUpReminders() {
       const rep = reps.find((r) => r.name === f.repName);
       if (!rep?.telegramChatId) continue;
       try {
+        const objectiveLine = f.smartiObjective
+          ? `\n\n🎯 Your Next SMARTI Objective from last visit:\n${escapeHtml(f.smartiObjective)}`
+          : "";
         await telegram.sendMessage(
           rep.telegramChatId,
-          `🔔 Follow-up time: visit <b>${escapeHtml(f.entityName)}</b> today.\n\nAfter your visit, when should the next follow-up be?`,
+          `🔔 Reminder to follow up: visit <b>${escapeHtml(f.entityName)}</b> today.${objectiveLine}\n\nAfter your visit, when should the next follow-up be?`,
           { inline_keyboard: followUpButtons(f.id) }
         );
         await db.updateRowById("FollowUps", f.id, { status: "reminded" });

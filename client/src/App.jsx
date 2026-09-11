@@ -1356,6 +1356,9 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   const [followUpError, setFollowUpError] = useState("");
   const [customFollowUpDays, setCustomFollowUpDays] = useState("");
   const [showStopFollowUp, setShowStopFollowUp] = useState(false);
+  // Doctors only — carried onto the follow-up so the Telegram reminder can
+  // remind the rep of their own stated goal, not just that a visit is due.
+  const [smartiObjective, setSmartiObjective] = useState("");
   const [stopFollowUpReason, setStopFollowUpReason] = useState("");
   const [exportSheetId, setExportSheetId] = useState("");
   const [showMyVisits, setShowMyVisits] = useState(false);
@@ -1573,6 +1576,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
       setCustomFollowUpDays("");
       setShowStopFollowUp(false);
       setStopFollowUpReason("");
+      setSmartiObjective("");
       loadTodayVisits();
       // Doctors don't buy stock, and sample-giving is already captured
       // per-item above (in "Items mentioned") — so they skip straight to
@@ -1620,6 +1624,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
         entityType,
         presetKey,
         visitId: lastVisit.id,
+        smartiObjective: isDoctorEntity ? smartiObjective.trim() : "",
       });
       setFollowUpStatus("set");
       setStep("done");
@@ -1644,6 +1649,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
         entityType,
         days,
         visitId: lastVisit.id,
+        smartiObjective: isDoctorEntity ? smartiObjective.trim() : "",
       });
       setFollowUpStatus("set");
       setStep("done");
@@ -2080,6 +2086,19 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
           <div style={{ fontSize: 13.5, marginBottom: 10 }}>
             Schedule a follow-up for <strong>{lastVisit.client}</strong>?
           </div>
+
+          {isDoctorEntity && (
+            <Field label="Next SMARTI Objective (included in your Telegram reminder for this follow-up)">
+              <textarea
+                value={smartiObjective}
+                onChange={(e) => setSmartiObjective(e.target.value)}
+                placeholder={`e.g. Move Dr. ${lastVisit.client.replace(/^Dr\.?\s*/i, "")} from 3 to 5 patients on SITAVITAE PLUS`}
+                rows={2}
+                style={{ ...inputStyle, resize: "vertical", marginBottom: 14 }}
+              />
+            </Field>
+          )}
+
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
             {FOLLOWUP_PRESETS.map((p) => (
               <button
