@@ -30,6 +30,7 @@ const SCHEMAS = {
   TrainingVideos: ["id", "title", "r2ObjectKey", "quiz", "createdAt"],
   TrainingProgress: ["id", "employeeId", "videoId", "completedAt", "quizResponses"],
   TrainingStudies: ["id", "title", "url", "notes", "createdAt"],
+  TrainingStudyViews: ["id", "employeeId", "studyId", "viewedAt"],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];

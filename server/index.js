@@ -71,6 +71,19 @@ async function notifyRep(repName, payload, subs) {
   }
 }
 
+// Every rep with push enabled, regardless of name — used for broadcasts
+// like "a new training study was added" where there's no single rep to
+// target.
+async function notifyAllReps(payload, subs) {
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+  try {
+    const allSubs = subs || (await db.getAllRows("PushSubscriptions"));
+    await sendPushToSubscriptions(allSubs.filter((s) => s.role === "rep"), payload);
+  } catch (e) {
+    console.error("notifyAllReps failed", e);
+  }
+}
+
 function signPayload(payload) {
   const hmac = crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("hex");
   return `${payload}.${hmac}`;
@@ -1906,6 +1919,7 @@ app.post("/api/admin/training-studies", requireManager, async (req, res) => {
       createdAt: new Date().toISOString(),
     };
     await db.appendRow("TrainingStudies", study);
+    notifyAllReps({ title: "New training study added", body: `"${study.title}" was just added to Training Studies.`, url: "/" });
     res.json(parseTrainingStudy(study));
   } catch (e) {
     console.error(e);
@@ -1947,6 +1961,32 @@ app.delete("/api/admin/training-studies/:id", requireManager, async (req, res) =
   try {
     const ok = await db.deleteRowById("TrainingStudies", req.params.id);
     if (!ok) return res.status(404).json({ error: "Study not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Fired when a rep opens a study's link — lets the every-other-day training
+// nudge (below) know which studies a rep has already gotten to, the same
+// way TrainingProgress tracks video completion. One row per employee per
+// study; re-opening just bumps viewedAt rather than piling up duplicates.
+app.post("/api/training-studies/:id/viewed", async (req, res) => {
+  try {
+    if (!req.repName) return res.status(403).json({ error: "Employees only." });
+    const studies = await db.getAllRows("TrainingStudies");
+    const study = studies.find((s) => s.id === req.params.id);
+    if (!study) return res.status(404).json({ error: "Study not found" });
+
+    const views = await db.getAllRows("TrainingStudyViews");
+    const existing = views.find((v) => v.employeeId === req.repName && v.studyId === study.id);
+    const viewedAt = new Date().toISOString();
+    if (existing) {
+      await db.updateRowById("TrainingStudyViews", existing.id, { viewedAt });
+    } else {
+      await db.appendRow("TrainingStudyViews", { id: `tsv${crypto.randomUUID()}`, employeeId: req.repName, studyId: study.id, viewedAt });
+    }
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -2895,6 +2935,72 @@ const ALERT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   checkExpiryAndOverdueAlerts();
   setInterval(checkExpiryAndOverdueAlerts, ALERT_CHECK_INTERVAL_MS);
+}
+
+// ---------- Every-other-day training nudge (alternating video/study) ----------
+// Keeps every rep gently cycling through the training catalog: every 2 days
+// they get pushed toward one item they haven't finished yet, alternating
+// between a Training Video and a Training Study. State (when each rep was
+// last nudged, and which type is next) lives in one Settings row so it
+// survives restarts — this function just runs hourly and asks "has it been
+// >= 2 days since this rep's last nudge?" rather than trying to schedule
+// exact 48h timers per rep.
+const TRAINING_NUDGE_INTERVAL_DAYS = 2;
+
+async function checkTrainingNudges() {
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+  try {
+    const [reps, videos, videoProgress, studies, studyViews, subs, rawSettings] = await Promise.all([
+      db.getAllRows("Reps"),
+      db.getAllRows("TrainingVideos"),
+      db.getAllRows("TrainingProgress"),
+      db.getAllRows("TrainingStudies"),
+      db.getAllRows("TrainingStudyViews"),
+      db.getAllRows("PushSubscriptions"),
+      db.getSettings(),
+    ]);
+    const state = rawSettings.trainingNudgeState ? JSON.parse(rawSettings.trainingNudgeState) : {};
+    const sortedVideos = [...videos].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    const sortedStudies = [...studies].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    const now = Date.now();
+    let anyNudged = false;
+
+    for (const rep of reps) {
+      const repState = state[rep.name];
+      const dueForNudge = !repState || (now - new Date(repState.lastSentAt).getTime()) / 86400000 >= TRAINING_NUDGE_INTERVAL_DAYS;
+      if (!dueForNudge) continue;
+
+      const nudgeType = repState?.nextType === "study" ? "study" : "video";
+      let payload;
+      if (nudgeType === "video") {
+        const completedIds = new Set(videoProgress.filter((p) => p.employeeId === rep.name).map((p) => p.videoId));
+        const pick = sortedVideos.find((v) => !completedIds.has(v.id));
+        payload = pick
+          ? { title: "Training reminder", body: `Watch "${pick.title}" under Training Videos when you get a chance.`, url: "/" }
+          : { title: "Training reminder", body: "Take a moment to revisit a video under Training Videos.", url: "/" };
+      } else {
+        const viewedIds = new Set(studyViews.filter((v) => v.employeeId === rep.name).map((v) => v.studyId));
+        const pick = sortedStudies.find((s) => !viewedIds.has(s.id));
+        payload = pick
+          ? { title: "Training reminder", body: `Read "${pick.title}" under Training Studies when you get a chance.`, url: "/" }
+          : { title: "Training reminder", body: "Take a moment to revisit a study under Training Studies.", url: "/" };
+      }
+
+      await notifyRep(rep.name, payload, subs);
+      state[rep.name] = { lastSentAt: new Date().toISOString(), nextType: nudgeType === "video" ? "study" : "video" };
+      anyNudged = true;
+    }
+
+    if (anyNudged) await db.setSettings({ trainingNudgeState: state });
+  } catch (e) {
+    console.error("checkTrainingNudges failed", e);
+  }
+}
+
+const TRAINING_NUDGE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  checkTrainingNudges();
+  setInterval(checkTrainingNudges, TRAINING_NUDGE_CHECK_INTERVAL_MS);
 }
 
 // ---------- Monthly Telegram digest: Pick up vs Stress to sell ----------

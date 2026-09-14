@@ -668,6 +668,7 @@ export function TrainingStudiesView({ role }) {
                   href={s.url}
                   target="_blank"
                   rel="noreferrer"
+                  onClick={() => { api.markTrainingStudyViewed(s.id).catch(() => {}); }}
                   style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14, fontWeight: 600, color: "#4C7A5E", textDecoration: "none" }}
                 >
                   {s.title} <ExternalLink size={13} />

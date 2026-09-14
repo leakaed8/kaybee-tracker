@@ -124,4 +124,5 @@ export const api = {
   addTrainingStudy: (payload) => request("/admin/training-studies", { method: "POST", body: JSON.stringify(payload) }),
   updateTrainingStudy: (id, patch) => request(`/admin/training-studies/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   removeTrainingStudy: (id) => request(`/admin/training-studies/${id}`, { method: "DELETE" }),
+  markTrainingStudyViewed: (id) => request(`/training-studies/${id}/viewed`, { method: "POST" }),
 };
