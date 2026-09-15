@@ -44,6 +44,28 @@ const savePendingVisits = (list) => {
   try { localStorage.setItem(PENDING_VISITS_KEY, JSON.stringify(list)); } catch { /* storage unavailable — nothing more we can do */ }
 };
 
+// Same idea, for orders placed against a pharmacy/supplement store while
+// there's no reception — a rep in a dead zone shouldn't lose an order just
+// because the request couldn't go out yet.
+const PENDING_ORDERS_KEY = "kb_pending_orders";
+const loadPendingOrders = () => {
+  try { return JSON.parse(localStorage.getItem(PENDING_ORDERS_KEY) || "[]"); } catch { return []; }
+};
+const savePendingOrders = (list) => {
+  try { localStorage.setItem(PENDING_ORDERS_KEY, JSON.stringify(list)); } catch { /* storage unavailable — nothing more we can do */ }
+};
+
+// Distinguishes "the request never reached the server" (no reception — safe
+// to queue and retry later) from "the server responded but rejected it"
+// (a real validation/business error — retrying unchanged would just fail
+// again, so this must surface to the rep instead of silently vanishing into
+// the offline queue). fetch() itself throws a TypeError when it can't even
+// open a connection; api.js's own request() timeout produces the specific
+// message below; navigator.onLine is a last, coarser signal.
+function isNetworkError(e) {
+  return e instanceof TypeError || /couldn't reach the server/i.test(e?.message || "") || (typeof navigator !== "undefined" && navigator.onLine === false);
+}
+
 // How far a check-in's GPS can be from a pharmacy/doctor's own saved
 // location (geocoded address or a GPS fix captured when it was added)
 // before it's flagged as a possible mismatch. Generous on purpose — a
@@ -210,18 +232,29 @@ export default function App() {
     }
   }, [refreshLive, refreshReference]);
 
-  // Retries visits that got queued locally because GPS wasn't available at
-  // the time (see PENDING_VISITS_KEY) — tries again on a timer and whenever
-  // the browser comes back online. Only runs while this tab is open; it's
-  // not a background-sync service worker, so a rep needs to reopen the app
-  // at some point after regaining signal for the queue to actually flush.
+  // Retries visits/orders that got queued locally — either because GPS
+  // wasn't available (a visit queued with no coords yet) or because there
+  // was no reception at all when the rep hit Save (queued with everything
+  // already filled in, coords included). Tries again on a timer and
+  // whenever the browser comes back online. Only runs while this tab is
+  // open; it's not a background-sync service worker, so a rep needs to
+  // reopen the app at some point after regaining signal for the queue to
+  // actually flush.
   const [pendingVisitCount, setPendingVisitCount] = useState(() => loadPendingVisits().length);
+  const [pendingOrderCount, setPendingOrderCount] = useState(() => loadPendingOrders().length);
 
   const queueVisitOffline = useCallback((visit) => {
     const pending = loadPendingVisits();
     pending.push(visit);
     savePendingVisits(pending);
     setPendingVisitCount(pending.length);
+  }, []);
+
+  const queueOrderOffline = useCallback((order) => {
+    const pending = loadPendingOrders();
+    pending.push(order);
+    savePendingOrders(pending);
+    setPendingOrderCount(pending.length);
   }, []);
 
   useEffect(() => {
@@ -231,7 +264,10 @@ export default function App() {
       if (pending.length === 0) return;
       const remaining = [];
       for (const v of pending) {
-        const coords = await new Promise((resolve) => getCurrentPositionSafe(resolve));
+        // A visit queued because there was no reception already has its
+        // real GPS fix attached — only a visit queued for missing GPS needs
+        // a fresh fix pulled now.
+        const coords = v.coords || await new Promise((resolve) => getCurrentPositionSafe(resolve));
         if (!coords) { remaining.push(v); continue; }
         try {
           await api.addVisit({ ...v, coords });
@@ -246,10 +282,27 @@ export default function App() {
         refreshReference({ fresh: true }); // a synced visit can silently set assignedRep server-side
       }
     };
-    trySyncPendingVisits();
-    const id = setInterval(trySyncPendingVisits, 30000);
-    window.addEventListener("online", trySyncPendingVisits);
-    return () => { clearInterval(id); window.removeEventListener("online", trySyncPendingVisits); };
+    const trySyncPendingOrders = async () => {
+      const pending = loadPendingOrders();
+      if (pending.length === 0) return;
+      const remaining = [];
+      for (const o of pending) {
+        try {
+          if (o.editOrderId) await api.updateOrder(o.editOrderId, o.payload);
+          else await api.createOrder(o.payload);
+        } catch (e) {
+          remaining.push(o);
+        }
+      }
+      savePendingOrders(remaining);
+      setPendingOrderCount(remaining.length);
+      if (remaining.length !== pending.length) refreshLive({ fresh: true });
+    };
+    const trySyncAll = () => { trySyncPendingVisits(); trySyncPendingOrders(); };
+    trySyncAll();
+    const id = setInterval(trySyncAll, 30000);
+    window.addEventListener("online", trySyncAll);
+    return () => { clearInterval(id); window.removeEventListener("online", trySyncAll); };
   }, [authState, role, refreshLive, refreshReference]);
 
   const updateSettingsField = useCallback((patch) => {
@@ -362,6 +415,11 @@ export default function App() {
               ⏳ {pendingVisitCount} visit{pendingVisitCount === 1 ? "" : "s"} waiting for GPS/signal to sync
             </div>
           )}
+          {pendingOrderCount > 0 && (
+            <div style={{ fontSize: 11, color: "#C17817", marginTop: 2 }}>
+              ⏳ {pendingOrderCount} order{pendingOrderCount === 1 ? "" : "s"} waiting for signal to sync
+            </div>
+          )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontSize: 13, fontWeight: 500, color: "#5B5445", background: "#F0EBE0", borderRadius: 8, padding: "9px 16px" }}>
@@ -449,6 +507,8 @@ export default function App() {
                 onPunch={punch}
                 onQueueOffline={queueVisitOffline}
                 pendingVisitCount={pendingVisitCount}
+                onQueueOrderOffline={queueOrderOffline}
+                pendingOrderCount={pendingOrderCount}
                 competitors={competitors}
                 myLastPunch={myLastPunch}
               />
@@ -1305,7 +1365,7 @@ function FieldChecklistModal({ icon, title, subtitle, sections, readOnlySection,
 }
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, supplementStoresOnly, medRepOnly, onAddVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, competitors, myLastPunch }) {
+function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, supplementStoresOnly, medRepOnly, onAddVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, onQueueOrderOffline, pendingOrderCount, competitors, myLastPunch }) {
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
   // Doctor-visit self-coaching tools — pure client-side reminders, nothing
@@ -1593,24 +1653,35 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
       // walk through the whole followup flow.
       if (isDoctorEntity) setShowPostCallChecklist(true);
     } catch (e) {
-      setVisitError(e?.message || "Couldn't save the visit.");
+      // No reception at all (not a rejection from the server, which would
+      // still fail the same way on retry) — queue it locally instead of
+      // making the rep re-type everything once they're back in signal.
+      // Unlike the manual "no GPS" path below, this already has a real GPS
+      // fix, so it's saved along with the visit and never needs a fresh one.
+      if (isNetworkError(e)) {
+        queueOfflineAndFinish({ coords });
+      } else {
+        setVisitError(e?.message || "Couldn't save the visit.");
+      }
     } finally {
       setSaving(false);
     }
   };
 
-  // GPS genuinely isn't always available (indoors, dead zones) — rather
-  // than leave the rep stuck with no way forward, this queues the visit
-  // locally and finishes it later automatically once a fix comes through.
-  // Order/sample steps aren't offered for these since there's no real
-  // visit id yet to attach them to; the rep can note anything important in
-  // the text notes instead, or check in again once it's synced.
-  const saveOffline = () => {
+  // GPS genuinely isn't always available (indoors, dead zones), and neither
+  // is reception — rather than leave the rep stuck with no way forward,
+  // this queues the visit locally and finishes it later automatically once
+  // a fix/signal comes through. Order/sample steps aren't offered for these
+  // since there's no real visit id yet to attach them to; the rep can note
+  // anything important in the text notes instead, or check in again once
+  // it's synced.
+  const queueOfflineAndFinish = (extra = {}) => {
     onQueueOffline({
       client, notes, mentionedItems,
       competitorName: sawCompetitor ? competitorName : "",
       competitorNotes: sawCompetitor ? competitorNotes : "",
       queuedAt: new Date().toISOString(),
+      ...extra,
     });
     setLastVisit({ client, pending: true });
     setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
@@ -1619,6 +1690,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
     setFollowUpStatus(null);
     setStep("done");
   };
+  const saveOffline = () => queueOfflineAndFinish();
 
   const scheduleFollowUp = async (presetKey) => {
     setFollowUpSaving(true);
@@ -2068,6 +2140,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
             offers={offers}
             clients={clients}
             onCreateOrder={onCreateOrder}
+            onQueueOrderOffline={onQueueOrderOffline}
             onDone={() => { loadRecentOrders(); loadTodayOrders(); goToStep("sample"); }}
           />
         </>
@@ -2287,6 +2360,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                         offers={offers}
                         clients={clients}
                         onCreateOrder={onCreateOrder}
+                        onQueueOrderOffline={onQueueOrderOffline}
                         onDone={() => { loadRecentOrders(); loadTodayOrders(); setAddingOrderForVisitId(null); }}
                       />
                     ) : (
@@ -2675,7 +2749,7 @@ function applyOfferToItems(rawItems, offers) {
   return { displayItems, appliedOffer: offer, avg, roundedAvg, freeItem: chosen, freeQty };
 }
 
-function OrderBuilder({ clientName, visitId, products, offers, clients, onCreateOrder, onUpdateOrder, editOrder, onDone }) {
+function OrderBuilder({ clientName, visitId, products, offers, clients, onCreateOrder, onUpdateOrder, onQueueOrderOffline, editOrder, onDone }) {
   const [productQuery, setProductQuery] = useState("");
   const [qty, setQty] = useState("");
   // Editing an existing order pre-fills its items — matched back to a
@@ -2872,7 +2946,22 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
         })),
         discountRate: finalDiscountRate,
       };
-      const saved = editOrder ? await onUpdateOrder(editOrder.id, payload) : await onCreateOrder(payload);
+      let saved;
+      try {
+        saved = editOrder ? await onUpdateOrder(editOrder.id, payload) : await onCreateOrder(payload);
+      } catch (e) {
+        // No reception — queue it locally so it syncs automatically once
+        // signal returns, instead of losing the order or forcing the rep to
+        // stay on this screen until they have signal. Editing an existing
+        // order offline isn't supported (no onQueueOrderOffline passed for
+        // that path) — that's a rarer, already-synced correction, not the
+        // "just took an order in a dead zone" case this exists for.
+        if (isNetworkError(e) && !editOrder && onQueueOrderOffline) {
+          onQueueOrderOffline({ payload, queuedAt: new Date().toISOString() });
+        } else {
+          throw e;
+        }
+      }
       downloadOrderPdf(saved || { ...payload, date: editOrder ? editOrder.date : new Date().toISOString(), total: finalTotal, netTotal: finalTotal * (1 - finalDiscountRate / 100) }, stockWarnings);
       onDone();
     } catch (e) {
