@@ -26,7 +26,7 @@ import {
 } from "./repKnowledge.js";
 import {
   FORM_OPTIONS, UNIT_OPTIONS, getIngredients, formatIngredients, computeMetrics,
-  fmtMoney, fmtDays, buildKeyDifferences, validateProductForm,
+  fmtMoney, fmtDays, buildKeyDifferences, validateProductForm, toNum,
 } from "./competitorCalc.js";
 
 const POLL_INTERVAL_MS = 30000; // Sheets API's per-user read quota is fixed and shared across every session — keep this conservative
@@ -375,6 +375,7 @@ export default function App() {
 
   const todayStr = new Date().toISOString().slice(0, 10);
   const removeProduct = (id) => withSync(() => api.removeProduct(id), { touchesReference: true });
+  const updateProductDetails = (id, patch) => withSync(() => api.updateProductDetails(id, patch), { touchesReference: true });
   const bulkImportProducts = (products) => withSync(() => api.importBulkProducts(products), { touchesReference: true });
   const addVisit = (visit) => withSync(() => api.addVisit(visit), { touchesReference: true }); // can silently set a client's assignedRep server-side
   const removeVisit = (id) => withSync(() => api.removeVisit(id));
@@ -564,7 +565,7 @@ export default function App() {
                 myLastPunch={myLastPunch}
               />
             )}
-            {tab === "stock" && <StockView products={sorted} />}
+            {tab === "stock" && <StockView products={sorted} onUpdateDetails={updateProductDetails} />}
             {tab === "clients" && !supplementStoresOnly && !medRepOnly && (
               <ClientsView
                 clients={clients}
@@ -941,9 +942,10 @@ function ProductRow({ product, repPhone, onRemove }) {
 // instead of red/yellow/green zones — for "is this even in stock" checks
 // that don't need the full expiry-urgency framing, e.g. while on a call
 // with a pharmacy and not going through the order flow at all.
-function StockView({ products }) {
+function StockView({ products, onUpdateDetails }) {
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("all");
+  const [expandedId, setExpandedId] = useState(null);
 
   const categories = Array.from(new Set(products.map((p) => p.category).filter(Boolean))).sort();
 
@@ -991,20 +993,43 @@ function StockView({ products }) {
                 <th style={{ padding: "6px 8px" }}>Qty</th>
                 <th style={{ padding: "6px 8px" }}>Price</th>
                 <th style={{ padding: "6px 8px" }}>Expiry</th>
+                <th style={{ padding: "6px 8px" }}>Details</th>
               </tr>
             </thead>
             <tbody>
-              {shown.map((p) => (
-                <tr key={p.id} style={{ borderTop: "1px solid #E5DFD3" }}>
-                  <td style={{ padding: "6px 8px", fontWeight: 500 }}>{p.name}</td>
-                  <td style={{ padding: "6px 8px", color: "#8A8272" }}>{p.category || "-"}</td>
-                  <td style={{ padding: "6px 8px", fontWeight: 600, color: p.qty > 0 ? "#4C7A5E" : "#B33A3A" }}>
-                    {p.qty > 0 ? p.qty : "Out of stock"}
-                  </td>
-                  <td style={{ padding: "6px 8px" }}>{p.price ? p.price.toFixed(2) : "-"}</td>
-                  <td className="kb-font-mono" style={{ padding: "6px 8px", color: p.zone?.color || "#8A8272" }}>{fmtDate(p.expiry)}</td>
-                </tr>
-              ))}
+              {shown.map((p) => {
+                const hasDetails = Boolean(p.form || p.packSize || getIngredients(p).length);
+                const isOpen = expandedId === p.id;
+                return (
+                  <React.Fragment key={p.id}>
+                    <tr style={{ borderTop: "1px solid #E5DFD3" }}>
+                      <td style={{ padding: "6px 8px", fontWeight: 500 }}>{p.name}</td>
+                      <td style={{ padding: "6px 8px", color: "#8A8272" }}>{p.category || "-"}</td>
+                      <td style={{ padding: "6px 8px", fontWeight: 600, color: p.qty > 0 ? "#4C7A5E" : "#B33A3A" }}>
+                        {p.qty > 0 ? p.qty : "Out of stock"}
+                      </td>
+                      <td style={{ padding: "6px 8px" }}>{p.price ? p.price.toFixed(2) : "-"}</td>
+                      <td className="kb-font-mono" style={{ padding: "6px 8px", color: p.zone?.color || "#8A8272" }}>{fmtDate(p.expiry)}</td>
+                      <td style={{ padding: "6px 8px" }}>
+                        <button
+                          onClick={() => setExpandedId(isOpen ? null : p.id)}
+                          style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11.5, fontWeight: 500, color: hasDetails ? "#4C7A5E" : "#8A8272", background: "none", border: "none", padding: "2px 0" }}
+                        >
+                          <ChevronDown size={13} style={{ transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+                          {hasDetails ? "Details" : "Add details"}
+                        </button>
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <tr>
+                        <td colSpan={6} style={{ padding: "0 8px 12px" }}>
+                          <ProductDetailsPanel product={p} onSave={(patch) => onUpdateDetails(p.id, patch)} />
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -1016,6 +1041,124 @@ function StockView({ products }) {
           Showing the first {LIST_DISPLAY_CAP} of {filtered.length.toLocaleString()} — narrow your search to see more.
         </div>
       )}
+    </div>
+  );
+}
+
+// Shows the dosage/pack-size/ingredient details behind each product's
+// computed days-supply and cost/day (or an "Add details" form if none are
+// recorded yet) — the same data "Compare with our product" under
+// Competitors pulls from. Open to any employee: this is additive reference
+// data, not a change to core stock (qty/price/expiry stay Excel-import only).
+function ProductDetailsPanel({ product, onSave }) {
+  const hasDetails = Boolean(product.form || product.packSize || getIngredients(product).length);
+  const [editing, setEditing] = useState(!hasDetails);
+
+  if (editing) {
+    return (
+      <ProductDetailsForm
+        product={product}
+        onCancel={hasDetails ? () => setEditing(false) : null}
+        onSave={async (patch) => {
+          await onSave(patch);
+          setEditing(false);
+        }}
+      />
+    );
+  }
+
+  const m = computeMetrics(product);
+  const ingredients = getIngredients(product);
+  return (
+    <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 12 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 16, fontSize: 12.5, marginBottom: 8 }}>
+        {ingredients.length > 0 && <div><span style={{ color: "#8A8272" }}>Ingredients: </span>{formatIngredients(ingredients)}</div>}
+        {product.form && <div><span style={{ color: "#8A8272" }}>Form: </span>{product.form}</div>}
+        {product.packSize && <div><span style={{ color: "#8A8272" }}>Pack size: </span>{product.packSize} units</div>}
+        {product.unitsPerDay && <div><span style={{ color: "#8A8272" }}>Taken: </span>{product.unitsPerDay}/day</div>}
+      </div>
+      {m.hasPackSize && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 16, fontSize: 12, marginBottom: 8 }}>
+          <MetricPreviewItem label="Days supply" value={m.daysSupply != null ? `${fmtDays(m.daysSupply)} days` : "—"} />
+          <MetricPreviewItem label="Cost/day" value={fmtMoney(m.costPerDay)} />
+          <MetricPreviewItem label="Cost/month" value={fmtMoney(m.costPerMonth)} />
+        </div>
+      )}
+      {product.updatedBy && (
+        <div style={{ fontSize: 10.5, color: "#8A8272", marginBottom: 6 }}>
+          Last edited by {product.updatedBy}{product.updatedAt ? ` · ${fmtDate(product.updatedAt)}` : ""}
+        </div>
+      )}
+      <button onClick={() => setEditing(true)} style={{ fontSize: 11.5, color: "#4C7A5E", background: "none", border: "none", padding: 0, display: "block" }}>
+        Edit details
+      </button>
+    </div>
+  );
+}
+
+function ProductDetailsForm({ product, onSave, onCancel }) {
+  const existingIngredients = getIngredients(product);
+  const [f, setF] = useState({
+    form: product.form || "",
+    packSize: product.packSize || "",
+    unitsPerDay: product.unitsPerDay || "1",
+    ingredients: existingIngredients.length
+      ? existingIngredients.map((i) => ({ name: i.name, form: i.form || "", amount: i.amount ?? "", unit: i.unit || "mg" }))
+      : [{ name: "", form: "", amount: "", unit: "mg" }],
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const set = (patch) => setF((prev) => ({ ...prev, ...patch }));
+
+  const save = async () => {
+    if (f.packSize !== "" && (toNum(f.packSize) === null || toNum(f.packSize) <= 0)) return setError("Pack size must be greater than zero.");
+    if (f.unitsPerDay !== "" && (toNum(f.unitsPerDay) === null || toNum(f.unitsPerDay) <= 0)) return setError("Units per day must be greater than zero.");
+    for (const ing of f.ingredients) {
+      if (ing.amount !== "" && ing.amount != null && toNum(ing.amount) === null) return setError(`"${ing.name || "Ingredient"}" needs a valid numeric amount.`);
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await onSave({ form: f.form, packSize: f.packSize, unitsPerDay: f.unitsPerDay, ingredients: f.ingredients });
+    } catch (e) {
+      setError(e.message || "Couldn't save.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 12 }}>
+      <div style={sectionLabelStyle}>PRODUCT DETAILS — {product.name}</div>
+      <Field label="Active ingredient(s)">
+        <IngredientsEditor ingredients={f.ingredients} onChange={(ingredients) => set({ ingredients })} />
+      </Field>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 10 }}>
+        <Field label="Form">
+          <select value={f.form} onChange={(e) => set({ form: e.target.value })} style={inputStyle}>
+            <option value="">Select…</option>
+            {FORM_OPTIONS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+          </select>
+        </Field>
+        <Field label="Pack size (units)">
+          <input value={f.packSize} onChange={(e) => set({ packSize: e.target.value })} type="number" min="0" placeholder="e.g. 60" style={inputStyle} />
+        </Field>
+        <Field label="Taken (units/day)">
+          <input value={f.unitsPerDay} onChange={(e) => set({ unitsPerDay: e.target.value })} type="number" min="0" placeholder="1" style={inputStyle} />
+        </Field>
+      </div>
+      <ProductMetricsPreview product={{ ...f, price: product.price }} />
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button disabled={saving} onClick={save} style={{ padding: "6px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12, fontWeight: 500 }}>
+          {saving ? "Saving…" : "Save details"}
+        </button>
+        {onCancel && (
+          <button type="button" onClick={onCancel} style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12 }}>
+            Cancel
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -4099,9 +4242,10 @@ function ProductAdvancedDetails({ p }) {
   );
 }
 
-// Our own Products don't carry pack size / dose / ingredients (that's a
-// pharmacy-stock model, not a comparison one), so this stays an honest
-// price-only comparison rather than fabricating a cost/day for our side.
+// Our own Products only get a real cost/day and days-supply once someone
+// has filled in its dosage/pack size under Stock ("Add details") — until
+// then this stays an honest price-only comparison rather than fabricating
+// a number from missing data.
 function CompareWithOurProduct({ competitor, ourProducts, onClose }) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(null);
@@ -4109,6 +4253,8 @@ function CompareWithOurProduct({ competitor, ourProducts, onClose }) {
     ? ourProducts.filter((op) => op.name.toLowerCase().includes(query.toLowerCase().trim())).slice(0, 8)
     : [];
   const cm = computeMetrics(competitor);
+  const om = selected ? computeMetrics(selected) : null;
+  const ourIngredients = selected ? getIngredients(selected) : [];
 
   return (
     <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, marginTop: 8 }}>
@@ -4129,11 +4275,22 @@ function CompareWithOurProduct({ competitor, ourProducts, onClose }) {
         <div>
           <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 8 }}>OUR PRODUCT vs COMPETITOR</div>
           <ComparisonRow label="Product" a={selected.name} b={`${competitor.productName} (${competitor.competitorName})`} />
+          {ourIngredients.length > 0 && <ComparisonRow label="Ingredients" a={formatIngredients(ourIngredients)} b={formatIngredients(getIngredients(competitor)) || "—"} />}
+          {(selected.form || competitor.form) && <ComparisonRow label="Form" a={selected.form || "—"} b={competitor.form || "—"} />}
           <ComparisonRow label="Public price" a={fmtMoney(Number(selected.price))} b={fmtMoney(cm.price)} />
-          {cm.hasDiscount && <ComparisonRow label="Effective price" a="—" b={fmtMoney(cm.effectivePrice)} />}
-          <div style={{ fontSize: 11, color: "#8A8272", marginTop: 8, fontStyle: "italic" }}>
-            Dose, pack size, and cost/day for our product aren't tracked in Stock yet, so only price is compared here.
-          </div>
+          {(om?.hasDiscount || cm.hasDiscount) && <ComparisonRow label="Effective price" a={om?.hasDiscount ? fmtMoney(om.effectivePrice) : "—"} b={cm.hasDiscount ? fmtMoney(cm.effectivePrice) : "—"} />}
+          {om?.hasPackSize && (
+            <>
+              <ComparisonRow label="Days supply" a={fmtDays(om.daysSupply)} b={cm.daysSupply != null ? fmtDays(cm.daysSupply) : "—"} />
+              <ComparisonRow label="Cost/day" a={fmtMoney(om.costPerDay)} b={fmtMoney(cm.costPerDay)} />
+              <ComparisonRow label="Cost/month" a={fmtMoney(om.costPerMonth)} b={fmtMoney(cm.costPerMonth)} />
+            </>
+          )}
+          {!om?.hasPackSize && (
+            <div style={{ fontSize: 11, color: "#8A8272", marginTop: 8, fontStyle: "italic" }}>
+              Dose and pack size for {selected.name} aren't recorded yet — add them under Stock ("Add details") to compare days supply and cost/day.
+            </div>
+          )}
           <button onClick={() => setSelected(null)} style={{ fontSize: 11.5, color: "#4C7A5E", background: "none", border: "none", padding: "6px 0 0", display: "block" }}>
             ← Pick a different product
           </button>

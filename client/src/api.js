@@ -56,6 +56,7 @@ export const api = {
   getDoctorVisitStats: (names) => request("/doctors/visit-stats", { method: "POST", body: JSON.stringify({ names }) }),
   addProduct: (product) => request("/products", { method: "POST", body: JSON.stringify(product) }),
   removeProduct: (id) => request(`/products/${id}`, { method: "DELETE" }),
+  updateProductDetails: (id, patch) => request(`/products/${id}/details`, { method: "PATCH", body: JSON.stringify(patch) }),
   importSampleInventory: () => request("/products/import-sample", { method: "POST" }),
   importBulkProducts: (products) => request("/products/import-bulk", { method: "POST", body: JSON.stringify({ products }) }),
   addVisit: (visit) => request("/visits", { method: "POST", body: JSON.stringify(visit) }),

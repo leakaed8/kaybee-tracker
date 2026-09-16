@@ -959,23 +959,66 @@ app.post("/api/products/import-bulk", async (req, res) => {
     if (!Array.isArray(products) || products.length === 0) {
       return res.status(400).json({ error: "No products provided" });
     }
+    // This is a full stock refresh (qty/price/expiry all come fresh from the
+    // sheet), but the dosage/pack-size/ingredient details a rep tags on in
+    // the app live only in this table — carry them over by matching on
+    // product name (case-insensitive) so a routine re-import doesn't wipe
+    // out details entered since the last one, and so the id stays stable
+    // for anything already referencing it (order line items, samples).
+    const existing = await db.getAllRows("Products");
+    const existingByName = new Map(existing.map((p) => [String(p.name || "").trim().toLowerCase(), p]));
     const normalized = products
       .filter((p) => p.name && p.expiry)
-      .map((p) => ({
-        id: `p${crypto.randomUUID()}`,
-        name: String(p.name).trim(),
-        category: p.category || "Supplement",
-        expiry: p.expiry,
-        qty: Number(p.qty) || 0,
-        sold90: Number(p.sold90) || 0,
-        description: p.description || "",
-        price: Number(p.price) || 0,
-      }));
+      .map((p) => {
+        const prior = existingByName.get(String(p.name).trim().toLowerCase());
+        return {
+          id: prior ? prior.id : `p${crypto.randomUUID()}`,
+          name: String(p.name).trim(),
+          category: p.category || "Supplement",
+          expiry: p.expiry,
+          qty: Number(p.qty) || 0,
+          sold90: Number(p.sold90) || 0,
+          description: p.description || "",
+          price: Number(p.price) || 0,
+          form: prior?.form || "",
+          packSize: prior?.packSize || "",
+          unitsPerDay: prior?.unitsPerDay || "",
+          ingredients: prior?.ingredients || "",
+          updatedBy: prior?.updatedBy || "",
+          updatedAt: prior?.updatedAt || "",
+        };
+      });
     if (normalized.length === 0) {
       return res.status(400).json({ error: "None of the rows had both a name and an expiry date" });
     }
     await db.replaceAllRows("Products", normalized);
     res.json({ ok: true, count: normalized.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Open to any logged-in employee, same as competitor products — filling in
+// a product's dosage/pack size/ingredients is additive reference data, not
+// a change to core stock (qty/price/expiry stay manager-only via the Excel
+// import above). Every save stamps who last touched it.
+app.patch("/api/products/:id/details", async (req, res) => {
+  try {
+    const validationError = validateCompetitorProductNumbers(req.body);
+    if (validationError) return res.status(400).json({ error: validationError });
+    const { form, packSize, unitsPerDay } = req.body;
+    const patch = {
+      form: form || "",
+      packSize: packSize === "" || packSize == null ? "" : Number(packSize),
+      unitsPerDay: unitsPerDay === "" || unitsPerDay == null ? "" : Number(unitsPerDay),
+      ingredients: normalizeIngredients(req.body.ingredients),
+      updatedBy: req.repName || (req.role === "manager" ? "Manager" : ""),
+      updatedAt: new Date().toISOString(),
+    };
+    const ok = await db.updateRowById("Products", req.params.id, patch);
+    if (!ok) return res.status(404).json({ error: "Product not found" });
+    res.json({ ok: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
