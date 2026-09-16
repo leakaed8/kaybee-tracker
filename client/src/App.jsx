@@ -257,6 +257,24 @@ export default function App() {
     setPendingOrderCount(pending.length);
   }, []);
 
+  // An order placed against a visit that's itself still queued offline has
+  // no real visit id to send yet — so instead of tracking it as its own
+  // independent pending order, it rides along on the matching queued visit
+  // (found by localKey) until that visit actually syncs and gets a real id.
+  // See trySyncPendingVisits below for the other half of this.
+  const attachPendingOrder = useCallback((localKey, payload) => {
+    const pending = loadPendingVisits();
+    const idx = pending.findIndex((v) => v.localKey === localKey);
+    if (idx === -1) {
+      // The visit isn't in the queue anymore for some reason — don't lose
+      // the order, just track it independently instead.
+      queueOrderOffline({ payload, queuedAt: new Date().toISOString() });
+      return;
+    }
+    pending[idx] = { ...pending[idx], pendingOrder: payload };
+    savePendingVisits(pending);
+  }, [queueOrderOffline]);
+
   useEffect(() => {
     if (authState !== "in" || role !== "rep") return;
     const trySyncPendingVisits = async () => {
@@ -270,7 +288,18 @@ export default function App() {
         const coords = v.coords || await new Promise((resolve) => getCurrentPositionSafe(resolve));
         if (!coords) { remaining.push(v); continue; }
         try {
-          await api.addVisit({ ...v, coords });
+          const created = await api.addVisit({ ...v, coords });
+          // The visit is in — if an order was riding along on it, it can
+          // finally get a real visitId. Try it right away; if reception
+          // drops again mid-way, it's not lost, just handed to the ordinary
+          // pending-orders queue now that it has a real id to retry with.
+          if (v.pendingOrder) {
+            try {
+              await api.createOrder({ ...v.pendingOrder, visitId: created.id });
+            } catch (orderErr) {
+              queueOrderOffline({ payload: { ...v.pendingOrder, visitId: created.id }, queuedAt: new Date().toISOString() });
+            }
+          }
         } catch (e) {
           remaining.push(v);
         }
@@ -509,6 +538,7 @@ export default function App() {
                 pendingVisitCount={pendingVisitCount}
                 onQueueOrderOffline={queueOrderOffline}
                 pendingOrderCount={pendingOrderCount}
+                onAttachPendingOrder={attachPendingOrder}
                 competitors={competitors}
                 myLastPunch={myLastPunch}
               />
@@ -1365,7 +1395,7 @@ function FieldChecklistModal({ icon, title, subtitle, sections, readOnlySection,
 }
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, supplementStoresOnly, medRepOnly, onAddVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, onQueueOrderOffline, pendingOrderCount, competitors, myLastPunch }) {
+function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, supplementStoresOnly, medRepOnly, onAddVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, onQueueOrderOffline, pendingOrderCount, onAttachPendingOrder, competitors, myLastPunch }) {
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
   // Doctor-visit self-coaching tools — pure client-side reminders, nothing
@@ -1671,24 +1701,33 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   // GPS genuinely isn't always available (indoors, dead zones), and neither
   // is reception — rather than leave the rep stuck with no way forward,
   // this queues the visit locally and finishes it later automatically once
-  // a fix/signal comes through. Order/sample steps aren't offered for these
-  // since there's no real visit id yet to attach them to; the rep can note
-  // anything important in the text notes instead, or check in again once
-  // it's synced.
+  // a fix/signal comes through. There's no real visit id yet to attach an
+  // order to, so a pharmacy/supplement-store order placed from here rides
+  // along on this same queued visit (see localKey below) and only becomes
+  // its own independently-synced order once the visit itself has a real id
+  // — see onAttachPendingOrder and trySyncPendingVisits. Doctors don't
+  // place orders, so their offline path just ends here; the rep can note
+  // anything else important in the text notes, or check in again once
+  // synced.
   const queueOfflineAndFinish = (extra = {}) => {
+    const localKey = `local_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     onQueueOffline({
       client, notes, mentionedItems,
       competitorName: sawCompetitor ? competitorName : "",
       competitorNotes: sawCompetitor ? competitorNotes : "",
       queuedAt: new Date().toISOString(),
+      localKey,
       ...extra,
     });
-    setLastVisit({ client, pending: true });
+    setLastVisit({ client, pending: true, localKey });
     setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
     setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
     setVisitError(""); setLocError("");
     setFollowUpStatus(null);
-    setStep("done");
+    // Pharmacies/supplement stores still get offered the order question —
+    // that's the one later step that itself supports queuing offline (via
+    // onAttachPendingOrder). Doctors have nothing left to offer offline.
+    goToStep(!isDoctorEntity ? "orderPrompt" : "done");
   };
   const saveOffline = () => queueOfflineAndFinish();
 
@@ -2123,7 +2162,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
             <button onClick={() => goToStep("order")} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
               Yes, add order
             </button>
-            <button onClick={() => goToStep(!isDoctorEntity ? "sample" : "followup")} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
+            <button onClick={() => goToStep(lastVisit.pending ? "done" : !isDoctorEntity ? "sample" : "followup")} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
               No
             </button>
           </div>
@@ -2141,7 +2180,9 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
             clients={clients}
             onCreateOrder={onCreateOrder}
             onQueueOrderOffline={onQueueOrderOffline}
-            onDone={() => { loadRecentOrders(); loadTodayOrders(); goToStep("sample"); }}
+            pendingVisitLocalKey={lastVisit.pending ? lastVisit.localKey : null}
+            onAttachPendingOrder={onAttachPendingOrder}
+            onDone={() => { loadRecentOrders(); loadTodayOrders(); goToStep(lastVisit.pending ? "done" : "sample"); }}
           />
         </>
       )}
@@ -2749,7 +2790,7 @@ function applyOfferToItems(rawItems, offers) {
   return { displayItems, appliedOffer: offer, avg, roundedAvg, freeItem: chosen, freeQty };
 }
 
-function OrderBuilder({ clientName, visitId, products, offers, clients, onCreateOrder, onUpdateOrder, onQueueOrderOffline, editOrder, onDone }) {
+function OrderBuilder({ clientName, visitId, products, offers, clients, onCreateOrder, onUpdateOrder, onQueueOrderOffline, pendingVisitLocalKey, onAttachPendingOrder, editOrder, onDone }) {
   const [productQuery, setProductQuery] = useState("");
   const [qty, setQty] = useState("");
   // Editing an existing order pre-fills its items — matched back to a
@@ -2956,7 +2997,12 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
         // order offline isn't supported (no onQueueOrderOffline passed for
         // that path) — that's a rarer, already-synced correction, not the
         // "just took an order in a dead zone" case this exists for.
-        if (isNetworkError(e) && !editOrder && onQueueOrderOffline) {
+        if (!isNetworkError(e) || editOrder) throw e;
+        if (pendingVisitLocalKey && onAttachPendingOrder) {
+          // The visit itself hasn't synced yet (no real visitId to send) —
+          // attach to it so both go out together once it does.
+          onAttachPendingOrder(pendingVisitLocalKey, payload);
+        } else if (onQueueOrderOffline) {
           onQueueOrderOffline({ payload, queuedAt: new Date().toISOString() });
         } else {
           throw e;
