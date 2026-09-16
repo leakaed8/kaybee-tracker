@@ -1368,6 +1368,81 @@ app.post("/api/visits", async (req, res) => {
   }
 });
 
+// Lets a rep go back and fix up the visit they just logged (forgot a note,
+// forgot to flag a competitor, forgot an item mentioned) without it turning
+// into a second, duplicate visit — Check-In's Back button routes here
+// rather than re-submitting POST /api/visits. Client/coords/time are never
+// touched here; only content a rep might realistically have missed.
+app.patch("/api/visits/:id", async (req, res) => {
+  try {
+    const visits = await db.getAllRows("Visits");
+    const visit = visits.find((v) => v.id === req.params.id);
+    if (!visit) return res.status(404).json({ error: "Visit not found." });
+    // A rep can fix up their own just-logged visit; not rewrite someone
+    // else's — same boundary as who's allowed to delete one.
+    if (req.role !== "manager" && visit.repName !== req.repName) {
+      return res.status(403).json({ error: "You can only edit your own visits." });
+    }
+
+    const { notes, mentionedItems, competitorName, competitorNotes } = req.body;
+    const patch = {};
+    if (notes !== undefined) {
+      patch.notes = notes || "";
+      patch.objectionTag = classifyObjection(notes);
+    }
+    if (Array.isArray(mentionedItems)) {
+      patch.itemsMentioned = mentionedItems.length ? JSON.stringify(mentionedItems) : "";
+    }
+    if (Object.keys(patch).length > 0) {
+      await db.updateRowById("Visits", req.params.id, patch);
+    }
+
+    // A newly-flagged sample (added on this edit, not present at creation)
+    // still gets its own Samples row, mirroring POST /api/visits — existing
+    // sample rows are left alone, this only ever adds one, never removes.
+    if (Array.isArray(mentionedItems)) {
+      const existingSamples = await db.getAllRows("Samples");
+      const alreadyLogged = new Set(existingSamples.filter((s) => s.visitId === req.params.id).map((s) => s.productId));
+      const newSampleRows = mentionedItems
+        .filter((it) => (it.sampleStatus === "gave" || it.sampleStatus === "next_visit") && !alreadyLogged.has(it.productId))
+        .map((it) => ({
+          id: `s${crypto.randomUUID()}`,
+          doctorName: visit.client,
+          productName: it.name,
+          productId: it.productId,
+          status: it.sampleStatus,
+          repName: visit.repName || "",
+          visitId: req.params.id,
+          date: visit.time,
+        }));
+      if (newSampleRows.length) await db.appendRows("Samples", newSampleRows);
+    }
+
+    // Same idea for a competitor sighting flagged on this edit — only added
+    // if one wasn't already logged for this visit; never overwritten.
+    if (competitorName && String(competitorName).trim()) {
+      const existingSightings = await db.getAllRows("CompetitorSightings");
+      const already = existingSightings.some((s) => s.visitId === req.params.id);
+      if (!already) {
+        await db.appendRow("CompetitorSightings", {
+          id: `cs${crypto.randomUUID()}`,
+          visitId: req.params.id,
+          client: visit.client,
+          repName: visit.repName || "",
+          competitorName: String(competitorName).trim(),
+          notes: competitorNotes || "",
+          date: visit.time,
+        });
+      }
+    }
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Pharmacy sample-giving, asked right after the order question in Check-In
 // — separate from the doctor "items mentioned" flow above (which predates
 // quantity tracking), so this is the one place item + qty samples get

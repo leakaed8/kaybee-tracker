@@ -384,6 +384,7 @@ export default function App() {
   const bulkImportCatalogProducts = (products) => withSync(() => api.importCatalogProductsBulk(products), { touchesReference: true });
   const bulkImportProducts = (products) => withSync(() => api.importBulkProducts(products), { touchesReference: true });
   const addVisit = (visit) => withSync(() => api.addVisit(visit), { touchesReference: true }); // can silently set a client's assignedRep server-side
+  const updateVisit = (id, patch) => withSync(() => api.updateVisit(id, patch));
   const removeVisit = (id) => withSync(() => api.removeVisit(id));
   const punch = (type, coords) => withSync(() => api.punch(type, coords));
   const createOrder = (order) => withSync(() => api.createOrder(order));
@@ -558,6 +559,7 @@ export default function App() {
                 supplementStoresOnly={supplementStoresOnly}
                 medRepOnly={medRepOnly}
                 onAddVisit={addVisit}
+                onUpdateVisit={updateVisit}
                 onCreateOrder={createOrder}
                 onUpdateOrder={updateOrder}
                 onRequestDeleteOrder={requestDeleteOrder}
@@ -1428,7 +1430,7 @@ function FieldChecklistModal({ icon, title, subtitle, sections, readOnlySection,
 }
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, supplementStoresOnly, medRepOnly, onAddVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, onQueueOrderOffline, pendingOrderCount, onAttachPendingOrder, competitors, myLastPunch }) {
+function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, supplementStoresOnly, medRepOnly, onAddVisit, onUpdateVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, onQueueOrderOffline, pendingOrderCount, onAttachPendingOrder, competitors, myLastPunch }) {
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
   // Doctor-visit self-coaching tools — pure client-side reminders, nothing
@@ -1467,17 +1469,23 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   // pure bookkeeping for goBack() and never drives its own render.
   const stepHistoryRef = useRef([]);
   const goToStep = (next) => { stepHistoryRef.current.push(step); setStep(next); };
-  // Never steps back onto "checkin" — that form was already submitted
-  // (the visit is saved by the time any later step exists), so re-showing
-  // it with the same fields still filled in risks creating a second,
-  // duplicate visit if "Save visit" gets tapped again. A doctor visit
-  // reaches "followup" directly from "checkin" (no order/sample steps in
-  // between), so this guard is what makes Back a no-op there specifically,
-  // rather than only on the pharmacy path where it's obviously needed.
-  const canGoBack = stepHistoryRef.current.length > 0 && stepHistoryRef.current[stepHistoryRef.current.length - 1] !== "checkin";
+  // Stepping back onto "checkin" is allowed specifically when there's a
+  // real, already-synced visit to fix up — a rep who forgot a note, an
+  // item mentioned, or a competitor flag can go back and add it. Not
+  // allowed for a pending/offline visit (no server id yet to update). Going
+  // back flips into edit mode (see editingSavedVisit) rather than
+  // re-showing a blank form, and Save turns into an update via
+  // onUpdateVisit, never a second, duplicate visit.
+  const canGoBack = stepHistoryRef.current.length > 0 && (
+    stepHistoryRef.current[stepHistoryRef.current.length - 1] !== "checkin" ||
+    Boolean(lastVisit && lastVisit.id && !lastVisit.pending)
+  );
+  const [editingSavedVisit, setEditingSavedVisit] = useState(false);
   const goBack = () => {
     if (!canGoBack) return;
-    setStep(stepHistoryRef.current.pop());
+    const prev = stepHistoryRef.current.pop();
+    if (prev === "checkin") setEditingSavedVisit(true);
+    setStep(prev);
   };
   const [followUpStatus, setFollowUpStatus] = useState(null); // null | "set" | "stopped"
   const [followUpSaving, setFollowUpSaving] = useState(false);
@@ -1496,8 +1504,6 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   const [sawCompetitor, setSawCompetitor] = useState(false);
   const [competitorName, setCompetitorName] = useState("");
   const [competitorNotes, setCompetitorNotes] = useState("");
-  const [listening, setListening] = useState(false);
-  const recognitionRef = useRef(null);
   // Own-scoped, on-demand replacements for what used to come out of the
   // global visits/orders bootstrap arrays — fetched here, refetched after
   // whatever action would change them, instead of held in App() state.
@@ -1559,29 +1565,6 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   useEffect(() => {
     api.getMyExportSheet().then((data) => setExportSheetId(data.exportSheetId || "")).catch(() => {});
   }, []);
-
-  const SpeechRecognitionClass = typeof window !== "undefined" ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
-
-  const toggleDictation = () => {
-    if (!SpeechRecognitionClass) return;
-    if (listening) {
-      recognitionRef.current?.stop();
-      return;
-    }
-    const recognition = new SpeechRecognitionClass();
-    recognition.lang = "en-US";
-    recognition.interimResults = false;
-    recognition.continuous = true;
-    recognition.onresult = (e) => {
-      const transcript = Array.from(e.results).map((r) => r[0].transcript).join(" ");
-      setNotes((prev) => (prev ? `${prev} ${transcript}` : transcript));
-    };
-    recognition.onerror = () => setListening(false);
-    recognition.onend = () => setListening(false);
-    recognitionRef.current = recognition;
-    recognition.start();
-    setListening(true);
-  };
 
   const NOTE_TEMPLATES = [
     "No stock issues", "Requested pricing follow-up", "Price objection raised",
@@ -1697,8 +1680,11 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
         competitorNotes: sawCompetitor ? competitorNotes : "",
       });
       setLastVisit(created || { client: visitClient });
-      setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
-      setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
+      // client/notes/coords/mentionedItems/competitor fields are deliberately
+      // NOT cleared here (only on startNewVisit) — Back can bring the rep
+      // right back to this same checkin form, pre-filled with what they just
+      // entered, to fix up anything they forgot (see editingSavedVisit).
+      setItemQuery(""); setSampleMenuFor(null);
       setFollowUpStatus(null);
       setFollowUpError("");
       setCustomFollowUpDays("");
@@ -1726,6 +1712,29 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
       } else {
         setVisitError(e?.message || "Couldn't save the visit.");
       }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Reached only via Back from orderPrompt/followup right after a visit was
+  // just saved (see canGoBack/goBack) — updates the SAME visit instead of
+  // creating a second one. Client/coords/time are never touched; only the
+  // content a rep might realistically have forgotten.
+  const submitEdit = async () => {
+    setVisitError("");
+    setSaving(true);
+    try {
+      await onUpdateVisit(lastVisit.id, {
+        notes, mentionedItems,
+        competitorName: sawCompetitor ? competitorName : "",
+        competitorNotes: sawCompetitor ? competitorNotes : "",
+      });
+      setEditingSavedVisit(false);
+      loadTodayVisits();
+      goToStep(!isDoctorEntity ? "orderPrompt" : "followup");
+    } catch (e) {
+      setVisitError(e?.message || "Couldn't save your changes.");
     } finally {
       setSaving(false);
     }
@@ -1833,6 +1842,12 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
 
   const startNewVisit = () => {
     setLastVisit(null);
+    setEditingSavedVisit(false);
+    // The previous visit's client/notes/mentionedItems/competitor fields
+    // stuck around after saving (so Back could bring the rep right back to
+    // them for edits) — clear them now that a genuinely new visit begins.
+    setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
+    setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
     setFollowUpStatus(null);
     setFollowUpError("");
     setVisitError("");
@@ -1925,7 +1940,21 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
 
       {step === "checkin" && (
         <>
-          {!supplementStoresOnly && !medRepOnly && (
+          {editingSavedVisit && lastVisit && (
+            <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 8, padding: 10, marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12.5, color: "#7A5B2E" }}>
+                Editing your check-in for <strong>{lastVisit.client}</strong> — add anything you forgot, then save.
+              </span>
+              <button
+                type="button"
+                onClick={() => { setEditingSavedVisit(false); goToStep(!isDoctorEntity ? "orderPrompt" : "followup"); }}
+                style={{ fontSize: 11.5, color: "#5B5445", background: "none", border: "none", padding: 0, whiteSpace: "nowrap" }}
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+          {!editingSavedVisit && !supplementStoresOnly && !medRepOnly && (
             <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
               <button onClick={() => { setEntityType("pharmacy"); setClient(""); }} style={{
                 flex: 1, padding: "8px 14px", borderRadius: 8, border: entityType === "pharmacy" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
@@ -1960,6 +1989,9 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
 
           <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
             <Field label={`${entityTypeLabel} name`}>
+              {editingSavedVisit ? (
+                <div style={{ ...inputStyle, marginBottom: 10, background: "#F0EBE0", color: "#5B5445" }}>{client}</div>
+              ) : (
               <SearchableSelect
                 value={client}
                 onChange={setClient}
@@ -1968,8 +2000,9 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                 placeholder={isDoctorEntity ? "e.g. Dr. Nour Khalil" : entityType === "supplement_store" ? "e.g. Vitamin World Hamra" : "e.g. Pharmacie Al Nour"}
                 style={{ ...inputStyle, marginBottom: 10 }}
               />
+              )}
             </Field>
-            {otherRepWarning && (
+            {!editingSavedVisit && otherRepWarning && (
               <div style={{ background: "#FBF0F0", border: "1px solid #E5B8B0", color: "#7A3B3B", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 10, fontWeight: 500 }}>
                 ⚠ {client} is assigned to <strong>{otherRepWarning}</strong> — you're about to visit another rep's account.
               </div>
@@ -1998,29 +2031,13 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               </div>
             )}
             <Field label="Visit notes">
-              <div style={{ position: "relative" }}>
-                <textarea
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                  placeholder="What was discussed, orders taken, objections…"
-                  rows={3}
-                  style={{ ...inputStyle, marginBottom: 8, resize: "vertical", paddingRight: 40 }}
-                />
-                {SpeechRecognitionClass && (
-                  <button
-                    type="button"
-                    onClick={toggleDictation}
-                    title={listening ? "Stop dictation" : "Dictate notes"}
-                    style={{
-                      position: "absolute", top: 6, right: 6, width: 28, height: 28, borderRadius: 6,
-                      border: "1px solid #E5DFD3", background: listening ? "#B33A3A" : "#fff",
-                      color: listening ? "#FAF7F2" : "#5B5445", fontSize: 13, lineHeight: 1,
-                    }}
-                  >
-                    🎙
-                  </button>
-                )}
-              </div>
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="What was discussed, orders taken, objections…"
+                rows={3}
+                style={{ ...inputStyle, marginBottom: 8, resize: "vertical" }}
+              />
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
                 {NOTE_TEMPLATES.map((t) => (
                   <button
@@ -2175,31 +2192,38 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                 — a temporary exception while Rabih's phone location permissions
                 get sorted out. Remove the isSupervisor carve-out below (both here
                 and server-side in POST /api/visits) once that's fixed. */}
-            {!coords && !isSupervisor && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>Capture your GPS location before saving — this is how a visit gets confirmed as real.</div>}
-            {!coords && isSupervisor && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>Location isn't required for your account right now — you can save without it.</div>}
+            {!editingSavedVisit && !coords && !isSupervisor && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>Capture your GPS location before saving — this is how a visit gets confirmed as real.</div>}
+            {!editingSavedVisit && !coords && isSupervisor && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>Location isn't required for your account right now — you can save without it.</div>}
 
-            <button disabled={!client || (!coords && !isSupervisor) || !matchedEntity || saving} onClick={submit} style={{
-              padding: "9px 18px", borderRadius: 8, border: "none",
-              background: client && (coords || isSupervisor) && matchedEntity && !saving ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500,
-            }}>
-              {saving ? "Saving…" : "Save visit & continue"}
+            <button
+              disabled={editingSavedVisit ? saving : (!client || (!coords && !isSupervisor) || !matchedEntity || saving)}
+              onClick={editingSavedVisit ? submitEdit : submit}
+              style={{
+                padding: "9px 18px", borderRadius: 8, border: "none",
+                background: (editingSavedVisit ? !saving : (client && (coords || isSupervisor) && matchedEntity && !saving)) ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500,
+              }}
+            >
+              {saving ? "Saving…" : editingSavedVisit ? "Save changes" : "Save visit & continue"}
             </button>
           </div>
         </>
       )}
 
       {step === "orderPrompt" && lastVisit && (
-        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
-          <span style={{ fontSize: 13.5 }}>Did <strong>{lastVisit.client}</strong> place an order?</span>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => goToStep("order")} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
-              Yes, add order
-            </button>
-            <button onClick={() => goToStep(lastVisit.pending ? "done" : !isDoctorEntity ? "sample" : "followup")} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
-              No
-            </button>
+        <>
+          {canGoBack && <BackStepButton onClick={goBack} />}
+          <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+            <span style={{ fontSize: 13.5 }}>Did <strong>{lastVisit.client}</strong> place an order?</span>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => goToStep("order")} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+                Yes, add order
+              </button>
+              <button onClick={() => goToStep(lastVisit.pending ? "done" : !isDoctorEntity ? "sample" : "followup")} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
+                No
+              </button>
+            </div>
           </div>
-        </div>
+        </>
       )}
 
       {step === "order" && lastVisit && (

@@ -63,6 +63,7 @@ export const api = {
   importSampleInventory: () => request("/products/import-sample", { method: "POST" }),
   importBulkProducts: (products) => request("/products/import-bulk", { method: "POST", body: JSON.stringify({ products }) }),
   addVisit: (visit) => request("/visits", { method: "POST", body: JSON.stringify(visit) }),
+  updateVisit: (id, patch) => request(`/visits/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   removeVisit: (id) => request(`/visits/${id}`, { method: "DELETE" }),
   punch: (type, coords) => request("/punch", { method: "POST", body: JSON.stringify({ type, coords }) }),
   createOrder: (order) => request("/orders", { method: "POST", body: JSON.stringify(order) }),
