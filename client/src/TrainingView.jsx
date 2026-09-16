@@ -9,6 +9,17 @@ function EmptyState({ text }) {
   return <div style={{ textAlign: "center", padding: "30px 0", color: "#B7AF9E", fontSize: 13 }}>{text}</div>;
 }
 
+// Starter suggestions for the "Vitamin / nutrient" field on a study — not a
+// closed list (it's a free-text input with these as datalist options, plus
+// whatever's actually been used on existing studies), just enough so the
+// first few studies added don't each invent slightly different spellings.
+const NUTRIENT_OPTIONS = [
+  "Vitamin A", "Vitamin B1 (Thiamine)", "Vitamin B2 (Riboflavin)", "Vitamin B3 (Niacin)",
+  "Vitamin B5 (Pantothenic Acid)", "Vitamin B6", "Vitamin B7 (Biotin)", "Vitamin B9 (Folate)",
+  "Vitamin B12", "Vitamin C", "Vitamin D", "Vitamin E", "Vitamin K",
+  "Calcium", "Magnesium", "Zinc", "Iron", "Potassium", "CoQ10", "Omega-3", "Probiotics",
+];
+
 // Plays a signed, short-expiry R2 URL fetched fresh from our own backend
 // for this logged-in employee — never a public/unsigned link, and the URL
 // is never persisted anywhere on the client past this session. It's a
@@ -536,6 +547,7 @@ export function TrainingVideosView({ role, repName, isSupervisor, repNames }) {
 function AddTrainingStudyForm({ onAdded }) {
   const [title, setTitle] = useState("");
   const [url, setUrl] = useState("");
+  const [nutrient, setNutrient] = useState("");
   const [notes, setNotes] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -543,10 +555,11 @@ function AddTrainingStudyForm({ onAdded }) {
   const submit = async () => {
     setError("");
     if (!title.trim() || !url.trim()) { setError("Title and URL are required."); return; }
+    if (!nutrient.trim()) { setError("Pick (or type) the vitamin/nutrient this study is about."); return; }
     setSaving(true);
     try {
-      await api.addTrainingStudy({ title: title.trim(), url: url.trim(), notes: notes.trim() });
-      setTitle(""); setUrl(""); setNotes("");
+      await api.addTrainingStudy({ title: title.trim(), url: url.trim(), nutrient: nutrient.trim(), notes: notes.trim() });
+      setTitle(""); setUrl(""); setNutrient(""); setNotes("");
       onAdded();
     } catch (e) {
       setError(e.message);
@@ -561,6 +574,7 @@ function AddTrainingStudyForm({ onAdded }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Study title" style={inputStyle} />
         <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="Link (e.g. https://pubmed.ncbi.nlm.nih.gov/...)" style={inputStyle} />
+        <input value={nutrient} onChange={(e) => setNutrient(e.target.value)} placeholder="Vitamin / nutrient (e.g. Vitamin B12)" list="study-nutrient-options" style={inputStyle} />
         <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Why it's relevant (optional)" rows={2} style={{ ...inputStyle, resize: "vertical" }} />
         {error && <div style={{ fontSize: 12, color: "#B33A3A" }}>{error}</div>}
         <div>
@@ -580,6 +594,7 @@ function AddTrainingStudyForm({ onAdded }) {
 function EditTrainingStudyForm({ study, onSaved, onCancel }) {
   const [title, setTitle] = useState(study.title);
   const [url, setUrl] = useState(study.url);
+  const [nutrient, setNutrient] = useState(study.nutrient || "");
   const [notes, setNotes] = useState(study.notes || "");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -587,9 +602,10 @@ function EditTrainingStudyForm({ study, onSaved, onCancel }) {
   const submit = async () => {
     setError("");
     if (!title.trim() || !url.trim()) { setError("Title and URL are required."); return; }
+    if (!nutrient.trim()) { setError("Pick (or type) the vitamin/nutrient this study is about."); return; }
     setSaving(true);
     try {
-      await api.updateTrainingStudy(study.id, { title: title.trim(), url: url.trim(), notes: notes.trim() });
+      await api.updateTrainingStudy(study.id, { title: title.trim(), url: url.trim(), nutrient: nutrient.trim(), notes: notes.trim() });
       onSaved();
     } catch (e) {
       setError(e.message);
@@ -602,6 +618,7 @@ function EditTrainingStudyForm({ study, onSaved, onCancel }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Study title" style={inputStyle} />
       <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="Link" style={inputStyle} />
+      <input value={nutrient} onChange={(e) => setNutrient(e.target.value)} placeholder="Vitamin / nutrient" list="study-nutrient-options" style={inputStyle} />
       <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Why it's relevant (optional)" rows={2} style={{ ...inputStyle, resize: "vertical" }} />
       {error && <div style={{ fontSize: 12, color: "#B33A3A" }}>{error}</div>}
       <div style={{ display: "flex", gap: 8 }}>
@@ -618,12 +635,25 @@ function EditTrainingStudyForm({ study, onSaved, onCancel }) {
   );
 }
 
+const ALL_NUTRIENTS_KEY = "__all__";
+const UNTAGGED_KEY = "__untagged__";
+
+function studyChipStyle(active) {
+  return {
+    padding: "6px 12px", borderRadius: 16, fontSize: 12, fontWeight: 500, whiteSpace: "nowrap",
+    border: active ? "1px solid #1F2A24" : "1px solid #E5DFD3",
+    background: active ? "#1F2A24" : "#fff", color: active ? "#FAF7F2" : "#5B5445",
+  };
+}
+
 export function TrainingStudiesView({ role }) {
   const [studies, setStudies] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
+  const [selectedNutrient, setSelectedNutrient] = useState(ALL_NUTRIENTS_KEY);
+  const [search, setSearch] = useState("");
   const canEdit = role === "manager";
 
   const load = useCallback(() => {
@@ -645,25 +675,76 @@ export function TrainingStudiesView({ role }) {
     }
   };
 
+  // "See our vitamins, then the studies under it" — chips built from
+  // whatever's actually been used on real studies (plus the starter list,
+  // so the very first study added still has real suggestions to pick from),
+  // each with a live count. A study saved before this field existed has no
+  // nutrient at all — those land under "Untagged" rather than being hidden.
+  const usedNutrients = studies ? [...new Set(studies.map((s) => s.nutrient).filter(Boolean))] : [];
+  const nutrientOptions = [...new Set([...usedNutrients, ...NUTRIENT_OPTIONS])].sort();
+  const nutrientCounts = {};
+  let untaggedCount = 0;
+  (studies || []).forEach((s) => {
+    if (s.nutrient) nutrientCounts[s.nutrient] = (nutrientCounts[s.nutrient] || 0) + 1;
+    else untaggedCount += 1;
+  });
+  const chips = [
+    { key: ALL_NUTRIENTS_KEY, label: "All", count: studies?.length || 0 },
+    ...usedNutrients.sort().map((n) => ({ key: n, label: n, count: nutrientCounts[n] })),
+    ...(untaggedCount > 0 ? [{ key: UNTAGGED_KEY, label: "Untagged", count: untaggedCount }] : []),
+  ];
+
+  const q = search.toLowerCase().trim();
+  const filteredStudies = (studies || []).filter((s) => {
+    if (selectedNutrient === ALL_NUTRIENTS_KEY) { /* no nutrient filter */ }
+    else if (selectedNutrient === UNTAGGED_KEY && s.nutrient) return false;
+    else if (selectedNutrient !== UNTAGGED_KEY && s.nutrient !== selectedNutrient) return false;
+    if (!q) return true;
+    return s.title.toLowerCase().includes(q) || (s.notes || "").toLowerCase().includes(q) || (s.nutrient || "").toLowerCase().includes(q);
+  });
+
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Studies</h2>
       <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
-        Reference studies to cite with doctors and pharmacists — tap through to read the source.
+        Reference studies to cite with doctors and pharmacists, organized by vitamin/nutrient — tap through to read the source.
       </p>
 
-      {canEdit && <AddTrainingStudyForm onAdded={load} />}
+      <AddTrainingStudyForm onAdded={load} />
 
       {studies === null && <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>}
       {studies && studies.length === 0 && <EmptyState text="No studies added yet." />}
 
+      {studies && studies.length > 0 && (
+        <>
+          <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+            {chips.map((c) => (
+              <button key={c.key} onClick={() => setSelectedNutrient(c.key)} style={studyChipStyle(selectedNutrient === c.key)}>
+                {c.label} ({c.count})
+              </button>
+            ))}
+          </div>
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search studies…"
+            style={{ ...inputStyle, marginBottom: 14 }}
+          />
+        </>
+      )}
+
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {studies && studies.map((s) => (
+        {studies && filteredStudies.map((s) => (
           <div key={s.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
             {editingId === s.id ? (
               <EditTrainingStudyForm study={s} onSaved={() => { setEditingId(null); load(); }} onCancel={() => setEditingId(null)} />
             ) : (
               <>
+                {s.nutrient && (
+                  <div style={{ display: "inline-block", fontSize: 10.5, fontWeight: 600, color: "#4C7A5E", background: "#F3F7F4", border: "1px solid #CFE0D5", borderRadius: 12, padding: "2px 8px", marginBottom: 6 }}>
+                    {s.nutrient}
+                  </div>
+                )}
                 <a
                   href={s.url}
                   target="_blank"
@@ -674,6 +755,7 @@ export function TrainingStudiesView({ role }) {
                   {s.title} <ExternalLink size={13} />
                 </a>
                 {s.notes && <div style={{ fontSize: 12.5, color: "#5B5445", marginTop: 4 }}>{s.notes}</div>}
+                {s.createdBy && <div style={{ fontSize: 10.5, color: "#B7AF9E", marginTop: 6 }}>Added by {s.createdBy}</div>}
                 {canEdit && (
                   <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3", display: "flex", alignItems: "center", gap: 8 }}>
                     {confirmDeleteId === s.id ? (
@@ -707,7 +789,12 @@ export function TrainingStudiesView({ role }) {
             )}
           </div>
         ))}
+        {studies && studies.length > 0 && filteredStudies.length === 0 && <EmptyState text="No studies match this filter." />}
       </div>
+
+      <datalist id="study-nutrient-options">
+        {nutrientOptions.map((n) => <option key={n} value={n} />)}
+      </datalist>
     </div>
   );
 }

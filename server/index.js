@@ -428,7 +428,7 @@ function parseTrainingProgress(p) {
 }
 
 function parseTrainingStudy(s) {
-  return { id: s.id, title: s.title, url: s.url, notes: s.notes || "", createdAt: s.createdAt };
+  return { id: s.id, title: s.title, url: s.url, notes: s.notes || "", createdAt: s.createdAt, nutrient: s.nutrient || "", createdBy: s.createdBy || "" };
 }
 
 function parsePunch(p) {
@@ -1902,9 +1902,12 @@ app.get("/api/training-studies", async (req, res) => {
   }
 });
 
-app.post("/api/admin/training-studies", requireManager, async (req, res) => {
+// Open to any logged-in employee (not just managers) — reps are the ones
+// out finding relevant studies, same reasoning as opening up the
+// competitor product list. Editing/deleting stays manager-only below.
+app.post("/api/admin/training-studies", async (req, res) => {
   try {
-    const { title, url, notes } = req.body;
+    const { title, url, notes, nutrient } = req.body;
     if (!title || !String(title).trim()) return res.status(400).json({ error: "title is required" });
     if (!url || !String(url).trim()) return res.status(400).json({ error: "url is required" });
     let cleanUrl = String(url).trim();
@@ -1916,10 +1919,13 @@ app.post("/api/admin/training-studies", requireManager, async (req, res) => {
       title: String(title).trim(),
       url: cleanUrl,
       notes: notes ? String(notes).trim() : "",
+      nutrient: nutrient ? String(nutrient).trim() : "",
+      createdBy: req.repName || (req.role === "manager" ? "Manager" : ""),
       createdAt: new Date().toISOString(),
     };
     await db.appendRow("TrainingStudies", study);
-    notifyAllReps({ title: "New training study added", body: `"${study.title}" was just added to Training Studies.`, url: "/" });
+    const nutrientNote = study.nutrient ? ` (${study.nutrient})` : "";
+    notifyAllReps({ title: "New training study added", body: `"${study.title}"${nutrientNote} was just added to Training Studies.`, url: "/" });
     res.json(parseTrainingStudy(study));
   } catch (e) {
     console.error(e);
@@ -1933,7 +1939,7 @@ app.patch("/api/admin/training-studies/:id", requireManager, async (req, res) =>
     const study = rows.find((s) => s.id === req.params.id);
     if (!study) return res.status(404).json({ error: "Study not found" });
 
-    const { title, url, notes } = req.body;
+    const { title, url, notes, nutrient } = req.body;
     const patch = {};
     if (title !== undefined) {
       if (!String(title).trim()) return res.status(400).json({ error: "title can't be empty" });
@@ -1947,6 +1953,7 @@ app.patch("/api/admin/training-studies/:id", requireManager, async (req, res) =>
       patch.url = cleanUrl;
     }
     if (notes !== undefined) patch.notes = String(notes).trim();
+    if (nutrient !== undefined) patch.nutrient = String(nutrient).trim();
     if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
 
     await db.updateRowById("TrainingStudies", study.id, patch);
