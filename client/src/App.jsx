@@ -55,6 +55,21 @@ const savePendingOrders = (list) => {
   try { localStorage.setItem(PENDING_ORDERS_KEY, JSON.stringify(list)); } catch { /* storage unavailable — nothing more we can do */ }
 };
 
+// Pharmacies/doctors/products only ever lived in React state, refetched
+// fresh on every app load — fine online, but it meant a rep opening the app
+// with no reception at all (not mid-session, but a fresh load/reopen) saw
+// an empty list and got told a real, already-registered pharmacy "isn't in
+// the system yet". Caching the last successful fetch here means a fresh
+// load while offline still has yesterday's (or this morning's) list to
+// check in against, instead of nothing.
+const REFERENCE_CACHE_KEY = "kb_reference_cache";
+const loadReferenceCache = () => {
+  try { return JSON.parse(localStorage.getItem(REFERENCE_CACHE_KEY) || "{}"); } catch { return {}; }
+};
+const saveReferenceCache = (data) => {
+  try { localStorage.setItem(REFERENCE_CACHE_KEY, JSON.stringify(data)); } catch { /* storage unavailable — nothing more we can do */ }
+};
+
 // Distinguishes "the request never reached the server" (no reception — safe
 // to queue and retry later) from "the server responded but rejected it"
 // (a real validation/business error — retrying unchanged would just fail
@@ -125,10 +140,12 @@ export default function App() {
   // "Reference" tier — Products/Clients/Doctors — loaded once at login, then
   // refreshed on a slow timer (see REFERENCE_POLL_INTERVAL_MS below), not
   // the fast 30s poll. These are needed broadly for search/autocomplete but
-  // tolerate being a few minutes stale.
-  const [products, setProducts] = useState([]);
-  const [clients, setClients] = useState([]);
-  const [doctors, setDoctors] = useState([]);
+  // tolerate being a few minutes stale. Seeded from the last successful
+  // fetch (see REFERENCE_CACHE_KEY) so a fresh app load with no reception
+  // at all still has something to check in against, instead of an empty list.
+  const [products, setProducts] = useState(() => loadReferenceCache().products || []);
+  const [clients, setClients] = useState(() => loadReferenceCache().clients || []);
+  const [doctors, setDoctors] = useState(() => loadReferenceCache().doctors || []);
   // "Live" tier — small, polled every 30s as before.
   const [repNames, setRepNames] = useState([]);
   const [offers, setOffers] = useState([]);
@@ -182,9 +199,13 @@ export default function App() {
   const refreshReference = useCallback(async (opts) => {
     try {
       const data = await api.bootstrapReference(opts);
-      setProducts(data.products || []);
-      setClients(data.clients || []);
-      setDoctors(data.doctors || []);
+      const products = data.products || [];
+      const clients = data.clients || [];
+      const doctors = data.doctors || [];
+      setProducts(products);
+      setClients(clients);
+      setDoctors(doctors);
+      saveReferenceCache({ products, clients, doctors });
     } catch (e) {
       setLoadError(e.message);
     }
