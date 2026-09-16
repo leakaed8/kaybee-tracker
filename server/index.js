@@ -626,7 +626,7 @@ app.post("/api/push/subscribe", async (req, res) => {
 // VisitComments, CompetitorProducts) is dropped entirely in favor of scoped,
 // on-demand endpoints fetched only by the specific view that needs them.
 const LIVE_BOOTSTRAP_TABS = ["Reps", "Offers", "Competitors", "PunchLog"];
-const REFERENCE_BOOTSTRAP_TABS = ["Products", "Clients", "Doctors"];
+const REFERENCE_BOOTSTRAP_TABS = ["Products", "Clients", "Doctors", "ProductCatalog"];
 
 // See the comment above BOOTSTRAP_CACHE_TTL_MS's old location: this cache
 // lets concurrent sessions polling within the same few seconds share one
@@ -686,12 +686,13 @@ async function buildReferenceBootstrapPayload() {
     db.getAllRowsBatch(REFERENCE_BOOTSTRAP_TABS),
     db.getAllRows("StockMovement"),
   ]);
-  const { Products: products, Clients: clients, Doctors: doctors } = batch;
+  const { Products: products, Clients: clients, Doctors: doctors, ProductCatalog: productCatalog } = batch;
   const movementIndex = buildMovementIndex(stockMovement);
   return {
     products: products.map((p) => ({ ...parseProduct(p), avgMonthlyMovement: avgMonthlyMovementFor(p.name, movementIndex) })),
     clients,
     doctors,
+    productCatalog,
   };
 }
 
@@ -1009,26 +1010,113 @@ app.post("/api/products/import-bulk", async (req, res) => {
   }
 });
 
-// Open to any logged-in employee, same as competitor products — filling in
-// a product's dosage/pack size/ingredients is additive reference data, not
-// a change to core stock (qty/price/expiry stay manager-only via the Excel
-// import above). Every save stamps who last touched it.
-app.patch("/api/products/:id/details", async (req, res) => {
+// ---------- Product Catalog (manager-curated master list, decoupled from Stock) ----------
+// Stock (the Products tab above) tracks per-batch qty + expiry and gets
+// fully replaced on every re-import, so it's the wrong place to hang
+// dosage/pack-size/ingredient details a manager wants to keep permanently.
+// This is a separate, independent list — every product the company
+// carries, regardless of what's currently in stock or which batch/expiry —
+// and it's what "Compare with our product" under Competitors reads from.
+app.post("/api/product-catalog", requireManager, async (req, res) => {
   try {
+    if (!req.body.name || !String(req.body.name).trim()) return res.status(400).json({ error: "Product name is required." });
     const validationError = validateCompetitorProductNumbers(req.body);
     if (validationError) return res.status(400).json({ error: validationError });
-    const { form, packSize, unitsPerDay } = req.body;
-    const patch = {
-      form: form || "",
-      packSize: packSize === "" || packSize == null ? "" : Number(packSize),
-      unitsPerDay: unitsPerDay === "" || unitsPerDay == null ? "" : Number(unitsPerDay),
+    const product = {
+      id: `pc${crypto.randomUUID()}`,
+      name: String(req.body.name).trim(),
+      price: req.body.price === "" || req.body.price == null ? "" : Number(req.body.price),
+      form: req.body.form || "",
+      packSize: req.body.packSize === "" || req.body.packSize == null ? "" : Number(req.body.packSize),
+      unitsPerDay: req.body.unitsPerDay === "" || req.body.unitsPerDay == null ? "" : Number(req.body.unitsPerDay),
       ingredients: normalizeIngredients(req.body.ingredients),
-      updatedBy: req.repName || (req.role === "manager" ? "Manager" : ""),
-      updatedAt: new Date().toISOString(),
+      notes: req.body.notes || "",
+      createdBy: req.repName || "Manager",
+      createdAt: new Date().toISOString(),
+      updatedBy: "",
+      updatedAt: "",
     };
-    const ok = await db.updateRowById("Products", req.params.id, patch);
+    await db.appendRow("ProductCatalog", product);
+    res.json(product);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/product-catalog/:id", requireManager, async (req, res) => {
+  try {
+    if (req.body.name !== undefined && !String(req.body.name).trim()) return res.status(400).json({ error: "Product name is required." });
+    const validationError = validateCompetitorProductNumbers(req.body);
+    if (validationError) return res.status(400).json({ error: validationError });
+    const patch = { updatedBy: req.repName || "Manager", updatedAt: new Date().toISOString() };
+    if (req.body.name !== undefined) patch.name = String(req.body.name).trim();
+    if (req.body.price !== undefined) patch.price = req.body.price === "" ? "" : Number(req.body.price);
+    if (req.body.form !== undefined) patch.form = req.body.form || "";
+    if (req.body.packSize !== undefined) patch.packSize = req.body.packSize === "" ? "" : Number(req.body.packSize);
+    if (req.body.unitsPerDay !== undefined) patch.unitsPerDay = req.body.unitsPerDay === "" ? "" : Number(req.body.unitsPerDay);
+    if (req.body.ingredients !== undefined) patch.ingredients = normalizeIngredients(req.body.ingredients);
+    if (req.body.notes !== undefined) patch.notes = req.body.notes || "";
+    const ok = await db.updateRowById("ProductCatalog", req.params.id, patch);
     if (!ok) return res.status(404).json({ error: "Product not found" });
     res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/product-catalog/:id", requireManager, async (req, res) => {
+  try {
+    await db.deleteRowById("ProductCatalog", req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Additive, not a full replace like Stock's import — this is a growing
+// master list, not a snapshot of "what's on the shelf right now", so a
+// partial re-export shouldn't delete products left out of it. Matches by
+// name (case-insensitive): an existing product gets its price refreshed
+// (if the sheet provides one) while keeping whatever details a manager
+// already filled in; a name not seen before is added as a new product.
+app.post("/api/product-catalog/import-bulk", requireManager, async (req, res) => {
+  try {
+    const { products } = req.body;
+    const rows = Array.isArray(products) ? products.filter((p) => p.name && String(p.name).trim()) : [];
+    if (rows.length === 0) return res.status(400).json({ error: "No products provided" });
+
+    const existing = await db.getAllRows("ProductCatalog");
+    const existingByName = new Map(existing.map((p) => [String(p.name).trim().toLowerCase(), p]));
+    const seen = new Set();
+    const toAdd = [];
+    const toUpdate = [];
+    for (const row of rows) {
+      const key = String(row.name).trim().toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const prior = existingByName.get(key);
+      if (prior) {
+        if (row.price !== undefined && row.price !== "" && row.price !== null) {
+          toUpdate.push({ id: prior.id, price: Number(row.price) || 0 });
+        }
+      } else {
+        toAdd.push({
+          id: `pc${crypto.randomUUID()}`,
+          name: String(row.name).trim(),
+          price: row.price === "" || row.price == null ? "" : Number(row.price) || 0,
+          form: "", packSize: "", unitsPerDay: "", ingredients: "", notes: "",
+          createdBy: `${req.repName || "Manager"} (Excel import)`,
+          createdAt: new Date().toISOString(),
+          updatedBy: "", updatedAt: "",
+        });
+      }
+    }
+    if (toAdd.length > 0) await db.appendRows("ProductCatalog", toAdd);
+    for (const u of toUpdate) await db.updateRowById("ProductCatalog", u.id, { price: u.price });
+    res.json({ ok: true, added: toAdd.length, updated: toUpdate.length });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

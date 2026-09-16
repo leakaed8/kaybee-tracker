@@ -146,6 +146,7 @@ export default function App() {
   const [products, setProducts] = useState(() => loadReferenceCache().products || []);
   const [clients, setClients] = useState(() => loadReferenceCache().clients || []);
   const [doctors, setDoctors] = useState(() => loadReferenceCache().doctors || []);
+  const [productCatalog, setProductCatalog] = useState(() => loadReferenceCache().productCatalog || []);
   // "Live" tier — small, polled every 30s as before.
   const [repNames, setRepNames] = useState([]);
   const [offers, setOffers] = useState([]);
@@ -202,10 +203,12 @@ export default function App() {
       const products = data.products || [];
       const clients = data.clients || [];
       const doctors = data.doctors || [];
+      const productCatalog = data.productCatalog || [];
       setProducts(products);
       setClients(clients);
       setDoctors(doctors);
-      saveReferenceCache({ products, clients, doctors });
+      setProductCatalog(productCatalog);
+      saveReferenceCache({ products, clients, doctors, productCatalog });
     } catch (e) {
       setLoadError(e.message);
     }
@@ -375,7 +378,10 @@ export default function App() {
 
   const todayStr = new Date().toISOString().slice(0, 10);
   const removeProduct = (id) => withSync(() => api.removeProduct(id), { touchesReference: true });
-  const updateProductDetails = (id, patch) => withSync(() => api.updateProductDetails(id, patch), { touchesReference: true });
+  const addCatalogProduct = (product) => withSync(() => api.addCatalogProduct(product), { touchesReference: true });
+  const updateCatalogProduct = (id, patch) => withSync(() => api.updateCatalogProduct(id, patch), { touchesReference: true });
+  const removeCatalogProduct = (id) => withSync(() => api.removeCatalogProduct(id), { touchesReference: true });
+  const bulkImportCatalogProducts = (products) => withSync(() => api.importCatalogProductsBulk(products), { touchesReference: true });
   const bulkImportProducts = (products) => withSync(() => api.importBulkProducts(products), { touchesReference: true });
   const addVisit = (visit) => withSync(() => api.addVisit(visit), { touchesReference: true }); // can silently set a client's assignedRep server-side
   const removeVisit = (id) => withSync(() => api.removeVisit(id));
@@ -565,7 +571,7 @@ export default function App() {
                 myLastPunch={myLastPunch}
               />
             )}
-            {tab === "stock" && <StockView products={sorted} onUpdateDetails={updateProductDetails} />}
+            {tab === "stock" && <StockView products={sorted} />}
             {tab === "clients" && !supplementStoresOnly && !medRepOnly && (
               <ClientsView
                 clients={clients}
@@ -629,7 +635,7 @@ export default function App() {
               <CompetitorsView
                 canEdit={role === "manager"}
                 competitors={competitors}
-                ourProducts={products}
+                ourProducts={productCatalog}
                 onAdd={addCompetitor}
                 onUpdate={updateCompetitor}
                 onRemove={removeCompetitor}
@@ -686,6 +692,11 @@ export default function App() {
                 onAddOffer={addOffer}
                 onToggleOfferActive={toggleOfferActive}
                 onRemoveOffer={removeOffer}
+                productCatalog={productCatalog}
+                onAddCatalogProduct={addCatalogProduct}
+                onUpdateCatalogProduct={updateCatalogProduct}
+                onRemoveCatalogProduct={removeCatalogProduct}
+                onBulkImportCatalogProducts={bulkImportCatalogProducts}
               />
             )}
           </>
@@ -942,10 +953,9 @@ function ProductRow({ product, repPhone, onRemove }) {
 // instead of red/yellow/green zones — for "is this even in stock" checks
 // that don't need the full expiry-urgency framing, e.g. while on a call
 // with a pharmacy and not going through the order flow at all.
-function StockView({ products, onUpdateDetails }) {
+function StockView({ products }) {
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("all");
-  const [expandedId, setExpandedId] = useState(null);
 
   const categories = Array.from(new Set(products.map((p) => p.category).filter(Boolean))).sort();
 
@@ -993,43 +1003,20 @@ function StockView({ products, onUpdateDetails }) {
                 <th style={{ padding: "6px 8px" }}>Qty</th>
                 <th style={{ padding: "6px 8px" }}>Price</th>
                 <th style={{ padding: "6px 8px" }}>Expiry</th>
-                <th style={{ padding: "6px 8px" }}>Details</th>
               </tr>
             </thead>
             <tbody>
-              {shown.map((p) => {
-                const hasDetails = Boolean(p.form || p.packSize || getIngredients(p).length);
-                const isOpen = expandedId === p.id;
-                return (
-                  <React.Fragment key={p.id}>
-                    <tr style={{ borderTop: "1px solid #E5DFD3" }}>
-                      <td style={{ padding: "6px 8px", fontWeight: 500 }}>{p.name}</td>
-                      <td style={{ padding: "6px 8px", color: "#8A8272" }}>{p.category || "-"}</td>
-                      <td style={{ padding: "6px 8px", fontWeight: 600, color: p.qty > 0 ? "#4C7A5E" : "#B33A3A" }}>
-                        {p.qty > 0 ? p.qty : "Out of stock"}
-                      </td>
-                      <td style={{ padding: "6px 8px" }}>{p.price ? p.price.toFixed(2) : "-"}</td>
-                      <td className="kb-font-mono" style={{ padding: "6px 8px", color: p.zone?.color || "#8A8272" }}>{fmtDate(p.expiry)}</td>
-                      <td style={{ padding: "6px 8px" }}>
-                        <button
-                          onClick={() => setExpandedId(isOpen ? null : p.id)}
-                          style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11.5, fontWeight: 500, color: hasDetails ? "#4C7A5E" : "#8A8272", background: "none", border: "none", padding: "2px 0" }}
-                        >
-                          <ChevronDown size={13} style={{ transform: isOpen ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
-                          {hasDetails ? "Details" : "Add details"}
-                        </button>
-                      </td>
-                    </tr>
-                    {isOpen && (
-                      <tr>
-                        <td colSpan={6} style={{ padding: "0 8px 12px" }}>
-                          <ProductDetailsPanel product={p} onSave={(patch) => onUpdateDetails(p.id, patch)} />
-                        </td>
-                      </tr>
-                    )}
-                  </React.Fragment>
-                );
-              })}
+              {shown.map((p) => (
+                <tr key={p.id} style={{ borderTop: "1px solid #E5DFD3" }}>
+                  <td style={{ padding: "6px 8px", fontWeight: 500 }}>{p.name}</td>
+                  <td style={{ padding: "6px 8px", color: "#8A8272" }}>{p.category || "-"}</td>
+                  <td style={{ padding: "6px 8px", fontWeight: 600, color: p.qty > 0 ? "#4C7A5E" : "#B33A3A" }}>
+                    {p.qty > 0 ? p.qty : "Out of stock"}
+                  </td>
+                  <td style={{ padding: "6px 8px" }}>{p.price ? p.price.toFixed(2) : "-"}</td>
+                  <td className="kb-font-mono" style={{ padding: "6px 8px", color: p.zone?.color || "#8A8272" }}>{fmtDate(p.expiry)}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
@@ -1041,125 +1028,6 @@ function StockView({ products, onUpdateDetails }) {
           Showing the first {LIST_DISPLAY_CAP} of {filtered.length.toLocaleString()} — narrow your search to see more.
         </div>
       )}
-    </div>
-  );
-}
-
-// Shows the dosage/pack-size/ingredient details behind each product's
-// computed days-supply and cost/day (or an "Add details" form if none are
-// recorded yet) — the same data "Compare with our product" under
-// Competitors pulls from. Open to any employee: this is additive reference
-// data, not a change to core stock (qty/price/expiry stay Excel-import only).
-function ProductDetailsPanel({ product, onSave }) {
-  const hasDetails = Boolean(product.form || product.packSize || getIngredients(product).length);
-  const [editing, setEditing] = useState(!hasDetails);
-
-  if (editing) {
-    return (
-      <ProductDetailsForm
-        product={product}
-        onCancel={hasDetails ? () => setEditing(false) : null}
-        onSave={async (patch) => {
-          await onSave(patch);
-          setEditing(false);
-        }}
-      />
-    );
-  }
-
-  const m = computeMetrics(product);
-  const ingredients = getIngredients(product);
-  return (
-    <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 12 }}>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 16, fontSize: 12.5, marginBottom: 8 }}>
-        {ingredients.length > 0 && <div><span style={{ color: "#8A8272" }}>Ingredients: </span>{formatIngredients(ingredients)}</div>}
-        {product.form && <div><span style={{ color: "#8A8272" }}>Form: </span>{product.form}</div>}
-        {product.packSize && <div><span style={{ color: "#8A8272" }}>Pack size: </span>{product.packSize} units</div>}
-        {product.unitsPerDay && <div><span style={{ color: "#8A8272" }}>Taken: </span>{product.unitsPerDay}/day</div>}
-        {product.sku && <div><span style={{ color: "#8A8272" }}>SKU: </span>{product.sku}</div>}
-      </div>
-      {m.hasPackSize && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 16, fontSize: 12, marginBottom: 8 }}>
-          <MetricPreviewItem label="Days supply" value={m.daysSupply != null ? `${fmtDays(m.daysSupply)} days` : "—"} />
-          <MetricPreviewItem label="Cost/day" value={fmtMoney(m.costPerDay)} />
-          <MetricPreviewItem label="Cost/month" value={fmtMoney(m.costPerMonth)} />
-        </div>
-      )}
-      {product.updatedBy && (
-        <div style={{ fontSize: 10.5, color: "#8A8272", marginBottom: 6 }}>
-          Last edited by {product.updatedBy}{product.updatedAt ? ` · ${fmtDate(product.updatedAt)}` : ""}
-        </div>
-      )}
-      <button onClick={() => setEditing(true)} style={{ fontSize: 11.5, color: "#4C7A5E", background: "none", border: "none", padding: 0, display: "block" }}>
-        Edit details
-      </button>
-    </div>
-  );
-}
-
-function ProductDetailsForm({ product, onSave, onCancel }) {
-  const existingIngredients = getIngredients(product);
-  const [f, setF] = useState({
-    form: product.form || "",
-    packSize: product.packSize || "",
-    unitsPerDay: product.unitsPerDay || "1",
-    ingredients: existingIngredients.length
-      ? existingIngredients.map((i) => ({ name: i.name, form: i.form || "", amount: i.amount ?? "", unit: i.unit || "mg" }))
-      : [{ name: "", form: "", amount: "", unit: "mg" }],
-  });
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-  const set = (patch) => setF((prev) => ({ ...prev, ...patch }));
-
-  const save = async () => {
-    if (f.packSize !== "" && (toNum(f.packSize) === null || toNum(f.packSize) <= 0)) return setError("Pack size must be greater than zero.");
-    if (f.unitsPerDay !== "" && (toNum(f.unitsPerDay) === null || toNum(f.unitsPerDay) <= 0)) return setError("Units per day must be greater than zero.");
-    for (const ing of f.ingredients) {
-      if (ing.amount !== "" && ing.amount != null && toNum(ing.amount) === null) return setError(`"${ing.name || "Ingredient"}" needs a valid numeric amount.`);
-    }
-    setSaving(true);
-    setError("");
-    try {
-      await onSave({ form: f.form, packSize: f.packSize, unitsPerDay: f.unitsPerDay, ingredients: f.ingredients });
-    } catch (e) {
-      setError(e.message || "Couldn't save.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 12 }}>
-      <div style={sectionLabelStyle}>PRODUCT DETAILS — {product.name}</div>
-      <Field label="Active ingredient(s)">
-        <IngredientsEditor ingredients={f.ingredients} onChange={(ingredients) => set({ ingredients })} />
-      </Field>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 10 }}>
-        <Field label="Form">
-          <select value={f.form} onChange={(e) => set({ form: e.target.value })} style={inputStyle}>
-            <option value="">Select…</option>
-            {FORM_OPTIONS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
-          </select>
-        </Field>
-        <Field label="Pack size (units)">
-          <input value={f.packSize} onChange={(e) => set({ packSize: e.target.value })} type="number" min="0" placeholder="e.g. 60" style={inputStyle} />
-        </Field>
-        <Field label="Taken (units/day)">
-          <input value={f.unitsPerDay} onChange={(e) => set({ unitsPerDay: e.target.value })} type="number" min="0" placeholder="1" style={inputStyle} />
-        </Field>
-      </div>
-      <ProductMetricsPreview product={{ ...f, price: product.price }} />
-      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
-      <div style={{ display: "flex", gap: 8 }}>
-        <button disabled={saving} onClick={save} style={{ padding: "6px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12, fontWeight: 500 }}>
-          {saving ? "Saving…" : "Save details"}
-        </button>
-        {onCancel && (
-          <button type="button" onClick={onCancel} style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12 }}>
-            Cancel
-          </button>
-        )}
-      </div>
     </div>
   );
 }
@@ -4243,10 +4111,10 @@ function ProductAdvancedDetails({ p }) {
   );
 }
 
-// Our own Products only get a real cost/day and days-supply once someone
-// has filled in its dosage/pack size under Stock ("Add details") — until
-// then this stays an honest price-only comparison rather than fabricating
-// a number from missing data.
+// Searches the Product Catalog (Settings → Product Catalog), not Stock —
+// a catalog entry only gets a real cost/day and days-supply once a manager
+// has filled in its dosage/pack size there; until then this stays an
+// honest price-only comparison rather than fabricating a number.
 function CompareWithOurProduct({ competitor, ourProducts, onClose }) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(null);
@@ -4289,7 +4157,7 @@ function CompareWithOurProduct({ competitor, ourProducts, onClose }) {
           )}
           {!om?.hasPackSize && (
             <div style={{ fontSize: 11, color: "#8A8272", marginTop: 8, fontStyle: "italic" }}>
-              Dose and pack size for {selected.name} aren't recorded yet — add them under Stock ("Add details") to compare days supply and cost/day.
+              Dose and pack size for {selected.name} aren't recorded yet — a manager can add them under Settings → Product Catalog to compare days supply and cost/day.
             </div>
           )}
           <button onClick={() => setSelected(null)} style={{ fontSize: 11.5, color: "#4C7A5E", background: "none", border: "none", padding: "6px 0 0", display: "block" }}>
@@ -7435,6 +7303,353 @@ function OutreachView({ dailyTarget, contactedToday, templates, todayStr, onLog 
   );
 }
 
+// ---------- Product Catalog (manager-only, independent of Stock) ----------
+// A master list of every product the company carries, separate from the
+// Stock tab's per-batch expiry/qty rows — this is what "Compare with our
+// product" under Competitors searches, so a product's dosage/pack-size
+// details survive regardless of which expiry batch happens to be in stock.
+function validateCatalogProductForm(f) {
+  if (!f.name?.trim()) return "Product name is required.";
+  if (f.price !== "" && f.price != null) {
+    const price = toNum(f.price);
+    if (price === null || price < 0) return "Public price can't be negative.";
+  }
+  if (f.packSize !== "" && f.packSize != null) {
+    const packSize = toNum(f.packSize);
+    if (packSize === null || packSize <= 0) return "Pack size must be greater than zero.";
+  }
+  if (f.unitsPerDay !== "" && f.unitsPerDay != null) {
+    const upd = toNum(f.unitsPerDay);
+    if (upd === null || upd <= 0) return "Units per day must be greater than zero.";
+  }
+  for (const ing of f.ingredients || []) {
+    if (ing.amount !== "" && ing.amount != null && toNum(ing.amount) === null) {
+      return `"${ing.name || "Ingredient"}" needs a valid numeric amount.`;
+    }
+  }
+  return null;
+}
+
+function emptyCatalogProductForm() {
+  return {
+    name: "", price: "",
+    ingredients: [{ name: "", form: "", amount: "", unit: "mg" }],
+    form: "", packSize: "", unitsPerDay: "1", notes: "",
+  };
+}
+
+function toCatalogProductFormShape(p) {
+  const ingredients = getIngredients(p);
+  return {
+    name: p.name || "", price: p.price ?? "",
+    ingredients: ingredients.length ? ingredients.map((i) => ({ name: i.name, form: i.form || "", amount: i.amount ?? "", unit: i.unit || "mg" })) : [{ name: "", form: "", amount: "", unit: "mg" }],
+    form: p.form || "", packSize: p.packSize ?? "", unitsPerDay: p.unitsPerDay || "1", notes: p.notes || "",
+  };
+}
+
+function CatalogProductForm({ initial, saving, error, submitLabel, onCancel, onSubmit }) {
+  const [f, setF] = useState(initial);
+  const set = (patch) => setF((prev) => ({ ...prev, ...patch }));
+  const submit = () => {
+    const validationError = validateCatalogProductForm(f);
+    if (validationError) { onSubmit(f, validationError); return; }
+    onSubmit(f);
+  };
+  return (
+    <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 12, marginBottom: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 10, marginBottom: 10 }}>
+        <Field label="Product name">
+          <input value={f.name} onChange={(e) => set({ name: e.target.value })} placeholder="e.g. Magnesium + Vitamin B6 (Alfa)" style={inputStyle} />
+        </Field>
+        <Field label="Public price">
+          <input value={f.price} onChange={(e) => set({ price: e.target.value })} type="number" min="0" placeholder="e.g. 21.65" style={inputStyle} />
+        </Field>
+      </div>
+      <Field label="Active ingredient(s)">
+        <IngredientsEditor ingredients={f.ingredients} onChange={(ingredients) => set({ ingredients })} />
+      </Field>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 10 }}>
+        <Field label="Form">
+          <select value={f.form} onChange={(e) => set({ form: e.target.value })} style={inputStyle}>
+            <option value="">Select…</option>
+            {FORM_OPTIONS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+          </select>
+        </Field>
+        <Field label="Pack size (units)">
+          <input value={f.packSize} onChange={(e) => set({ packSize: e.target.value })} type="number" min="0" placeholder="e.g. 60" style={inputStyle} />
+        </Field>
+        <Field label="Taken (units/day)">
+          <input value={f.unitsPerDay} onChange={(e) => set({ unitsPerDay: e.target.value })} type="number" min="0" placeholder="1" style={inputStyle} />
+        </Field>
+      </div>
+      <ProductMetricsPreview product={f} />
+      <textarea value={f.notes} onChange={(e) => set({ notes: e.target.value })} placeholder="Notes (optional)" rows={2} style={{ ...inputStyle, resize: "vertical", marginBottom: 10 }} />
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button disabled={saving} onClick={submit} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+          {saving ? "Saving…" : submitLabel}
+        </button>
+        <button type="button" onClick={onCancel} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// Deliberately simple and additive — just a name (required) and price
+// (optional) column, no expiry/qty. Never deletes a product left out of
+// the sheet; a name already in the catalog just gets its price refreshed,
+// keeping whatever dosage/pack-size details a manager already filled in.
+function CatalogProductExcelImportSection({ onImport, onDone }) {
+  const [headers, setHeaders] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [mapping, setMapping] = useState({ name: "", price: "" });
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setError("");
+    setResult(null);
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: "array" });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+        const headerRow = (json[0] || []).map((h, i) => (h === "" ? `Column ${i + 1}` : String(h)));
+        const dataRows = json.slice(1).filter((r) => r.some((cell) => cell !== ""));
+        setHeaders(headerRow);
+        setRows(dataRows);
+        setMapping({ name: "", price: "" });
+      } catch {
+        setError("Couldn't read that file. Make sure it's a valid Excel (.xlsx) file.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const parsed = useMemo(() => {
+    if (!mapping.name) return [];
+    const nameIdx = headers.indexOf(mapping.name);
+    const priceIdx = headers.indexOf(mapping.price);
+    return rows
+      .map((r) => ({ name: String(r[nameIdx] ?? "").trim(), price: priceIdx >= 0 ? r[priceIdx] : "" }))
+      .filter((p) => p.name);
+  }, [mapping, rows, headers]);
+
+  const doImport = async () => {
+    setImporting(true);
+    setError("");
+    try {
+      const res = await onImport(parsed);
+      setResult(res);
+      setHeaders([]);
+      setRows([]);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    } catch (e) {
+      setError(e.message || "Import failed.");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 12, marginBottom: 12 }}>
+      <p style={{ fontSize: 12, color: "#5B5445", marginBottom: 8 }}>
+        Upload a simple list of every product you carry — just a name column (and optionally price). This adds any new names to the catalog and refreshes the price on ones that already exist; it never deletes anything, and it's completely separate from the Stock/expiry sheet.
+      </p>
+      <button onClick={() => fileInputRef.current?.click()} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 8, background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 12.5, fontWeight: 500, marginBottom: 8 }}>
+        <Upload size={13} /> Choose Excel file
+      </button>
+      <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ display: "none" }} />
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
+      {result && (
+        <div style={{ fontSize: 12, color: "#4C7A5E", marginBottom: 8 }}>
+          Added {result.added} new product{result.added === 1 ? "" : "s"}, refreshed the price on {result.updated} existing one{result.updated === 1 ? "" : "s"}.
+        </div>
+      )}
+      {headers.length > 0 && (
+        <div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+            <div>
+              <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>Product name column *</label>
+              <select value={mapping.name} onChange={(e) => setMapping((m) => ({ ...m, name: e.target.value }))} style={inputStyle}>
+                <option value="">— select a column —</option>
+                {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>Price column (optional)</label>
+              <select value={mapping.price} onChange={(e) => setMapping((m) => ({ ...m, price: e.target.value }))} style={inputStyle}>
+                <option value="">— none —</option>
+                {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </div>
+          </div>
+          {mapping.name && (
+            <>
+              <div style={{ fontSize: 12, color: "#5B5445", marginBottom: 8 }}>{parsed.length} products ready to import.</div>
+              <button
+                disabled={parsed.length === 0 || importing}
+                onClick={doImport}
+                style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: parsed.length && !importing ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
+              >
+                {importing ? "Importing…" : `Import ${parsed.length} product${parsed.length === 1 ? "" : "s"}`}
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBulk }) {
+  const [search, setSearch] = useState("");
+  const [showAdd, setShowAdd] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [showImport, setShowImport] = useState(false);
+
+  const list = products || [];
+  const q = search.toLowerCase().trim();
+  const filtered = q ? list.filter((p) => p.name.toLowerCase().includes(q)) : list;
+  const shown = filtered.slice(0, LIST_DISPLAY_CAP);
+
+  const submitAdd = async (f, validationError) => {
+    if (validationError) return setError(validationError);
+    setSaving(true);
+    setError("");
+    try {
+      await onAdd(f);
+      setShowAdd(false);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const submitEdit = async (id, f, validationError) => {
+    if (validationError) return setError(validationError);
+    setSaving(true);
+    setError("");
+    try {
+      await onUpdate(id, f);
+      setEditingId(null);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
+        <div>
+          <div style={{ fontSize: 14.5, fontWeight: 600 }}>Product Catalog</div>
+          <p style={{ fontSize: 12, color: "#8A8272", margin: "2px 0 0", maxWidth: 480 }}>
+            Every product the company carries, independent of Stock's expiry batches — this is what "Compare with our product" under Competitors reads from.
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={() => { setShowImport((v) => !v); setShowAdd(false); }} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "7px 12px" }}>
+            <Upload size={13} /> Import Excel
+          </button>
+          <button onClick={() => { setShowAdd((v) => !v); setEditingId(null); setError(""); setShowImport(false); }} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, background: "#1F2A24", color: "#FAF7F2", border: "none", borderRadius: 8, padding: "7px 12px" }}>
+            <Plus size={13} /> Add product
+          </button>
+        </div>
+      </div>
+
+      {showImport && <CatalogProductExcelImportSection onImport={onImportBulk} onDone={() => setShowImport(false)} />}
+
+      {showAdd && (
+        <CatalogProductForm
+          initial={emptyCatalogProductForm()}
+          saving={saving}
+          error={error}
+          submitLabel="Save product"
+          onCancel={() => { setShowAdd(false); setError(""); }}
+          onSubmit={submitAdd}
+        />
+      )}
+
+      <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search the catalog…" style={{ ...inputStyle, marginBottom: 10 }} />
+
+      {shown.length === 0 ? (
+        <EmptyState text={q ? "No products match." : "No products in the catalog yet — add one or import an Excel list."} />
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {shown.map((p) => {
+            const m = computeMetrics(p);
+            const ingredients = getIngredients(p);
+            return editingId === p.id ? (
+              <CatalogProductForm
+                key={p.id}
+                initial={toCatalogProductFormShape(p)}
+                saving={saving}
+                error={error}
+                submitLabel="Save changes"
+                onCancel={() => { setEditingId(null); setError(""); }}
+                onSubmit={(f, validationError) => submitEdit(p.id, f, validationError)}
+              />
+            ) : (
+              <div key={p.id} style={{ border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 13.5, fontWeight: 600 }}>{p.name}</div>
+                    <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 2 }}>
+                      {ingredients.length > 0 ? formatIngredients(ingredients) : "No ingredients recorded"}
+                      {p.form ? ` · ${p.form}` : ""}{p.packSize ? ` · pack of ${p.packSize}` : ""}
+                    </div>
+                    {m.hasPackSize && (
+                      <div style={{ fontSize: 11.5, color: "#4C7A5E", marginTop: 4 }}>
+                        {fmtDays(m.daysSupply)} days supply · {fmtMoney(m.costPerDay)}/day · {fmtMoney(m.costPerMonth)}/month
+                      </div>
+                    )}
+                    {p.updatedBy && (
+                      <div style={{ fontSize: 10.5, color: "#8A8272", marginTop: 4 }}>
+                        Last edited by {p.updatedBy}{p.updatedAt ? ` · ${fmtDate(p.updatedAt)}` : ""}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>{p.price !== "" && p.price != null ? fmtMoney(Number(p.price)) : "—"}</div>
+                    <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                      <button onClick={() => { setEditingId(p.id); setShowAdd(false); setError(""); }} style={{ fontSize: 11.5, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "4px 8px" }}>Edit</button>
+                      {confirmDeleteId === p.id ? (
+                        <>
+                          <button onClick={() => onRemove(p.id)} style={{ fontSize: 11.5, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "4px 8px" }}>Yes</button>
+                          <button onClick={() => setConfirmDeleteId(null)} style={{ fontSize: 11.5, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "4px 8px" }}>Cancel</button>
+                        </>
+                      ) : (
+                        <button onClick={() => setConfirmDeleteId(p.id)} style={{ fontSize: 11.5, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "4px 8px" }}>Delete</button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {filtered.length > LIST_DISPLAY_CAP && (
+        <div style={{ fontSize: 11, color: "#8A8272", marginTop: 8 }}>
+          Showing the first {LIST_DISPLAY_CAP} of {filtered.length.toLocaleString()} — search to narrow.
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------- Excel upload with column mapping ----------
 function ExcelImportSection({ onImport, productCount }) {
   const [sheetNames, setSheetNames] = useState([]);
@@ -8480,7 +8695,7 @@ function PharmacyPickupImportSection() {
 }
 
 // ---------- Settings ----------
-function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer }) {
+function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts }) {
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Settings</h2>
@@ -8496,6 +8711,16 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
       )}
 
       {role === "manager" && <ExcelImportSection onImport={onBulkImport} productCount={productCount} />}
+
+      {role === "manager" && (
+        <ProductCatalogSection
+          products={productCatalog}
+          onAdd={onAddCatalogProduct}
+          onUpdate={onUpdateCatalogProduct}
+          onRemove={onRemoveCatalogProduct}
+          onImportBulk={onBulkImportCatalogProducts}
+        />
+      )}
 
       {role === "manager" && <StockMovementImportSection />}
 

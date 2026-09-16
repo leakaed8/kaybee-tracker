@@ -31,6 +31,12 @@ const SCHEMAS = {
   TrainingProgress: ["id", "employeeId", "videoId", "completedAt", "quizResponses"],
   TrainingStudies: ["id", "title", "url", "notes", "createdAt", "nutrient", "createdBy"],
   TrainingStudyViews: ["id", "employeeId", "studyId", "viewedAt"],
+  // A master list of every product the company carries, independent of the
+  // Stock/Products tab (which tracks per-batch qty + expiry and gets fully
+  // replaced on every stock re-import). This is what "Compare with our
+  // product" under Competitors reads from, so a product's dosage/pack-size
+  // details survive regardless of which batch is currently in stock.
+  ProductCatalog: ["id", "name", "price", "form", "packSize", "unitsPerDay", "ingredients", "notes", "createdBy", "createdAt", "updatedBy", "updatedAt"],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];
