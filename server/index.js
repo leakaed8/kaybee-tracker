@@ -961,16 +961,20 @@ app.post("/api/products/import-bulk", async (req, res) => {
     }
     // This is a full stock refresh (qty/price/expiry all come fresh from the
     // sheet), but the dosage/pack-size/ingredient details a rep tags on in
-    // the app live only in this table — carry them over by matching on
-    // product name (case-insensitive) so a routine re-import doesn't wipe
-    // out details entered since the last one, and so the id stays stable
-    // for anything already referencing it (order line items, samples).
+    // the app live only in this table — carry them over so a routine
+    // re-import doesn't wipe out details entered since the last one, and so
+    // the id stays stable for anything already referencing it (order line
+    // items, samples). Matched by SKU first when the sheet provides one —
+    // that survives a product being renamed — falling back to name
+    // (case-insensitive) for sheets without a SKU column.
     const existing = await db.getAllRows("Products");
+    const existingBySku = new Map(existing.filter((p) => p.sku).map((p) => [String(p.sku).trim().toLowerCase(), p]));
     const existingByName = new Map(existing.map((p) => [String(p.name || "").trim().toLowerCase(), p]));
     const normalized = products
       .filter((p) => p.name && p.expiry)
       .map((p) => {
-        const prior = existingByName.get(String(p.name).trim().toLowerCase());
+        const sku = p.sku ? String(p.sku).trim() : "";
+        const prior = (sku && existingBySku.get(sku.toLowerCase())) || existingByName.get(String(p.name).trim().toLowerCase());
         return {
           id: prior ? prior.id : `p${crypto.randomUUID()}`,
           name: String(p.name).trim(),
@@ -986,6 +990,7 @@ app.post("/api/products/import-bulk", async (req, res) => {
           ingredients: prior?.ingredients || "",
           updatedBy: prior?.updatedBy || "",
           updatedAt: prior?.updatedAt || "",
+          sku: sku || prior?.sku || "",
         };
       });
     if (normalized.length === 0) {

@@ -3,7 +3,7 @@ const { google } = require("googleapis");
 const SHEET_ID = process.env.SHEET_ID;
 
 const SCHEMAS = {
-  Products: ["id", "name", "category", "expiry", "qty", "sold90", "description", "price", "form", "packSize", "unitsPerDay", "ingredients", "updatedBy", "updatedAt"],
+  Products: ["id", "name", "category", "expiry", "qty", "sold90", "description", "price", "form", "packSize", "unitsPerDay", "ingredients", "updatedBy", "updatedAt", "sku"],
   Visits: ["id", "client", "notes", "coordsLat", "coordsLng", "time", "repName", "itemsMentioned", "objectionTag"],
   Clients: ["id", "name", "phone", "tier", "area", "assignedRep", "registrationNumber", "address", "coordsLat", "coordsLng", "discountRate", "nameAr", "type"],
   Doctors: ["id", "name", "hospital", "area", "phone", "specialty", "tier", "registrationNumber", "address", "coordsLat", "coordsLng"],

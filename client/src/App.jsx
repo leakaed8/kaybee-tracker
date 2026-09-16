@@ -1076,6 +1076,7 @@ function ProductDetailsPanel({ product, onSave }) {
         {product.form && <div><span style={{ color: "#8A8272" }}>Form: </span>{product.form}</div>}
         {product.packSize && <div><span style={{ color: "#8A8272" }}>Pack size: </span>{product.packSize} units</div>}
         {product.unitsPerDay && <div><span style={{ color: "#8A8272" }}>Taken: </span>{product.unitsPerDay}/day</div>}
+        {product.sku && <div><span style={{ color: "#8A8272" }}>SKU: </span>{product.sku}</div>}
       </div>
       {m.hasPackSize && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 16, fontSize: 12, marginBottom: 8 }}>
@@ -7441,7 +7442,7 @@ function ExcelImportSection({ onImport, productCount }) {
   const [workbook, setWorkbook] = useState(null);
   const [headers, setHeaders] = useState([]);
   const [rows, setRows] = useState([]);
-  const [mapping, setMapping] = useState({ name: "", expiry: "", qty: "", sold90: "", category: "", description: "", price: "" });
+  const [mapping, setMapping] = useState({ name: "", expiry: "", qty: "", sold90: "", category: "", description: "", price: "", sku: "" });
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const [importing, setImporting] = useState(false);
@@ -7470,7 +7471,7 @@ function ExcelImportSection({ onImport, productCount }) {
         setSheetNames(wb.SheetNames);
         setSelectedSheet(wb.SheetNames[0]);
         readSheet(wb, wb.SheetNames[0]);
-        setMapping({ name: "", expiry: "", qty: "", sold90: "", category: "", description: "", price: "" });
+        setMapping({ name: "", expiry: "", qty: "", sold90: "", category: "", description: "", price: "", sku: "" });
       } catch (err) {
         setError("Couldn't read that file. Make sure it's a valid Excel (.xlsx) file.");
       }
@@ -7481,7 +7482,7 @@ function ExcelImportSection({ onImport, productCount }) {
   const changeSheet = (name) => {
     setSelectedSheet(name);
     readSheet(workbook, name);
-    setMapping({ name: "", expiry: "", qty: "", sold90: "", category: "", description: "", price: "" });
+    setMapping({ name: "", expiry: "", qty: "", sold90: "", category: "", description: "", price: "", sku: "" });
   };
 
   const parsed = useMemo(() => {
@@ -7493,6 +7494,7 @@ function ExcelImportSection({ onImport, productCount }) {
     const categoryIdx = headers.indexOf(mapping.category);
     const descIdx = headers.indexOf(mapping.description);
     const priceIdx = headers.indexOf(mapping.price);
+    const skuIdx = headers.indexOf(mapping.sku);
 
     let skipped = 0;
     const valid = [];
@@ -7508,6 +7510,7 @@ function ExcelImportSection({ onImport, productCount }) {
         category: categoryIdx >= 0 && r[categoryIdx] ? String(r[categoryIdx]).trim() : "Supplement",
         description: descIdx >= 0 ? String(r[descIdx] || "").trim() : "",
         price: priceIdx >= 0 ? Number(r[priceIdx]) || 0 : 0,
+        sku: skuIdx >= 0 ? String(r[skuIdx] ?? "").trim() : "",
       });
     });
     return { valid, skipped };
@@ -7551,6 +7554,9 @@ function ExcelImportSection({ onImport, productCount }) {
       <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
         Upload an .xlsx file with your current stock. Match its columns to what the app needs below, preview the result, then confirm — this replaces the current product list ({productCount} items now).
       </p>
+      <p style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 10, fontStyle: "italic" }}>
+        If your sheet has a product code / SKU, map it below — matching by code means a product keeps its dosage/pack-size details (and any orders/samples pointing to it) across re-imports even if its name changes. Without one, matching falls back to name.
+      </p>
 
       <button
         onClick={() => fileInputRef.current?.click()}
@@ -7582,6 +7588,7 @@ function ExcelImportSection({ onImport, productCount }) {
             {fieldSelect("category", "Category column", false)}
             {fieldSelect("description", "Description column", false)}
             {fieldSelect("price", "Price column", false)}
+            {fieldSelect("sku", "Product code / SKU column", false)}
           </div>
 
           {mapping.name && mapping.expiry && mapping.qty && (
@@ -7595,6 +7602,7 @@ function ExcelImportSection({ onImport, productCount }) {
                     <thead>
                       <tr style={{ textAlign: "left", color: "#8A8272" }}>
                         <th style={{ padding: "4px 6px" }}>Name</th>
+                        {mapping.sku && <th style={{ padding: "4px 6px" }}>SKU</th>}
                         <th style={{ padding: "4px 6px" }}>Category</th>
                         <th style={{ padding: "4px 6px" }}>Expiry</th>
                         <th style={{ padding: "4px 6px" }}>Qty</th>
@@ -7606,6 +7614,7 @@ function ExcelImportSection({ onImport, productCount }) {
                       {parsed.valid.slice(0, 5).map((p, i) => (
                         <tr key={i} style={{ borderTop: "1px solid #E5DFD3" }}>
                           <td style={{ padding: "4px 6px" }}>{p.name}</td>
+                          {mapping.sku && <td style={{ padding: "4px 6px" }}>{p.sku || "—"}</td>}
                           <td style={{ padding: "4px 6px" }}>{p.category}</td>
                           <td style={{ padding: "4px 6px" }}>{p.expiry}</td>
                           <td style={{ padding: "4px 6px" }}>{p.qty}</td>
