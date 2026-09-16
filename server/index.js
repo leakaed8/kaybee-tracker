@@ -964,17 +964,22 @@ app.post("/api/products/import-bulk", async (req, res) => {
     // the app live only in this table — carry them over so a routine
     // re-import doesn't wipe out details entered since the last one, and so
     // the id stays stable for anything already referencing it (order line
-    // items, samples). Matched by SKU first when the sheet provides one —
-    // that survives a product being renamed — falling back to name
-    // (case-insensitive) for sheets without a SKU column.
+    // items, samples). A "batch" here is product + expiry, not just the
+    // product — the exact same item legitimately appears as two rows with
+    // two different expiry dates (an older batch on the shelf and a newer
+    // one just delivered), so expiry must be part of the match key or two
+    // real batches collapse onto one row on re-import. Matched by SKU+expiry
+    // first when the sheet provides a SKU — that survives a product being
+    // renamed — falling back to name+expiry for sheets without a SKU column.
     const existing = await db.getAllRows("Products");
-    const existingBySku = new Map(existing.filter((p) => p.sku).map((p) => [String(p.sku).trim().toLowerCase(), p]));
-    const existingByName = new Map(existing.map((p) => [String(p.name || "").trim().toLowerCase(), p]));
+    const batchKey = (identifier, expiry) => `${String(identifier || "").trim().toLowerCase()}::${String(expiry || "").trim()}`;
+    const existingBySku = new Map(existing.filter((p) => p.sku).map((p) => [batchKey(p.sku, p.expiry), p]));
+    const existingByName = new Map(existing.map((p) => [batchKey(p.name, p.expiry), p]));
     const normalized = products
       .filter((p) => p.name && p.expiry)
       .map((p) => {
         const sku = p.sku ? String(p.sku).trim() : "";
-        const prior = (sku && existingBySku.get(sku.toLowerCase())) || existingByName.get(String(p.name).trim().toLowerCase());
+        const prior = (sku && existingBySku.get(batchKey(sku, p.expiry))) || existingByName.get(batchKey(p.name, p.expiry));
         return {
           id: prior ? prior.id : `p${crypto.randomUUID()}`,
           name: String(p.name).trim(),
