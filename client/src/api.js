@@ -125,4 +125,5 @@ export const api = {
   updateTrainingStudy: (id, patch) => request(`/admin/training-studies/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   removeTrainingStudy: (id) => request(`/admin/training-studies/${id}`, { method: "DELETE" }),
   markTrainingStudyViewed: (id) => request(`/training-studies/${id}/viewed`, { method: "POST" }),
+  tagTrainingStudyNutrient: (id, nutrient) => request(`/training-studies/${id}/nutrient`, { method: "PATCH", body: JSON.stringify({ nutrient }) }),
 };

@@ -610,7 +610,7 @@ export default function App() {
             )}
             {tab === "knowledge" && <KnowledgeView />}
             {tab === "training" && (
-              <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
+              <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} products={products} />
             )}
             {tab === "route" && role === "rep" && !isSupervisor && <RouteView clients={clients} doctors={doctors} />}
             {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} />}
@@ -6133,7 +6133,7 @@ function KnowledgeView() {
 // list of study links reps can cite with doctors/pharmacists. The
 // curriculum stays hidden from supervisors exactly as before; Videos and
 // Studies are for every role, since neither is rep-only content.
-function TrainingTabView({ role, repName, isSupervisor, repNames }) {
+function TrainingTabView({ role, repName, isSupervisor, repNames, products }) {
   const [subTab, setSubTab] = useState(isSupervisor ? "videos" : "curriculum");
   const pillStyle = (active) => ({
     padding: "6px 14px", borderRadius: 16, fontSize: 12.5, fontWeight: 500,
@@ -6153,7 +6153,7 @@ function TrainingTabView({ role, repName, isSupervisor, repNames }) {
       {subTab === "curriculum" && !isSupervisor ? (
         <TrainingCurriculumView />
       ) : subTab === "studies" ? (
-        <TrainingStudiesView role={role} />
+        <TrainingStudiesView role={role} products={products} />
       ) : (
         <TrainingVideosView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
       )}

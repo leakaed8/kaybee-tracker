@@ -9,16 +9,46 @@ function EmptyState({ text }) {
   return <div style={{ textAlign: "center", padding: "30px 0", color: "#B7AF9E", fontSize: 13 }}>{text}</div>;
 }
 
-// Starter suggestions for the "Vitamin / nutrient" field on a study — not a
-// closed list (it's a free-text input with these as datalist options, plus
-// whatever's actually been used on existing studies), just enough so the
-// first few studies added don't each invent slightly different spellings.
-const NUTRIENT_OPTIONS = [
-  "Vitamin A", "Vitamin B1 (Thiamine)", "Vitamin B2 (Riboflavin)", "Vitamin B3 (Niacin)",
-  "Vitamin B5 (Pantothenic Acid)", "Vitamin B6", "Vitamin B7 (Biotin)", "Vitamin B9 (Folate)",
-  "Vitamin B12", "Vitamin C", "Vitamin D", "Vitamin E", "Vitamin K",
-  "Calcium", "Magnesium", "Zinc", "Iron", "Potassium", "CoQ10", "Omega-3", "Probiotics",
-];
+// Suggestions for the "Vitamin / nutrient" field on a study — not a closed
+// list (it's always a free-text input; anyone can type something not
+// listed here, e.g. a nutrient whose name doesn't literally appear in any
+// product name). Each nutrient's keywords are matched (case-insensitive,
+// substring) against real product names to decide whether it's actually
+// "in stock" — see detectStockedNutrients — so the suggestion list reflects
+// products that actually exist rather than a generic vitamin textbook list.
+const NUTRIENT_KEYWORDS = {
+  "Vitamin A": ["vitamin a", "vit a", "beta-carotene", "beta carotene", "retinol"],
+  "Vitamin B1 (Thiamine)": ["b1", "thiamine", "thiamin"],
+  "Vitamin B2 (Riboflavin)": ["b2", "riboflavin"],
+  "Vitamin B3 (Niacin)": ["b3", "niacin"],
+  "Vitamin B5 (Pantothenic Acid)": ["b5", "pantothenic"],
+  "Vitamin B6": ["b6", "pyridoxine"],
+  "Vitamin B7 (Biotin)": ["b7", "biotin"],
+  "Vitamin B9 (Folate)": ["b9", "folate", "folic acid"],
+  "Vitamin B12": ["b12", "cobalamin"],
+  "Vitamin C": ["vitamin c", "vit c", "ascorbic"],
+  "Vitamin D": ["vitamin d", "vit d", "cholecalciferol"],
+  "Vitamin E": ["vitamin e", "vit e", "tocopherol"],
+  "Vitamin K": ["vitamin k", "vit k"],
+  "Calcium": ["calcium"],
+  "Magnesium": ["magnesium"],
+  "Zinc": ["zinc"],
+  "Iron": ["iron"],
+  "Potassium": ["potassium"],
+  "CoQ10": ["coq10", "co q10", "coenzyme q10", "ubiquinone"],
+  "Omega-3": ["omega", "fish oil", "flaxseed", "cod liver", "salmon oil"],
+  "Probiotics": ["probiotic"],
+};
+
+// Only returns nutrients with a real matching product — deliberately doesn't
+// invent a connection that isn't backed by an actual product name.
+function detectStockedNutrients(products) {
+  const names = (products || []).map((p) => (p.name || "").toLowerCase());
+  if (names.length === 0) return [];
+  return Object.keys(NUTRIENT_KEYWORDS).filter((nutrient) =>
+    NUTRIENT_KEYWORDS[nutrient].some((kw) => names.some((n) => n.includes(kw)))
+  );
+}
 
 // Plays a signed, short-expiry R2 URL fetched fresh from our own backend
 // for this logged-in employee — never a public/unsigned link, and the URL
@@ -646,7 +676,51 @@ function studyChipStyle(active) {
   };
 }
 
-export function TrainingStudiesView({ role }) {
+// A narrow, fast action for any employee (not gated behind manager-only
+// Edit) — just enough to clear the "Untagged" backlog without opening a
+// full edit form for a study someone else added.
+function QuickTagNutrient({ study, nutrientOptions, onTagged }) {
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async () => {
+    if (!value.trim()) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api.tagTrainingStudyNutrient(study.id, value.trim());
+      onTagged();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+      <input
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+        placeholder="Tag with a vitamin/nutrient…"
+        list="study-nutrient-options"
+        style={{ ...inputStyle, width: "auto", flex: "1 1 220px", fontSize: 12, padding: "5px 8px" }}
+      />
+      <button
+        onClick={submit}
+        disabled={saving || !value.trim()}
+        style={{ fontSize: 11.5, fontWeight: 500, color: "#FAF7F2", background: value.trim() ? "#4C7A5E" : "#D8D2C4", border: "none", borderRadius: 6, padding: "6px 10px" }}
+      >
+        {saving ? "Tagging…" : "Tag"}
+      </button>
+      {error && <span style={{ fontSize: 11, color: "#B33A3A" }}>{error}</span>}
+    </div>
+  );
+}
+
+export function TrainingStudiesView({ role, products }) {
   const [studies, setStudies] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
@@ -676,12 +750,14 @@ export function TrainingStudiesView({ role }) {
   };
 
   // "See our vitamins, then the studies under it" — chips built from
-  // whatever's actually been used on real studies (plus the starter list,
-  // so the very first study added still has real suggestions to pick from),
-  // each with a live count. A study saved before this field existed has no
+  // whatever's actually been used on real studies, each with a live count.
+  // A study saved before this field existed (or never tagged) has no
   // nutrient at all — those land under "Untagged" rather than being hidden.
   const usedNutrients = studies ? [...new Set(studies.map((s) => s.nutrient).filter(Boolean))] : [];
-  const nutrientOptions = [...new Set([...usedNutrients, ...NUTRIENT_OPTIONS])].sort();
+  // Suggestions when tagging/adding a study: nutrients already used on some
+  // study, plus nutrients actually detected in the real product catalog —
+  // never a generic list unconnected to what's really used or sold.
+  const nutrientOptions = [...new Set([...usedNutrients, ...detectStockedNutrients(products)])].sort();
   const nutrientCounts = {};
   let untaggedCount = 0;
   (studies || []).forEach((s) => {
@@ -740,10 +816,12 @@ export function TrainingStudiesView({ role }) {
               <EditTrainingStudyForm study={s} onSaved={() => { setEditingId(null); load(); }} onCancel={() => setEditingId(null)} />
             ) : (
               <>
-                {s.nutrient && (
+                {s.nutrient ? (
                   <div style={{ display: "inline-block", fontSize: 10.5, fontWeight: 600, color: "#4C7A5E", background: "#F3F7F4", border: "1px solid #CFE0D5", borderRadius: 12, padding: "2px 8px", marginBottom: 6 }}>
                     {s.nutrient}
                   </div>
+                ) : (
+                  <QuickTagNutrient study={s} nutrientOptions={nutrientOptions} onTagged={load} />
                 )}
                 <a
                   href={s.url}

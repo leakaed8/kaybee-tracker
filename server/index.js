@@ -2001,6 +2001,23 @@ app.post("/api/training-studies/:id/viewed", async (req, res) => {
   }
 });
 
+// Open to any employee, not just managers — a narrow, single-field version
+// of the full (manager-only) edit below, specifically so the backlog of
+// untagged studies can get tagged quickly by whoever notices one, without
+// needing full edit rights over the title/URL/notes.
+app.patch("/api/training-studies/:id/nutrient", async (req, res) => {
+  try {
+    const { nutrient } = req.body;
+    if (!nutrient || !String(nutrient).trim()) return res.status(400).json({ error: "nutrient is required" });
+    const ok = await db.updateRowById("TrainingStudies", req.params.id, { nutrient: String(nutrient).trim() });
+    if (!ok) return res.status(404).json({ error: "Study not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Competitors are a manager-curated master list (name + supplier + offer
 // details) — reps pick from it (or type a name that isn't listed yet) when
 // logging a sighting during Check-In, they don't add to the list directly.
