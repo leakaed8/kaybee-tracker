@@ -715,6 +715,11 @@ app.get("/api/bootstrap", async (req, res) => {
 
 app.get("/api/bootstrap/reference", async (req, res) => {
   try {
+    // This is the general Product Catalog data every tab reads (Settings,
+    // Stock, the Competitors "compare with our product" tool) — seeded here
+    // too so the Mason/ALFA master list shows up regardless of which tab a
+    // user opens first, not only after visiting Recall.
+    await ensureOurProductsMasterDataSeeded();
     const wantsFresh = req.query.fresh === "true";
     if (!wantsFresh && referenceBootstrapCache && Date.now() - referenceBootstrapCache.timestamp < REFERENCE_BOOTSTRAP_CACHE_TTL_MS) {
       return res.json(referenceBootstrapCache.data);
@@ -893,7 +898,16 @@ app.get("/api/competitor-sightings", async (req, res) => {
 // grown list identified alongside Orders.
 app.get("/api/competitor-products", async (req, res) => {
   try {
+    // Seeded in this order regardless of entry point (a rep may open
+    // Competitors before ever opening Recall) — competitor/product-catalog
+    // seeding depends on the B12 our-products already existing, both for
+    // the anchor-product linking step and for the Mason/ALFA enrichment
+    // matches below.
+    await ensureRecallCategoriesSeeded();
+    await ensureRecallB12Seeded();
+    await ensureB12ProductDataSeeded();
     await ensureCompetitorMasterDataSeeded();
+    await ensureOurProductsMasterDataSeeded();
     const { q, limit } = req.query;
     const rows = await db.getAllRows("CompetitorProducts");
     let products = rows.sort((a, b) => a.genericName.localeCompare(b.genericName));
@@ -4810,6 +4824,13 @@ const COMPETITOR_MASTER_SEED = {
 let competitorMasterDataSeedChecked = false;
 async function ensureCompetitorMasterDataSeeded() {
   if (competitorMasterDataSeedChecked) return;
+  // Self-sufficient rather than trusting every call site to sequence
+  // prerequisites correctly — this seed's B12-category linking step needs
+  // the B12 our-products to already exist. All three are idempotent
+  // (no-op after their first run), so calling them here is always safe.
+  await ensureRecallCategoriesSeeded();
+  await ensureRecallB12Seeded();
+  await ensureB12ProductDataSeeded();
   const norm = (s) => String(s || "").trim().toLowerCase();
 
   const existingProducts = await db.getAllRows("CompetitorProducts");
@@ -4900,6 +4921,1010 @@ async function ensureCompetitorMasterDataSeeded() {
   }
 
   competitorMasterDataSeedChecked = true;
+}
+
+// ---------- Recall: our own product catalog (Mason + ALFA master list) ----------
+// Transcribed from a user-provided Excel export (101 rows: 55 Alfa Vitamins
+// + 46 Mason). Ingredient/dose text is kept VERBATIM as given, never split
+// into separate name/amount/unit facts by guesswork — the source column
+// already states the full fact as one string, and re-parsing it risks
+// mis-attributing an amount to the wrong nutrient. Every Mason row has
+// blank dose/serving/pack/URL fields, matching that row's own
+// "NOT YET RESEARCHED" status in the source file — left blank here too,
+// not backfilled from the product name.
+const OUR_PRODUCTS_MASTER_SEED = [
+  {
+    name: "ALFA ALFAHYDROXY FAT BURNER & WEIGHT CONTROL 90CAPS",
+    price: 29.4,
+    form: "Capsule",
+    packSize: 90,
+    ingredients: "[{\"name\": \"Chromium 400 mcg + 225 mg bitter orange + 225 mg apple cider vinegar powder + 195 mg garcinia + 90 mg green tea + 90 mg uva ursi + 90 mg cascara + 45 mg caffeine + 45 mg grapefruit\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/alfahydroxy-90-capsules",
+    notes: "Labeled serving size: 3 capsules.",
+  },
+  {
+    name: "ALFA Alflexil 60 Caps",
+    price: 24.54,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"glucosamine sulfate 1500 mg + chondroitin sulfate 750 mg + MSM 300 mg + collagen hydrolysate 300 mg + hyaluronic acid 10 mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/alflexil-glucosamine-60-capsules",
+    notes: "Labeled serving size: 4 capsules.",
+  },
+  {
+    name: "ALFA Apple Cider Vinegar 1000 Mg 60 Caps.",
+    price: 22.5,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"1000 mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/apple-cider-vinegar",
+    notes: "Labeled serving size: 2 capsules.",
+  },
+  {
+    name: "ALFA ASHWAGANDHA 2100MG 60 CAPS",
+    price: 40.4,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"2,100 mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/ashwagandha",
+    notes: "Labeled serving size: 3 capsules.",
+  },
+  {
+    name: "ALFA Biotin 10,000 Mcg 60 Tabs",
+    price: 32.12,
+    form: "Tablet",
+    packSize: 60,
+    ingredients: "[{\"name\": \"10,000 mcg biotin/tablet\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/biotin-10000-mcg-60-tablets",
+    notes: "Labeled serving size: 1 tablet.",
+  },
+  {
+    name: "ALFA Biotin 5000 Mcg 100 Tabs",
+    price: 29.0,
+    form: "Tablet",
+    packSize: 100,
+    ingredients: "[{\"name\": \"5,000 mcg biotin/tablet\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/biotin-5000-mcg",
+    notes: "Labeled serving size: 1 tablet.",
+  },
+  {
+    name: "ALFA Calcium Magnesium Zinc + Vit.d",
+    price: 22.5,
+    form: "",
+    packSize: "",
+    ingredients: "[{\"name\": \"Ca 300 mg + Mg 133 mg + Zn 5 mg + D3 3.325 mcg (133 IU)/caplet\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/calcium-magnesium-zinc",
+    notes: "Labeled serving size: 1 caplet.",
+  },
+  {
+    name: "ALFA Chromium Picolinate 400 Mcg 100tab",
+    price: 19.6,
+    form: "Tablet",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Chromium 400 mcg + calcium 92 mg/tablet\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/chromium-picolinate",
+    notes: "Labeled serving size: 1 tablet.",
+  },
+  {
+    name: "ALFA Co Q-10 100mg 30 Softgels",
+    price: 62.0,
+    form: "Softgel",
+    packSize: 30,
+    ingredients: "[{\"name\": \"CoQ10 100 mg (ubiquinone)/softgel\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/coq10-30-softgels",
+    notes: "Labeled serving size: 1 softgel.",
+  },
+  {
+    name: "ALFA Cod Liver Oil 100 Softgels",
+    price: 32.0,
+    form: "Softgel",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Vitamin A 1,250 IU + Vitamin D 135 IU + cod liver oil 415 mg/softgel; EPA 32 mg + DHA 32 mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/cod-liver-oil",
+    notes: "Labeled serving size: 1 softgel.",
+  },
+  {
+    name: "ALFA Collagen C Hydrolysate 3000mg With C 1000mg Pouches",
+    price: 83.38,
+    form: "Sachet/Pouch",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "ALFA Collagen Hydrolysate+c 60 Caps",
+    price: 24.15,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"Vitamin C 90 mg + Biotin 1,000 mcg + Collagen hydrolysate 1,000 mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "",
+    notes: "Source URL field held page-title text instead of a link (\"CollagenC Hydrolysate + Biotin Supplement | Alfa Vitamins Store\") - left out. Labeled serving size: 3 capsules.",
+  },
+  {
+    name: "ALFA Dhea 50 Mg 60 Caps.",
+    price: 18.0,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"DHEA 50 mg/2 capsules\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/dhea",
+    notes: "Labeled serving size: 2 capsules.",
+  },
+  {
+    name: "ALFA Echinacea 1200mg 90 Capsules",
+    price: 24.4,
+    form: "Capsule",
+    packSize: 90,
+    ingredients: "[{\"name\": \"Echinacea purpurea 1,200 mg/3 capsules\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/echinacea",
+    notes: "Labeled serving size: 3 capsules.",
+  },
+  {
+    name: "ALFA Folic Acid 800mcg 100 tabs",
+    price: 19.6,
+    form: "Tablet",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Folic acid 800 mcg (1,360 mcg DFE)/tablet\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/folic-acid",
+    notes: "Labeled serving size: 1 tablet.",
+  },
+  {
+    name: "ALFA Garlic (odorless) 2000 Mg 100 Softgel",
+    price: 26.2,
+    form: "Softgel",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Garlic oil concentrate 20 mg equivalent to 2,000 mg odorless garlic/2 softgels\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/garlic-odorless",
+    notes: "Labeled serving size: 2 softgels.",
+  },
+  {
+    name: "ALFA Ginkgo Biloba 120 Mg 60 Caps.",
+    price: 22.9,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"Ginkgo biloba extract 120 mg/capsule\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/ginkgo-biloba-60",
+    notes: "Labeled serving size: 1 capsule.",
+  },
+  {
+    name: "ALFA Ginseng & Ginkgo Biloba 90 Caps",
+    price: 23.9,
+    form: "Capsule",
+    packSize: 90,
+    ingredients: "[{\"name\": \"Korean ginseng powder 600 mg + ginkgo powder 100 mg + ginkgo extract 60 mg/2 tablets\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/ginseng-ginkgo",
+    notes: "Labeled serving size: 2 tablets.",
+  },
+  {
+    name: "ALFA HAIR NAILS SKIN 60 CAPS",
+    price: 24.0,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"Multiple vitamins/minerals including B12, biotin, zinc and copper; exact amounts not captured in page text\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/hair-skin-nails-60-capsules",
+    notes: "Labeled serving size: 2 capsules.",
+  },
+  {
+    name: "ALFA Korean Ginseng 1000 mg 60 Caps",
+    price: 22.35,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"Korean ginseng 1,000 mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/korean-ginseng-1000-mg-60-capsules",
+    notes: "Labeled serving size: 2 capsules.",
+  },
+  {
+    name: "ALFA Libi Max 30 Caps",
+    price: 29.8,
+    form: "Capsule",
+    packSize: 30,
+    ingredients: "[{\"name\": \"Vitamin B6: 5 mg (as pyridoxine hydrochloride)\\nProprietary Blend: 800 mg\\nHorny goat weed\\nGuarana extract (seed)\\nMaca (root)\\nHydrolyzed collagen:\\nL-Arginine\\nL-Lysine\\nL-Glutamic acid\\nL-Proline\\nL-Glycine\\nL-Alanine\\nL-Cystine\\nL-Valine\\nL-Methionine\\nL-Isoleucine\\nL-Leucine\\nL-Tyrosine\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/libimax-aphrodisiac-30-capsules",
+    notes: "Labeled serving size: 1 capsule.",
+  },
+  {
+    name: "ALFA MAGNESIUM + MELATONIN 60 CAPS",
+    price: 35.0,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"Magnesium citrate + magnesium oxide blend 1,400 mg = 420 mg elemental Mg + melatonin 10 mg/2 capsules\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/magnesium-plus-melatonin-10-mg-60-capsules",
+    notes: "Labeled serving size: 2 capsules.",
+  },
+  {
+    name: "ALFA MAGNESIUM + VITAMIN B6",
+    price: 21.65,
+    form: "",
+    packSize: "",
+    ingredients: "[{\"name\": \"Magnesium oxide 500 mg = 300 mg elemental Mg + vitamin B6 50 mg/capsule\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/magnesium-plus-b-6-500-mg-100-tablets",
+    notes: "Labeled serving size: 1 capsule.",
+  },
+  {
+    name: "ALFA MAGNESIUM CITRATE 60 CAPS",
+    price: 31.9,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"Magnesium citrate + magnesium oxide blend 1,400 mg = 420 mg elemental Mg + L-taurine 150 mg/2 capsules\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/magnesium-citrate",
+    notes: "Labeled serving size: 2 capsules.",
+  },
+  {
+    name: "ALFA MAGNESIUM GLYCINATE 2500mg 90CAPS",
+    price: 47.53,
+    form: "Capsule",
+    packSize: 90,
+    ingredients: "[{\"name\": \"Magnesium glycinate 2,500 mg (350 mg elemental Mg )\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/magnesium-glycinate",
+    notes: "Labeled serving size: 3 veggie capsules.",
+  },
+  {
+    name: "ALFA Maximum Amino 60 Capsules",
+    price: 32.0,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"Soy Protein Isolate\\nAmino acid profile per serving (2 capsules):\\nAlanine \\u2014 38 mg\\nArginine \\u2014 68 mg\\nAspartic Acid \\u2014 104 mg\\nCystine \\u2014 12 mg\\nGlutamic Acid \\u2014 171 mg\\nGlycine \\u2014 37 mg\\nHistidine \\u2014 23 mg\\nIsoleucine \\u2014 44 mg\\nLeucine \\u2014 73 mg\\nLysine \\u2014 56 mg\\nMethionine \\u2014 12 mg\\nPhenylalanine \\u2014 47 mg\\nProline \\u2014 46 mg\\nSerine \\u2014 47 mg\\nThreonine \\u2014 35 mg\\nTryptophan \\u2014 12 mg\\nTyrosine \\u2014 35 mg\\nValine \\u2014 45 mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/amino-supplement-anti-catabolic-muscle-builder",
+    notes: "Labeled serving size: 2 capsules.",
+  },
+  {
+    name: "ALFA Maximum Bcaa 100 Capsules",
+    price: 31.5,
+    form: "Capsule",
+    packSize: 100,
+    ingredients: "[{\"name\": \"L-Leucine \\u2014 500 mg\\nL-Isoleucine \\u2014 320 mg\\nL-Valine \\u2014 440 mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/bcaa-100-capsules-muscle-mass-builder",
+    notes: "Labeled serving size: 2 capsules.",
+  },
+  {
+    name: "ALFA Maximum CLA 2000 Mg 100 Softgels",
+    price: 47.0,
+    form: "Softgel",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Safflower oil 2,000 mg; typically 80% CLA (serving size not captured)\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/cla-2000mg",
+    notes: "Labeled serving size: 2 Softgels.",
+  },
+  {
+    name: "ALFA Maximum Creatine 1200 Mg 100 Caps.",
+    price: 45.7,
+    form: "Capsule",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Creatine monohydrate 1,200 mg/2 capsules\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/creatine-1200-mg-pre-workout-supplement-muscle-growth",
+    notes: "Labeled serving size: 2 capsules.",
+  },
+  {
+    name: "ALFA Maximum L-arginine 1000mc 100 Caps",
+    price: 31.0,
+    form: "Capsule",
+    packSize: 100,
+    ingredients: "[{\"name\": \"L-arginine 1,000 mg (as L-arginine HCl)\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/l-arginine-1000-mg-muscle-mass-builder-pre-workout-supplement",
+    notes: "Labeled serving size: 2 capsules.",
+  },
+  {
+    name: "ALFA Maximum L-carnitine 500 Mg 60 Caps",
+    price: 31.2,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"L-carnitine 500 mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "",
+    notes: "Labeled serving size: 1 capsule.",
+  },
+  {
+    name: "ALFA Maximum L-glutamine 1000mg 100 Capsules",
+    price: 30.32,
+    form: "Capsule",
+    packSize: 100,
+    ingredients: "[{\"name\": \"L-glutamine 1,000 mg/2 capsules\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/maximum-l-glutamine-1000-mg-100-capsules",
+    notes: "Labeled serving size: 2 capsules.",
+  },
+  {
+    name: "ALFA Memorin 60 Caps.",
+    price: 21.0,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"Vitamin B1 (as thiamine mononitrate): 100 mg \\u2014 6,667% DV\\nVitamin B6 (as pyridoxine hydrochloride): 15 mg \\u2014 750% DV\\nFolic Acid (as folate): 500 mcg \\u2014 125% DV\\nVitamin B12 (as cyanocobalamin): 500 mcg \\u2014 8,333% DV\\nCalcium (as calcium glycerophosphate): 3 mg \\u2014 <1% DV\\nGinkgo Biloba Powder (leaves): 300 mg\\nGlutamic Acid: 200 mg\\nCholine Bitartrate: 50 mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/memory-supplement-memorin",
+    notes: "Labeled serving size: 2 capsules.",
+  },
+  {
+    name: "ALFA Milk Thistle 500 mg 120 Capsules",
+    price: 32.4,
+    form: "Capsule",
+    packSize: 120,
+    ingredients: "[{\"name\": \"Milk thistle extract 500 mg/capsule\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/milk-thistle-800mg-120caps",
+    notes: "Labeled serving size: 1 capsule.",
+  },
+  {
+    name: "ALFA MULTI COMPLEX SENIOR 100 CAPS",
+    price: 27.5,
+    form: "Capsule",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Vitamin A (as acetate) \\u2014 1,500 mcg RAE (5,000 IU)\\nVitamin C (as calcium ascorbate) \\u2014 67 mg\\nVitamin D3 (as cholecalciferol) \\u2014 30 mcg (1,200 IU)\\nVitamin E (as d-alpha tocopheryl succinate) \\u2014 13.5 mg (30 IU)\\nVitamin K (as phytonadione) \\u2014 80 mcg\\nVitamin B1 (as thiamine mononitrate) \\u2014 1.5 mg\\nVitamin B2 (as riboflavin) \\u2014 1.7 mg\\nVitamin B3 (as niacinamide) \\u2014 20 mg\\nVitamin B6 (as pyridoxine hydrochloride) \\u2014 2 mg\\nFolate (as folic acid) \\u2014 667 mcg DFE\\nVitamin B12 (as cyanocobalamin) \\u2014 6 mcg\\nBiotin \\u2014 300 mcg\\nPantothenic Acid (as d-calcium pantothenate) \\u2014 10 mg\\nCalcium (as calcium citrate) \\u2014 300 mg\\nIron (as ferrous fumarate) \\u2014 18 mg\\nPhosphorus (as dicalcium phosphate) \\u2014 22.5 mg\\nIodine (as potassium iodide) \\u2014 150 mcg\\nMagnesium (as magnesium oxide) \\u2014 25 mg\\nZinc (as zinc oxide) \\u2014 10 mg\\nSelenium (as selenomethionine) \\u2014 70 mcg\\nCopper (as copper oxide) \\u2014 2 mg\\nManganese (as manganese sulfate) \\u2014 2 mg\\nChromium (as chromium picolinate) \\u2014 120 mcg\\nMolybdenum (as sodium molybdate) \\u2014 75 mcg\\nBoron (as boron amino acid chelate) \\u2014 50 mcg\\nGrape Seed Extract \\u2014 20 mg\\nSoy Flavonoid Extract (soybean seed) \\u2014 20 mg\\nGinkgo Biloba Extract (Ginkgo biloba leaves) \\u2014 20 mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/multi-complex-senior",
+    notes: "Labeled serving size: 2 Tablets.",
+  },
+  {
+    name: "ALFA Multi Men 100 Tabs",
+    price: 28.0,
+    form: "Tablet",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Vitamin A (as acetate) \\u2014 5,000 IU\\nVitamin C (as ascorbic acid) \\u2014 60 mg\\nVitamin D (as cholecalciferol) \\u2014 400 IU\\nVitamin E (as dl-alpha tocopheryl acetate) \\u2014 30 IU\\nVitamin K (as phytonadione) \\u2014 80 mcg\\nVitamin B1 (as thiamine mononitrate) \\u2014 1.5 mg\\nVitamin B2 (as riboflavin) \\u2014 1.7 mg\\nVitamin B3 (as niacinamide) \\u2014 20 mg\\nVitamin B6 (as pyridoxine hydrochloride) \\u2014 2 mg\\nFolate (as folic acid) \\u2014 400 mcg\\nVitamin B12 (as cyanocobalamin) \\u2014 6 mcg\\nBiotin \\u2014 300 mcg\\nPantothenic Acid (as dicalcium pantothenate) \\u2014 10 mg\\nCalcium (as dicalcium phosphate) \\u2014 126 mg\\nIron (as ferrous fumarate) \\u2014 18 mg\\nPhosphorus (as dicalcium phosphate) \\u2014 97 mg\\nIodine (as potassium iodide) \\u2014 150 mcg\\nMagnesium (as magnesium oxide) \\u2014 25 mg\\nZinc (as zinc oxide) \\u2014 15 mg\\nSelenium (as selenium amino acid chelate) \\u2014 70 mcg\\nCopper (as copper oxide) \\u2014 2 mg\\nManganese (as manganese sulfate) \\u2014 2 mg\\nChromium (as chromium picolinate) \\u2014 120 mcg\\nMolybdenum (as molybdenum amino acid chelate) \\u2014 75 mcg\\nBoron (as boron amino acid chelate) \\u2014 150 mcg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/multi-men",
+    notes: "Labeled serving size: 1 tablet.",
+  },
+  {
+    name: "ALFA Multi Women 100 Tabs",
+    price: 28.0,
+    form: "Tablet",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Vitamin A (as acetate) \\u2014 5,000 IU\\nVitamin C (as ascorbic acid) \\u2014 60 mg\\nVitamin D (as cholecalciferol) \\u2014 400 IU\\nVitamin E (as dl-alpha tocopheryl acetate) \\u2014 30 IU\\nVitamin K (as phytonadione) \\u2014 80 mcg\\nVitamin B1 (as thiamine mononitrate) \\u2014 1.5 mg\\nVitamin B2 (as riboflavin) \\u2014 1.7 mg\\nVitamin B3 (as niacinamide) \\u2014 20 mg\\nVitamin B6 (as pyridoxine hydrochloride) \\u2014 2 mg\\nFolate (as folic acid) \\u2014 800 mcg\\nVitamin B12 (as cyanocobalamin) \\u2014 6 mcg\\nBiotin \\u2014 300 mcg\\nPantothenic Acid (as dicalcium pantothenate) \\u2014 10 mg\\nCalcium (as dicalcium phosphate) \\u2014 162 mg\\nIron (as ferrous fumarate) \\u2014 18 mg\\nPhosphorus (as dicalcium phosphate) \\u2014 125 mg\\nIodine (as potassium iodide) \\u2014 150 mcg\\nMagnesium (as magnesium oxide) \\u2014 25 mg\\nZinc (as zinc oxide) \\u2014 15 mg\\nSelenium (as selenium amino acid chelate) \\u2014 70 mcg\\nCopper (as copper oxide) \\u2014 2 mg\\nManganese (as manganese sulfate) \\u2014 2 mg\\nChromium (as chromium picolinate) \\u2014 120 mcg\\nMolybdenum (as molybdenum amino acid chelate) \\u2014 75 mcg\\nBoron (as boron amino acid chelate) \\u2014 150 mcg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/multi-women",
+    notes: "Labeled serving size: 1 tablet.",
+  },
+  {
+    name: "ALFA Multivitamins GUMMIES Adult",
+    price: 32.0,
+    form: "Gummy",
+    packSize: "",
+    ingredients: "[{\"name\": \"Vitamin A (as acetate) \\u2014 450 mcg RAE\\nVitamin C (as ascorbic acid) \\u2014 36 mg\\nVitamin D (as cholecalciferol) \\u2014 25 mcg\\nVitamin E (as dl-alpha tocopheryl acetate) \\u2014 15 mg\\nNiacin (as niacinamide) \\u2014 8 mg NE\\nVitamin B6 (as pyridoxine HCl) \\u2014 1.7 mg\\nFolate (as folic acid) \\u2014 400 mcg DFE (240 mcg folic acid)\\nVitamin B12 (as cyanocobalamin) \\u2014 4.8 mcg\\nBiotin \\u2014 30 mcg\\nPantothenic Acid (as d-calcium pantothenate) \\u2014 3 mg\\nSodium (as sodium citrate) \\u2014 5 mg\\nInositol \\u2014 1.5 mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/multivitamins-gummies",
+    notes: "Labeled serving size: 2 gummies.",
+  },
+  {
+    name: "ALFA NAD+ PLUS RESVERATROL 60 CAPS",
+    price: 81.0,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"NAD+ 600 mg + nicotinamide ribose 300 mg + resveratrol 100 mg/3 capsules\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/nad-plus-resveratrol",
+    notes: "Labeled serving size: 3 capsules.",
+  },
+  {
+    name: "ALFA NIACIN 500mg 60 TABS",
+    price: 25.0,
+    form: "Tablet",
+    packSize: 60,
+    ingredients: "[{\"name\": \"Niacin 500 mg + inositol 100 mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/niacin-vitamin-b3",
+    notes: "Labeled serving size: 2 tablets.",
+  },
+  {
+    name: "ALFA Omega 3.6.9 Flax Oil 1000 Mg",
+    price: 23.6,
+    form: "Softgel",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Alpha-Linolenic Acid (Omega-3) \\u2014 500 mg\\nLinoleic Acid (Omega-6) \\u2014 120 mg\\nOleic Acid (Omega-9) \\u2014 150 mg\\nOther Fatty Acids and Phytonutrients \\u2014 72 mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "",
+    notes: "Source URL field held page-title text instead of a link (\"Alfa 369 - Omega 369 - Flax Oil 1000 mg - 100 Softgels | Alfa Vitamins \u2013 Alfa Vitamins Store\") - left out. Labeled serving size: 1 softgel .",
+  },
+  {
+    name: "ALFA Omega-3 Fish Oil 60 Softgels",
+    price: 32.0,
+    form: "Softgel",
+    packSize: 60,
+    ingredients: "[{\"name\": \"Fish oil 1,000 mg + omega-3 300 mg + EPA 180 mg + DHA 120 mg/softgel (60-count label)\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/omega-3-fish-oil-1000-mg",
+    notes: "Labeled serving size: 1 softgel.",
+  },
+  {
+    name: "ALFA Resveratrol 500 Mg 60 Caps",
+    price: 48.0,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"Polygonum cuspidatum extract 1,000 mg equivalent to 500 mg resveratrol/3 capsules\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/resveratrol",
+    notes: "Labeled serving size: 3 capsules.",
+  },
+  {
+    name: "ALFA Salmon Oil Omega 3 100 Softgels",
+    price: 46.0,
+    form: "Softgel",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Salmon oil 1,000 mg/softgel; EPA/DHA listed on label but exact amounts not captured\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/salmon-oil-100-softgels",
+    notes: "Labeled serving size: 1 softgel.",
+  },
+  {
+    name: "ALFA Saw Palmetto 60 capsules",
+    price: 22.74,
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"Saw palmetto extract 200 mg + saw palmetto powder 100 mg/2 capsules\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/saw-palmetto",
+    notes: "Labeled serving size: 2 capsules.",
+  },
+  {
+    name: "ALFA SELENIUM 200 MCG 100 CAPS",
+    price: 24.0,
+    form: "Capsule",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Selenium 200 mcg/capsule (selenium amino acid chelate)\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/selenium",
+    notes: "Labeled serving size: 1 capsule.",
+  },
+  {
+    name: "ALFA Soy Lecithin Soy Bean 1200mg 100 Softgels",
+    price: 38.4,
+    form: "Softgel",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Soy lecithin 1,200 mg/softgel\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/soy-lecithin-1200-mg-100-softgels",
+    notes: "Labeled serving size: 1 softgel.",
+  },
+  {
+    name: "ALFA SPIRULINA 2000mg 60 tabs",
+    price: 20.9,
+    form: "Tablet",
+    packSize: 60,
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "ALFA Super Gummy Bears 60 Gummies",
+    price: 32.1,
+    form: "Gummy",
+    packSize: 60,
+    ingredients: "[{\"name\": \"Vitamin A (as retinyl acetate) \\u2014 1,248 IU\\nVitamin C (as ascorbic acid) \\u2014 9 mg\\nVitamin D (as cholecalciferol) \\u2014 30 IU\\nVitamin E (as dl-alpha tocopheryl acetate) \\u2014 7.5 IU\\nVitamin B6 (as pyridoxine hydrochloride) \\u2014 0.35 mg\\nFolate (as folic acid) \\u2014 120 mcg\\nVitamin B12 (as cyanocobalamin) \\u2014 2 mcg\\nBiotin \\u2014 30 mcg\\nVitamin B5 (as calcium pantothenate) \\u2014 2.5 mg\\nIodine (as potassium iodide) \\u2014 18.5 mcg\\nZinc (as zinc citrate) \\u2014 1.1 mg\\nCholine Bitartrate \\u2014 5 mcg\\nInositol \\u2014 5 mcg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "",
+    notes: "Source URL field held page-title text instead of a link (\"Multivitamin Gummy Bears - Kids Complete Vitamins \u2013 Alfa Vitamins Store\") - left out. Labeled serving size: 1 gummy.",
+  },
+  {
+    name: "ALFA TURMERIC CURCUMIN 2000MG 90 CAPS",
+    price: 38.5,
+    form: "Capsule",
+    packSize: 90,
+    ingredients: "[{\"name\": \"Turmeric Powder (Curcuma longa L.) (root) \\u2014 1,800 mg\\nTurmeric Extract (Curcuma longa L.) (root) \\u2014 200 mg\\nBlack Pepper Powder (Piper nigrum) (fruit) \\u2014 10 mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "",
+    notes: "Labeled serving size: 3 capsules.",
+  },
+  {
+    name: "ALFA Vitamin B-1 100 MG 100 TABS",
+    price: 24.4,
+    form: "Tablet",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Vitamin B1 100 mg/tablet\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/vitamin-b1-supplement-blood-circulation-metabolism-digestive-system-muscle-antioxidant",
+    notes: "Labeled serving size: 1 tablet.",
+  },
+  {
+    name: "ALFA Vitamin B-2 50 Mg 100 Tablets",
+    price: 20.36,
+    form: "Tablet",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Vitamin B2 (riboflavin) 50 mg/tablet\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/vitamin-b2",
+    notes: "Labeled serving size: 1 tablet.",
+  },
+  {
+    name: "ALFA Vitamin B-6 100 MG 100 TABLETS",
+    price: 20.4,
+    form: "Tablet",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Vitamin B6 100 mg + calcium 48 mg/tablet\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/vitamin-b6-100mg-100-tabs",
+    notes: "Labeled serving size: 1 tablet.",
+  },
+  {
+    name: "ALFA Vitamin E-400 100 Softgels",
+    price: 40.1,
+    form: "Softgel",
+    packSize: 100,
+    ingredients: "[{\"name\": \"Vitamin E 180 mg (400 IU), dl-alpha tocopheryl acetate/softgel\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "https://alfavitamins.com/products/vitamin-e-400-iu-with-100-softgels",
+    notes: "Labeled serving size: 1 softgel.",
+  },
+  {
+    name: "Mason Natural BERBERINE CEYLON CINNAMON COMPLEX 60 CAPSULES",
+    price: 57.5,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Beta Carotene Vit A",
+    price: 34.4,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Calcium 500+vit D3 - Oyster Shell 60 tabs",
+    price: 16.4,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Calcium 600MG 100tab",
+    price: 28.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Calcium Citrate+vit.d3 60 Caplets",
+    price: 27.3,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Calcium Magnesium Zinc100tab",
+    price: 22.5,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Chewable Calcium 600 + Vitamin D3 100tab",
+    price: 32.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Chewable Papaya 100tab",
+    price: 21.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Chromium Picolinate 200mcg 100tab",
+    price: 27.3,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Cod Liver Oil 100 Softgels",
+    price: 34.5,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Daily Multi Vitamins Iron Free 100 Tabs",
+    price: 24.5,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Fat Burner 60 Tab",
+    price: "",
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "Price shown as 0 in the source file (likely not yet entered, not a genuine free price) - left blank.",
+  },
+  {
+    name: "Mason Natural Folic Acid 400mcg 100 tabs",
+    price: 15.75,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Ginger 500 Mg 60 Caps.",
+    price: 22.2,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Highly Concentrated Cranberry with Probiotic 60 tabs",
+    price: 40.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Korean Ginseng 100 Caps",
+    price: 31.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Little Animals Children's Chewable",
+    price: 18.65,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Maca 500 Mg 60 Caps",
+    price: 32.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural MAGNESIUM CITRATE 250MG 60 SOFTGELS",
+    price: 44.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Magnesium Gluconate 550mg 100tab",
+    price: 25.4,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural MAGNESIUM GLYCINATE with BIOPERINE 60 CAPSULES",
+    price: 44.65,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural MEGA BIOTIN 10000 MCG 50 SOFTGELS",
+    price: 58.8,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Melatonin 3mg 60 Tabs",
+    price: 21.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Melatonin 5mg 60 Tabs",
+    price: 29.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Milk Thistle 500 Mg 60 Caps.",
+    price: 28.3,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Moringa 500mg 60caps",
+    price: 40.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural MUSHROOM POWER EGCG & MATCHA 60 SOFTGELS",
+    price: 89.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural N-Acetyl-L-Cysteine (NAC) 60 caps",
+    price: 47.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Odor Free Garlic 100cap",
+    price: 20.6,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Omega-3 Fish Oil 60 Caps",
+    price: 33.1,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Selenium 200mcg 60tab",
+    price: "",
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "Price shown as 0 in the source file (likely not yet entered, not a genuine free price) - left blank.",
+  },
+  {
+    name: "Mason Natural Stress B-Complex 60 Tab",
+    price: 29.55,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural TURMERIC 500MG WITH BLACK PEPPER 60 SOFTGELS",
+    price: 45.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Valerian Root 60 Cap",
+    price: 24.1,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Vitamin B-1 250mg 100 tabs",
+    price: 37.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Vitamin B-6 50 Mg 100tab",
+    price: 19.5,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Vitamin C-1000 100 Tab",
+    price: 37.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Vitamin D3 1000 CHEWABLE Tabs",
+    price: 29.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Vitamin E-1000 50 Softgels",
+    price: 45.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Vitamin E-400 *100 Softgels",
+    price: 34.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Vitatrum Lutein 30cp",
+    price: 8.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+  {
+    name: "Mason Natural Women's Daily Formula 90caplets",
+    price: 32.0,
+    form: "",
+    packSize: "",
+    ingredients: "[]",
+    sourceUrl: "",
+    notes: "",
+  },
+];
+
+
+// Five rows in the source file correspond to products the earlier B12 seed
+// already created (matched by exact product identity, not just similar
+// name) — handled here as enrichment/conflict, never as new duplicate rows:
+//   - Mason B12 100 mcg / 500 mcg: price matches exactly, nothing new to add.
+//   - Mason B12 1,000 mcg: price differs (31.12 vs 34) AND the new source's
+//     name says "Sublingual" where the existing record says "Quick-Dissolve"
+//     administration — both recorded as open conflicts, never silently
+//     picked.
+//   - Mason B12 5,000 mcg: price matches; same "Sublingual" vs
+//     "Quick-Dissolve" conflict.
+//   - ALFA B-Complex Formula: price matches, but the new source gives every
+//     ingredient's exact amount (including the B12 amount, 10 mcg — one of
+//     the two facts the original seed explicitly flagged as missing). Since
+//     these are all currently-BLANK fields being filled in (not a value
+//     being overwritten), this is an enrichment, not a conflict.
+const OUR_PRODUCTS_EXISTING_MATCH_ENRICHMENTS = {
+  "ALFA B-Complex Formula": {
+    ingredients: JSON.stringify([
+      { name: "Thiamine", form: "", amount: 10, unit: "mg" },
+      { name: "Riboflavin", form: "", amount: 10, unit: "mg" },
+      { name: "Niacinamide", form: "", amount: 40, unit: "mg" },
+      { name: "Vitamin B6", form: "", amount: 10, unit: "mg" },
+      { name: "Folic Acid", form: "", amount: 400, unit: "mcg" },
+      { name: "Vitamin B12", form: "", amount: 10, unit: "mcg" },
+      { name: "Biotin", form: "", amount: 300, unit: "mcg" },
+      { name: "Pantothenate", form: "", amount: 10, unit: "mg" },
+    ]),
+    notesAppend: "Ingredient amounts confirmed via Mason/ALFA product list import (per tablet). Folate labeled as 680 mcg DFE (400 mcg folic acid) — folic acid amount recorded as 400 mcg.",
+    linkCompoundAmount: 10,
+    linkUnit: "mcg",
+  },
+};
+const OUR_PRODUCTS_EXISTING_MATCH_CONFLICTS = [
+  {
+    productName: "Mason Natural Vitamin B12 1,000 mcg Quick Dissolve",
+    fields: [
+      { fieldName: "price", sourceALabel: "Earlier B12 research", sourceAValue: "31.12", sourceBLabel: "Mason/ALFA product list import", sourceBValue: "34" },
+      { fieldName: "form", sourceALabel: "Earlier B12 research (Quick-Dissolve)", sourceAValue: "Quick-Dissolve", sourceBLabel: "Mason/ALFA product list import (\"Sublingual\")", sourceBValue: "Sublingual" },
+    ],
+  },
+  {
+    productName: "Mason Natural Vitamin B12 5,000 mcg Quick Dissolve",
+    fields: [
+      { fieldName: "form", sourceALabel: "Earlier B12 research (Quick-Dissolve)", sourceAValue: "Quick-Dissolve", sourceBLabel: "Mason/ALFA product list import (\"Sublingual\")", sourceBValue: "Sublingual" },
+    ],
+  },
+];
+
+let ourProductsMasterDataSeedChecked = false;
+async function ensureOurProductsMasterDataSeeded() {
+  if (ourProductsMasterDataSeedChecked) return;
+  // Self-sufficient for the same reason as ensureCompetitorMasterDataSeeded
+  // above — the enrichment/conflict matching below needs the B12 seed's
+  // Mason/ALFA catalog rows to already exist.
+  await ensureRecallCategoriesSeeded();
+  await ensureRecallB12Seeded();
+  await ensureB12ProductDataSeeded();
+  const norm = (s) => String(s || "").trim().toLowerCase();
+
+  const catalog = await db.getAllRows("ProductCatalog");
+  const catalogIdByName = new Map(catalog.map((p) => [norm(p.name), p.id]));
+
+  // ---- New products: match-or-skip, never duplicate ----
+  const newRows = [];
+  for (const item of OUR_PRODUCTS_MASTER_SEED) {
+    if (catalogIdByName.has(norm(item.name))) continue;
+    newRows.push({
+      id: `pc${crypto.randomUUID()}`, name: item.name, price: item.price,
+      form: item.form, packSize: item.packSize, unitsPerDay: "",
+      ingredients: item.ingredients, notes: item.notes,
+      createdBy: "Mason/ALFA product list import", createdAt: new Date().toISOString(),
+      updatedBy: "", updatedAt: "",
+    });
+  }
+  if (newRows.length) await db.appendRows("ProductCatalog", newRows);
+
+  // ---- Enrichment: fill blank fields on an already-existing product ----
+  for (const [productName, enrich] of Object.entries(OUR_PRODUCTS_EXISTING_MATCH_ENRICHMENTS)) {
+    const productId = catalogIdByName.get(norm(productName));
+    if (!productId) continue;
+    const product = catalog.find((p) => p.id === productId);
+    const currentIngredients = (() => { try { return JSON.parse(product.ingredients || "[]"); } catch { return []; } })();
+    const hasAnyAmount = currentIngredients.some((i) => i.amount !== "" && i.amount != null);
+    const patch = {};
+    if (!hasAnyAmount) {
+      patch.ingredients = enrich.ingredients;
+      patch.notes = [product.notes, enrich.notesAppend].filter(Boolean).join(" ");
+    }
+    if (Object.keys(patch).length) {
+      patch.updatedBy = "Mason/ALFA product list import";
+      patch.updatedAt = new Date().toISOString();
+      await db.updateRowById("ProductCatalog", productId, patch);
+    }
+
+    const links = await db.getAllRows("RecallProductIngredients");
+    const link = links.find((l) => l.productId === productId);
+    if (link && !isFieldFilled(link.compoundAmount) && enrich.linkCompoundAmount) {
+      await db.updateRowById("RecallProductIngredients", link.id, {
+        compoundAmount: enrich.linkCompoundAmount, unit: enrich.linkUnit,
+      });
+      await recomputeOurProductResearchStatus(link.id);
+    }
+  }
+
+  // ---- Conflicts: never silently pick one source's value over another ----
+  const existingConflicts = await db.getAllRows("RecallFieldConflicts");
+  const hasOpenOrResolvedConflict = (entityId, fieldName) =>
+    existingConflicts.some((c) => c.entityType === "ProductCatalog" && c.entityId === entityId && c.fieldName === fieldName);
+  const newConflicts = [];
+  for (const entry of OUR_PRODUCTS_EXISTING_MATCH_CONFLICTS) {
+    const productId = catalogIdByName.get(norm(entry.productName));
+    if (!productId) continue;
+    for (const f of entry.fields) {
+      if (hasOpenOrResolvedConflict(productId, f.fieldName)) continue;
+      newConflicts.push({
+        id: `fc-pcm-${crypto.randomUUID()}`, entityType: "ProductCatalog", entityId: productId, fieldName: f.fieldName,
+        sourceALabel: f.sourceALabel, sourceAValue: f.sourceAValue, sourceBLabel: f.sourceBLabel, sourceBValue: f.sourceBValue,
+        status: "CONFLICT", notes: "", createdAt: new Date().toISOString(),
+        resolution: "", resolvedBy: "", resolvedAt: "",
+      });
+    }
+  }
+  if (newConflicts.length) await db.appendRows("RecallFieldConflicts", newConflicts);
+
+  ourProductsMasterDataSeedChecked = true;
 }
 
 // ---------- Recall Phase 2D: research status derivation + editing ----------
@@ -5012,6 +6037,7 @@ app.get("/api/recall/categories", async (req, res) => {
     await ensureRecallB12Seeded();
     await ensureB12ProductDataSeeded();
     await ensureCompetitorMasterDataSeeded();
+    await ensureOurProductsMasterDataSeeded();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
@@ -5061,6 +6087,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     await ensureRecallB12Seeded();
     await ensureB12ProductDataSeeded();
     await ensureCompetitorMasterDataSeeded();
+    await ensureOurProductsMasterDataSeeded();
     const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
