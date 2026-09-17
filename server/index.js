@@ -4368,6 +4368,129 @@ app.patch("/api/recall/field-conflicts/:id/resolve", async (req, res) => {
   }
 });
 
+// Which of OUR products actually belong to a Recall category (have a
+// RecallProductIngredients link) — this is the picker used to attach an
+// existing competitor product to a category, since a category's
+// membership is defined entirely by its our-products, not by the
+// competitor product itself. Open to any employee, matching the shared
+// competitor-research editing rule.
+app.get("/api/recall/linkable-products", async (req, res) => {
+  try {
+    const [links, catalog, ingredients, categories] = await Promise.all([
+      db.getAllRows("RecallProductIngredients"),
+      db.getAllRows("ProductCatalog"),
+      db.getAllRows("RecallIngredients"),
+      db.getAllRows("RecallCategories"),
+    ]);
+    const catalogById = new Map(catalog.map((p) => [p.id, p]));
+    const ingredientById = new Map(ingredients.map((i) => [i.id, i]));
+    const categoryById = new Map(categories.map((c) => [c.id, c]));
+    const seen = new Set();
+    const products = [];
+    for (const link of links) {
+      if (seen.has(link.productId)) continue;
+      const product = catalogById.get(link.productId);
+      const ingredient = ingredientById.get(link.ingredientId);
+      const category = ingredient ? categoryById.get(ingredient.categoryId) : null;
+      if (!product || !category) continue;
+      seen.add(link.productId);
+      products.push({ ourProductId: product.id, productName: product.name, categoryId: category.id, categoryName: category.name });
+    }
+    res.json({ products });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Every existing competitor<->our-product comparison link, enriched with
+// the category it puts the competitor product under — used by the
+// Competitors tab to show "Already in Recall under: <category>" per row.
+app.get("/api/recall/competitor-relationships", async (req, res) => {
+  try {
+    const [rels, catalog, links, ingredients, categories] = await Promise.all([
+      db.getAllRows("RecallCompetitorRelationships"),
+      db.getAllRows("ProductCatalog"),
+      db.getAllRows("RecallProductIngredients"),
+      db.getAllRows("RecallIngredients"),
+      db.getAllRows("RecallCategories"),
+    ]);
+    const catalogById = new Map(catalog.map((p) => [p.id, p]));
+    const ingredientIdByProductId = new Map(links.map((l) => [l.productId, l.ingredientId]));
+    const ingredientById = new Map(ingredients.map((i) => [i.id, i]));
+    const categoryById = new Map(categories.map((c) => [c.id, c]));
+    const relationships = rels.map((r) => {
+      const ingredientId = ingredientIdByProductId.get(r.ourProductId);
+      const ingredient = ingredientId ? ingredientById.get(ingredientId) : null;
+      const category = ingredient ? categoryById.get(ingredient.categoryId) : null;
+      return {
+        id: r.id, competitorProductId: r.competitorProductId, ourProductId: r.ourProductId,
+        ourProductName: catalogById.get(r.ourProductId)?.name || "",
+        categoryId: category?.id || "", categoryName: category?.name || "",
+      };
+    });
+    res.json({ relationships });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Attaches an EXISTING competitor product to a Recall category by linking
+// it against one of that category's our-products. Never creates a new
+// competitor product or category here — both must already exist. Open to
+// any employee: attaching research to a category is a research-completion
+// action, same as editing the competitor product's own fields.
+app.post("/api/recall/competitor-relationships", async (req, res) => {
+  try {
+    const { competitorProductId, ourProductId, comparisonType, notes } = req.body;
+    if (!competitorProductId || !ourProductId) {
+      return res.status(400).json({ error: "competitorProductId and ourProductId are required." });
+    }
+    const [competitorProducts, links, existingRels] = await Promise.all([
+      db.getAllRows("CompetitorProducts"),
+      db.getAllRows("RecallProductIngredients"),
+      db.getAllRows("RecallCompetitorRelationships"),
+    ]);
+    if (!competitorProducts.some((p) => p.id === competitorProductId)) {
+      return res.status(404).json({ error: "Competitor product not found." });
+    }
+    if (!links.some((l) => l.productId === ourProductId)) {
+      return res.status(400).json({ error: "That product is not part of any Recall category." });
+    }
+    const already = existingRels.find((r) => r.ourProductId === ourProductId && r.competitorProductId === competitorProductId);
+    if (already) return res.json({ ok: true, id: already.id, alreadyLinked: true });
+
+    const row = {
+      id: `cr-${crypto.randomUUID()}`, ourProductId, competitorProductId,
+      comparisonType: comparisonType || "dose-and-form-comparison", notes: notes || "",
+      sourceIds: "", createdAt: new Date().toISOString(),
+    };
+    await db.appendRows("RecallCompetitorRelationships", [row]);
+    res.json({ ok: true, id: row.id });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Removes a competitor product from a category's comparison — an
+// undo/structural action, so kept manager-only (unlike editing the
+// competitor product's own research fields, which stays open to all
+// employees). This never deletes the competitor product itself, only the
+// link putting it under this category.
+app.delete("/api/recall/competitor-relationships/:id", requireManager, async (req, res) => {
+  try {
+    const rels = await db.getAllRows("RecallCompetitorRelationships");
+    if (!rels.some((r) => r.id === req.params.id)) return res.status(404).json({ error: "Link not found." });
+    await db.deleteRowById("RecallCompetitorRelationships", req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 const clientDist = path.join(__dirname, "..", "client", "dist");
 app.use(express.static(clientDist, {
   setHeaders: (res, filePath) => {

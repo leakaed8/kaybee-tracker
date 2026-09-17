@@ -565,19 +565,43 @@ function OurProductCard({ product: p, canEdit, onSaved }) {
   );
 }
 
-function CompetitorCard({ rel: c, canEdit, onSaved }) {
+function CompetitorCard({ rel: c, canEdit, canUnlink, onSaved }) {
   const [editing, setEditing] = useState(false);
+  const [unlinking, setUnlinking] = useState(false);
+  const [error, setError] = useState("");
   const cp = c.competitorProduct;
+  const unlink = async () => {
+    setUnlinking(true);
+    setError("");
+    try {
+      // Only removes the comparison link (RecallCompetitorRelationships) —
+      // the competitor product itself is untouched and still lives under
+      // the Competitors tab, unlinked from any category.
+      await api.removeRecallCompetitorRelationship(c.id);
+      onSaved();
+    } catch (e) {
+      setError(e.message || "Couldn't remove this comparison.");
+      setUnlinking(false);
+    }
+  };
   return (
     <div style={{ fontSize: 12.5, marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid #F0EBE0" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
         <div style={{ fontWeight: 600 }}>{cp.competitorName} — {cp.productName}</div>
-        {canEdit && (
-          <button type="button" onClick={() => setEditing((v) => !v)} style={editButtonStyle}>
-            {editing ? "Close" : "Edit / Complete Research"}
-          </button>
-        )}
+        <div style={{ display: "flex", gap: 6 }}>
+          {canEdit && (
+            <button type="button" onClick={() => setEditing((v) => !v)} style={editButtonStyle}>
+              {editing ? "Close" : "Edit / Complete Research"}
+            </button>
+          )}
+          {canUnlink && (
+            <button type="button" disabled={unlinking} onClick={unlink} style={cancelButtonStyle}>
+              {unlinking ? "Removing…" : "Remove from comparison"}
+            </button>
+          )}
+        </div>
       </div>
+      {error && <div style={{ color: "#B33A3A", fontSize: 11, marginTop: 4 }}>{error}</div>}
       {c.retailerListings.length > 0 && (
         <div style={{ marginTop: 4 }}>
           {c.retailerListings.map((l) => (
@@ -591,6 +615,93 @@ function CompetitorCard({ rel: c, canEdit, onSaved }) {
       <MissingInfoBadge researchStatus={cp.researchStatus} missingFields={cp.missingFields} />
       {editing && (
         <CompetitorEditor competitorProduct={cp} retailerListings={c.retailerListings} onCancel={() => setEditing(false)} onSaved={() => { setEditing(false); onSaved(); }} />
+      )}
+    </div>
+  );
+}
+
+// Attaches an EXISTING competitor product (already in the Competitors tab)
+// to this category, by linking it against one of the category's own
+// products. Never creates a competitor product here — search only finds
+// ones that already exist; if it doesn't exist yet, it has to be added
+// under the Competitors tab first. Open to any employee, matching the
+// shared competitor-research editing rule.
+function AddCompetitorToCategory({ ourProducts, existingCompetitorIds, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [ourProductId, setOurProductId] = useState(ourProducts[0]?.id || "");
+  const [error, setError] = useState("");
+  const [addingId, setAddingId] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    setSearching(true);
+    const t = setTimeout(() => {
+      api.getCompetitorProducts({ q: query.trim(), limit: 15 })
+        .then((data) => setResults((data.competitorProducts || []).filter((p) => !existingCompetitorIds.has(p.id))))
+        .catch(() => setResults([]))
+        .finally(() => setSearching(false));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [query, open, existingCompetitorIds]);
+
+  if (ourProducts.length === 0) {
+    return <div style={{ fontSize: 11.5, color: "#8A8272", fontStyle: "italic" }}>Add at least one of our products to this category before linking competitors.</div>;
+  }
+
+  const add = async (competitorProductId) => {
+    setAddingId(competitorProductId);
+    setError("");
+    try {
+      await api.addRecallCompetitorRelationship({ competitorProductId, ourProductId });
+      setResults((r) => r.filter((p) => p.id !== competitorProductId));
+      onSaved();
+    } catch (e) {
+      setError(e.message || "Couldn't link that competitor.");
+    } finally {
+      setAddingId("");
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 4, marginBottom: 14, paddingTop: 10, borderTop: "1px solid #F0EBE0" }}>
+      {!open ? (
+        <button type="button" onClick={() => setOpen(true)} style={editButtonStyle}>+ Add existing competitor to this comparison</button>
+      ) : (
+        <div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search competitor products by brand or ingredient…"
+              style={{ ...inputStyle, flex: 1, minWidth: 180 }}
+            />
+            {ourProducts.length > 1 && (
+              <select value={ourProductId} onChange={(e) => setOurProductId(e.target.value)} style={{ ...inputStyle, width: "auto" }}>
+                {ourProducts.map((p) => <option key={p.id} value={p.id}>Compare against: {p.name}</option>)}
+              </select>
+            )}
+            <button type="button" onClick={() => { setOpen(false); setQuery(""); setResults([]); }} style={cancelButtonStyle}>Close</button>
+          </div>
+          {error && <div style={{ color: "#B33A3A", fontSize: 11.5, marginBottom: 6 }}>{error}</div>}
+          {searching && <div style={{ fontSize: 11.5, color: "#8A8272" }}>Searching…</div>}
+          {!searching && results.length === 0 && (
+            <div style={{ fontSize: 11.5, color: "#8A8272" }}>
+              No unlinked competitor products match{query.trim() ? "" : " yet"} — add it under the Competitors tab first if it doesn't exist there.
+            </div>
+          )}
+          {results.map((p) => (
+            <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid #F0EBE0", fontSize: 12 }}>
+              <div>{p.competitorName} — {p.productName}{p.genericName ? ` (${p.genericName})` : ""}</div>
+              <button type="button" disabled={addingId === p.id} onClick={() => add(p.id)} style={editButtonStyle}>
+                {addingId === p.id ? "Adding…" : "Add"}
+              </button>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -746,8 +857,13 @@ function RecallAnalysisSection({ products, competitors, ingredient, role, onSave
               <OurProductCard key={r.key} product={r.raw} canEdit={role === "manager"} onSaved={onSaved} />
             ))}
             {competitorRows.map((r) => (
-              <CompetitorCard key={r.key} rel={r.rel} canEdit={true} onSaved={onSaved} />
+              <CompetitorCard key={r.key} rel={r.rel} canEdit={true} canUnlink={role === "manager"} onSaved={onSaved} />
             ))}
+            <AddCompetitorToCategory
+              ourProducts={ourRows.map((r) => ({ id: r.raw.id, name: r.name }))}
+              existingCompetitorIds={new Set(competitorRows.map((r) => r.raw.id))}
+              onSaved={onSaved}
+            />
           </ExpandableDetails>
         </>
       )}

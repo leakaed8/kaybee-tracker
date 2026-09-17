@@ -141,4 +141,8 @@ export const api = {
   addRecallRetailerListing: (listing) => request("/recall/retailer-listings", { method: "POST", body: JSON.stringify(listing) }),
   updateRecallRetailerListing: (id, patch) => request(`/recall/retailer-listings/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   resolveRecallFieldConflict: (id, resolution) => request(`/recall/field-conflicts/${id}/resolve`, { method: "PATCH", body: JSON.stringify({ resolution }) }),
+  getRecallLinkableProducts: () => request("/recall/linkable-products"),
+  getRecallCompetitorRelationships: () => request("/recall/competitor-relationships"),
+  addRecallCompetitorRelationship: (payload) => request("/recall/competitor-relationships", { method: "POST", body: JSON.stringify(payload) }),
+  removeRecallCompetitorRelationship: (id) => request(`/recall/competitor-relationships/${id}`, { method: "DELETE" }),
 };

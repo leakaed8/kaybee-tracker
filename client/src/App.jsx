@@ -3566,6 +3566,12 @@ function CompetitorsView({ canEdit, competitors, ourProducts, onAdd, onUpdate, o
   const [products, setProducts] = useState([]);
   const [productsTotal, setProductsTotal] = useState(0);
   const [sightings, setSightings] = useState([]);
+  // Which Recall categories each competitor product is already linked to
+  // (via a RecallCompetitorRelationships row), and which of our products
+  // are actually part of a Recall category — both needed to offer "Link
+  // to Recall category" per row without duplicating Recall's own logic.
+  const [recallLinkableProducts, setRecallLinkableProducts] = useState([]);
+  const [recallRelationships, setRecallRelationships] = useState([]);
 
   const loadProducts = useCallback(() => {
     api.getCompetitorProducts({ q: productSearch }).then((data) => {
@@ -3577,6 +3583,19 @@ function CompetitorsView({ canEdit, competitors, ourProducts, onAdd, onUpdate, o
   useEffect(() => {
     api.getCompetitorSightings({}).then((data) => setSightings(data.sightings || [])).catch(() => setSightings([]));
   }, []);
+  const loadRecallRelationships = useCallback(() => {
+    api.getRecallCompetitorRelationships().then((data) => setRecallRelationships(data.relationships || [])).catch(() => setRecallRelationships([]));
+  }, []);
+  useEffect(() => {
+    api.getRecallLinkableProducts().then((data) => setRecallLinkableProducts(data.products || [])).catch(() => setRecallLinkableProducts([]));
+    loadRecallRelationships();
+  }, [loadRecallRelationships]);
+  const recallLinksByCompetitorId = new Map();
+  recallRelationships.forEach((r) => {
+    const list = recallLinksByCompetitorId.get(r.competitorProductId) || [];
+    list.push(r);
+    recallLinksByCompetitorId.set(r.competitorProductId, list);
+  });
 
   const submitAdd = async () => {
     if (!form.name.trim()) { setError("Competitor name is required."); return; }
@@ -3837,6 +3856,10 @@ function CompetitorsView({ canEdit, competitors, ourProducts, onAdd, onUpdate, o
               compareChecked={compareIds.has(p.id)}
               onToggleCompare={() => toggleCompare(p.id)}
               ourProducts={ourProducts || []}
+              recallLinkableProducts={recallLinkableProducts}
+              recallLinks={recallLinksByCompetitorId.get(p.id) || []}
+              canUnlinkRecall={canEdit}
+              onRecallLinksChanged={loadRecallRelationships}
             />
           )
         ))}
@@ -4042,9 +4065,10 @@ const COMPETITOR_DETAIL_LABELS = {
 };
 
 // ---------- Competitor product row (read mode) ----------
-function CompetitorProductRow({ p, canEditProduct, canDelete, onStartEdit, confirmDelete, onConfirmDelete, onCancelDelete, onDelete, compareChecked, onToggleCompare, ourProducts }) {
+function CompetitorProductRow({ p, canEditProduct, canDelete, onStartEdit, confirmDelete, onConfirmDelete, onCancelDelete, onDelete, compareChecked, onToggleCompare, ourProducts, recallLinkableProducts, recallLinks, canUnlinkRecall, onRecallLinksChanged }) {
   const [showDetails, setShowDetails] = useState(false);
   const [showCompareOurs, setShowCompareOurs] = useState(false);
+  const [showRecallLink, setShowRecallLink] = useState(false);
   const ingredients = getIngredients(p);
   const m = computeMetrics(p);
   const hasAdvancedDetails = COMPETITOR_DETAIL_KEYS.some((k) => p[k]);
@@ -4081,6 +4105,12 @@ function CompetitorProductRow({ p, canEditProduct, canDelete, onStartEdit, confi
               )}
             </div>
 
+            {recallLinks.length > 0 && (
+              <div style={{ fontSize: 11, color: "#4C7A5E", marginTop: 6 }}>
+                In Recall under: {recallLinks.map((l) => l.categoryName).filter(Boolean).join(", ") || "a category"}
+              </div>
+            )}
+
             <div style={{ display: "flex", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
               {hasAdvancedDetails && (
                 <button type="button" onClick={() => setShowDetails((v) => !v)} style={{ fontSize: 11.5, color: "#4C7A5E", background: "none", border: "none", padding: 0 }}>
@@ -4090,10 +4120,23 @@ function CompetitorProductRow({ p, canEditProduct, canDelete, onStartEdit, confi
               <button type="button" onClick={() => setShowCompareOurs((v) => !v)} style={{ fontSize: 11.5, color: "#4C7A5E", background: "none", border: "none", padding: 0 }}>
                 Compare with our product
               </button>
+              <button type="button" onClick={() => setShowRecallLink((v) => !v)} style={{ fontSize: 11.5, color: "#4C7A5E", background: "none", border: "none", padding: 0 }}>
+                Link to Recall category
+              </button>
             </div>
 
             {showDetails && <ProductAdvancedDetails p={p} />}
             {showCompareOurs && <CompareWithOurProduct competitor={p} ourProducts={ourProducts} onClose={() => setShowCompareOurs(false)} />}
+            {showRecallLink && (
+              <LinkToRecallCategory
+                competitorProductId={p.id}
+                linkableProducts={recallLinkableProducts}
+                existingLinks={recallLinks}
+                canUnlink={canUnlinkRecall}
+                onChanged={onRecallLinksChanged}
+                onClose={() => setShowRecallLink(false)}
+              />
+            )}
           </div>
         </div>
 
@@ -4136,6 +4179,86 @@ function ProductAdvancedDetails({ p }) {
           <span style={{ color: "#8A8272" }}>{COMPETITOR_DETAIL_LABELS[k]}: </span>{p[k]}
         </div>
       ))}
+    </div>
+  );
+}
+
+// Attaches this competitor product to a Recall category's Analysis table,
+// by linking it against one of that category's products (the same
+// RecallCompetitorRelationships link Recall's own "Manage research" panel
+// creates — this is just the other entry point to it, per the request that
+// a new competitor added here should be reachable from Recall too).
+// Distinct from CompareWithOurProduct below: that's an ephemeral, unsaved
+// price comparison; this persists and is what makes the competitor show up
+// under Recall for every rep.
+function LinkToRecallCategory({ competitorProductId, linkableProducts, existingLinks, canUnlink, onChanged, onClose }) {
+  const linkedOurProductIds = new Set(existingLinks.map((l) => l.ourProductId));
+  const available = linkableProducts.filter((p) => !linkedOurProductIds.has(p.ourProductId));
+  const [ourProductId, setOurProductId] = useState(available[0]?.ourProductId || "");
+  const [saving, setSaving] = useState(false);
+  const [unlinkingId, setUnlinkingId] = useState("");
+  const [error, setError] = useState("");
+
+  const link = async () => {
+    if (!ourProductId) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api.addRecallCompetitorRelationship({ competitorProductId, ourProductId });
+      onChanged();
+    } catch (e) {
+      setError(e.message || "Couldn't link.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  const unlink = async (relId) => {
+    setUnlinkingId(relId);
+    setError("");
+    try {
+      await api.removeRecallCompetitorRelationship(relId);
+      onChanged();
+    } catch (e) {
+      setError(e.message || "Couldn't remove that link.");
+    } finally {
+      setUnlinkingId("");
+    }
+  };
+
+  return (
+    <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, marginTop: 8, fontSize: 12 }}>
+      {existingLinks.length > 0 && (
+        <div style={{ marginBottom: 8 }}>
+          {existingLinks.map((l) => (
+            <div key={l.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0" }}>
+              <div>{l.categoryName || "Recall category"} — compared against {l.ourProductName || "our product"}</div>
+              {canUnlink && (
+                <button type="button" disabled={unlinkingId === l.id} onClick={() => unlink(l.id)} style={{ fontSize: 11, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "3px 8px" }}>
+                  {unlinkingId === l.id ? "Removing…" : "Remove"}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {available.length === 0 ? (
+        <div style={{ color: "#8A8272" }}>
+          {linkableProducts.length === 0
+            ? "No Recall categories have products set up yet."
+            : "Already linked to every Recall product it could be compared against."}
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <select value={ourProductId} onChange={(e) => setOurProductId(e.target.value)} style={{ ...inputStyle, width: "auto", flex: 1, minWidth: 180 }}>
+            {available.map((p) => <option key={p.ourProductId} value={p.ourProductId}>{p.categoryName} — {p.productName}</option>)}
+          </select>
+          <button type="button" disabled={saving} onClick={link} style={{ fontSize: 11.5, background: "#4C7A5E", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}>
+            {saving ? "Adding…" : "Add to Recall"}
+          </button>
+          <button type="button" onClick={onClose} style={{ fontSize: 11.5, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Close</button>
+        </div>
+      )}
+      {error && <div style={{ color: "#B33A3A", marginTop: 6 }}>{error}</div>}
     </div>
   );
 }
