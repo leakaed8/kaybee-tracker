@@ -3434,6 +3434,319 @@ async function ensureRecallB12Seeded() {
   recallB12SeedChecked = true;
 }
 
+// ---------- B12 product data layer (Recall Phase 2C) ----------
+// Populates the Mason/ALFA ("our products") and Lebanese-competitor B12
+// product records using ONLY the facts given in the Phase 2C request. Any
+// field not explicitly given is left blank on the record and named in that
+// record's own missingFields list instead — never guessed. Matching against
+// an existing record happens by NAME at request time (the same idempotent,
+// self-healing pattern as every other Recall seed in this file), since this
+// environment has no live Sheets credentials to look up a real existing ID
+// directly; see the implementation report for that disclosed limitation.
+const B12_OUR_PRODUCTS_SEED = [
+  {
+    matchName: "Mason Natural Vitamin B12 1,000 mcg Quick Dissolve",
+    catalog: {
+      name: "Mason Natural Vitamin B12 1,000 mcg Quick Dissolve",
+      price: 31.12, form: "Quick-Dissolve", packSize: 100, unitsPerDay: "",
+      ingredients: "Vitamin B12 (Cyanocobalamin) 1,000 mcg",
+      notes: "Price is a previously documented retailer price, pending re-verification. Administration: dissolves under the tongue, as explicitly stated.",
+    },
+    link: {
+      chemicalForm: "Cyanocobalamin", compoundAmount: 1000, activeAmount: "", unit: "mcg",
+      servingSize: "", dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "PARTIALLY_VERIFIED",
+      notes: "Administration: dissolves under the tongue, as explicitly stated (not assumed from 'Quick-Dissolve' alone).",
+      missingFields: "serving size, recommended daily use, complete ingredient list, exact manufacturer source URL, exact retailer source URL, SKU",
+    },
+  },
+  {
+    matchName: "Mason Natural Vitamin B12 5,000 mcg Quick Dissolve",
+    catalog: {
+      name: "Mason Natural Vitamin B12 5,000 mcg Quick Dissolve",
+      price: 30.50, form: "Quick-Dissolve", packSize: 30, unitsPerDay: "",
+      ingredients: "Vitamin B12 (Cyanocobalamin) 5,000 mcg",
+      notes: "Price is a previously documented Lebanese price, pending re-verification. Administration: dissolves under the tongue, as explicitly stated.",
+    },
+    link: {
+      chemicalForm: "Cyanocobalamin", compoundAmount: 5000, activeAmount: "", unit: "mcg",
+      servingSize: "", dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "PARTIALLY_VERIFIED",
+      notes: "Administration: dissolves under the tongue, as explicitly stated (not assumed from 'Quick-Dissolve' alone).",
+      missingFields: "serving size, recommended daily use, complete ingredient list, exact source URL, SKU",
+    },
+  },
+  {
+    matchName: "Mason Natural Vitamin B12 500 mcg",
+    catalog: {
+      name: "Mason Natural Vitamin B12 500 mcg",
+      price: 30.80, form: "Tablet", packSize: 100, unitsPerDay: "",
+      ingredients: "Vitamin B12 500 mcg; also includes calcium per previously documented product identity (amount not verified).",
+      notes: "Price is a previously documented price, pending re-verification. Chemical form is not verified — not assumed.",
+    },
+    link: {
+      chemicalForm: "", compoundAmount: 500, activeAmount: "", unit: "mcg",
+      servingSize: "", dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "PARTIALLY_VERIFIED",
+      notes: "Includes calcium per previously documented product identity — a distinct SKU from the plain B12-only products above.",
+      missingFields: "chemical form, serving size, recommended daily use, complete ingredients, exact source URL, SKU",
+    },
+  },
+  {
+    matchName: "Mason Natural Vitamin B12 100 mcg",
+    catalog: {
+      name: "Mason Natural Vitamin B12 100 mcg",
+      price: 20.56, form: "Tablet", packSize: 100, unitsPerDay: "",
+      ingredients: "",
+      notes: "Price is a previously documented price, pending re-verification. Chemical form is not verified — not assumed.",
+    },
+    link: {
+      chemicalForm: "", compoundAmount: 100, activeAmount: "", unit: "mcg",
+      servingSize: "", dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "PARTIALLY_VERIFIED",
+      notes: "",
+      missingFields: "chemical form, serving size, recommended daily use, complete ingredients, exact source URL, SKU",
+    },
+  },
+  {
+    matchName: "ALFA B-Complex Formula",
+    catalog: {
+      name: "ALFA B-Complex Formula",
+      price: 24.20, form: "Tablet", packSize: 100, unitsPerDay: 1,
+      ingredients: "Thiamine, Riboflavin, Niacinamide, Vitamin B6, Folic Acid, Vitamin B12, Biotin, Pantothenate (amounts not verified)",
+      notes: "Price is a previously documented Lebanese price, pending re-verification.",
+    },
+    link: {
+      // B12 amount and chemical form must NOT be inferred for this product.
+      chemicalForm: "", compoundAmount: "", activeAmount: "", unit: "",
+      servingSize: "", dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "PARTIALLY_VERIFIED",
+      notes: "B-complex formula; B12 is one of several listed ingredients.",
+      missingFields: "B12 amount, B12 chemical form, complete ingredient amounts, dosage/release information if not verified, exact source URL, SKU if applicable",
+    },
+  },
+];
+
+const B12_COMPETITOR_PRODUCTS_SEED = [
+  {
+    competitorName: "Suplima", productName: "CoBalance-12",
+    genericName: "Cyanocobalamin", form: "Tablet", dosage: "5,000 mcg", packSize: 30,
+    notes: "Recommended use: 1 tablet/day.",
+    missingFields: "complete ingredients, serving size if different from daily use, exact source URL, SKU",
+    retailerListings: [{ retailer: "Nicolas Care", displayedPrice: 25, currency: "USD",
+      notes: "Price previously documented. This product remains included even if the retailer page previously showed it as sold out/unavailable — availability is not tracked here." }],
+    compareWith: "Mason Natural Vitamin B12 5,000 mcg Quick Dissolve",
+    comparisonNotes: "Same labeled B12 amount (5,000 mcg) and same chemical form (Cyanocobalamin) as Mason's 5,000 mcg product; dosage form (tablet) is not confirmed as Quick-Dissolve for this competitor product.",
+  },
+  {
+    competitorName: "Green Made", productName: "Cobalin",
+    genericName: "Methylcobalamin", form: "Capsule", dosage: "1,000 mcg", packSize: 30,
+    notes: "Recommended use: 1-3 capsules/day.",
+    missingFields: "complete ingredients, serving size, exact source URLs, SKU",
+    retailerListings: [
+      { retailer: "Sohati Care", displayedPrice: 12.45, currency: "USD", notes: "Price previously documented." },
+      { retailer: "Nicolas Care", displayedPrice: "", currency: "", notes: "Previously identified on this retailer; price and source URL not verified in this research pass." },
+    ],
+    compareWith: "Mason Natural Vitamin B12 1,000 mcg Quick Dissolve",
+    comparisonNotes: "Same labeled B12 amount (1,000 mcg) as Mason's 1,000 mcg product; different chemical form (Methylcobalamin vs. Cyanocobalamin) and different dosage form (capsule vs. Quick-Dissolve tablet).",
+  },
+  {
+    competitorName: "Citrelax", productName: "B Complete",
+    genericName: "Methylcobalamin", form: "Capsule", dosage: "100 mcg", packSize: 30,
+    notes: "Recommended use: 1 capsule/day.",
+    missingFields: "complete ingredient list, serving size, exact source URL, SKU",
+    retailerListings: [{ retailer: "Skin Society", displayedPrice: 17.85, currency: "USD", notes: "Price previously documented." }],
+    compareWith: "Mason Natural Vitamin B12 100 mcg",
+    comparisonNotes: "Same labeled B12 amount (100 mcg) as Mason's 100 mcg product; Mason's chemical form is not verified, so a chemical-form comparison isn't possible yet.",
+  },
+  {
+    competitorName: "Tribion", productName: "Tribion (oral syrup)",
+    genericName: "Cyanocobalamin", form: "Oral Solution", dosage: "1,000 mcg", packSize: "10 mL x 10 vials",
+    notes: "Recommended use: 1 vial/day. Also contains folate 600 mcg as Quatrefolic.",
+    missingFields: "retailer/source not specified, exact price, complete ingredient list, exact source URL, SKU",
+    retailerListings: [],
+    compareWith: "Mason Natural Vitamin B12 1,000 mcg Quick Dissolve",
+    comparisonNotes: "Same labeled B12 amount (1,000 mcg) and chemical form (Cyanocobalamin) as Mason's 1,000 mcg product; different dosage form (oral liquid vial vs. Quick-Dissolve tablet). Tribion also contains folate, which Mason's B12 product is not documented to contain.",
+  },
+  {
+    competitorName: "Advancis", productName: "Neuro+",
+    genericName: "", form: "Tablet", dosage: "", packSize: 30,
+    notes: "Recommended use: 1 tablet at breakfast, may increase to 2/day.",
+    missingFields: "B12 amount, B12 chemical form, complete ingredients, retailer/source not specified, exact source URL, SKU",
+    retailerListings: [],
+    compareWith: "ALFA B-Complex Formula",
+    comparisonNotes: "Both are multi-ingredient formulas; B12 amount and chemical form are not yet verified for either product.",
+  },
+  {
+    competitorName: "Sundown", productName: "Vitamin B12 1,000 mcg",
+    genericName: "", form: "", dosage: "1,000 mcg", packSize: 120,
+    notes: "",
+    missingFields: "chemical form, dosage form, complete ingredients, serving size, recommended daily use, retailer/source not specified, exact source URL, SKU",
+    retailerListings: [],
+    compareWith: "Mason Natural Vitamin B12 1,000 mcg Quick Dissolve",
+    comparisonNotes: "Same labeled B12 amount (1,000 mcg) as Mason's 1,000 mcg product; Sundown's chemical form and dosage form are not verified, so no further comparison is possible yet.",
+  },
+  {
+    competitorName: "NOW", productName: "B-12 5,000 mcg + Folic Acid",
+    genericName: "Cyanocobalamin", form: "Lozenge", dosage: "5,000 mcg", packSize: 60,
+    notes: "Recommended use: 1 lozenge/day. Also contains folic acid.",
+    missingFields: "complete ingredient list, exact source URL, SKU",
+    retailerListings: [{ retailer: "Nicolas Care", displayedPrice: 20, currency: "USD", notes: "Price previously documented." }],
+    compareWith: "Mason Natural Vitamin B12 5,000 mcg Quick Dissolve",
+    comparisonNotes: "Same labeled B12 amount (5,000 mcg) and chemical form (Cyanocobalamin) as Mason's 5,000 mcg product; different dosage form (lozenge vs. Quick-Dissolve tablet). This product also contains folic acid, which Mason's B12 product is not documented to contain.",
+  },
+  {
+    // Manufacturer-only reference: no Lebanese retailer listing has been
+    // verified for this product, so per the Phase 2C instruction, no
+    // RecallRetailerListings row is created for it (see retailerListings: []).
+    competitorName: "NOW", productName: "Methyl B-12 5,000 mcg",
+    genericName: "Methylcobalamin", form: "Lozenge", dosage: "5,000 mcg", packSize: "",
+    notes: "No Lebanese retailer listing has been verified for this product — recorded as a manufacturer product reference only, not a Lebanese market listing.",
+    missingFields: "pack size, complete ingredient list, Lebanese retailer listing (not yet verified), exact source URL, SKU",
+    retailerListings: [],
+    compareWith: "Mason Natural Vitamin B12 5,000 mcg Quick Dissolve",
+    comparisonNotes: "Same labeled B12 amount (5,000 mcg) as Mason's 5,000 mcg product; different chemical form (Methylcobalamin vs. Cyanocobalamin).",
+  },
+];
+
+let recallB12ProductDataSeedChecked = false;
+async function ensureB12ProductDataSeeded() {
+  if (recallB12ProductDataSeedChecked) return;
+  const norm = (s) => String(s || "").trim().toLowerCase();
+
+  // ---- Our products: match-or-create in ProductCatalog, then link ----
+  const catalog = await db.getAllRows("ProductCatalog");
+  const productIdByName = new Map(catalog.map((p) => [norm(p.name), p.id]));
+  const newCatalogRows = [];
+  const ourProductIds = new Map(); // matchName -> id
+
+  for (const item of B12_OUR_PRODUCTS_SEED) {
+    const existingId = productIdByName.get(norm(item.matchName));
+    if (existingId) {
+      ourProductIds.set(item.matchName, existingId);
+    } else {
+      const id = `pc${crypto.randomUUID()}`;
+      newCatalogRows.push({
+        id, name: item.catalog.name, price: item.catalog.price, form: item.catalog.form,
+        packSize: item.catalog.packSize, unitsPerDay: item.catalog.unitsPerDay,
+        ingredients: item.catalog.ingredients, notes: item.catalog.notes,
+        createdBy: "Recall B12 product seed", createdAt: new Date().toISOString(), updatedBy: "", updatedAt: "",
+      });
+      ourProductIds.set(item.matchName, id);
+    }
+  }
+  if (newCatalogRows.length) await db.appendRows("ProductCatalog", newCatalogRows);
+
+  // Search for OTHER existing ALFA products that already contain B12 — per
+  // instruction, match rather than invent additional ALFA products.
+  // Best-effort name/ingredient text search; excludes the B-Complex product
+  // already handled above.
+  const alfaBComplexId = ourProductIds.get("ALFA B-Complex Formula");
+  const otherAlfaB12 = catalog.filter((p) =>
+    p.id !== alfaBComplexId && /alfa/i.test(p.name || "") && /\bb-?12\b|cobalamin/i.test(p.ingredients || "")
+  );
+
+  const productLinks = await db.getAllRows("RecallProductIngredients");
+  const linkedProductIds = new Set(productLinks.filter((l) => l.ingredientId === "vitamin-b12").map((l) => l.productId));
+  const newLinks = [];
+  for (const item of B12_OUR_PRODUCTS_SEED) {
+    const productId = ourProductIds.get(item.matchName);
+    if (linkedProductIds.has(productId)) continue;
+    newLinks.push({
+      id: `pi-b12-${crypto.randomUUID()}`, productId, ingredientId: "vitamin-b12",
+      chemicalForm: item.link.chemicalForm, compoundAmount: item.link.compoundAmount, activeAmount: item.link.activeAmount,
+      unit: item.link.unit, servingSize: item.link.servingSize, dailyAmount: item.link.dailyAmount,
+      amountBasis: item.link.amountBasis, sourceId: item.link.sourceId, verificationStatus: item.link.verificationStatus,
+      notes: item.link.notes, missingFields: item.link.missingFields,
+    });
+  }
+  for (const p of otherAlfaB12) {
+    if (linkedProductIds.has(p.id)) continue;
+    newLinks.push({
+      id: `pi-b12-${crypto.randomUUID()}`, productId: p.id, ingredientId: "vitamin-b12",
+      chemicalForm: "", compoundAmount: "", activeAmount: "", unit: "",
+      servingSize: "", dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "NOT_VERIFIED",
+      notes: "Found via an existing-catalog search for other ALFA products containing B12; fields not independently re-verified in this phase.",
+      missingFields: "B12 amount, B12 chemical form, serving size, recommended daily use, complete ingredients, exact source URL, SKU",
+    });
+  }
+  if (newLinks.length) await db.appendRows("RecallProductIngredients", newLinks);
+
+  // ---- Competitor products: match-or-create in CompetitorProducts ----
+  const competitorProducts = await db.getAllRows("CompetitorProducts");
+  const competitorIdByKey = new Map(competitorProducts.map((p) => [`${norm(p.competitorName)}|${norm(p.productName)}`, p.id]));
+  const newCompetitorRows = [];
+  const competitorIds = new Map(); // "brand|product" -> id
+
+  for (const item of B12_COMPETITOR_PRODUCTS_SEED) {
+    const key = `${norm(item.competitorName)}|${norm(item.productName)}`;
+    const existingId = competitorIdByKey.get(key);
+    if (existingId) {
+      competitorIds.set(key, existingId);
+    } else {
+      const id = `cp${crypto.randomUUID()}`;
+      const row = { id, createdAt: new Date().toISOString(), createdBy: "Recall B12 product seed", updatedBy: "", updatedAt: "" };
+      for (const f of COMPETITOR_PRODUCT_FIELDS) row[f] = "";
+      for (const f of COMPETITOR_PRODUCT_DETAIL_FIELDS) row[f] = "";
+      row.competitorName = item.competitorName;
+      row.productName = item.productName;
+      row.genericName = item.genericName || "";
+      row.form = item.form || "";
+      row.dosage = item.dosage || "";
+      row.packSize = item.packSize || "";
+      // Price stays on the retailer listing, not the master product — see
+      // Phase 2C rule 12 ("prices belong to retailer listings").
+      row.price = "";
+      row.notes = item.notes || "";
+      row.researchStatus = "PARTIALLY_VERIFIED";
+      row.missingFields = item.missingFields || "";
+      newCompetitorRows.push(row);
+      competitorIds.set(key, id);
+    }
+  }
+  if (newCompetitorRows.length) await db.appendRows("CompetitorProducts", newCompetitorRows);
+
+  // ---- Retailer listings: one row per (competitor product x retailer) ----
+  const existingListings = await db.getAllRows("RecallRetailerListings");
+  const listingKey = (competitorProductId, retailer) => `${competitorProductId}|${norm(retailer)}`;
+  const existingListingKeys = new Set(existingListings.map((l) => listingKey(l.competitorProductId, l.retailer)));
+  const newListings = [];
+  for (const item of B12_COMPETITOR_PRODUCTS_SEED) {
+    const key = `${norm(item.competitorName)}|${norm(item.productName)}`;
+    const competitorProductId = competitorIds.get(key);
+    for (const listing of item.retailerListings || []) {
+      if (!APPROVED_RETAILERS.includes(listing.retailer)) continue;
+      if (existingListingKeys.has(listingKey(competitorProductId, listing.retailer))) continue;
+      newListings.push({
+        id: `rl-b12-${crypto.randomUUID()}`, competitorProductId, retailer: listing.retailer,
+        // No source URL was provided for any listing in this research pass —
+        // left blank rather than invented; recorded as missing on the
+        // competitor product's own missingFields list instead.
+        sourceUrl: "", displayedPrice: listing.displayedPrice === "" ? "" : listing.displayedPrice,
+        currency: listing.currency || "", researchDate: "", notes: listing.notes || "",
+        createdBy: "Recall B12 product seed", createdAt: new Date().toISOString(),
+      });
+    }
+  }
+  if (newListings.length) await db.appendRows("RecallRetailerListings", newListings);
+
+  // ---- Comparison relationships (existing architecture — no ranking) ----
+  const existingRels = await db.getAllRows("RecallCompetitorRelationships");
+  const relKey = (a, b) => `${a}|${b}`;
+  const existingRelKeys = new Set(existingRels.map((r) => relKey(r.ourProductId, r.competitorProductId)));
+  const newRels = [];
+  for (const item of B12_COMPETITOR_PRODUCTS_SEED) {
+    const key = `${norm(item.competitorName)}|${norm(item.productName)}`;
+    const competitorProductId = competitorIds.get(key);
+    const ourProductId = ourProductIds.get(item.compareWith);
+    if (!ourProductId || !competitorProductId) continue;
+    if (existingRelKeys.has(relKey(ourProductId, competitorProductId))) continue;
+    newRels.push({
+      id: `cr-b12-${crypto.randomUUID()}`, ourProductId, competitorProductId,
+      comparisonType: "dose-and-form-comparison", notes: item.comparisonNotes || "",
+      sourceIds: "", createdAt: new Date().toISOString(),
+    });
+  }
+  if (newRels.length) await db.appendRows("RecallCompetitorRelationships", newRels);
+
+  recallB12ProductDataSeedChecked = true;
+}
+
 // One combined read per page load (categories + the three empty-for-now
 // knowledge tabs used to compute counts), rather than one Sheets call per
 // category — the whole point of Phase J's performance rule.
@@ -3441,6 +3754,7 @@ app.get("/api/recall/categories", async (req, res) => {
   try {
     await ensureRecallCategoriesSeeded();
     await ensureRecallB12Seeded();
+    await ensureB12ProductDataSeeded();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
@@ -3488,7 +3802,8 @@ app.get("/api/recall/categories/:id", async (req, res) => {
   try {
     await ensureRecallCategoriesSeeded();
     await ensureRecallB12Seeded();
-    const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels] = await Promise.all([
+    await ensureB12ProductDataSeeded();
+    const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
       db.getAllRows("RecallIngredientForms"),
@@ -3498,6 +3813,8 @@ app.get("/api/recall/categories/:id", async (req, res) => {
       db.getAllRows("RecallQuizQuestions"),
       db.getAllRows("ProductCatalog"),
       db.getAllRows("RecallCompetitorRelationships"),
+      db.getAllRows("CompetitorProducts"),
+      db.getAllRows("RecallRetailerListings"),
     ]);
     const category = categories.find((c) => c.id === req.params.id);
     if (!category) return res.status(404).json({ error: "Recall category not found." });
@@ -3506,9 +3823,61 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     const ingredientIds = new Set(categoryIngredients.map((ing) => ing.id));
     const ingredientForms = forms.filter((f) => ingredientIds.has(f.ingredientId));
     const links = productIngredients.filter((pi) => ingredientIds.has(pi.ingredientId));
+    const linkByProductId = new Map(links.map((pi) => [pi.productId, pi]));
     const productIds = new Set(links.map((pi) => pi.productId));
-    const products = catalog.filter((p) => productIds.has(p.id));
-    const competitors = competitorRels.filter((r) => productIds.has(r.ourProductId));
+    // Our products, enriched with this category's ingredient-link facts
+    // (B12 amount, chemical form, verification status, missing fields) —
+    // additive fields on top of the raw ProductCatalog row, not a
+    // replacement for it.
+    const products = catalog.filter((p) => productIds.has(p.id)).map((p) => {
+      const link = linkByProductId.get(p.id);
+      return {
+        ...p,
+        chemicalForm: link?.chemicalForm || "",
+        compoundAmount: link?.compoundAmount || "",
+        unit: link?.unit || "",
+        servingSize: link?.servingSize || "",
+        dailyAmount: link?.dailyAmount || "",
+        verificationStatus: link?.verificationStatus || "",
+        linkNotes: link?.notes || "",
+        missingFields: link?.missingFields ? link.missingFields.split(",").map((s) => s.trim()).filter(Boolean) : [],
+      };
+    });
+    // Competitor products linked to this category via a comparison
+    // relationship to one of our products above — enriched with the full
+    // competitor product record and its retailer listings (never an
+    // availability/stock field; see RecallRetailerListings schema comment).
+    const competitorProductById = new Map(competitorProducts.map((p) => [p.id, p]));
+    const listingsByCompetitorId = new Map();
+    retailerListings.forEach((l) => {
+      const list = listingsByCompetitorId.get(l.competitorProductId) || [];
+      list.push(l);
+      listingsByCompetitorId.set(l.competitorProductId, list);
+    });
+    const competitors = competitorRels
+      .filter((r) => productIds.has(r.ourProductId))
+      .map((r) => {
+        const cp = competitorProductById.get(r.competitorProductId);
+        return {
+          id: r.id,
+          comparisonType: r.comparisonType,
+          notes: r.notes || "",
+          ourProductId: r.ourProductId,
+          competitorProduct: cp
+            ? {
+                id: cp.id, competitorName: cp.competitorName, productName: cp.productName,
+                genericName: cp.genericName || "", form: cp.form || "", dosage: cp.dosage || "", packSize: cp.packSize || "",
+                researchStatus: cp.researchStatus || "", notes: cp.notes || "",
+                missingFields: cp.missingFields ? cp.missingFields.split(",").map((s) => s.trim()).filter(Boolean) : [],
+              }
+            : null,
+          retailerListings: (listingsByCompetitorId.get(r.competitorProductId) || []).map((l) => ({
+            retailer: l.retailer, displayedPrice: l.displayedPrice, currency: l.currency,
+            sourceUrl: l.sourceUrl || "", notes: l.notes || "",
+          })),
+        };
+      })
+      .filter((c) => c.competitorProduct);
     const categoryEvidence = evidence.filter((e) => ingredientIds.has(e.ingredientId));
     const categoryInteractions = interactions.filter((i) => ingredientIds.has(i.ingredientId));
     const categoryQuiz = quiz.filter((q) => q.categoryId === category.id && q.active !== "false");

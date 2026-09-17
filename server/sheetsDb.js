@@ -72,9 +72,13 @@ const SCHEMAS = {
     "documentedAdvantages", "documentedLimitations", "sourceIds", "lastReviewed",
   ],
   RecallDosageForms: ["id", "name", "route", "releaseType", "administrationMethod", "description"],
+  // missingFields appended (Phase 2C) — mirrors the CompetitorProducts
+  // pattern: verificationStatus already covers "how sure are we", but there
+  // was no field naming WHICH facts are still unverified for an our-product
+  // link. Appended at the end per the positional-schema rule.
   RecallProductIngredients: [
     "id", "productId", "ingredientId", "chemicalForm", "compoundAmount", "activeAmount", "unit",
-    "servingSize", "dailyAmount", "amountBasis", "sourceId", "verificationStatus", "notes",
+    "servingSize", "dailyAmount", "amountBasis", "sourceId", "verificationStatus", "notes", "missingFields",
   ],
   RecallClinicalEvidence: [
     "id", "ingredientId", "productId", "formId", "condition", "population", "intervention", "dose", "route",

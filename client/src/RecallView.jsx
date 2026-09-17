@@ -8,6 +8,29 @@ function EmptyState({ text }) {
   return <div style={{ textAlign: "center", padding: "24px 0", color: "#B7AF9E", fontSize: 13 }}>{text}</div>;
 }
 
+// Always shows what's missing rather than hiding it — a product is never
+// displayed as "complete" while required fields are still unverified.
+function MissingInfoBadge({ researchStatus, missingFields }) {
+  if (!researchStatus && (!missingFields || missingFields.length === 0)) return null;
+  return (
+    <div style={{ marginTop: 6 }}>
+      {researchStatus && (
+        <div style={{ fontSize: 10.5, fontWeight: 700, color: "#8A8272", letterSpacing: 0.3 }}>
+          RESEARCH STATUS: {researchStatus.replace(/_/g, " ")}
+        </div>
+      )}
+      {missingFields && missingFields.length > 0 && (
+        <div style={{ fontSize: 11, color: "#8A6B3A", marginTop: 2 }}>
+          <div style={{ fontWeight: 600 }}>MISSING INFORMATION</div>
+          <ul style={{ margin: "2px 0 0", paddingLeft: 16 }}>
+            {missingFields.map((f, idx) => <li key={idx}>{f}</li>)}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Structure-only phase: no clinical content ships with this module. Every
 // section below reads from tables that are genuinely empty right now, so
 // the empty-state text is accurate, not a placeholder pretending to be
@@ -218,7 +241,17 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack }) {
             {data.products.length === 0 ? (
               <EmptyState text="No products have been linked to this category yet." />
             ) : (
-              data.products.map((p) => <div key={p.id} style={{ fontSize: 12.5, marginBottom: 4 }}>{p.name}</div>)
+              data.products.map((p) => (
+                <div key={p.id} style={{ fontSize: 12.5, marginBottom: 12, paddingBottom: 12, borderBottom: "1px solid #F0EBE0" }}>
+                  <div style={{ fontWeight: 600 }}>{p.name}</div>
+                  {(p.compoundAmount || p.chemicalForm) && (
+                    <div style={{ color: "#5B5445", marginTop: 2 }}>
+                      {p.compoundAmount ? `${p.compoundAmount} ${p.unit || ""}`.trim() : ""}{p.compoundAmount && p.chemicalForm ? " · " : ""}{p.chemicalForm}
+                    </div>
+                  )}
+                  <MissingInfoBadge researchStatus={p.verificationStatus} missingFields={p.missingFields} />
+                </div>
+              ))
             )}
           </RecallSection>
 
@@ -226,7 +259,29 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack }) {
             {data.competitors.length === 0 ? (
               <EmptyState text="No competitor comparison has been added yet." />
             ) : (
-              data.competitors.map((c) => <div key={c.id} style={{ fontSize: 12.5 }}>{c.comparisonType}</div>)
+              data.competitors.map((c) => (
+                <div key={c.id} style={{ fontSize: 12.5, marginBottom: 12, paddingBottom: 12, borderBottom: "1px solid #F0EBE0" }}>
+                  <div style={{ fontWeight: 600 }}>
+                    {c.competitorProduct.competitorName} — {c.competitorProduct.productName}
+                  </div>
+                  <div style={{ color: "#5B5445", marginTop: 2 }}>
+                    {[c.competitorProduct.dosage, c.competitorProduct.genericName, c.competitorProduct.form, c.competitorProduct.packSize ? `pack of ${c.competitorProduct.packSize}` : ""]
+                      .filter(Boolean).join(" · ")}
+                  </div>
+                  {c.notes && <div style={{ color: "#8A8272", fontSize: 11.5, marginTop: 4 }}>{c.notes}</div>}
+                  {c.retailerListings.length > 0 && (
+                    <div style={{ marginTop: 6 }}>
+                      {c.retailerListings.map((l, idx) => (
+                        <div key={idx} style={{ fontSize: 11.5, color: "#5B5445" }}>
+                          {l.retailer}: {l.displayedPrice !== "" && l.displayedPrice != null ? `${l.currency || ""} ${l.displayedPrice}`.trim() : "price not verified"}
+                          {" — "}{l.sourceUrl ? <a href={l.sourceUrl} target="_blank" rel="noreferrer">source</a> : "source URL not verified"}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <MissingInfoBadge researchStatus={c.competitorProduct.researchStatus} missingFields={c.competitorProduct.missingFields} />
+                </div>
+              ))
             )}
           </RecallSection>
 
