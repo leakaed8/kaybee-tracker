@@ -186,7 +186,12 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack }) {
               <EmptyState text="No quick recall summary has been added yet." />
             ) : (
               data.ingredients.filter((i) => i.repQuickTakeaway).map((i) => (
-                <div key={i.id} style={{ fontSize: 12.5, marginBottom: 8 }}><strong>{i.name}: </strong>{i.repQuickTakeaway}</div>
+                <div key={i.id} style={{ marginBottom: 10 }}>
+                  <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 4 }}>{i.name}</div>
+                  <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5 }}>
+                    {i.repQuickTakeaway.split("\n").filter(Boolean).map((line, idx) => <li key={idx} style={{ marginBottom: 4 }}>{line}</li>)}
+                  </ul>
+                </div>
               ))
             )}
           </RecallSection>
@@ -195,7 +200,13 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack }) {
             {data.ingredientForms.length === 0 ? (
               <EmptyState text="No chemical forms have been added yet." />
             ) : (
-              data.ingredientForms.map((f) => <div key={f.id} style={{ fontSize: 12.5 }}>{f.formName}</div>)
+              data.ingredientForms.map((f) => (
+                <div key={f.id} style={{ fontSize: 12.5, marginBottom: 8 }}>
+                  <div><strong>{f.formName}</strong>{f.chemicalName ? ` (also known as ${f.chemicalName})` : ""}</div>
+                  {f.metabolicNotes && <div style={{ color: "#5B5445" }}>{f.metabolicNotes}</div>}
+                  {f.evidenceComparison && <div style={{ color: "#8A8272", fontSize: 11.5 }}>{f.evidenceComparison}</div>}
+                </div>
+              ))
             )}
           </RecallSection>
 
@@ -223,7 +234,19 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack }) {
             {data.evidence.length === 0 ? (
               <EmptyState text="Clinical evidence coming soon." />
             ) : (
-              data.evidence.map((e) => <div key={e.id} style={{ fontSize: 12.5 }}>{e.condition}</div>)
+              data.evidence.map((e) => (
+                <div key={e.id} style={{ fontSize: 12.5, marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid #F0EBE0" }}>
+                  <div style={{ fontWeight: 600, marginBottom: 2 }}>{e.condition}</div>
+                  {e.result ? (
+                    <div>{e.result}</div>
+                  ) : (
+                    <div style={{ color: "#B7AF9E", fontStyle: "italic" }}>Content pending — not yet extracted from the cited source.</div>
+                  )}
+                  {e.evidenceLevel && e.evidenceLevel !== "NOT_VERIFIED" && (
+                    <div style={{ fontSize: 10.5, color: "#8A8272", marginTop: 4 }}>Evidence level: {e.evidenceLevel}</div>
+                  )}
+                </div>
+              ))
             )}
           </RecallSection>
 
@@ -231,7 +254,12 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack }) {
             {data.interactions.length === 0 ? (
               <EmptyState text="No interaction information has been added yet." />
             ) : (
-              data.interactions.map((i) => <div key={i.id} style={{ fontSize: 12.5 }}>{i.drugName}</div>)
+              data.interactions.map((i) => (
+                <div key={i.id} style={{ fontSize: 12.5, marginBottom: 8 }}>
+                  <strong>{i.drugName}</strong>{i.drugClass ? ` (${i.drugClass})` : ""} — {i.clinicalSignificance}
+                  {i.pharmacistCheckpoint && <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 2 }}>Checkpoint: {i.pharmacistCheckpoint}</div>}
+                </div>
+              ))
             )}
           </RecallSection>
 
@@ -240,7 +268,21 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack }) {
               <EmptyState text="No clinical checkpoints have been added yet." />
             ) : (
               data.ingredients.filter((i) => i.clinicalCheckpoints).map((i) => (
-                <div key={i.id} style={{ fontSize: 12.5, marginBottom: 8 }}>{i.clinicalCheckpoints}</div>
+                <ul key={i.id} style={{ margin: 0, paddingLeft: 18, fontSize: 12.5 }}>
+                  {i.clinicalCheckpoints.split("\n").filter(Boolean).map((line, idx) => <li key={idx} style={{ marginBottom: 4 }}>{line}</li>)}
+                </ul>
+              ))
+            )}
+          </RecallSection>
+
+          <RecallSection title="What Not to Claim">
+            {data.ingredients.filter((i) => i.whatNotToClaim).length === 0 ? (
+              <EmptyState text="No guidance has been added yet." />
+            ) : (
+              data.ingredients.filter((i) => i.whatNotToClaim).map((i) => (
+                <ul key={i.id} style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: "#7A3B3B" }}>
+                  {i.whatNotToClaim.split("\n").filter(Boolean).map((line, idx) => <li key={idx} style={{ marginBottom: 4 }}>{line}</li>)}
+                </ul>
               ))
             )}
           </RecallSection>
