@@ -30,11 +30,17 @@ const SCHEMAS = {
   // listing data (price/URL/date) — this master row is deliberately
   // retailer-agnostic; a product doesn't get a second master row just
   // because it's listed on more than one retailer site.
+  // sku/sourceLabel/sourceUrl appended (Phase 2D) — the manager research
+  // editor needs somewhere to record a SKU and where a fact (not a
+  // retailer's price/listing — see RecallRetailerListings for that) came
+  // from. researchStatus/missingFields (Phase 3) are always SERVER-derived
+  // from the record's own fields, never accepted verbatim from a client
+  // patch — see deriveCompetitorResearchStatus in index.js.
   CompetitorProducts: [
     "id", "competitorName", "productName", "genericName", "form", "dosage", "packSize", "price", "discountRate", "notes", "createdAt",
     "unitsPerDay", "ingredients", "manufacturer", "manufacturingCountry", "ingredientOrigin", "gmp", "thirdPartyCertification",
     "coaAvailability", "contaminantTesting", "expiryDate", "evidenceReferences", "otherIngredients", "createdBy", "updatedBy", "updatedAt",
-    "researchStatus", "missingFields",
+    "researchStatus", "missingFields", "sku", "sourceLabel", "sourceUrl",
   ],
   TrainingVideos: ["id", "title", "r2ObjectKey", "quiz", "createdAt"],
   TrainingProgress: ["id", "employeeId", "videoId", "completedAt", "quizResponses"],
@@ -76,9 +82,15 @@ const SCHEMAS = {
   // pattern: verificationStatus already covers "how sure are we", but there
   // was no field naming WHICH facts are still unverified for an our-product
   // link. Appended at the end per the positional-schema rule.
+  // sku/manufacturer/sourceLabel/sourceUrl appended (Phase 2D) for the
+  // manager research editor — sourceId already links to a formal
+  // RecallResearchSources row when one exists; sourceLabel/sourceUrl let a
+  // manager record where a fact came from (e.g. "Manufacturer label") on
+  // the spot, without first creating a full source record.
   RecallProductIngredients: [
     "id", "productId", "ingredientId", "chemicalForm", "compoundAmount", "activeAmount", "unit",
     "servingSize", "dailyAmount", "amountBasis", "sourceId", "verificationStatus", "notes", "missingFields",
+    "sku", "manufacturer", "sourceLabel", "sourceUrl",
   ],
   RecallClinicalEvidence: [
     "id", "ingredientId", "productId", "formId", "condition", "population", "intervention", "dose", "route",
@@ -114,9 +126,15 @@ const SCHEMAS = {
   // serving size, etc.) without needing a dedicated "conflict" column on
   // every table. Recording a conflict always keeps BOTH source values —
   // never resolved by silently picking one.
+  // resolution/resolvedBy/resolvedAt appended (Phase 2D) — resolving a
+  // conflict picks one source's value onto the actual record (an explicit,
+  // auditable manager action, never automatic) but the conflict ROW itself
+  // is kept as history with status flipped to RESOLVED, not deleted —
+  // both original source values stay visible.
   RecallFieldConflicts: [
     "id", "entityType", "entityId", "fieldName", "sourceALabel", "sourceAValue",
     "sourceBLabel", "sourceBValue", "status", "notes", "createdAt",
+    "resolution", "resolvedBy", "resolvedAt",
   ],
 };
 

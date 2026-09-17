@@ -3747,6 +3747,107 @@ async function ensureB12ProductDataSeeded() {
   recallB12ProductDataSeedChecked = true;
 }
 
+// ---------- Recall Phase 2D: research status derivation + editing ----------
+// A record's researchStatus/missingFields are ALWAYS derived here from its
+// own current field values — never accepted verbatim from a client patch.
+// This is what keeps "VERIFIED" meaningful (a manager can't just declare
+// it) and keeps the missing-information checklist honest as fields get
+// filled in. These required-field lists are this phase's own definition —
+// the architecture didn't previously specify one — and are disclosed here
+// (and in the implementation report) for review/override.
+const OUR_PRODUCT_REQUIRED_FIELDS = [
+  { key: "chemicalForm", label: "chemical form" },
+  { key: "compoundAmount", label: "amount" },
+  { key: "dosageForm", label: "dosage form" },
+  { key: "servingSize", label: "serving size" },
+  { key: "dailyAmount", label: "recommended daily use" },
+  { key: "ingredients", label: "complete ingredients" },
+  { key: "sourceUrl", label: "manufacturer source URL" },
+  { key: "sku", label: "SKU" },
+];
+const COMPETITOR_PRODUCT_REQUIRED_FIELDS = [
+  { key: "genericName", label: "chemical form" },
+  { key: "dosage", label: "amount" },
+  { key: "form", label: "dosage form" },
+  { key: "packSize", label: "pack size" },
+  { key: "ingredients", label: "complete ingredients" },
+  { key: "sourceUrl", label: "manufacturer source URL" },
+  { key: "sku", label: "SKU" },
+];
+
+function isFieldFilled(v) {
+  if (v === undefined || v === null) return false;
+  if (typeof v === "string") return v.trim() !== "" && v.trim() !== "[]";
+  return true;
+}
+
+// hasOpenConflict: true if any RecallFieldConflicts row for this record still
+// has status "CONFLICT" (not yet resolved).
+function deriveResearchStatus(record, requiredFields, hasOpenConflict) {
+  if (hasOpenConflict) return "CONFLICT";
+  const presentCount = requiredFields.filter((f) => isFieldFilled(record[f.key])).length;
+  if (presentCount === 0) return "INCOMPLETE";
+  if (presentCount === requiredFields.length) return "VERIFIED";
+  return "PARTIALLY_VERIFIED";
+}
+
+function computeMissingFieldLabels(record, requiredFields, extra = []) {
+  const missing = requiredFields.filter((f) => !isFieldFilled(record[f.key])).map((f) => f.label);
+  extra.forEach(({ present, label }) => { if (!present) missing.push(label); });
+  return missing;
+}
+
+function conflictsFor(allConflicts, entityType, entityId) {
+  return allConflicts.filter((c) => c.entityType === entityType && c.entityId === entityId);
+}
+
+function hasOpenConflictOn(allConflicts, entityType, entityId, fieldName) {
+  return allConflicts.some((c) => c.entityType === entityType && c.entityId === entityId && c.status === "CONFLICT" && (!fieldName || c.fieldName === fieldName));
+}
+
+// Recomputes and persists researchStatus/missingFields for a competitor
+// product from its OWN current row data plus whether any retailer listing
+// for it has a sourceUrl (retailer source is tracked as a missing-info item
+// even though it isn't one of the fields that gates VERIFIED status — a
+// manufacturer-only reference product, per Phase 2C, legitimately has none).
+async function recomputeCompetitorResearchStatus(id) {
+  const [products, conflicts, listings] = await Promise.all([
+    db.getAllRows("CompetitorProducts"),
+    db.getAllRows("RecallFieldConflicts"),
+    db.getAllRows("RecallRetailerListings"),
+  ]);
+  const product = products.find((p) => p.id === id);
+  if (!product) return null;
+  const hasConflict = hasOpenConflictOn(conflicts, "CompetitorProducts", id);
+  const researchStatus = deriveResearchStatus(product, COMPETITOR_PRODUCT_REQUIRED_FIELDS, hasConflict);
+  const hasRetailerSource = listings.some((l) => l.competitorProductId === id && String(l.sourceUrl || "").trim());
+  const missingFields = computeMissingFieldLabels(product, COMPETITOR_PRODUCT_REQUIRED_FIELDS, [
+    { present: hasRetailerSource, label: "retailer source URL" },
+  ]).join(", ");
+  await db.updateRowById("CompetitorProducts", id, { researchStatus, missingFields });
+  return { researchStatus, missingFields };
+}
+
+// Same idea for an our-product link — merges the RecallProductIngredients
+// row with its ProductCatalog row's shared fields (dosage form/ingredients
+// live on ProductCatalog, not the link) before deriving status.
+async function recomputeOurProductResearchStatus(linkId) {
+  const [links, catalog, conflicts] = await Promise.all([
+    db.getAllRows("RecallProductIngredients"),
+    db.getAllRows("ProductCatalog"),
+    db.getAllRows("RecallFieldConflicts"),
+  ]);
+  const link = links.find((l) => l.id === linkId);
+  if (!link) return null;
+  const product = catalog.find((p) => p.id === link.productId);
+  const merged = { ...link, dosageForm: product?.form || "", ingredients: product?.ingredients || "" };
+  const hasConflict = hasOpenConflictOn(conflicts, "RecallProductIngredients", linkId) || hasOpenConflictOn(conflicts, "ProductCatalog", link.productId);
+  const researchStatus = deriveResearchStatus(merged, OUR_PRODUCT_REQUIRED_FIELDS, hasConflict);
+  const missingFields = computeMissingFieldLabels(merged, OUR_PRODUCT_REQUIRED_FIELDS).join(", ");
+  await db.updateRowById("RecallProductIngredients", linkId, { verificationStatus: researchStatus, missingFields });
+  return { researchStatus, missingFields };
+}
+
 // One combined read per page load (categories + the three empty-for-now
 // knowledge tabs used to compute counts), rather than one Sheets call per
 // category — the whole point of Phase J's performance rule.
@@ -3803,7 +3904,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     await ensureRecallCategoriesSeeded();
     await ensureRecallB12Seeded();
     await ensureB12ProductDataSeeded();
-    const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings] = await Promise.all([
+    const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
       db.getAllRows("RecallIngredientForms"),
@@ -3815,6 +3916,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
       db.getAllRows("RecallCompetitorRelationships"),
       db.getAllRows("CompetitorProducts"),
       db.getAllRows("RecallRetailerListings"),
+      db.getAllRows("RecallFieldConflicts"),
     ]);
     const category = categories.find((c) => c.id === req.params.id);
     if (!category) return res.status(404).json({ error: "Recall category not found." });
@@ -3825,22 +3927,38 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     const links = productIngredients.filter((pi) => ingredientIds.has(pi.ingredientId));
     const linkByProductId = new Map(links.map((pi) => [pi.productId, pi]));
     const productIds = new Set(links.map((pi) => pi.productId));
+    const splitFields = (s) => (s ? s.split(",").map((v) => v.trim()).filter(Boolean) : []);
     // Our products, enriched with this category's ingredient-link facts
-    // (B12 amount, chemical form, verification status, missing fields) —
-    // additive fields on top of the raw ProductCatalog row, not a
-    // replacement for it.
+    // (amount, chemical form, research status, missing fields, edit
+    // metadata) — additive fields on top of the raw ProductCatalog row, not
+    // a replacement for it. researchStatus/missingFields are DERIVED live
+    // from current data on every read (Phase 2D), not just whatever was
+    // last written, so the checklist can never go stale.
     const products = catalog.filter((p) => productIds.has(p.id)).map((p) => {
       const link = linkByProductId.get(p.id);
+      const merged = { ...(link || {}), dosageForm: p.form || "", ingredients: p.ingredients || "" };
+      const hasConflict = hasOpenConflictOn(fieldConflicts, "RecallProductIngredients", link?.id) || hasOpenConflictOn(fieldConflicts, "ProductCatalog", p.id);
+      const researchStatus = link ? deriveResearchStatus(merged, OUR_PRODUCT_REQUIRED_FIELDS, hasConflict) : "";
+      const missingFields = link ? computeMissingFieldLabels(merged, OUR_PRODUCT_REQUIRED_FIELDS) : [];
       return {
         ...p,
+        linkId: link?.id || "",
         chemicalForm: link?.chemicalForm || "",
         compoundAmount: link?.compoundAmount || "",
         unit: link?.unit || "",
         servingSize: link?.servingSize || "",
         dailyAmount: link?.dailyAmount || "",
-        verificationStatus: link?.verificationStatus || "",
+        sku: link?.sku || "",
+        manufacturer: link?.manufacturer || "",
+        sourceLabel: link?.sourceLabel || "",
+        sourceUrl: link?.sourceUrl || "",
+        verificationStatus: researchStatus,
         linkNotes: link?.notes || "",
-        missingFields: link?.missingFields ? link.missingFields.split(",").map((s) => s.trim()).filter(Boolean) : [],
+        missingFields,
+        conflicts: [
+          ...conflictsFor(fieldConflicts, "RecallProductIngredients", link?.id),
+          ...conflictsFor(fieldConflicts, "ProductCatalog", p.id),
+        ],
       };
     });
     // Competitor products linked to this category via a comparison
@@ -3858,6 +3976,13 @@ app.get("/api/recall/categories/:id", async (req, res) => {
       .filter((r) => productIds.has(r.ourProductId))
       .map((r) => {
         const cp = competitorProductById.get(r.competitorProductId);
+        const cpListings = listingsByCompetitorId.get(r.competitorProductId) || [];
+        const hasRetailerSource = cpListings.some((l) => String(l.sourceUrl || "").trim());
+        const hasConflict = cp ? hasOpenConflictOn(fieldConflicts, "CompetitorProducts", cp.id) : false;
+        const researchStatus = cp ? deriveResearchStatus(cp, COMPETITOR_PRODUCT_REQUIRED_FIELDS, hasConflict) : "";
+        const missingFields = cp
+          ? computeMissingFieldLabels(cp, COMPETITOR_PRODUCT_REQUIRED_FIELDS, [{ present: hasRetailerSource, label: "retailer source URL" }])
+          : [];
         return {
           id: r.id,
           comparisonType: r.comparisonType,
@@ -3867,12 +3992,15 @@ app.get("/api/recall/categories/:id", async (req, res) => {
             ? {
                 id: cp.id, competitorName: cp.competitorName, productName: cp.productName,
                 genericName: cp.genericName || "", form: cp.form || "", dosage: cp.dosage || "", packSize: cp.packSize || "",
-                researchStatus: cp.researchStatus || "", notes: cp.notes || "",
-                missingFields: cp.missingFields ? cp.missingFields.split(",").map((s) => s.trim()).filter(Boolean) : [],
+                ingredients: cp.ingredients || "", sku: cp.sku || "", manufacturer: cp.manufacturer || "",
+                sourceLabel: cp.sourceLabel || "", sourceUrl: cp.sourceUrl || "",
+                researchStatus, notes: cp.notes || "",
+                missingFields,
+                conflicts: conflictsFor(fieldConflicts, "CompetitorProducts", cp.id),
               }
             : null,
-          retailerListings: (listingsByCompetitorId.get(r.competitorProductId) || []).map((l) => ({
-            retailer: l.retailer, displayedPrice: l.displayedPrice, currency: l.currency,
+          retailerListings: cpListings.map((l) => ({
+            id: l.id, retailer: l.retailer, displayedPrice: l.displayedPrice, currency: l.currency,
             sourceUrl: l.sourceUrl || "", notes: l.notes || "",
           })),
         };
@@ -4032,6 +4160,143 @@ app.post("/api/recall/field-conflicts", requireManager, async (req, res) => {
     };
     await db.appendRow("RecallFieldConflicts", conflict);
     res.json(conflict);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Recall Phase 2D: manager research/edit routes ----------
+// These are DELIBERATELY separate from the app's existing, rep-open
+// /api/competitor-products/:id and /api/product-catalog/:id routes (used
+// for the day-to-day shared price list) — Recall's own research-completion
+// workflow is manager-only, per this phase's explicit permission rule, and
+// must not change who can edit the general price-list screens.
+const RECALL_COMPETITOR_RESEARCH_FIELDS = ["genericName", "form", "dosage", "packSize", "manufacturer", "sku", "sourceLabel", "sourceUrl", "notes"];
+
+app.patch("/api/recall/competitor-research/:id", requireManager, async (req, res) => {
+  try {
+    const products = await db.getAllRows("CompetitorProducts");
+    const existing = products.find((p) => p.id === req.params.id);
+    if (!existing) return res.status(404).json({ error: "Competitor product not found." });
+
+    const patch = {};
+    for (const key of RECALL_COMPETITOR_RESEARCH_FIELDS) {
+      if (req.body[key] !== undefined) patch[key] = req.body[key];
+    }
+    if (req.body.ingredients !== undefined) patch.ingredients = normalizeIngredients(req.body.ingredients);
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "No editable fields provided." });
+    patch.updatedBy = req.repName || "Manager";
+    patch.updatedAt = new Date().toISOString();
+
+    await db.updateRowById("CompetitorProducts", req.params.id, patch);
+    const derived = await recomputeCompetitorResearchStatus(req.params.id);
+    res.json({ ok: true, ...derived });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Edits an "our product" — the RecallProductIngredients link's own facts
+// (chemicalForm, amount, sourcing, ...) and, optionally in the same
+// request, the shared ProductCatalog fields (name/dosage form/pack
+// size/ingredients) that live on the master product record. Never creates
+// a new product or link — 404s if the link id doesn't already exist.
+const RECALL_OUR_PRODUCT_LINK_FIELDS = ["chemicalForm", "compoundAmount", "activeAmount", "unit", "servingSize", "dailyAmount", "amountBasis", "sku", "manufacturer", "sourceLabel", "sourceUrl", "linkNotes"];
+const RECALL_OUR_PRODUCT_CATALOG_FIELDS = ["name", "price", "form", "packSize", "unitsPerDay", "ingredients", "catalogNotes"];
+
+app.patch("/api/recall/our-products/:linkId", requireManager, async (req, res) => {
+  try {
+    const links = await db.getAllRows("RecallProductIngredients");
+    const link = links.find((l) => l.id === req.params.linkId);
+    if (!link) return res.status(404).json({ error: "Recall product link not found." });
+
+    const linkPatch = {};
+    for (const key of RECALL_OUR_PRODUCT_LINK_FIELDS) {
+      if (req.body[key] !== undefined) linkPatch[key === "linkNotes" ? "notes" : key] = req.body[key];
+    }
+    const catalogPatch = {};
+    for (const key of RECALL_OUR_PRODUCT_CATALOG_FIELDS) {
+      if (req.body[key] !== undefined) catalogPatch[key === "catalogNotes" ? "notes" : key] = req.body[key];
+    }
+    if (Object.keys(linkPatch).length === 0 && Object.keys(catalogPatch).length === 0) {
+      return res.status(400).json({ error: "No editable fields provided." });
+    }
+
+    if (Object.keys(linkPatch).length) await db.updateRowById("RecallProductIngredients", req.params.linkId, linkPatch);
+    if (Object.keys(catalogPatch).length) {
+      const catalogValidationError = validateCompetitorProductNumbers(catalogPatch);
+      if (catalogValidationError) return res.status(400).json({ error: catalogValidationError });
+      if (catalogPatch.ingredients !== undefined) catalogPatch.ingredients = normalizeIngredients(catalogPatch.ingredients);
+      catalogPatch.updatedBy = req.repName || "Manager";
+      catalogPatch.updatedAt = new Date().toISOString();
+      await db.updateRowById("ProductCatalog", link.productId, catalogPatch);
+    }
+
+    const derived = await recomputeOurProductResearchStatus(req.params.linkId);
+    res.json({ ok: true, ...derived });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Edits an EXISTING retailer listing (price/URL/notes/retailer) — never
+// creates a new one. Same allowlist-only field handling as the POST route
+// below it, so a caller sending "availability"/"inStock"/etc. is silently
+// ignored, not stored.
+app.patch("/api/recall/retailer-listings/:id", requireManager, async (req, res) => {
+  try {
+    const listings = await db.getAllRows("RecallRetailerListings");
+    if (!listings.some((l) => l.id === req.params.id)) return res.status(404).json({ error: "Retailer listing not found." });
+    const { retailer, sourceUrl, displayedPrice, currency, notes } = req.body;
+    if (retailer !== undefined && !APPROVED_RETAILERS.includes(retailer)) {
+      return res.status(400).json({ error: `retailer must be one of: ${APPROVED_RETAILERS.join(", ")}` });
+    }
+    const patch = {};
+    if (retailer !== undefined) patch.retailer = retailer;
+    if (sourceUrl !== undefined) patch.sourceUrl = String(sourceUrl).trim();
+    if (displayedPrice !== undefined) patch.displayedPrice = displayedPrice === "" ? "" : Number(displayedPrice);
+    if (currency !== undefined) patch.currency = currency;
+    if (notes !== undefined) patch.notes = notes;
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "No editable fields provided." });
+
+    await db.updateRowById("RecallRetailerListings", req.params.id, patch);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Resolving a conflict picks ONE source's value onto the actual record —
+// an explicit, auditable action, never automatic. The conflict row itself
+// is kept (status flipped to RESOLVED, not deleted) so both original
+// source values stay visible as history.
+app.patch("/api/recall/field-conflicts/:id/resolve", requireManager, async (req, res) => {
+  try {
+    const { resolution } = req.body;
+    if (resolution !== "A" && resolution !== "B") return res.status(400).json({ error: "resolution must be 'A' or 'B'." });
+    const conflicts = await db.getAllRows("RecallFieldConflicts");
+    const conflict = conflicts.find((c) => c.id === req.params.id);
+    if (!conflict) return res.status(404).json({ error: "Conflict not found." });
+    if (conflict.status !== "CONFLICT") return res.status(400).json({ error: "This conflict has already been resolved." });
+
+    const chosenValue = resolution === "A" ? conflict.sourceAValue : conflict.sourceBValue;
+    const targetTable = conflict.entityType;
+    if (!["CompetitorProducts", "RecallProductIngredients", "ProductCatalog"].includes(targetTable)) {
+      return res.status(400).json({ error: `Cannot resolve a conflict on entityType "${targetTable}" — unsupported table.` });
+    }
+    const applied = await db.updateRowById(targetTable, conflict.entityId, { [conflict.fieldName]: chosenValue });
+    if (!applied) return res.status(404).json({ error: "The record this conflict refers to no longer exists." });
+
+    await db.updateRowById("RecallFieldConflicts", req.params.id, {
+      status: "RESOLVED", resolution, resolvedBy: req.repName || "Manager", resolvedAt: new Date().toISOString(),
+    });
+
+    if (targetTable === "CompetitorProducts") await recomputeCompetitorResearchStatus(conflict.entityId);
+    res.json({ ok: true, appliedValue: chosenValue });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

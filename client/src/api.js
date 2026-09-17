@@ -136,4 +136,9 @@ export const api = {
   getRecallAssignments: (repName) => request(`/recall/assignments?repName=${encodeURIComponent(repName)}`),
   saveRecallAssignments: (repName, categoryIds) => request("/recall/assignments", { method: "POST", body: JSON.stringify({ repName, categoryIds }) }),
   getRecallDosageForms: () => request("/recall/dosage-forms"),
+  updateRecallCompetitorResearch: (id, patch) => request(`/recall/competitor-research/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  updateRecallOurProduct: (linkId, patch) => request(`/recall/our-products/${linkId}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  addRecallRetailerListing: (listing) => request("/recall/retailer-listings", { method: "POST", body: JSON.stringify(listing) }),
+  updateRecallRetailerListing: (id, patch) => request(`/recall/retailer-listings/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  resolveRecallFieldConflict: (id, resolution) => request(`/recall/field-conflicts/${id}/resolve`, { method: "PATCH", body: JSON.stringify({ resolution }) }),
 };

@@ -91,6 +91,7 @@ export function RecallView({ role, repName, repNames }) {
           categoryId={view}
           categoryName={categories.find((c) => c.id === view)?.name || ""}
           onBack={() => setView("home")}
+          role={role}
         />
       )}
     </div>
@@ -172,19 +173,20 @@ function RecallHome({ role, categories, myAssignedCategoryIds, onOpenCategory, o
   );
 }
 
-function RecallCategoryDetail({ categoryId, categoryName, onBack }) {
+function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  useEffect(() => {
+  const load = useCallback(() => {
     setLoading(true);
     setError("");
-    api.getRecallCategory(categoryId)
+    return api.getRecallCategory(categoryId)
       .then(setData)
       .catch((e) => setError(e.message || "Couldn't load this category."))
       .finally(() => setLoading(false));
   }, [categoryId]);
+  useEffect(() => { load(); }, [load]);
 
   return (
     <div>
@@ -237,20 +239,12 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack }) {
             <EmptyState text="No dosage form information has been added yet." />
           </RecallSection>
 
-          <RecallSection title="Your Products">
+          <RecallSection title="Our Products">
             {data.products.length === 0 ? (
               <EmptyState text="No products have been linked to this category yet." />
             ) : (
               data.products.map((p) => (
-                <div key={p.id} style={{ fontSize: 12.5, marginBottom: 12, paddingBottom: 12, borderBottom: "1px solid #F0EBE0" }}>
-                  <div style={{ fontWeight: 600 }}>{p.name}</div>
-                  {(p.compoundAmount || p.chemicalForm) && (
-                    <div style={{ color: "#5B5445", marginTop: 2 }}>
-                      {p.compoundAmount ? `${p.compoundAmount} ${p.unit || ""}`.trim() : ""}{p.compoundAmount && p.chemicalForm ? " · " : ""}{p.chemicalForm}
-                    </div>
-                  )}
-                  <MissingInfoBadge researchStatus={p.verificationStatus} missingFields={p.missingFields} />
-                </div>
+                <OurProductCard key={p.id} product={p} canEdit={role === "manager"} onSaved={load} />
               ))
             )}
           </RecallSection>
@@ -260,30 +254,12 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack }) {
               <EmptyState text="No competitor comparison has been added yet." />
             ) : (
               data.competitors.map((c) => (
-                <div key={c.id} style={{ fontSize: 12.5, marginBottom: 12, paddingBottom: 12, borderBottom: "1px solid #F0EBE0" }}>
-                  <div style={{ fontWeight: 600 }}>
-                    {c.competitorProduct.competitorName} — {c.competitorProduct.productName}
-                  </div>
-                  <div style={{ color: "#5B5445", marginTop: 2 }}>
-                    {[c.competitorProduct.dosage, c.competitorProduct.genericName, c.competitorProduct.form, c.competitorProduct.packSize ? `pack of ${c.competitorProduct.packSize}` : ""]
-                      .filter(Boolean).join(" · ")}
-                  </div>
-                  {c.notes && <div style={{ color: "#8A8272", fontSize: 11.5, marginTop: 4 }}>{c.notes}</div>}
-                  {c.retailerListings.length > 0 && (
-                    <div style={{ marginTop: 6 }}>
-                      {c.retailerListings.map((l, idx) => (
-                        <div key={idx} style={{ fontSize: 11.5, color: "#5B5445" }}>
-                          {l.retailer}: {l.displayedPrice !== "" && l.displayedPrice != null ? `${l.currency || ""} ${l.displayedPrice}`.trim() : "price not verified"}
-                          {" — "}{l.sourceUrl ? <a href={l.sourceUrl} target="_blank" rel="noreferrer">source</a> : "source URL not verified"}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  <MissingInfoBadge researchStatus={c.competitorProduct.researchStatus} missingFields={c.competitorProduct.missingFields} />
-                </div>
+                <CompetitorCard key={c.id} rel={c} canEdit={role === "manager"} onSaved={load} />
               ))
             )}
           </RecallSection>
+
+          <RecallComparisonSummary products={data.products} competitors={data.competitors} ingredient={data.ingredients[0]} />
 
           <RecallSection title="Clinical Evidence">
             {data.evidence.length === 0 ? (
@@ -361,6 +337,547 @@ function RecallSection({ title, children }) {
       <div style={{ fontSize: 11.5, fontWeight: 700, color: "#8A8272", letterSpacing: 0.4, marginBottom: 8 }}>{title.toUpperCase()}</div>
       {children}
     </div>
+  );
+}
+
+const editButtonStyle = { fontSize: 11, color: "#4C7A5E", background: "none", border: "1px solid #CFE0D5", borderRadius: 6, padding: "4px 8px", cursor: "pointer", whiteSpace: "nowrap" };
+const saveButtonStyle = { padding: "6px 12px", borderRadius: 7, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12, fontWeight: 500, cursor: "pointer" };
+const cancelButtonStyle = { padding: "6px 12px", borderRadius: 7, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", fontSize: 12, cursor: "pointer" };
+const editorPanelStyle = { marginTop: 10, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 };
+const editorTitleStyle = { fontSize: 11, fontWeight: 700, color: "#8A8272", marginBottom: 8, letterSpacing: 0.3 };
+const summaryLineStyle = { fontSize: 12, marginBottom: 4 };
+const scientificContextStyle = { fontSize: 11, color: "#5B5445", marginTop: 6, fontStyle: "italic" };
+const APPROVED_RETAILERS_CLIENT = ["Skin Society", "Mazen Online", "Nicolas Care", "Sohati Care"];
+
+function EditorField({ label, value, onChange, placeholder, textarea }) {
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <label style={{ display: "block", fontSize: 11, color: "#8A8272", marginBottom: 2 }}>{label}</label>
+      {textarea ? (
+        <textarea value={value} onChange={onChange} placeholder={placeholder} rows={2} style={{ ...inputStyle, resize: "vertical" }} />
+      ) : (
+        <input value={value} onChange={onChange} placeholder={placeholder} style={inputStyle} />
+      )}
+    </div>
+  );
+}
+
+// Manager-only — the parent card only renders this when canEdit is true, so
+// a rep never sees an editable field, but the API routes themselves are
+// also requireManager-gated as the real enforcement (never trust the UI
+// alone for a permission boundary).
+function OurProductEditor({ product: p, onCancel, onSaved }) {
+  const [form, setForm] = useState({
+    name: p.name || "", price: p.price ?? "", packSize: p.packSize ?? "", unitsPerDay: p.unitsPerDay ?? "",
+    catalogNotes: p.notes || "", ingredients: p.ingredients || "",
+    chemicalForm: p.chemicalForm || "", compoundAmount: p.compoundAmount ?? "", unit: p.unit || "",
+    form: p.form || "", servingSize: p.servingSize || "", dailyAmount: p.dailyAmount || "",
+    sku: p.sku || "", manufacturer: p.manufacturer || "", sourceLabel: p.sourceLabel || "", sourceUrl: p.sourceUrl || "",
+    linkNotes: p.linkNotes || "",
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+
+  const save = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      // Product identity (linkId/productId) never changes here — this
+      // edits the existing master product/link, it never creates a new one.
+      await api.updateRecallOurProduct(p.linkId, form);
+      onSaved();
+    } catch (e) {
+      setError(e.message || "Couldn't save.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={editorPanelStyle}>
+      <div style={editorTitleStyle}>Complete Product Information</div>
+      <EditorField label="Product name" value={form.name} onChange={set("name")} />
+      <EditorField label="Amount" value={form.compoundAmount} onChange={set("compoundAmount")} />
+      <EditorField label="Unit" value={form.unit} onChange={set("unit")} placeholder="mcg" />
+      <EditorField label="Chemical form" value={form.chemicalForm} onChange={set("chemicalForm")} />
+      <EditorField label="Dosage form" value={form.form} onChange={set("form")} placeholder="e.g. Tablet, Quick-Dissolve" />
+      <EditorField label="Pack size" value={form.packSize} onChange={set("packSize")} />
+      <EditorField label="Serving size" value={form.servingSize} onChange={set("servingSize")} />
+      <EditorField label="Recommended daily use" value={form.dailyAmount} onChange={set("dailyAmount")} />
+      <EditorField label="Price" value={form.price} onChange={set("price")} />
+      <EditorField label="Complete ingredients" value={form.ingredients} onChange={set("ingredients")} textarea />
+      <EditorField label="SKU" value={form.sku} onChange={set("sku")} />
+      <EditorField label="Manufacturer" value={form.manufacturer} onChange={set("manufacturer")} />
+      <EditorField label="Source (e.g. Manufacturer label)" value={form.sourceLabel} onChange={set("sourceLabel")} />
+      <EditorField label="Manufacturer source URL" value={form.sourceUrl} onChange={set("sourceUrl")} />
+      <EditorField label="Notes" value={form.linkNotes} onChange={set("linkNotes")} textarea />
+      {error && <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 6 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="button" disabled={saving} onClick={save} style={saveButtonStyle}>{saving ? "Saving…" : "Save"}</button>
+        <button type="button" onClick={onCancel} style={cancelButtonStyle}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function RetailerListingRow({ listing, onSaved }) {
+  const [form, setForm] = useState({ retailer: listing.retailer, displayedPrice: listing.displayedPrice ?? "", currency: listing.currency || "", sourceUrl: listing.sourceUrl || "", notes: listing.notes || "" });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+  const save = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      await api.updateRecallRetailerListing(listing.id, form);
+      onSaved();
+    } catch (e) {
+      setError(e.message || "Couldn't save.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <div style={{ marginBottom: 10, paddingBottom: 10, borderBottom: "1px dashed #E5DFD3" }}>
+      <div style={{ fontWeight: 600, fontSize: 11.5, marginBottom: 4 }}>{form.retailer}</div>
+      <EditorField label="Price" value={form.displayedPrice} onChange={set("displayedPrice")} />
+      <EditorField label="Currency" value={form.currency} onChange={set("currency")} />
+      <EditorField label="Source URL" value={form.sourceUrl} onChange={set("sourceUrl")} />
+      <EditorField label="Notes" value={form.notes} onChange={set("notes")} textarea />
+      {error && <div style={{ fontSize: 11, color: "#B33A3A", marginBottom: 4 }}>{error}</div>}
+      <button type="button" disabled={saving} onClick={save} style={saveButtonStyle}>{saving ? "Saving…" : "Save listing"}</button>
+    </div>
+  );
+}
+
+function AddRetailerListingRow({ competitorProductId, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({ retailer: APPROVED_RETAILERS_CLIENT[0], displayedPrice: "", currency: "USD", sourceUrl: "", notes: "" });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+  const save = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      // Always a NEW listing row, keyed to this one competitor product —
+      // never a new master product, and duplicate (product, retailer)
+      // listings are rejected the same way the seed logic dedupes them.
+      await api.addRecallRetailerListing({ competitorProductId, ...form });
+      setOpen(false);
+      onSaved();
+    } catch (e) {
+      setError(e.message || "Couldn't add listing.");
+    } finally {
+      setSaving(false);
+    }
+  };
+  if (!open) return <button type="button" onClick={() => setOpen(true)} style={editButtonStyle}>+ Add retailer listing</button>;
+  return (
+    <div style={{ marginTop: 8 }}>
+      <label style={{ display: "block", fontSize: 11, color: "#8A8272", marginBottom: 2 }}>Retailer</label>
+      <select value={form.retailer} onChange={set("retailer")} style={{ ...inputStyle, marginBottom: 8 }}>
+        {APPROVED_RETAILERS_CLIENT.map((r) => <option key={r} value={r}>{r}</option>)}
+      </select>
+      <EditorField label="Price" value={form.displayedPrice} onChange={set("displayedPrice")} />
+      <EditorField label="Currency" value={form.currency} onChange={set("currency")} />
+      <EditorField label="Source URL" value={form.sourceUrl} onChange={set("sourceUrl")} />
+      <EditorField label="Notes" value={form.notes} onChange={set("notes")} textarea />
+      {error && <div style={{ fontSize: 11, color: "#B33A3A", marginBottom: 4 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="button" disabled={saving} onClick={save} style={saveButtonStyle}>{saving ? "Adding…" : "Add"}</button>
+        <button type="button" onClick={() => setOpen(false)} style={cancelButtonStyle}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function CompetitorEditor({ competitorProduct: cp, retailerListings, onCancel, onSaved }) {
+  const [form, setForm] = useState({
+    genericName: cp.genericName || "", form: cp.form || "", dosage: cp.dosage || "", packSize: cp.packSize ?? "",
+    ingredients: cp.ingredients || "", manufacturer: cp.manufacturer || "", sku: cp.sku || "",
+    sourceLabel: cp.sourceLabel || "", sourceUrl: cp.sourceUrl || "", notes: cp.notes || "",
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+
+  const save = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      // Edits the existing master competitor product (cp.id) — never
+      // creates a duplicate.
+      await api.updateRecallCompetitorResearch(cp.id, form);
+      onSaved();
+    } catch (e) {
+      setError(e.message || "Couldn't save.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={editorPanelStyle}>
+      <div style={editorTitleStyle}>Complete Product Information</div>
+      <EditorField label="Chemical form" value={form.genericName} onChange={set("genericName")} />
+      <EditorField label="Dosage form" value={form.form} onChange={set("form")} />
+      <EditorField label="Amount (e.g. 1,000 mcg)" value={form.dosage} onChange={set("dosage")} />
+      <EditorField label="Pack size" value={form.packSize} onChange={set("packSize")} />
+      <EditorField label="Complete ingredients" value={form.ingredients} onChange={set("ingredients")} textarea />
+      <EditorField label="Manufacturer" value={form.manufacturer} onChange={set("manufacturer")} />
+      <EditorField label="SKU" value={form.sku} onChange={set("sku")} />
+      <EditorField label="Source (e.g. Manufacturer label)" value={form.sourceLabel} onChange={set("sourceLabel")} />
+      <EditorField label="Manufacturer source URL" value={form.sourceUrl} onChange={set("sourceUrl")} />
+      <EditorField label="Notes" value={form.notes} onChange={set("notes")} textarea />
+      {error && <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 6 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="button" disabled={saving} onClick={save} style={saveButtonStyle}>{saving ? "Saving…" : "Save"}</button>
+        <button type="button" onClick={onCancel} style={cancelButtonStyle}>Cancel</button>
+      </div>
+
+      <div style={{ marginTop: 14, paddingTop: 10, borderTop: "1px solid #E5DFD3" }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: "#8A8272", marginBottom: 6 }}>RETAILER LISTINGS</div>
+        {retailerListings.map((l) => <RetailerListingRow key={l.id} listing={l} onSaved={onSaved} />)}
+        <AddRetailerListingRow competitorProductId={cp.id} onSaved={onSaved} />
+      </div>
+    </div>
+  );
+}
+
+function ConflictRow({ conflict, onSaved }) {
+  const [resolving, setResolving] = useState(false);
+  const [error, setError] = useState("");
+  const resolve = async (which) => {
+    setResolving(true);
+    setError("");
+    try {
+      // Picks ONE source's value onto the record — explicit, never
+      // automatic. The other value is never silently deleted; both stay
+      // visible in this same conflict record's history.
+      await api.resolveRecallFieldConflict(conflict.id, which);
+      onSaved();
+    } catch (e) {
+      setError(e.message || "Couldn't resolve.");
+    } finally {
+      setResolving(false);
+    }
+  };
+  return (
+    <div style={{ background: "#FBF1E4", border: "1px solid #E8D5AE", borderRadius: 8, padding: 8, marginBottom: 6, fontSize: 11.5 }}>
+      <div style={{ fontWeight: 700, color: "#8A6B1A", marginBottom: 3 }}>⚠️ SOURCE CONFLICT</div>
+      <div>Field: {conflict.fieldName}</div>
+      <div>{conflict.sourceALabel || "Source A"}: {conflict.sourceAValue}</div>
+      <div>{conflict.sourceBLabel || "Source B"}: {conflict.sourceBValue}</div>
+      {error && <div style={{ color: "#B33A3A", marginTop: 4 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+        <button type="button" disabled={resolving} onClick={() => resolve("A")} style={cancelButtonStyle}>Use {conflict.sourceALabel || "Source A"}</button>
+        <button type="button" disabled={resolving} onClick={() => resolve("B")} style={cancelButtonStyle}>Use {conflict.sourceBLabel || "Source B"}</button>
+      </div>
+    </div>
+  );
+}
+
+// Only OPEN (status === "CONFLICT") rows render — a RESOLVED conflict stays
+// in the sheet as history but no longer needs a manager decision.
+function ConflictBanner({ conflicts, onSaved }) {
+  const open = (conflicts || []).filter((c) => c.status === "CONFLICT");
+  if (open.length === 0) return null;
+  return (
+    <div style={{ marginTop: 6 }}>
+      {open.map((c) => <ConflictRow key={c.id} conflict={c} onSaved={onSaved} />)}
+    </div>
+  );
+}
+
+function OurProductCard({ product: p, canEdit, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  return (
+    <div style={{ fontSize: 12.5, marginBottom: 12, paddingBottom: 12, borderBottom: "1px solid #F0EBE0" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+        <div style={{ fontWeight: 600 }}>{p.name}</div>
+        {canEdit && (
+          <button type="button" onClick={() => setEditing((v) => !v)} style={editButtonStyle}>
+            {editing ? "Close" : "Edit / Complete Research"}
+          </button>
+        )}
+      </div>
+      {(p.compoundAmount || p.chemicalForm || p.form) && (
+        <div style={{ color: "#5B5445", marginTop: 2 }}>
+          {[p.compoundAmount ? `${p.compoundAmount} ${p.unit || ""}`.trim() : "", p.chemicalForm, p.form, p.packSize ? `pack of ${p.packSize}` : ""].filter(Boolean).join(" · ")}
+        </div>
+      )}
+      {(p.servingSize || p.dailyAmount) && (
+        <div style={{ color: "#8A8272", fontSize: 11.5, marginTop: 2 }}>
+          {[p.servingSize ? `Serving size: ${p.servingSize}` : "", p.dailyAmount ? `Daily use: ${p.dailyAmount}` : ""].filter(Boolean).join(" · ")}
+        </div>
+      )}
+      {p.price !== "" && p.price != null && <div style={{ color: "#8A8272", fontSize: 11.5, marginTop: 2 }}>Price: {p.price}</div>}
+      <ConflictBanner conflicts={p.conflicts} onSaved={onSaved} />
+      <MissingInfoBadge researchStatus={p.verificationStatus} missingFields={p.missingFields} />
+      {editing && <OurProductEditor product={p} onCancel={() => setEditing(false)} onSaved={() => { setEditing(false); onSaved(); }} />}
+    </div>
+  );
+}
+
+function CompetitorCard({ rel: c, canEdit, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const cp = c.competitorProduct;
+  return (
+    <div style={{ fontSize: 12.5, marginBottom: 12, paddingBottom: 12, borderBottom: "1px solid #F0EBE0" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+        <div style={{ fontWeight: 600 }}>{cp.competitorName} — {cp.productName}</div>
+        {canEdit && (
+          <button type="button" onClick={() => setEditing((v) => !v)} style={editButtonStyle}>
+            {editing ? "Close" : "Edit / Complete Research"}
+          </button>
+        )}
+      </div>
+      <div style={{ color: "#5B5445", marginTop: 2 }}>
+        {[cp.dosage, cp.genericName, cp.form, cp.packSize ? `pack of ${cp.packSize}` : ""].filter(Boolean).join(" · ")}
+      </div>
+      {c.notes && <div style={{ color: "#8A8272", fontSize: 11.5, marginTop: 4 }}>{c.notes}</div>}
+      {c.retailerListings.length > 0 && (
+        <div style={{ marginTop: 6 }}>
+          {c.retailerListings.map((l) => (
+            <div key={l.id} style={{ fontSize: 11.5, color: "#5B5445" }}>
+              {l.retailer}: {l.displayedPrice !== "" && l.displayedPrice != null ? `${l.currency || ""} ${l.displayedPrice}`.trim() : "price not verified"}
+              {" — "}{l.sourceUrl ? <a href={l.sourceUrl} target="_blank" rel="noreferrer">source</a> : "source URL not verified"}
+            </div>
+          ))}
+        </div>
+      )}
+      <ConflictBanner conflicts={cp.conflicts} onSaved={onSaved} />
+      <MissingInfoBadge researchStatus={cp.researchStatus} missingFields={cp.missingFields} />
+      {editing && (
+        <CompetitorEditor competitorProduct={cp} retailerListings={c.retailerListings} onCancel={() => setEditing(false)} onSaved={() => { setEditing(false); onSaved(); }} />
+      )}
+    </div>
+  );
+}
+
+function distinctVerified(items, key) {
+  const vals = items.map((i) => i[key]).filter((v) => v && String(v).trim());
+  return [...new Set(vals)];
+}
+
+function SummarySubsection({ title, children }) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#5B5445", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function IncompleteNotice({ missing }) {
+  return (
+    <div style={{ fontSize: 11.5, color: "#8A6B3A" }}>
+      ⚠️ Comparison incomplete<br />
+      Missing: {missing.join(", ")}
+    </div>
+  );
+}
+
+// Built ENTIRELY from data.products/data.competitors already loaded for
+// this category — no separate fetch, no fabricated commentary. Every line
+// either states a value pulled straight from a record or explicitly says
+// "Not verified" / shows an "incomplete" notice; this is never a ranking
+// (see Phase 2D rule 14/Q — no best/winner/superior/strongest anywhere).
+function RecallComparisonSummary({ products, competitors, ingredient }) {
+  const ourItems = (products || []).map((p) => ({
+    label: p.name,
+    amount: p.compoundAmount ? `${p.compoundAmount}${p.unit ? ` ${p.unit}` : ""}` : "",
+    chemicalForm: p.chemicalForm || "",
+    dosageForm: p.form || "",
+    packSize: p.packSize || "",
+    price: p.price,
+    ingredientsText: p.ingredients || "",
+    notesText: [p.notes, p.linkNotes].filter(Boolean).join(" "),
+    missingFields: p.missingFields || [],
+  }));
+  const competitorItems = (competitors || []).map((c) => {
+    const cp = c.competitorProduct;
+    return {
+      label: `${cp.competitorName} — ${cp.productName}`,
+      amount: cp.dosage || "",
+      chemicalForm: cp.genericName || "",
+      dosageForm: cp.form || "",
+      packSize: cp.packSize || "",
+      retailerListings: c.retailerListings || [],
+      ingredientsText: cp.ingredients || "",
+      notesText: cp.notes || "",
+      missingFields: cp.missingFields || [],
+    };
+  });
+  const allItems = [...ourItems, ...competitorItems];
+  if (allItems.length === 0) return null;
+
+  const chemicalFormGroups = new Map();
+  allItems.forEach((i) => {
+    const key = i.chemicalForm || "Not verified";
+    chemicalFormGroups.set(key, [...(chemicalFormGroups.get(key) || []), i.label]);
+  });
+  const dosageFormGroups = new Map();
+  allItems.forEach((i) => {
+    const key = i.dosageForm || "Not verified";
+    dosageFormGroups.set(key, [...(dosageFormGroups.get(key) || []), i.label]);
+  });
+
+  const anyChemicalFormVerified = allItems.some((i) => i.chemicalForm);
+  const anyDosageFormVerified = allItems.some((i) => i.dosageForm);
+  const anyAmountVerified = allItems.some((i) => i.amount);
+  const anyPriceVerified = ourItems.some((i) => i.price !== "" && i.price != null) || competitorItems.some((i) => i.retailerListings.some((l) => l.displayedPrice !== "" && l.displayedPrice != null));
+  const hasFormulationNote = (i) => i.ingredientsText || /also contains|includes|folic acid|folate|calcium/i.test(i.notesText);
+  const anyFormulationNoted = allItems.some(hasFormulationNote);
+
+  const differentiators = [];
+  if (distinctVerified(allItems, "amount").length > 1) differentiators.push("Dose");
+  if (distinctVerified(allItems, "chemicalForm").length > 1) differentiators.push("Chemical form");
+  if (distinctVerified(allItems, "dosageForm").length > 1) differentiators.push("Dosage form");
+  if (distinctVerified(allItems, "packSize").length > 1) differentiators.push("Pack size");
+  if (anyFormulationNoted) differentiators.push("Additional ingredients / combination formulation");
+  if (anyPriceVerified) differentiators.push("Retailer price");
+
+  const ingredientName = ingredient?.name || "This ingredient";
+  const quickTakeawayFirstLine = (ingredient?.repQuickTakeaway || "").split("\n").filter(Boolean)[0] || "";
+  const whatNotToClaimFirstLine = (ingredient?.whatNotToClaim || "").split("\n").filter(Boolean)[0] || "";
+
+  return (
+    <RecallSection title={`${ingredientName} market comparison`}>
+      <div style={{ fontSize: 11, color: "#8A8272", fontStyle: "italic", marginBottom: 10 }}>
+        This summarizes documented differences only — it does not recommend one product over another.
+      </div>
+
+      <SummarySubsection title="Dose differences">
+        {anyAmountVerified
+          ? allItems.map((i, idx) => <div key={idx} style={summaryLineStyle}>{i.label}: {i.amount || "Not verified"}</div>)
+          : <IncompleteNotice missing={["amount"]} />}
+      </SummarySubsection>
+
+      <SummarySubsection title="Chemical form differences">
+        {anyChemicalFormVerified ? (
+          <>
+            {[...chemicalFormGroups.entries()].map(([form, labels]) => (
+              <div key={form} style={summaryLineStyle}><strong>{form}:</strong> {labels.join(", ")}</div>
+            ))}
+            <div style={scientificContextStyle}>
+              Methylcobalamin and adenosylcobalamin are metabolically active forms. Cyanocobalamin and hydroxocobalamin are converted by the body into active forms. Current evidence does not establish that methylcobalamin has superior absorption compared with cyanocobalamin.
+            </div>
+          </>
+        ) : <IncompleteNotice missing={["chemical form"]} />}
+      </SummarySubsection>
+
+      <SummarySubsection title="Dosage form differences">
+        {anyDosageFormVerified ? (
+          <>
+            {[...dosageFormGroups.entries()].map(([form, labels]) => (
+              <div key={form} style={summaryLineStyle}><strong>{form}:</strong> {labels.join(", ")}</div>
+            ))}
+            <div style={scientificContextStyle}>
+              Chemical form (e.g. Cyanocobalamin, Methylcobalamin) is what the active ingredient is; dosage form (e.g. Tablet, Quick-Dissolve, Lozenge) is how the product is taken — the two are independent facts. A "Quick-Dissolve" product is only described as sublingual when a source explicitly documents that it dissolves under the tongue; sublingual administration is never assumed from the format name alone, and no format is described as more effective than another.
+            </div>
+          </>
+        ) : <IncompleteNotice missing={["dosage form"]} />}
+      </SummarySubsection>
+
+      <SummarySubsection title="Formulation differences">
+        {anyFormulationNoted ? (
+          allItems.filter(hasFormulationNote).map((i, idx) => <div key={idx} style={summaryLineStyle}>{i.label}: {i.ingredientsText || i.notesText}</div>)
+        ) : (
+          <div style={{ fontSize: 11.5, color: "#8A8272" }}>No documented additional ingredients beyond the core content for the products currently on file.</div>
+        )}
+      </SummarySubsection>
+
+      <SummarySubsection title="Pack size differences">
+        {allItems.some((i) => i.packSize)
+          ? allItems.map((i, idx) => <div key={idx} style={summaryLineStyle}>{i.label}: {i.packSize || "Not verified"}</div>)
+          : <IncompleteNotice missing={["pack size"]} />}
+      </SummarySubsection>
+
+      <SummarySubsection title="Price differences">
+        {anyPriceVerified ? (
+          <>
+            {ourItems.filter((i) => i.price !== "" && i.price != null).map((i, idx) => <div key={`o${idx}`} style={summaryLineStyle}>{i.label}: {i.price}</div>)}
+            {competitorItems.flatMap((i, idx) =>
+              i.retailerListings.filter((l) => l.displayedPrice !== "" && l.displayedPrice != null).map((l, lidx) => (
+                <div key={`${idx}-${lidx}`} style={summaryLineStyle}>{i.label} ({l.retailer}): {l.currency || ""} {l.displayedPrice}</div>
+              ))
+            )}
+          </>
+        ) : <IncompleteNotice missing={["retailer/price information"]} />}
+      </SummarySubsection>
+
+      <SummarySubsection title="What actually differentiates the products?">
+        {differentiators.length > 0 ? (
+          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
+            {differentiators.map((d) => <li key={d} style={{ marginBottom: 3 }}>{d}</li>)}
+          </ul>
+        ) : <div style={{ fontSize: 11.5, color: "#8A8272", fontStyle: "italic" }}>Not enough verified information to compare.</div>}
+      </SummarySubsection>
+
+      <SummarySubsection title="Information gaps">
+        {allItems.some((i) => i.missingFields.length > 0) ? (
+          allItems.filter((i) => i.missingFields.length > 0).map((i, idx) => (
+            <div key={idx} style={{ ...summaryLineStyle, color: "#8A6B3A" }}>⚠️ {i.label} — missing: {i.missingFields.join(", ")}</div>
+          ))
+        ) : <div style={{ fontSize: 11.5, color: "#8A8272" }}>No documented information gaps for the products currently on file.</div>}
+      </SummarySubsection>
+
+      <SummarySubsection title="How to position our products">
+        {ourItems.length === 0 ? (
+          <div style={{ fontSize: 11.5, color: "#8A8272", fontStyle: "italic" }}>No our-products on file for this category yet.</div>
+        ) : (
+          ourItems.map((i, idx) => {
+            const amountForm = [i.amount, i.chemicalForm].filter(Boolean).join(" ");
+            const dosageFormPhrase = i.dosageForm ? ` in a ${i.dosageForm.toLowerCase()} format` : "";
+            const whatCanBeSaid = amountForm ? `"Contains ${amountForm}${dosageFormPhrase}."` : "Not enough verified information to state yet.";
+            return (
+              <div key={idx} style={{ marginBottom: 12, paddingBottom: 12, borderBottom: idx < ourItems.length - 1 ? "1px solid #F0EBE0" : "none" }}>
+                <div style={{ fontWeight: 600, marginBottom: 3 }}>{i.label}</div>
+                <div style={{ fontSize: 11.5, color: "#5B5445", marginBottom: 3 }}>
+                  <strong>What it contains:</strong> {[i.amount, i.chemicalForm, i.dosageForm].filter(Boolean).join(", ") || "Not enough verified information."}
+                </div>
+                {(i.ingredientsText || i.notesText) && (
+                  <div style={{ fontSize: 11.5, color: "#5B5445", marginBottom: 3 }}>
+                    <strong>What makes its formulation distinct:</strong> {i.ingredientsText || i.notesText}
+                  </div>
+                )}
+                <div style={{ fontSize: 11.5, color: "#2F5B41", marginBottom: 3 }}>
+                  <strong>What can be said:</strong> {whatCanBeSaid}
+                </div>
+                {whatNotToClaimFirstLine && (
+                  <div style={{ fontSize: 11.5, color: "#7A3B3B" }}>
+                    <strong>Do not claim:</strong> {whatNotToClaimFirstLine.replace(/^Do not claim /i, "")}
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+      </SummarySubsection>
+
+      <SummarySubsection title="If the doctor mentions a competitor">
+        <div style={{ fontSize: 12, marginBottom: 6 }}>
+          Acknowledge the competitor's form factually, then transition back to what's documented about our product — do not attack the competitor or claim superiority.
+        </div>
+        <div style={scientificContextStyle}>
+          "Methylcobalamin is one of the metabolically active forms of B12. Cyanocobalamin is another supplemental form that is converted into active forms by the body. Current evidence has not established superior absorption simply based on these forms."
+        </div>
+      </SummarySubsection>
+
+      <SummarySubsection title="Pre-call — 30 second summary">
+        <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
+          <li style={{ marginBottom: 4 }}>Forms represented in this market: {distinctVerified(allItems, "chemicalForm").length > 0 ? distinctVerified(allItems, "chemicalForm").join(", ") : "Not verified"}.</li>
+          <li style={{ marginBottom: 4 }}>Our products use: {distinctVerified(ourItems, "chemicalForm").length > 0 ? distinctVerified(ourItems, "chemicalForm").join(", ") : "Not verified"}.</li>
+          <li style={{ marginBottom: 4 }}>Competitor dosage formats: {distinctVerified(competitorItems, "dosageForm").length > 0 ? distinctVerified(competitorItems, "dosageForm").join(", ") : "Not verified"}.</li>
+          <li style={{ marginBottom: 4 }}>Major formulation differences: {anyFormulationNoted ? "some products contain additional ingredients beyond the core content — see Formulation differences above." : "None documented beyond dose/form."}</li>
+          <li style={{ marginBottom: 4 }}>Clinical point to remember: {quickTakeawayFirstLine || "See Clinical Evidence above."}</li>
+          <li>What NOT to claim: {whatNotToClaimFirstLine || "See What Not to Claim above."}</li>
+        </ol>
+      </SummarySubsection>
+    </RecallSection>
   );
 }
 
