@@ -893,6 +893,7 @@ app.get("/api/competitor-sightings", async (req, res) => {
 // grown list identified alongside Orders.
 app.get("/api/competitor-products", async (req, res) => {
   try {
+    await ensureCompetitorMasterDataSeeded();
     const { q, limit } = req.query;
     const rows = await db.getAllRows("CompetitorProducts");
     let products = rows.sort((a, b) => a.genericName.localeCompare(b.genericName));
@@ -3763,6 +3764,1144 @@ async function ensureB12ProductDataSeeded() {
   recallB12ProductDataSeedChecked = true;
 }
 
+// ---------- Recall: competitor master data (categories beyond B12) ----------
+// Transcribed verbatim from a user-provided Lebanese-market research file
+// (73 source rows across ~27 categories). Every NOT VERIFIED / blank field
+// from that source stays blank here — never guessed. Two rows needed
+// special handling: an exact duplicate (Webber Naturals Calma-D, listed
+// under both "Vitamin D" and "Vitamin D / calcium / magnesium") was merged
+// into one product record, and one row (Green Made Cobalin 1000 mcg)
+// already existed from the earlier B12 seed, so it only appears in
+// enrichments (filling in its retailer listing's missing sourceUrl), not
+// as a new product. judgmentCalls records every non-mechanical call made
+// while transcribing (brand/product-name splits, price ranges, a couple of
+// retailer/URL mismatches in the source itself) for review.
+//
+// IMPORTANT — linking: a competitor product only shows up under a Recall
+// category's own "Competitors" table once linked (RecallCompetitorRelationships)
+// against one of that category's OWN products. Only b-vitamins-b12 has
+// our-products (Mason/ALFA) loaded so far, so only this seed's
+// b-vitamins-b12 items are auto-linked below. Every other category's
+// competitor products are created and fully populated (visible/editable
+// under the Competitors tab) but stay unlinked until Mason/ALFA data exists
+// for that category — then linking is a one-click action via the existing
+// "Link to Recall category" / "Add existing competitor" UI.
+const COMPETITOR_MASTER_SEED = {
+  newProducts: [
+    // --- B-complex / B vitamins -> b-vitamins-b12 ---
+    {
+      categoryId: "b-vitamins-b12",
+      competitorName: "HealthAid",
+      productName: "Vitamin B Complex",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/energy-supplements",
+      retailer: "Nicolas Care",
+      displayedPrice: 24.42,
+    },
+    {
+      categoryId: "b-vitamins-b12",
+      competitorName: "PiLeJe",
+      productName: "Neurobiane",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "",
+      sourceUrl: "https://mazenonline.com/collections/nerves",
+      retailer: "Mazen Online",
+      displayedPrice: 18.83,
+    },
+    {
+      categoryId: "b-vitamins-b12",
+      competitorName: "Health Aid",
+      productName: "Neuroforte Multivitamin",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "",
+      sourceUrl: "https://mazenonline.com/collections/nerves",
+      retailer: "Mazen Online",
+      displayedPrice: 28.86,
+    },
+
+    // --- B12 -> b-vitamins-b12 ---
+    // (Green Made Cobalin 1000 mcg / Sohati Care omitted here - see enrichments)
+    {
+      categoryId: "b-vitamins-b12",
+      competitorName: "Green Made",
+      productName: "Cobalin SL 5000 mcg",
+      genericName: "Methylcobalamin",
+      form: "",
+      dosage: "5,000 mcg",
+      packSize: "",
+      notes:
+        "Recommended use: 1 tablet/week. Pack size conflict: source page shows '10 capsules/tablets' (wording conflict) - left unrecorded, see raw text here.",
+      sourceUrl: "https://sohaticare.com/products/cobalin-sl",
+      retailer: "Sohati Care",
+      displayedPrice: 16.85,
+    },
+    {
+      categoryId: "b-vitamins-b12",
+      competitorName: "NOW",
+      productName: "B12 1000 mcg Lozenges",
+      genericName: "",
+      form: "Lozenge",
+      dosage: "1,000 mcg",
+      packSize: "",
+      notes: "Recommended use: Not verified from current source. Pack size: Not verified.",
+      sourceUrl: "https://mazenonline.com/collections/nerves",
+      retailer: "Mazen Online",
+      displayedPrice: 13,
+    },
+    {
+      categoryId: "b-vitamins-b12",
+      competitorName: "NOW",
+      productName: "B12 5000 mcg Lozenges",
+      genericName: "",
+      form: "Lozenge",
+      dosage: "5,000 mcg",
+      packSize: "",
+      notes:
+        "Recommended use: Not verified from current source. Pack size: Not verified. Possible overlap with existing NOW 5,000 mcg B12 entries (NOW B-12 5,000 mcg + Folic Acid Lozenge, or NOW Methyl B-12 5,000 mcg Lozenge), but NOT confirmed the same SKU - this source only says 'Vitamin B12 5,000 mcg' with no mention of folic acid or methyl-/cyano- form, so kept as its own separate entry.",
+      sourceUrl: "https://mazenonline.com/collections/nerves",
+      retailer: "Mazen Online",
+      displayedPrice: 19,
+    },
+    {
+      categoryId: "b-vitamins-b12",
+      competitorName: "Medvial",
+      productName: "Cobast",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "",
+      sourceUrl: "https://mazenonline.com/collections/nerves",
+      retailer: "Mazen Online",
+      displayedPrice: 19,
+    },
+    {
+      categoryId: "b-vitamins-b12",
+      competitorName: "Dietaroma",
+      productName: "Mix B12",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/vendors?q=dietaroma",
+      retailer: "Nicolas Care",
+      displayedPrice: 15,
+    },
+
+    // --- Multivitamin -> multivitamins ---
+    {
+      categoryId: "multivitamins",
+      competitorName: "ESI",
+      productName: "Multicomplex Senior 30 Tablets",
+      genericName: "",
+      form: "Tablet",
+      dosage: "",
+      packSize: 30,
+      notes:
+        "Recommended use: Daily dose shown on product page. Broad multivitamin/mineral; detailed daily nutrient profile previously captured but not itemized here. Retailer/URL mismatch: source table lists retailer as 'Nicolas Care', but the source URL is mazenonline.com - retailer recorded as 'Mazen Online' to match the URL, per explicit instruction for this row.",
+      sourceUrl: "https://mazenonline.com/collections/esi/products/multicomplex-senior-1",
+      retailer: "Mazen Online",
+      displayedPrice: 16,
+    },
+    {
+      categoryId: "multivitamins",
+      competitorName: "Advancis",
+      productName: "Essential Vitamins 30 Tablets",
+      genericName: "",
+      form: "Tablet",
+      dosage: "",
+      packSize: 30,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/multivitamin",
+      retailer: "Nicolas Care",
+      displayedPrice: 20.33,
+    },
+    {
+      categoryId: "multivitamins",
+      competitorName: "Vitabiotics",
+      productName: "Wellwoman",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "Women's multivitamin/mineral. Serving/dosage and pack size not fully captured from source.",
+      sourceUrl: "https://nicolas-care.com/collections/multivitamin",
+      retailer: "Nicolas Care",
+      displayedPrice: 21.64,
+    },
+    {
+      categoryId: "multivitamins",
+      competitorName: "Webber Naturals",
+      productName: "MultiSure Men 60 Capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 60,
+      notes: "Men's multivitamin/mineral. Recommended use not fully captured.",
+      sourceUrl: "https://nicolas-care.com/collections/multivitamin",
+      retailer: "Nicolas Care",
+      displayedPrice: 28,
+    },
+    {
+      categoryId: "multivitamins",
+      competitorName: "Valuemed",
+      productName: "Centramin Multivitamin 30 Tablets",
+      genericName: "",
+      form: "Tablet",
+      dosage: "",
+      packSize: 30,
+      notes: "Adult multivitamin/mineral. Recommended use not fully captured.",
+      sourceUrl: "https://nicolas-care.com/collections/multivitamin",
+      retailer: "Nicolas Care",
+      displayedPrice: 10,
+    },
+    {
+      categoryId: "multivitamins",
+      competitorName: "Green Made",
+      productName: "MaxiVit 15 caps",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 15,
+      notes: "",
+      sourceUrl: "https://sohaticare.com/products/maxivit-15-caps",
+      retailer: "Sohati Care",
+      displayedPrice: 9.45,
+    },
+    {
+      categoryId: "multivitamins",
+      competitorName: "PiLeJe",
+      productName: "Multibiane 30 capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 30,
+      notes: "",
+      sourceUrl: "https://sohaticare.com/products/pileje-multibiane",
+      retailer: "Sohati Care",
+      displayedPrice: 11.75,
+    },
+
+    // --- Folic acid / prenatal & conception -> womens-health ---
+    {
+      categoryId: "womens-health",
+      competitorName: "Pregnacare",
+      productName: "30 Tabs",
+      genericName: "",
+      form: "Tablet",
+      dosage: "",
+      packSize: 30,
+      notes:
+        "Recommended use: Not fully captured. Contains 19 vitamins/minerals; folic acid 400 mcg; vitamin D 10 mcg.",
+      sourceUrl: "https://sohaticare.com/products/pregnacare",
+      retailer: "Sohati Care",
+      displayedPrice: 20,
+    },
+    {
+      categoryId: "womens-health",
+      competitorName: "Pregnacare",
+      productName: "Conception",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "Public price not captured from source (listed as 'Not captured').",
+      sourceUrl: "https://sohaticare.com/products/pregnacare-conception",
+      retailer: "Sohati Care",
+      displayedPrice: "",
+    },
+
+    // --- Folic acid / iron -> iron ---
+    {
+      categoryId: "iron",
+      competitorName: "Webber Naturals",
+      productName: "Acifer Complex iron & folic acid 60 Cap",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 60,
+      notes: "",
+      sourceUrl: "https://mazenonline.com/en-iraq/collections/supplements-1",
+      retailer: "Mazen Online",
+      displayedPrice: 19,
+    },
+
+    // --- Folic acid (no qualifier) -> b-vitamins-b12 ---
+    {
+      categoryId: "b-vitamins-b12",
+      competitorName: "Folate",
+      productName: "Folic Acid 800 mcg - 100 Tablets",
+      genericName: "",
+      form: "Tablet",
+      dosage: "800 mcg",
+      packSize: 100,
+      notes: "Public price not captured from source (listed as 'Not captured').",
+      sourceUrl: "https://skinsociety.me/pages/avada-sitemap-products",
+      retailer: "Skin Society",
+      displayedPrice: "",
+    },
+
+    // --- Vitamin D -> vitamin-d ---
+    {
+      categoryId: "vitamin-d",
+      competitorName: "Nutrilabs",
+      productName: "NuD3 10000 IU 30 capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "10000 IU",
+      packSize: 30,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/vitamin-d",
+      retailer: "Nicolas Care",
+      displayedPrice: 14,
+    },
+    {
+      categoryId: "vitamin-d",
+      competitorName: "Webber Naturals",
+      productName: "Calma-D Forte 60 tablets",
+      genericName: "",
+      form: "Tablet",
+      dosage: "",
+      packSize: 60,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/vitamin-d",
+      retailer: "Nicolas Care",
+      displayedPrice: 25,
+    },
+    {
+      categoryId: "vitamin-d",
+      competitorName: "Solgar",
+      productName: "D3 400 IU 100 softgels",
+      genericName: "",
+      form: "Softgel",
+      dosage: "400 IU",
+      packSize: 100,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/vitamin-d",
+      retailer: "Nicolas Care",
+      displayedPrice: 39.8,
+    },
+    {
+      // Deduped: this row appears twice in the source table, identically,
+      // once under "Vitamin D" and once under "Vitamin D / calcium / magnesium".
+      // Treated as ONE product; category set to Vitamin D (its first listing).
+      categoryId: "vitamin-d",
+      competitorName: "Webber Naturals",
+      productName: "Calma-D 60 tablets",
+      genericName: "",
+      form: "Tablet",
+      dosage: "",
+      packSize: 60,
+      notes:
+        "Recommended use: 1-2 tablets/day. Contains calcium 500 mg elemental + magnesium 250 mg elemental + vitamin D3 200 IU. NOTE: this row appears twice in the source table (once under 'Vitamin D', once under 'Vitamin D / calcium / magnesium') with identical name/retailer/price/URL - deduplicated into a single entry here; it is equally relevant to the Calcium/Magnesium category.",
+      sourceUrl: "https://mazenonline.com/products/calma-d-1",
+      retailer: "Mazen Online",
+      displayedPrice: 20,
+    },
+    {
+      categoryId: "vitamin-d",
+      competitorName: "Fresh Pharma",
+      productName: "Acti-D 30 tablets",
+      genericName: "",
+      form: "Tablet",
+      dosage: "1,000 IU",
+      packSize: 30,
+      notes: "Recommended use: Not verified.",
+      sourceUrl: "https://mazenonline.com/products/acti-d-30-tablets",
+      retailer: "Mazen Online",
+      displayedPrice: 22,
+    },
+    {
+      categoryId: "vitamin-d",
+      competitorName: "NOW",
+      productName: "D3 Max Potency 50,000 IU",
+      genericName: "Vitamin D3",
+      form: "",
+      dosage: "50,000 IU",
+      packSize: "",
+      notes: "Recommended use: Not verified. Pack size: Not verified.",
+      sourceUrl: "https://mazenonline.com/ar-iraq/products/vitamin-d-3-max-potency-50-000-iu",
+      retailer: "Mazen Online",
+      displayedPrice: 13,
+    },
+
+    // --- Vitamin D / calcium -> calcium ---
+    {
+      categoryId: "calcium",
+      competitorName: "Osteocare",
+      productName: "Chewable",
+      genericName: "",
+      form: "Chewable",
+      dosage: "",
+      packSize: "",
+      notes:
+        "Recommended use: Adults 2/day. Contains vitamin D + calcium + magnesium + zinc + copper + manganese + selenium + boron. Pack size ambiguous/conflicting: source shows '3 tablets' alongside 'Adults 2/day' dosing guidance.",
+      sourceUrl: "https://sohaticare.com/products/osteocare",
+      retailer: "Sohati Care",
+      displayedPrice: 13,
+    },
+
+    // --- Magnesium -> magnesium ---
+    {
+      categoryId: "magnesium",
+      competitorName: "Magnesium B6",
+      productName: "30 Tablets",
+      genericName: "",
+      form: "Tablet",
+      dosage: "",
+      packSize: 30,
+      notes: "Recommended use: Not fully captured. Contains magnesium + vitamin B6.",
+      sourceUrl: "https://sohaticare.com/products/magnesium-b6-30-tablets",
+      retailer: "Sohati Care",
+      displayedPrice: 8.55,
+    },
+    {
+      categoryId: "magnesium",
+      competitorName: "Magnesal",
+      productName: "Plus x30 Capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 30,
+      notes: "Recommended use: Not fully captured. Magnesium combination formula (specific ingredients not itemized).",
+      sourceUrl: "https://sohaticare.com/products/magnesal-plus",
+      retailer: "Sohati Care",
+      displayedPrice: 12.5,
+    },
+    {
+      categoryId: "magnesium",
+      competitorName: "MagneCalm",
+      productName: "60 capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 60,
+      notes: "Recommended use: Not fully captured. Magnesium formula (specific ingredients not itemized).",
+      sourceUrl: "https://sohaticare.com/products/magnecalm",
+      retailer: "Sohati Care",
+      displayedPrice: 21.85,
+    },
+    {
+      categoryId: "magnesium",
+      competitorName: "Green Made",
+      productName: "SupraMag 30 Capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 30,
+      notes: "Recommended use: Not fully captured. Magnesium formula (specific ingredients not itemized).",
+      sourceUrl: "https://nicolas-care.com/collections/essential-vitamins?page=2",
+      retailer: "Nicolas Care",
+      displayedPrice: 14.86,
+    },
+    {
+      categoryId: "magnesium",
+      competitorName: "Sole Pharma",
+      productName: "Magnefol 30 Tablets",
+      genericName: "",
+      form: "Tablet",
+      dosage: "",
+      packSize: 30,
+      notes: "Recommended use: Not fully captured. Magnesium + folate combination formula.",
+      sourceUrl: "https://nicolas-care.com/collections/essential-vitamins?page=2",
+      retailer: "Nicolas Care",
+      displayedPrice: 15.54,
+    },
+    {
+      categoryId: "magnesium",
+      competitorName: "Polski Lek",
+      productName: "Magnesium Cardio 60 Tablets",
+      genericName: "",
+      form: "Tablet",
+      dosage: "",
+      packSize: 60,
+      notes: "Recommended use: Not fully captured. Magnesium cardiovascular-support formula.",
+      sourceUrl: "https://nicolas-care.com/collections/essential-vitamins?page=2",
+      retailer: "Nicolas Care",
+      displayedPrice: 20,
+    },
+
+    // --- Omega-3 -> omega-3 ---
+    {
+      categoryId: "omega-3",
+      competitorName: "Excellium",
+      productName: "Omega 3 60 Capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 60,
+      notes: "Recommended use: Not fully captured. EPA/DHA details need product-page verification.",
+      sourceUrl: "https://sohaticare.com/products/omega-3-excellium-60-capsules",
+      retailer: "Sohati Care",
+      displayedPrice: 11.77,
+    },
+    {
+      categoryId: "omega-3",
+      competitorName: "Advancis",
+      productName: "Omega-3 Super EPA 30 Capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 30,
+      notes: "Recommended use: Not fully captured. EPA-focused omega-3 formula.",
+      sourceUrl: "https://sohaticare.com/collections/omega-3-supplements",
+      retailer: "Sohati Care",
+      displayedPrice: 22.92,
+    },
+    {
+      categoryId: "omega-3",
+      competitorName: "Advancis",
+      productName: "Omega 3 Junior",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "Recommended use: Not fully captured. Pack size not fully captured. Omega-3 junior (children's) formula.",
+      sourceUrl: "https://sohaticare.com/products/omega-3-junior",
+      retailer: "Sohati Care",
+      displayedPrice: 17.92,
+    },
+
+    // --- Omega-3 / flax -> omega-3 ---
+    {
+      categoryId: "omega-3",
+      competitorName: "Alfa 369",
+      productName: "Omega 369 Organic Flax Oil 1000 mg",
+      genericName: "",
+      form: "",
+      dosage: "1000 mg",
+      packSize: "",
+      notes: "Public price not captured from source (listed as 'Not captured').",
+      sourceUrl: "https://skinsociety.me/pages/avada-sitemap-products",
+      retailer: "Skin Society",
+      displayedPrice: "",
+    },
+
+    // --- Collagen -> collagen ---
+    {
+      categoryId: "collagen",
+      competitorName: "Grass-fed Collagen with Probiotic",
+      productName: "",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes:
+        "Recommended use: 1 scoop. Contains hydrolyzed collagen peptides 10 g + hyaluronic acid 50 mg + 10 probiotic strains + biotin 30 mcg. Pack size not fully captured. Retailer/URL mismatch: source table lists retailer as 'Sohati Care', but the source URL is mazenonline.com - retailer recorded as given ('Sohati Care'), mismatch flagged for review.",
+      sourceUrl: "https://mazenonline.com/ar-iraq/products/grass-fed-collagen-with-probiotic",
+      retailer: "Sohati Care",
+      displayedPrice: 60,
+    },
+    {
+      categoryId: "collagen",
+      competitorName: "Pure",
+      productName: "Collagen Plus 4000MG",
+      genericName: "",
+      form: "",
+      dosage: "4000 mg",
+      packSize: "",
+      notes: "",
+      sourceUrl: "https://sohaticare.com/products/pure-collagen-plus-4000mg",
+      retailer: "Sohati Care",
+      displayedPrice: 43.29,
+    },
+    {
+      categoryId: "collagen",
+      competitorName: "ESI",
+      productName: "Biocollagenix 120 Tablets",
+      genericName: "",
+      form: "Tablet",
+      dosage: "",
+      packSize: 120,
+      notes: "",
+      sourceUrl: "https://mazenonline.com/collections/food-supplements",
+      retailer: "Mazen Online",
+      displayedPrice: 49,
+    },
+    {
+      categoryId: "collagen",
+      competitorName: "Trenker",
+      productName: "NC2 Native Collagen II 30 Capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 30,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/vendors?q=trenker",
+      retailer: "Nicolas Care",
+      displayedPrice: 35,
+    },
+
+    // --- Biotin -> hair-skin-nails ---
+    {
+      categoryId: "hair-skin-nails",
+      competitorName: "Dietpharm",
+      productName: "Biotin x30 Tabs",
+      genericName: "",
+      form: "Tablet",
+      dosage: "",
+      packSize: 30,
+      notes: "",
+      sourceUrl: "https://sohaticare.com/products/biotin-x30-tabs",
+      retailer: "Sohati Care",
+      displayedPrice: 9.92,
+    },
+    {
+      categoryId: "hair-skin-nails",
+      competitorName: "Green Made",
+      productName: "HMS D-Biotin 100mg",
+      genericName: "",
+      form: "",
+      dosage: "100 mg",
+      packSize: "",
+      notes: "",
+      sourceUrl: "https://mazenonline.com/collections/nerves",
+      retailer: "Mazen Online",
+      displayedPrice: 27.81,
+    },
+
+    // --- Biotin / hair -> hair-skin-nails ---
+    {
+      categoryId: "hair-skin-nails",
+      competitorName: "Arkopharma",
+      productName: "Forcapil Hair & Nails",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "Public price shown as a range: $17.76-$36.63 (likely reflects multiple pack sizes/variants); no single clean price recorded.",
+      sourceUrl: "https://mazenonline.com/en-iraq/collections/supplements-1",
+      retailer: "Mazen Online",
+      displayedPrice: "",
+    },
+
+    // --- Hair / skin / nails -> hair-skin-nails ---
+    {
+      categoryId: "hair-skin-nails",
+      competitorName: "Dietaroma",
+      productName: "Capilea Strong Hair & Nails 60 Capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 60,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/vendors?q=dietaroma",
+      retailer: "Nicolas Care",
+      displayedPrice: 27,
+    },
+
+    // --- Apple cider vinegar -> digestive-gut-health ---
+    {
+      categoryId: "digestive-gut-health",
+      competitorName: "Holland & Barrett",
+      productName: "Apple Cider Vinegar",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "",
+      sourceUrl: "https://mazenonline.com/en-iraq/products/t-apple-cider-vinegar",
+      retailer: "Mazen Online",
+      displayedPrice: 20,
+    },
+    {
+      categoryId: "digestive-gut-health",
+      competitorName: "NOW",
+      productName: "Apple Cider Vinegar 450 mg 180 Veg Capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "450 mg",
+      packSize: 180,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/digestive-enzymes",
+      retailer: "Nicolas Care",
+      displayedPrice: 30,
+    },
+    {
+      categoryId: "digestive-gut-health",
+      competitorName: "21st Century",
+      productName: "Apple Cider Vinegar 300 mg - 250 Tablets",
+      genericName: "",
+      form: "Tablet",
+      dosage: "300 mg",
+      packSize: 250,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/vitamins-supplements?page=2",
+      retailer: "Nicolas Care",
+      displayedPrice: 33.3,
+    },
+    {
+      categoryId: "digestive-gut-health",
+      competitorName: "Swanson",
+      productName: "Apple Vinegar 120 Tabs",
+      genericName: "",
+      form: "Tablet",
+      dosage: "",
+      packSize: 120,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/products/swanson-apple-vinegar-120-tabs",
+      retailer: "Nicolas Care",
+      displayedPrice: 39.33,
+    },
+
+    // --- Ashwagandha -> sleep-stress-mood ---
+    {
+      categoryId: "sleep-stress-mood",
+      competitorName: "Biotech USA",
+      productName: "Ashwagandha 60 Capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 60,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/stress-relief",
+      retailer: "Nicolas Care",
+      displayedPrice: 18.62,
+    },
+    {
+      categoryId: "sleep-stress-mood",
+      competitorName: "Novadiet",
+      productName: "Ashwagandha",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "Public price shown as 'From $23' (starting price; exact price not captured).",
+      sourceUrl: "https://nicolas-care.com/collections/stress-support",
+      retailer: "Nicolas Care",
+      displayedPrice: "",
+    },
+    {
+      categoryId: "sleep-stress-mood",
+      competitorName: "Marinas",
+      productName: "Ashwagandha",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "",
+      sourceUrl: "https://mazenonline.com/collections/vendors?q=Marinas",
+      retailer: "Mazen Online",
+      displayedPrice: 22,
+    },
+
+    // --- 5-HTP -> sleep-stress-mood ---
+    {
+      categoryId: "sleep-stress-mood",
+      competitorName: "Solaray",
+      productName: "5-HTP with Vitamin C 100 mg 30 Capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "100 mg",
+      packSize: 30,
+      notes: "Dosage '100 mg' as listed in product name - unclear whether this refers to the 5-HTP or the vitamin C content; not further verified.",
+      sourceUrl: "https://nicolas-care.com/collections/stress-support",
+      retailer: "Nicolas Care",
+      displayedPrice: 52.46,
+    },
+
+    // --- Melatonin -> sleep-stress-mood ---
+    {
+      categoryId: "sleep-stress-mood",
+      competitorName: "Vitarmonyl",
+      productName: "Melaforte Melatonin 30 Capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 30,
+      notes: "",
+      sourceUrl: "https://sohaticare.com/products/melaforte-melatonin-30-capsules",
+      retailer: "Sohati Care",
+      displayedPrice: 7.7,
+    },
+
+    // --- Calcium/Magnesium/Zinc -> calcium ---
+    {
+      categoryId: "calcium",
+      competitorName: "Sundown",
+      productName: "Calcium, Magnesium & Zinc 100 Caplets",
+      genericName: "",
+      form: "Caplet",
+      dosage: "",
+      packSize: 100,
+      notes: "",
+      sourceUrl: "https://mazenonline.com/en-iraq/collections/supplements-1",
+      retailer: "Mazen Online",
+      displayedPrice: 17.01,
+    },
+    {
+      categoryId: "calcium",
+      competitorName: "Calcium Magnesium & Zinc",
+      productName: "Caplets",
+      genericName: "",
+      form: "Caplet",
+      dosage: "",
+      packSize: "",
+      notes: "Public price not captured from source (listed as 'Not captured').",
+      sourceUrl: "https://skinsociety.me/pages/avada-sitemap-products",
+      retailer: "Skin Society",
+      displayedPrice: "",
+    },
+
+    // --- Vitamin C -> vitamin-c ---
+    {
+      categoryId: "vitamin-c",
+      competitorName: "Juvamine",
+      productName: "Vitamin C 1000 mg 30 Effervescent Tablets",
+      genericName: "",
+      form: "Effervescent",
+      dosage: "1000 mg",
+      packSize: 30,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/vitamins-supplements",
+      retailer: "Nicolas Care",
+      displayedPrice: 9.99,
+    },
+    {
+      categoryId: "vitamin-c",
+      competitorName: "Biorga",
+      productName: "Sana+ Vita C Extra 1000 mg 20 Effervescent Tablets",
+      genericName: "",
+      form: "Effervescent",
+      dosage: "1,000 mg",
+      packSize: 20,
+      notes: "Recommended use: Not verified.",
+      sourceUrl: "https://nicolas-care.com/collections/immune-support",
+      retailer: "Nicolas Care",
+      displayedPrice: 8.33,
+    },
+    {
+      categoryId: "vitamin-c",
+      competitorName: "Solaray",
+      productName: "Buffered Vitamin C 800 mg 100 VegCaps",
+      genericName: "",
+      form: "Capsule",
+      dosage: "800 mg",
+      packSize: 100,
+      notes: "Recommended use: Not verified. Buffered vitamin C formulation.",
+      sourceUrl: "https://nicolas-care.com/collections/immune-support",
+      retailer: "Nicolas Care",
+      displayedPrice: 41.63,
+    },
+
+    // --- CoQ10 -> coq10 ---
+    {
+      categoryId: "coq10",
+      competitorName: "Advancis",
+      productName: "Coenzyme Q10 30 Capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 30,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/advancis",
+      retailer: "Nicolas Care",
+      displayedPrice: 21,
+    },
+    {
+      categoryId: "coq10",
+      competitorName: "Med-Vial",
+      productName: "Mega Q10 30 Capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 30,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/vitamins-supplements?page=2",
+      retailer: "Nicolas Care",
+      displayedPrice: 30,
+    },
+    {
+      categoryId: "coq10",
+      competitorName: "Webber Naturals",
+      productName: "QuTen Forte 30 Softgels",
+      genericName: "",
+      form: "Softgel",
+      dosage: "",
+      packSize: 30,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/vitamins-supplements",
+      retailer: "Nicolas Care",
+      displayedPrice: 36,
+    },
+
+    // --- Turmeric/curcumin -> joint-bone-mobility ---
+    {
+      categoryId: "joint-bone-mobility",
+      competitorName: "Turmera",
+      productName: "",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "Public price not captured from source (listed as 'Not captured'). Single-word product name in source; no distinguishable brand/product split available.",
+      sourceUrl: "https://skinsociety.me/pages/avada-sitemap-products",
+      retailer: "Skin Society",
+      displayedPrice: "",
+    },
+
+    // --- Probiotic -> probiotics ---
+    {
+      categoryId: "probiotics",
+      competitorName: "Green Made",
+      productName: "ProbioLife",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "",
+      sourceUrl: "https://mazenonline.com/collections/food-supplements",
+      retailer: "Mazen Online",
+      displayedPrice: 10.86,
+    },
+    {
+      categoryId: "probiotics",
+      competitorName: "Priotic",
+      productName: "Plus",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/products/3761-sku-3761-1",
+      retailer: "Nicolas Care",
+      displayedPrice: 9.99,
+    },
+
+    // --- Memory / ginkgo -> brain-cognitive-health-memory ---
+    {
+      categoryId: "brain-cognitive-health-memory",
+      competitorName: "Dietaroma",
+      productName: "Capital Memoire 40 Capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 40,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/vendors?q=dietaroma",
+      retailer: "Nicolas Care",
+      displayedPrice: 25,
+    },
+
+    // --- Memory -> brain-cognitive-health-memory ---
+    {
+      categoryId: "brain-cognitive-health-memory",
+      competitorName: "Lifeplan",
+      productName: "AlzAid 60 Tablets",
+      genericName: "",
+      form: "Tablet",
+      dosage: "",
+      packSize: 60,
+      notes: "",
+      sourceUrl: "https://mazenonline.com/collections/fatigue-energy",
+      retailer: "Mazen Online",
+      displayedPrice: 9.99,
+    },
+
+    // --- Joint -> joint-bone-mobility ---
+    {
+      categoryId: "joint-bone-mobility",
+      competitorName: "Trenker",
+      productName: "Biocondil 60 Tablets",
+      genericName: "",
+      form: "Tablet",
+      dosage: "",
+      packSize: 60,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/vendors?q=trenker",
+      retailer: "Nicolas Care",
+      displayedPrice: 34,
+    },
+    {
+      categoryId: "joint-bone-mobility",
+      competitorName: "Arthrosamine",
+      productName: "Plus",
+      genericName: "",
+      form: "",
+      dosage: "",
+      packSize: "",
+      notes: "Public price not captured from source (listed as 'Not captured').",
+      sourceUrl: "https://skinsociety.me/pages/avada-sitemap-products",
+      retailer: "Skin Society",
+      displayedPrice: "",
+    },
+    {
+      categoryId: "joint-bone-mobility",
+      competitorName: "Chondrosamine",
+      productName: "900mg",
+      genericName: "",
+      form: "",
+      dosage: "900 mg",
+      packSize: "",
+      notes: "Public price not captured from source (listed as 'Not captured').",
+      sourceUrl: "https://skinsociety.me/pages/avada-sitemap-products",
+      retailer: "Skin Society",
+      displayedPrice: "",
+    },
+
+    // --- Weight management -> weight-management ---
+    {
+      categoryId: "weight-management",
+      competitorName: "NOW",
+      productName: "Glucomannan 180 Veg Capsules",
+      genericName: "",
+      form: "Capsule",
+      dosage: "",
+      packSize: 180,
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/collections/digestive-enzymes",
+      retailer: "Nicolas Care",
+      displayedPrice: 40,
+    },
+    {
+      categoryId: "weight-management",
+      competitorName: "Sweet Bear",
+      productName: "Fat Burner Gummies",
+      genericName: "",
+      form: "Gummy",
+      dosage: "",
+      packSize: "",
+      notes: "",
+      sourceUrl: "https://nicolas-care.com/products/sweet-bear-fat-burner-gummies",
+      retailer: "Nicolas Care",
+      displayedPrice: 33.3,
+    },
+  ],
+
+  enrichments: [
+    {
+      competitorKey: "Green Made|Cobalin",
+      retailer: "Sohati Care",
+      field: "sourceUrl",
+      value: "https://sohaticare.com/products/cobalin-1000-mcg",
+    },
+  ],
+
+  judgmentCalls: [
+    "ROW COUNT DISCREPANCY: the source table as given contains 73 data rows, not 94 as stated in the task instructions. Verified by manual line-by-line enumeration and by summing per-category subtotals (both give 73). Proceeded with the actual 73 rows: 71 newProducts + 1 enrichment + 1 merged-duplicate-pair-counted-once = 73.",
+    "'Pregnacare 30 Tabs' / 'Pregnacare Conception': no separate company brand given in source, so 'Pregnacare' was used as competitorName and the remainder as productName.",
+    "'Magnesium B6 30 Tablets': no distinguishable brand token in source; used 'Magnesium B6' as competitorName and '30 Tablets' as productName.",
+    "'Magnesal Plus x30 Capsules' and 'MagneCalm 60 capsules': treated the leading single word as competitorName ('Magnesal', 'MagneCalm') with the remainder as productName, though these read more like single fused brand+product names.",
+    "'Omega 3 Excellium 60 Capsules': assumed 'Excellium' is the brand (placed after the category word 'Omega 3' in the source string) and set competitorName='Excellium', productName='Omega 3 60 Capsules' — word order is unusual and this split is uncertain.",
+    "'Grass-fed Collagen with Probiotic': no brand token identifiable; used the full descriptive name as competitorName and left productName empty.",
+    "'Pure Collagen Plus 4000MG': treated 'Pure' as competitorName and 'Collagen Plus 4000MG' as productName; 'Pure' may not be an actual distinct brand.",
+    "'Calcium Magnesium & Zinc Caplets' and 'Turmera': no brand/product split possible (single descriptive phrase or single word) — competitorName set to the full name (or the single word), productName left empty for 'Turmera'.",
+    "'Priotic Plus' and 'Arthrosamine Plus': split as competitorName + 'Plus' product line; could alternatively be a single fused brand name.",
+    "'Chondrosamine 900mg': productName kept verbatim as '900mg' while dosage field normalized to '900 mg'.",
+    "Form 'Caplet' used for 'Caplets' (Sundown Calcium/Magnesium/Zinc; generic Calcium Magnesium & Zinc Caplets) even though the task's form-mapping example list did not explicitly include 'Caplet' — treated as an unambiguous, clearly stated dosage form analogous to the listed examples.",
+    "genericName 'Vitamin D3' was recorded for 'NOW D3 Max Potency 50,000 IU' (verified details column explicitly says 'Vitamin D3 50,000 IU'), but genericName was left blank for plain 'Vitamin D' or 'Vitamin B12' mentions elsewhere (rows for Fresh Pharma Acti-D, NOW B12 Lozenges) since those don't specify a distinct vitamer/ester — this line is a judgment call on what counts as a sufficiently specific 'chemical/generic' name.",
+    "'ESI Multicomplex Senior 30 Tablets': per the explicit task exception, retailer was recorded as 'Mazen Online' (matching the source URL) instead of the table's literal 'Nicolas Care', with a note flagging the mismatch.",
+    "'Grass-fed Collagen with Probiotic' also has a retailer/URL mismatch (table says 'Sohati Care', URL is mazenonline.com), but since the task only specified an explicit override for the ESI Multicomplex Senior row, the literal table retailer ('Sohati Care') was kept here and the mismatch was only flagged in notes rather than overridden.",
+    "Webber Naturals Calma-D 60 tablets (Vitamin D / Vitamin D+calcium+magnesium duplicate pair): merged into a single entry under categoryId 'vitamin-d' (its first listing), with a note that it is equally relevant to the Calcium/Magnesium category.",
+  ],
+};
+
+let competitorMasterDataSeedChecked = false;
+async function ensureCompetitorMasterDataSeeded() {
+  if (competitorMasterDataSeedChecked) return;
+  const norm = (s) => String(s || "").trim().toLowerCase();
+
+  const existingProducts = await db.getAllRows("CompetitorProducts");
+  const productIdByKey = new Map(existingProducts.map((p) => [`${norm(p.competitorName)}|${norm(p.productName)}`, p.id]));
+
+  // ---- Enrichments: fill a blank field on an already-existing record ----
+  // (only ever fills a currently-blank field — never overwrites a value
+  // that's already there, per the "never silently overwrite" rule).
+  const existingListings = await db.getAllRows("RecallRetailerListings");
+  for (const enr of COMPETITOR_MASTER_SEED.enrichments) {
+    const productId = productIdByKey.get(norm(enr.competitorKey));
+    if (!productId) continue; // the record it refers to doesn't exist — skip rather than guess
+    if (enr.field === "sourceUrl" && enr.retailer) {
+      const listing = existingListings.find((l) => l.competitorProductId === productId && norm(l.retailer) === norm(enr.retailer));
+      if (listing && !listing.sourceUrl) {
+        await db.updateRowById("RecallRetailerListings", listing.id, { sourceUrl: enr.value });
+      }
+    }
+  }
+
+  // ---- New competitor products + retailer listings ----
+  const newProductRows = [];
+  const newListingRows = [];
+  const createdIdByKey = new Map();
+  for (const item of COMPETITOR_MASTER_SEED.newProducts) {
+    const key = `${norm(item.competitorName)}|${norm(item.productName)}`;
+    if (productIdByKey.has(key) || createdIdByKey.has(key)) continue; // already exists — never duplicate
+    const id = `cp${crypto.randomUUID()}`;
+    const row = { id, createdAt: new Date().toISOString(), createdBy: "Recall competitor master data seed", updatedBy: "", updatedAt: "" };
+    for (const f of COMPETITOR_PRODUCT_FIELDS) row[f] = "";
+    for (const f of COMPETITOR_PRODUCT_DETAIL_FIELDS) row[f] = "";
+    row.competitorName = item.competitorName;
+    row.productName = item.productName;
+    row.genericName = item.genericName || "";
+    row.form = item.form || "";
+    row.dosage = item.dosage || "";
+    row.packSize = item.packSize;
+    // Price stays on the retailer listing, not the master product — see
+    // Phase 2C rule 12 ("prices belong to retailer listings").
+    row.price = "";
+    row.notes = item.notes || "";
+    row.researchStatus = "PARTIALLY_VERIFIED";
+    row.missingFields = "";
+    row.sourceLabel = "";
+    row.sourceUrl = item.sourceUrl || "";
+    newProductRows.push(row);
+    createdIdByKey.set(key, id);
+
+    if (item.retailer) {
+      newListingRows.push({
+        id: `rl-cm-${crypto.randomUUID()}`, competitorProductId: id, retailer: item.retailer,
+        sourceUrl: item.sourceUrl || "", displayedPrice: item.displayedPrice === "" ? "" : item.displayedPrice,
+        currency: item.displayedPrice === "" ? "" : "USD", researchDate: "", notes: "",
+        createdBy: "Recall competitor master data seed", createdAt: new Date().toISOString(),
+      });
+    }
+  }
+  if (newProductRows.length) await db.appendRows("CompetitorProducts", newProductRows);
+  if (newListingRows.length) await db.appendRows("RecallRetailerListings", newListingRows);
+
+  // ---- Link the B12/B-complex products into the b-vitamins-b12 category ----
+  // (the only category with our-products loaded so far — see header note).
+  // Any one of Mason/ALFA's B12 products serves as the anchor product a
+  // relationship must point at; the Analysis/Competitors tables no longer
+  // group rows by "compared against X" (see the Recall simplification
+  // pass), so which specific our-product is picked has no visible effect.
+  const links = await db.getAllRows("RecallProductIngredients");
+  const b12ProductIds = [...new Set(links.filter((l) => l.ingredientId === "vitamin-b12").map((l) => l.productId))];
+  const anchorProductId = b12ProductIds[0];
+  if (anchorProductId) {
+    const existingRels = await db.getAllRows("RecallCompetitorRelationships");
+    const existingRelKeys = new Set(existingRels.map((r) => `${r.ourProductId}|${r.competitorProductId}`));
+    const newRels = [];
+    for (const item of COMPETITOR_MASTER_SEED.newProducts) {
+      if (item.categoryId !== "b-vitamins-b12") continue;
+      const key = `${norm(item.competitorName)}|${norm(item.productName)}`;
+      const competitorProductId = productIdByKey.get(key) || createdIdByKey.get(key);
+      if (!competitorProductId) continue;
+      const relKey = `${anchorProductId}|${competitorProductId}`;
+      if (existingRelKeys.has(relKey)) continue;
+      newRels.push({
+        id: `cr-cm-${crypto.randomUUID()}`, ourProductId: anchorProductId, competitorProductId,
+        comparisonType: "dose-and-form-comparison", notes: "", sourceIds: "", createdAt: new Date().toISOString(),
+      });
+      existingRelKeys.add(relKey);
+    }
+    if (newRels.length) await db.appendRows("RecallCompetitorRelationships", newRels);
+  }
+
+  competitorMasterDataSeedChecked = true;
+}
+
 // ---------- Recall Phase 2D: research status derivation + editing ----------
 // A record's researchStatus/missingFields are ALWAYS derived here from its
 // own current field values — never accepted verbatim from a client patch.
@@ -3872,6 +5011,7 @@ app.get("/api/recall/categories", async (req, res) => {
     await ensureRecallCategoriesSeeded();
     await ensureRecallB12Seeded();
     await ensureB12ProductDataSeeded();
+    await ensureCompetitorMasterDataSeeded();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
@@ -3920,6 +5060,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     await ensureRecallCategoriesSeeded();
     await ensureRecallB12Seeded();
     await ensureB12ProductDataSeeded();
+    await ensureCompetitorMasterDataSeeded();
     const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
