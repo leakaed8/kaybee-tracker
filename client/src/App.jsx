@@ -7361,7 +7361,7 @@ function validateCatalogProductForm(f) {
 
 function emptyCatalogProductForm() {
   return {
-    name: "", price: "",
+    name: "", price: "", sku: "",
     ingredients: [{ name: "", form: "", amount: "", unit: "mg" }],
     form: "", packSize: "", unitsPerDay: "1", notes: "",
   };
@@ -7370,7 +7370,7 @@ function emptyCatalogProductForm() {
 function toCatalogProductFormShape(p) {
   const ingredients = getIngredients(p);
   return {
-    name: p.name || "", price: p.price ?? "",
+    name: p.name || "", price: p.price ?? "", sku: p.sku || "",
     ingredients: ingredients.length ? ingredients.map((i) => ({ name: i.name, form: i.form || "", amount: i.amount ?? "", unit: i.unit || "mg" })) : [{ name: "", form: "", amount: "", unit: "mg" }],
     form: p.form || "", packSize: p.packSize ?? "", unitsPerDay: p.unitsPerDay || "1", notes: p.notes || "",
   };
@@ -7411,6 +7411,9 @@ function CatalogProductForm({ initial, saving, error, submitLabel, onCancel, onS
           <input value={f.unitsPerDay} onChange={(e) => set({ unitsPerDay: e.target.value })} type="number" min="0" placeholder="1" style={inputStyle} />
         </Field>
       </div>
+      <Field label="SKU (optional)">
+        <input value={f.sku} onChange={(e) => set({ sku: e.target.value })} placeholder="e.g. MN-B12-1000" style={{ ...inputStyle, marginBottom: 10 }} />
+      </Field>
       <ProductMetricsPreview product={f} />
       <textarea value={f.notes} onChange={(e) => set({ notes: e.target.value })} placeholder="Notes (optional)" rows={2} style={{ ...inputStyle, resize: "vertical", marginBottom: 10 }} />
       {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
@@ -7638,6 +7641,7 @@ function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBu
                     <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 2 }}>
                       {ingredients.length > 0 ? formatIngredients(ingredients) : "No ingredients recorded"}
                       {p.form ? ` · ${p.form}` : ""}{p.packSize ? ` · pack of ${p.packSize}` : ""}
+                      {p.sku ? ` · SKU ${p.sku}` : ""}
                     </div>
                     {m.hasPackSize && (
                       <div style={{ fontSize: 11.5, color: "#4C7A5E", marginTop: 4 }}>

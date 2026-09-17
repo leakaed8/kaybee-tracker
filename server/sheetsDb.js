@@ -51,7 +51,10 @@ const SCHEMAS = {
   // replaced on every stock re-import). This is what "Compare with our
   // product" under Competitors reads from, so a product's dosage/pack-size
   // details survive regardless of which batch is currently in stock.
-  ProductCatalog: ["id", "name", "price", "form", "packSize", "unitsPerDay", "ingredients", "notes", "createdBy", "createdAt", "updatedBy", "updatedAt"],
+  // sku appended (this phase) so a manager can record/see it in the general
+  // Settings -> Product Catalog screen, not just via the Recall research
+  // editor — matches the Products/Stock tab, which already has one.
+  ProductCatalog: ["id", "name", "price", "form", "packSize", "unitsPerDay", "ingredients", "notes", "createdBy", "createdAt", "updatedBy", "updatedAt", "sku"],
 
   // ---------- Recall (medical rep training/knowledge-reference module) ----------
   // Structure-only for now — no clinical content is populated. Recall sits on

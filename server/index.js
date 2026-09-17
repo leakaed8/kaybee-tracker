@@ -1031,6 +1031,7 @@ app.post("/api/product-catalog", requireManager, async (req, res) => {
       unitsPerDay: req.body.unitsPerDay === "" || req.body.unitsPerDay == null ? "" : Number(req.body.unitsPerDay),
       ingredients: normalizeIngredients(req.body.ingredients),
       notes: req.body.notes || "",
+      sku: req.body.sku || "",
       createdBy: req.repName || "Manager",
       createdAt: new Date().toISOString(),
       updatedBy: "",
@@ -1057,6 +1058,7 @@ app.patch("/api/product-catalog/:id", requireManager, async (req, res) => {
     if (req.body.unitsPerDay !== undefined) patch.unitsPerDay = req.body.unitsPerDay === "" ? "" : Number(req.body.unitsPerDay);
     if (req.body.ingredients !== undefined) patch.ingredients = normalizeIngredients(req.body.ingredients);
     if (req.body.notes !== undefined) patch.notes = req.body.notes || "";
+    if (req.body.sku !== undefined) patch.sku = req.body.sku || "";
     const ok = await db.updateRowById("ProductCatalog", req.params.id, patch);
     if (!ok) return res.status(404).json({ error: "Product not found" });
     res.json({ ok: true });
@@ -3449,7 +3451,10 @@ const B12_OUR_PRODUCTS_SEED = [
     catalog: {
       name: "Mason Natural Vitamin B12 1,000 mcg Quick Dissolve",
       price: 31.12, form: "Quick-Dissolve", packSize: 100, unitsPerDay: "",
-      ingredients: "Vitamin B12 (Cyanocobalamin) 1,000 mcg",
+      // Structured (not free text) so the general Settings -> Product
+      // Catalog ingredients editor can display/edit it like any other
+      // product's ingredients, not just show a blob of text.
+      ingredients: JSON.stringify([{ name: "Vitamin B12 (Cyanocobalamin)", form: "", amount: 1000, unit: "mcg" }]),
       notes: "Price is a previously documented retailer price, pending re-verification. Administration: dissolves under the tongue, as explicitly stated.",
     },
     link: {
@@ -3464,7 +3469,7 @@ const B12_OUR_PRODUCTS_SEED = [
     catalog: {
       name: "Mason Natural Vitamin B12 5,000 mcg Quick Dissolve",
       price: 30.50, form: "Quick-Dissolve", packSize: 30, unitsPerDay: "",
-      ingredients: "Vitamin B12 (Cyanocobalamin) 5,000 mcg",
+      ingredients: JSON.stringify([{ name: "Vitamin B12 (Cyanocobalamin)", form: "", amount: 5000, unit: "mcg" }]),
       notes: "Price is a previously documented Lebanese price, pending re-verification. Administration: dissolves under the tongue, as explicitly stated.",
     },
     link: {
@@ -3479,7 +3484,13 @@ const B12_OUR_PRODUCTS_SEED = [
     catalog: {
       name: "Mason Natural Vitamin B12 500 mcg",
       price: 30.80, form: "Tablet", packSize: 100, unitsPerDay: "",
-      ingredients: "Vitamin B12 500 mcg; also includes calcium per previously documented product identity (amount not verified).",
+      // Calcium's amount is not verified — left blank rather than guessed;
+      // it still appears as its own named ingredient row for a manager to
+      // fill in once known, instead of being buried in free text.
+      ingredients: JSON.stringify([
+        { name: "Vitamin B12", form: "", amount: 500, unit: "mcg" },
+        { name: "Calcium", form: "", amount: "", unit: "" },
+      ]),
       notes: "Price is a previously documented price, pending re-verification. Chemical form is not verified — not assumed.",
     },
     link: {
@@ -3494,7 +3505,7 @@ const B12_OUR_PRODUCTS_SEED = [
     catalog: {
       name: "Mason Natural Vitamin B12 100 mcg",
       price: 20.56, form: "Tablet", packSize: 100, unitsPerDay: "",
-      ingredients: "",
+      ingredients: JSON.stringify([{ name: "Vitamin B12", form: "", amount: 100, unit: "mcg" }]),
       notes: "Price is a previously documented price, pending re-verification. Chemical form is not verified — not assumed.",
     },
     link: {
@@ -3509,7 +3520,12 @@ const B12_OUR_PRODUCTS_SEED = [
     catalog: {
       name: "ALFA B-Complex Formula",
       price: 24.20, form: "Tablet", packSize: 100, unitsPerDay: 1,
-      ingredients: "Thiamine, Riboflavin, Niacinamide, Vitamin B6, Folic Acid, Vitamin B12, Biotin, Pantothenate (amounts not verified)",
+      // Named ingredients only — amounts were never given and are not
+      // guessed; each stays its own row (amount blank) for a manager to
+      // fill in once verified.
+      ingredients: JSON.stringify([
+        "Thiamine", "Riboflavin", "Niacinamide", "Vitamin B6", "Folic Acid", "Vitamin B12", "Biotin", "Pantothenate",
+      ].map((name) => ({ name, form: "", amount: "", unit: "" }))),
       notes: "Price is a previously documented Lebanese price, pending re-verification.",
     },
     link: {
@@ -3840,7 +3856,7 @@ async function recomputeOurProductResearchStatus(linkId) {
   const link = links.find((l) => l.id === linkId);
   if (!link) return null;
   const product = catalog.find((p) => p.id === link.productId);
-  const merged = { ...link, dosageForm: product?.form || "", ingredients: product?.ingredients || "" };
+  const merged = { ...link, dosageForm: product?.form || "", ingredients: product?.ingredients || "", sku: product?.sku || "" };
   const hasConflict = hasOpenConflictOn(conflicts, "RecallProductIngredients", linkId) || hasOpenConflictOn(conflicts, "ProductCatalog", link.productId);
   const researchStatus = deriveResearchStatus(merged, OUR_PRODUCT_REQUIRED_FIELDS, hasConflict);
   const missingFields = computeMissingFieldLabels(merged, OUR_PRODUCT_REQUIRED_FIELDS).join(", ");
@@ -3936,7 +3952,10 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     // last written, so the checklist can never go stale.
     const products = catalog.filter((p) => productIds.has(p.id)).map((p) => {
       const link = linkByProductId.get(p.id);
-      const merged = { ...(link || {}), dosageForm: p.form || "", ingredients: p.ingredients || "" };
+      // sku lives on the ProductCatalog row itself (p.sku, already present
+      // via the ...p spread below) — also editable under Settings ->
+      // Product Catalog — not on the Recall-specific link.
+      const merged = { ...(link || {}), dosageForm: p.form || "", ingredients: p.ingredients || "", sku: p.sku || "" };
       const hasConflict = hasOpenConflictOn(fieldConflicts, "RecallProductIngredients", link?.id) || hasOpenConflictOn(fieldConflicts, "ProductCatalog", p.id);
       const researchStatus = link ? deriveResearchStatus(merged, OUR_PRODUCT_REQUIRED_FIELDS, hasConflict) : "";
       const missingFields = link ? computeMissingFieldLabels(merged, OUR_PRODUCT_REQUIRED_FIELDS) : [];
@@ -3948,7 +3967,6 @@ app.get("/api/recall/categories/:id", async (req, res) => {
         unit: link?.unit || "",
         servingSize: link?.servingSize || "",
         dailyAmount: link?.dailyAmount || "",
-        sku: link?.sku || "",
         manufacturer: link?.manufacturer || "",
         sourceLabel: link?.sourceLabel || "",
         sourceUrl: link?.sourceUrl || "",
@@ -4203,8 +4221,11 @@ app.patch("/api/recall/competitor-research/:id", requireManager, async (req, res
 // request, the shared ProductCatalog fields (name/dosage form/pack
 // size/ingredients) that live on the master product record. Never creates
 // a new product or link — 404s if the link id doesn't already exist.
-const RECALL_OUR_PRODUCT_LINK_FIELDS = ["chemicalForm", "compoundAmount", "activeAmount", "unit", "servingSize", "dailyAmount", "amountBasis", "sku", "manufacturer", "sourceLabel", "sourceUrl", "linkNotes"];
-const RECALL_OUR_PRODUCT_CATALOG_FIELDS = ["name", "price", "form", "packSize", "unitsPerDay", "ingredients", "catalogNotes"];
+// sku lives on ProductCatalog (the general master-product record — a
+// manager can also see/edit it under Settings -> Product Catalog), not on
+// this Recall-specific link, so it belongs in the catalog field list below.
+const RECALL_OUR_PRODUCT_LINK_FIELDS = ["chemicalForm", "compoundAmount", "activeAmount", "unit", "servingSize", "dailyAmount", "amountBasis", "manufacturer", "sourceLabel", "sourceUrl", "linkNotes"];
+const RECALL_OUR_PRODUCT_CATALOG_FIELDS = ["name", "price", "form", "packSize", "unitsPerDay", "ingredients", "catalogNotes", "sku"];
 
 app.patch("/api/recall/our-products/:linkId", requireManager, async (req, res) => {
   try {
