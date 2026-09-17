@@ -37,6 +37,56 @@ const SCHEMAS = {
   // product" under Competitors reads from, so a product's dosage/pack-size
   // details survive regardless of which batch is currently in stock.
   ProductCatalog: ["id", "name", "price", "form", "packSize", "unitsPerDay", "ingredients", "notes", "createdBy", "createdAt", "updatedBy", "updatedAt"],
+
+  // ---------- Recall (medical rep training/knowledge-reference module) ----------
+  // Structure-only for now — no clinical content is populated. Recall sits on
+  // top of ProductCatalog (the master product list) rather than duplicating
+  // it: RecallProductIngredients.productId points at ProductCatalog.id.
+  RecallCategories: ["id", "name", "description", "displayOrder", "active"],
+  // repId stores the rep's NAME (e.g. "Rita"), matching the repName identity
+  // convention used by every other table in this app (Visits.repName,
+  // Orders.repName, Samples.repName, ...) — not a separate numeric Reps.id
+  // foreign key, so no lookup indirection is needed anywhere.
+  RepCategoryAssignments: ["id", "repId", "categoryId", "assignedBy", "createdAt"],
+  // categoryId is not in the spec's literal column list but is added here —
+  // without it there is no way to know which ingredients belong to which
+  // Recall category, which every downstream count/query in this phase
+  // depends on. Flagged in the implementation report.
+  RecallIngredients: [
+    "id", "categoryId", "name", "commonName", "scientificName", "description", "physiologicalRole",
+    "clinicalUses", "evidenceSummary", "evidenceLevel", "precautions", "contraindications",
+    "drugInteractionSummary", "clinicalCheckpoints", "repQuickTakeaway", "whatNotToClaim", "lastReviewed",
+  ],
+  RecallIngredientForms: [
+    "id", "ingredientId", "formName", "chemicalName", "formType", "compoundAmount", "activeAmount", "unit",
+    "conversionRequired", "absorptionNotes", "metabolicNotes", "clinicalEvidence", "evidenceComparison",
+    "documentedAdvantages", "documentedLimitations", "sourceIds", "lastReviewed",
+  ],
+  RecallDosageForms: ["id", "name", "route", "releaseType", "administrationMethod", "description"],
+  RecallProductIngredients: [
+    "id", "productId", "ingredientId", "chemicalForm", "compoundAmount", "activeAmount", "unit",
+    "servingSize", "dailyAmount", "amountBasis", "sourceId", "verificationStatus", "notes",
+  ],
+  RecallClinicalEvidence: [
+    "id", "ingredientId", "productId", "formId", "condition", "population", "intervention", "dose", "route",
+    "duration", "comparator", "outcome", "result", "clinicalSignificance", "evidenceLevel", "studyType",
+    "sourceId", "publicationYear", "lastReviewed",
+  ],
+  RecallResearchSources: [
+    "id", "sourceType", "sourceName", "title", "authors", "journal", "pmid", "pmcid", "doi", "url",
+    "publicationYear", "sourceDate", "sourceQuality", "notes",
+  ],
+  RecallDrugInteractions: [
+    "id", "ingredientId", "drugName", "drugClass", "direction", "mechanism", "clinicalSignificance",
+    "timing", "evidenceLevel", "pharmacistCheckpoint", "sourceId", "lastReviewed",
+  ],
+  RecallCompetitorRelationships: [
+    "id", "ourProductId", "competitorProductId", "comparisonType", "notes", "sourceIds", "createdAt",
+  ],
+  RecallQuizQuestions: [
+    "id", "categoryId", "ingredientId", "question", "optionA", "optionB", "optionC", "optionD",
+    "correctAnswer", "explanation", "sourceIds", "active",
+  ],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];

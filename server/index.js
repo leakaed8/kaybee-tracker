@@ -3923,6 +3923,197 @@ if (telegram.isConfigured()) {
   }
 }
 
+// ---------- Recall (medical rep training/knowledge-reference module) ----------
+// Structure only — no clinical content ships here. Recall sits on top of
+// ProductCatalog (the master product list); it never duplicates it or
+// touches Products/Stock. See server/sheetsDb.js for the new tabs' schemas.
+
+// Fixed, stable slug ids — not auto-incrementing row numbers — so a category
+// can be referenced safely from RepCategoryAssignments/RecallIngredients
+// even if rows get reordered in the sheet.
+const RECALL_CATEGORIES_SEED = [
+  { id: "b-vitamins-b12", name: "B Vitamins / B12" },
+  { id: "vitamin-d", name: "Vitamin D" },
+  { id: "vitamin-c", name: "Vitamin C" },
+  { id: "magnesium", name: "Magnesium" },
+  { id: "calcium", name: "Calcium" },
+  { id: "iron", name: "Iron" },
+  { id: "zinc", name: "Zinc" },
+  { id: "omega-3", name: "Omega-3" },
+  { id: "coq10", name: "CoQ10" },
+  { id: "multivitamins", name: "Multivitamins" },
+  { id: "probiotics", name: "Probiotics" },
+  { id: "collagen", name: "Collagen" },
+  { id: "hair-skin-nails", name: "Hair / Skin / Nails" },
+  { id: "joint-bone-mobility", name: "Joint / Bone / Mobility" },
+  { id: "immune-support", name: "Immune Support" },
+  { id: "womens-health", name: "Women's Health" },
+  { id: "mens-health", name: "Men's Health" },
+  { id: "heart-cardiovascular", name: "Heart / Cardiovascular" },
+  { id: "digestive-gut-health", name: "Digestive / Gut Health" },
+  { id: "liver-detox-metabolic", name: "Liver / Detox / Metabolic" },
+  { id: "weight-management", name: "Weight Management" },
+  { id: "sports-nutrition-performance", name: "Sports Nutrition & Performance" },
+  { id: "sleep-stress-mood", name: "Sleep / Stress / Mood" },
+  { id: "eye-health-vision", name: "Eye Health & Vision" },
+  { id: "brain-cognitive-health-memory", name: "Brain / Cognitive Health & Memory" },
+  { id: "respiratory-allergy-seasonal-support", name: "Respiratory / Allergy / Seasonal Support" },
+];
+
+// Idempotent — checks before inserting, per the "no duplicates" rule. Runs
+// on first request rather than at deploy time, since this dev environment
+// has no credentials to write to the real production Sheet directly; this
+// makes the real deploy self-seed the first time anyone opens Recall.
+let recallCategoriesSeedChecked = false;
+async function ensureRecallCategoriesSeeded() {
+  if (recallCategoriesSeedChecked) return;
+  const existing = await db.getAllRows("RecallCategories");
+  const existingIds = new Set(existing.map((c) => c.id));
+  const missing = RECALL_CATEGORIES_SEED.filter((c) => !existingIds.has(c.id));
+  if (missing.length) {
+    await db.appendRows("RecallCategories", missing.map((c, i) => ({
+      id: c.id, name: c.name, description: "", displayOrder: existing.length + i + 1, active: "true",
+    })));
+  }
+  recallCategoriesSeedChecked = true;
+}
+
+// One combined read per page load (categories + the three empty-for-now
+// knowledge tabs used to compute counts), rather than one Sheets call per
+// category — the whole point of Phase J's performance rule.
+app.get("/api/recall/categories", async (req, res) => {
+  try {
+    await ensureRecallCategoriesSeeded();
+    const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
+      db.getAllRows("RecallCategories"),
+      db.getAllRows("RecallIngredients"),
+      db.getAllRows("RecallProductIngredients"),
+      db.getAllRows("RecallClinicalEvidence"),
+      req.repName ? db.getAllRows("RepCategoryAssignments") : Promise.resolve([]),
+    ]);
+    const ingredientIdsByCategory = new Map();
+    ingredients.forEach((ing) => {
+      const list = ingredientIdsByCategory.get(ing.categoryId) || [];
+      list.push(ing.id);
+      ingredientIdsByCategory.set(ing.categoryId, list);
+    });
+    const result = categories
+      .filter((c) => c.active !== "false")
+      .sort((a, b) => (Number(a.displayOrder) || 0) - (Number(b.displayOrder) || 0))
+      .map((c) => {
+        const ingredientIds = new Set(ingredientIdsByCategory.get(c.id) || []);
+        const productIds = new Set(
+          productIngredients.filter((pi) => ingredientIds.has(pi.ingredientId)).map((pi) => pi.productId)
+        );
+        const evidenceCount = evidence.filter((e) => ingredientIds.has(e.ingredientId)).length;
+        return {
+          id: c.id, name: c.name, description: c.description || "", displayOrder: Number(c.displayOrder) || 0,
+          productCount: productIds.size,
+          knowledgeCount: ingredientIds.size,
+          evidenceCount,
+        };
+      });
+    const myAssignedCategoryIds = req.repName
+      ? assignments.filter((a) => a.repId === req.repName).map((a) => a.categoryId)
+      : [];
+    res.json({ categories: result, myAssignedCategoryIds });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// A single detail bundle for one category — every section the category
+// page needs, computed from currently-empty tables. Sections legitimately
+// show real empty arrays right now; the client renders each as an
+// empty-state message rather than fabricating placeholder content.
+app.get("/api/recall/categories/:id", async (req, res) => {
+  try {
+    await ensureRecallCategoriesSeeded();
+    const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels] = await Promise.all([
+      db.getAllRows("RecallCategories"),
+      db.getAllRows("RecallIngredients"),
+      db.getAllRows("RecallIngredientForms"),
+      db.getAllRows("RecallProductIngredients"),
+      db.getAllRows("RecallClinicalEvidence"),
+      db.getAllRows("RecallDrugInteractions"),
+      db.getAllRows("RecallQuizQuestions"),
+      db.getAllRows("ProductCatalog"),
+      db.getAllRows("RecallCompetitorRelationships"),
+    ]);
+    const category = categories.find((c) => c.id === req.params.id);
+    if (!category) return res.status(404).json({ error: "Recall category not found." });
+
+    const categoryIngredients = ingredients.filter((ing) => ing.categoryId === category.id);
+    const ingredientIds = new Set(categoryIngredients.map((ing) => ing.id));
+    const ingredientForms = forms.filter((f) => ingredientIds.has(f.ingredientId));
+    const links = productIngredients.filter((pi) => ingredientIds.has(pi.ingredientId));
+    const productIds = new Set(links.map((pi) => pi.productId));
+    const products = catalog.filter((p) => productIds.has(p.id));
+    const competitors = competitorRels.filter((r) => productIds.has(r.ourProductId));
+    const categoryEvidence = evidence.filter((e) => ingredientIds.has(e.ingredientId));
+    const categoryInteractions = interactions.filter((i) => ingredientIds.has(i.ingredientId));
+    const categoryQuiz = quiz.filter((q) => q.categoryId === category.id && q.active !== "false");
+
+    res.json({
+      category: { id: category.id, name: category.name, description: category.description || "" },
+      ingredients: categoryIngredients,
+      ingredientForms,
+      products,
+      competitors,
+      evidence: categoryEvidence,
+      interactions: categoryInteractions,
+      quizAvailable: categoryQuiz.length > 0,
+      quizQuestionCount: categoryQuiz.length,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/recall/assignments", requireManager, async (req, res) => {
+  try {
+    const { repName } = req.query;
+    if (!repName) return res.status(400).json({ error: "repName is required" });
+    const assignments = await db.getAllRows("RepCategoryAssignments");
+    const categoryIds = assignments.filter((a) => a.repId === repName).map((a) => a.categoryId);
+    res.json({ categoryIds });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Replace-set semantics, matching the checkbox-list UI a manager actually
+// uses (pick a rep, check/uncheck boxes, Save) — simpler and less
+// error-prone than separate add/remove endpoints, and only ever touches
+// this one rep's rows; every other rep's assignments are left untouched.
+app.post("/api/recall/assignments", requireManager, async (req, res) => {
+  try {
+    const { repName, categoryIds } = req.body;
+    if (!repName) return res.status(400).json({ error: "repName is required" });
+    const validCategoryIds = new Set(RECALL_CATEGORIES_SEED.map((c) => c.id));
+    const cleanIds = [...new Set(Array.isArray(categoryIds) ? categoryIds : [])].filter((id) => validCategoryIds.has(id));
+
+    const existing = await db.getAllRows("RepCategoryAssignments");
+    const keptForOtherReps = existing.filter((a) => a.repId !== repName);
+    const now = new Date().toISOString();
+    const newRowsForThisRep = cleanIds.map((categoryId) => ({
+      id: `rca${crypto.randomUUID()}`,
+      repId: repName,
+      categoryId,
+      assignedBy: req.repName || "Manager",
+      createdAt: now,
+    }));
+    await db.replaceAllRows("RepCategoryAssignments", [...keptForOtherReps, ...newRowsForThisRep]);
+    res.json({ ok: true, count: newRowsForThisRep.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Render's free tier sleeps after ~15 minutes with no inbound traffic. A self
 // request through the public URL (not localhost) counts as real traffic and
 // resets that timer, keeping the service warm without any external pinger.

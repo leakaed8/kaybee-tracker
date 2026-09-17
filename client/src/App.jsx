@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { api } from "./api.js";
 import { TrainingVideosView, TrainingStudiesView } from "./TrainingView.jsx";
+import { RecallView } from "./RecallView.jsx";
 import {
   daysUntil, fmtDate, turnoverPct, zoneFor, isSlowMover, isAtRisk, effectiveSold90, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
   computeLeadScore,
@@ -523,6 +524,7 @@ export default function App() {
         {(role === "manager" || role === "rep") && <TabBtn active={tab === "competitors"} onClick={() => setTab("competitors")} icon={<Swords size={15} />} label="Competitors" />}
         <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />
         <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />
+        <TabBtn active={tab === "recall"} onClick={() => setTab("recall")} icon={<Brain size={15} />} label="Recall" />
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
       </nav>
 
@@ -620,6 +622,9 @@ export default function App() {
             {tab === "knowledge" && <KnowledgeView />}
             {tab === "training" && (
               <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} products={products} />
+            )}
+            {tab === "recall" && (
+              <RecallView role={role} repName={repName} repNames={repNames} />
             )}
             {tab === "route" && role === "rep" && !isSupervisor && <RouteView clients={clients} doctors={doctors} />}
             {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} />}

@@ -131,4 +131,8 @@ export const api = {
   removeTrainingStudy: (id) => request(`/admin/training-studies/${id}`, { method: "DELETE" }),
   markTrainingStudyViewed: (id) => request(`/training-studies/${id}/viewed`, { method: "POST" }),
   tagTrainingStudyNutrient: (id, nutrient) => request(`/training-studies/${id}/nutrient`, { method: "PATCH", body: JSON.stringify({ nutrient }) }),
+  getRecallCategories: () => request("/recall/categories"),
+  getRecallCategory: (id) => request(`/recall/categories/${id}`),
+  getRecallAssignments: (repName) => request(`/recall/assignments?repName=${encodeURIComponent(repName)}`),
+  saveRecallAssignments: (repName, categoryIds) => request("/recall/assignments", { method: "POST", body: JSON.stringify({ repName, categoryIds }) }),
 };
