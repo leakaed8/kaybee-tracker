@@ -235,10 +235,6 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
             )}
           </RecallSection>
 
-          <RecallSection title="Dosage Forms">
-            <EmptyState text="No dosage form information has been added yet." />
-          </RecallSection>
-
           <RecallSection title="Our Products">
             {data.products.length === 0 ? (
               <EmptyState text="No products have been linked to this category yet." />
@@ -701,6 +697,26 @@ function SummarySubsection({ title, children }) {
   );
 }
 
+// Collapsed by default — keeps the market-comparison section to its
+// conclusions on first look, per feedback that the full field-by-field
+// breakdown made Recall feel crowded. Nothing inside is removed, just
+// tucked behind a toggle for a rep who wants the underlying detail.
+function ExpandableDetails({ label, children }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11.5, color: "#4C7A5E", background: "none", border: "none", padding: "4px 0", cursor: "pointer", fontWeight: 500 }}
+      >
+        {open ? "▾ Hide full market comparison details" : `▸ ${label}`}
+      </button>
+      {open && <div style={{ marginTop: 8 }}>{children}</div>}
+    </div>
+  );
+}
+
 function IncompleteNotice({ missing }) {
   return (
     <div style={{ fontSize: 11.5, color: "#8A6B3A" }}>
@@ -780,79 +796,18 @@ function RecallComparisonSummary({ products, competitors, ingredient }) {
         This summarizes documented differences only — it does not recommend one product over another.
       </div>
 
-      <SummarySubsection title="Dose differences">
-        {anyAmountVerified
-          ? allItems.map((i, idx) => <div key={idx} style={summaryLineStyle}>{i.label}: {i.amount || "Not verified"}</div>)
-          : <IncompleteNotice missing={["amount"]} />}
-      </SummarySubsection>
-
-      <SummarySubsection title="Chemical form differences">
-        {anyChemicalFormVerified ? (
-          <>
-            {[...chemicalFormGroups.entries()].map(([form, labels]) => (
-              <div key={form} style={summaryLineStyle}><strong>{form}:</strong> {labels.join(", ")}</div>
-            ))}
-            <div style={scientificContextStyle}>
-              Methylcobalamin and adenosylcobalamin are metabolically active forms. Cyanocobalamin and hydroxocobalamin are converted by the body into active forms. Current evidence does not establish that methylcobalamin has superior absorption compared with cyanocobalamin.
-            </div>
-          </>
-        ) : <IncompleteNotice missing={["chemical form"]} />}
-      </SummarySubsection>
-
-      <SummarySubsection title="Dosage form differences">
-        {anyDosageFormVerified ? (
-          <>
-            {[...dosageFormGroups.entries()].map(([form, labels]) => (
-              <div key={form} style={summaryLineStyle}><strong>{form}:</strong> {labels.join(", ")}</div>
-            ))}
-            <div style={scientificContextStyle}>
-              Chemical form (e.g. Cyanocobalamin, Methylcobalamin) is what the active ingredient is; dosage form (e.g. Tablet, Quick-Dissolve, Lozenge) is how the product is taken — the two are independent facts. A "Quick-Dissolve" product is only described as sublingual when a source explicitly documents that it dissolves under the tongue; sublingual administration is never assumed from the format name alone, and no format is described as more effective than another.
-            </div>
-          </>
-        ) : <IncompleteNotice missing={["dosage form"]} />}
-      </SummarySubsection>
-
-      <SummarySubsection title="Formulation differences">
-        {anyFormulationNoted ? (
-          allItems.filter(hasFormulationNote).map((i, idx) => <div key={idx} style={summaryLineStyle}>{i.label}: {i.ingredientsText || i.notesText}</div>)
-        ) : (
-          <div style={{ fontSize: 11.5, color: "#8A8272" }}>No documented additional ingredients beyond the core content for the products currently on file.</div>
-        )}
-      </SummarySubsection>
-
-      <SummarySubsection title="Pack size differences">
-        {allItems.some((i) => i.packSize)
-          ? allItems.map((i, idx) => <div key={idx} style={summaryLineStyle}>{i.label}: {i.packSize || "Not verified"}</div>)
-          : <IncompleteNotice missing={["pack size"]} />}
-      </SummarySubsection>
-
-      <SummarySubsection title="Price differences">
-        {anyPriceVerified ? (
-          <>
-            {ourItems.filter((i) => i.price !== "" && i.price != null).map((i, idx) => <div key={`o${idx}`} style={summaryLineStyle}>{i.label}: {i.price}</div>)}
-            {competitorItems.flatMap((i, idx) =>
-              i.retailerListings.filter((l) => l.displayedPrice !== "" && l.displayedPrice != null).map((l, lidx) => (
-                <div key={`${idx}-${lidx}`} style={summaryLineStyle}>{i.label} ({l.retailer}): {l.currency || ""} {l.displayedPrice}</div>
-              ))
-            )}
-          </>
-        ) : <IncompleteNotice missing={["retailer/price information"]} />}
-      </SummarySubsection>
-
-      <SummarySubsection title="What actually differentiates the products?">
-        {differentiators.length > 0 ? (
-          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
-            {differentiators.map((d) => <li key={d} style={{ marginBottom: 3 }}>{d}</li>)}
-          </ul>
-        ) : <div style={{ fontSize: 11.5, color: "#8A8272", fontStyle: "italic" }}>Not enough verified information to compare.</div>}
-      </SummarySubsection>
-
-      <SummarySubsection title="Information gaps">
-        {allItems.some((i) => i.missingFields.length > 0) ? (
-          allItems.filter((i) => i.missingFields.length > 0).map((i, idx) => (
-            <div key={idx} style={{ ...summaryLineStyle, color: "#8A6B3A" }}>⚠️ {i.label} — missing: {i.missingFields.join(", ")}</div>
-          ))
-        ) : <div style={{ fontSize: 11.5, color: "#8A8272" }}>No documented information gaps for the products currently on file.</div>}
+      {/* Conclusions first, always visible — this is what a rep actually
+          needs before a call. The full field-by-field breakdown these are
+          drawn from is available on demand below, not by default. */}
+      <SummarySubsection title="Pre-call — 30 second summary">
+        <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
+          <li style={{ marginBottom: 4 }}>Forms represented in this market: {distinctVerified(allItems, "chemicalForm").length > 0 ? distinctVerified(allItems, "chemicalForm").join(", ") : "Not verified"}.</li>
+          <li style={{ marginBottom: 4 }}>Our products use: {distinctVerified(ourItems, "chemicalForm").length > 0 ? distinctVerified(ourItems, "chemicalForm").join(", ") : "Not verified"}.</li>
+          <li style={{ marginBottom: 4 }}>Competitor dosage formats: {distinctVerified(competitorItems, "dosageForm").length > 0 ? distinctVerified(competitorItems, "dosageForm").join(", ") : "Not verified"}.</li>
+          <li style={{ marginBottom: 4 }}>Major formulation differences: {anyFormulationNoted ? "some products contain additional ingredients beyond the core content." : "None documented beyond dose/form."}</li>
+          <li style={{ marginBottom: 4 }}>Clinical point to remember: {quickTakeawayFirstLine || "See Clinical Evidence above."}</li>
+          <li>What NOT to claim: {whatNotToClaimFirstLine || "See What Not to Claim above."}</li>
+        </ol>
       </SummarySubsection>
 
       <SummarySubsection title="How to position our products">
@@ -888,25 +843,91 @@ function RecallComparisonSummary({ products, competitors, ingredient }) {
         )}
       </SummarySubsection>
 
-      <SummarySubsection title="If the doctor mentions a competitor">
-        <div style={{ fontSize: 12, marginBottom: 6 }}>
-          Acknowledge the competitor's form factually, then transition back to what's documented about our product — do not attack the competitor or claim superiority.
-        </div>
-        <div style={scientificContextStyle}>
-          "Methylcobalamin is one of the metabolically active forms of B12. Cyanocobalamin is another supplemental form that is converted into active forms by the body. Current evidence has not established superior absorption simply based on these forms."
-        </div>
+      <SummarySubsection title="What actually differentiates the products?">
+        {differentiators.length > 0 ? (
+          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
+            {differentiators.map((d) => <li key={d} style={{ marginBottom: 3 }}>{d}</li>)}
+          </ul>
+        ) : <div style={{ fontSize: 11.5, color: "#8A8272", fontStyle: "italic" }}>Not enough verified information to compare.</div>}
       </SummarySubsection>
 
-      <SummarySubsection title="Pre-call — 30 second summary">
-        <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
-          <li style={{ marginBottom: 4 }}>Forms represented in this market: {distinctVerified(allItems, "chemicalForm").length > 0 ? distinctVerified(allItems, "chemicalForm").join(", ") : "Not verified"}.</li>
-          <li style={{ marginBottom: 4 }}>Our products use: {distinctVerified(ourItems, "chemicalForm").length > 0 ? distinctVerified(ourItems, "chemicalForm").join(", ") : "Not verified"}.</li>
-          <li style={{ marginBottom: 4 }}>Competitor dosage formats: {distinctVerified(competitorItems, "dosageForm").length > 0 ? distinctVerified(competitorItems, "dosageForm").join(", ") : "Not verified"}.</li>
-          <li style={{ marginBottom: 4 }}>Major formulation differences: {anyFormulationNoted ? "some products contain additional ingredients beyond the core content — see Formulation differences above." : "None documented beyond dose/form."}</li>
-          <li style={{ marginBottom: 4 }}>Clinical point to remember: {quickTakeawayFirstLine || "See Clinical Evidence above."}</li>
-          <li>What NOT to claim: {whatNotToClaimFirstLine || "See What Not to Claim above."}</li>
-        </ol>
-      </SummarySubsection>
+      <ExpandableDetails label="Show full market comparison details">
+        <SummarySubsection title="Dose differences">
+          {anyAmountVerified
+            ? allItems.map((i, idx) => <div key={idx} style={summaryLineStyle}>{i.label}: {i.amount || "Not verified"}</div>)
+            : <IncompleteNotice missing={["amount"]} />}
+        </SummarySubsection>
+
+        <SummarySubsection title="Chemical form differences">
+          {anyChemicalFormVerified ? (
+            <>
+              {[...chemicalFormGroups.entries()].map(([form, labels]) => (
+                <div key={form} style={summaryLineStyle}><strong>{form}:</strong> {labels.join(", ")}</div>
+              ))}
+              <div style={scientificContextStyle}>
+                Methylcobalamin and adenosylcobalamin are metabolically active forms. Cyanocobalamin and hydroxocobalamin are converted by the body into active forms. Current evidence does not establish that methylcobalamin has superior absorption compared with cyanocobalamin.
+              </div>
+            </>
+          ) : <IncompleteNotice missing={["chemical form"]} />}
+        </SummarySubsection>
+
+        <SummarySubsection title="Dosage form differences">
+          {anyDosageFormVerified ? (
+            <>
+              {[...dosageFormGroups.entries()].map(([form, labels]) => (
+                <div key={form} style={summaryLineStyle}><strong>{form}:</strong> {labels.join(", ")}</div>
+              ))}
+              <div style={scientificContextStyle}>
+                Chemical form (e.g. Cyanocobalamin, Methylcobalamin) is what the active ingredient is; dosage form (e.g. Tablet, Quick-Dissolve, Lozenge) is how the product is taken — the two are independent facts. A "Quick-Dissolve" product is only described as sublingual when a source explicitly documents that it dissolves under the tongue; sublingual administration is never assumed from the format name alone, and no format is described as more effective than another.
+              </div>
+            </>
+          ) : <IncompleteNotice missing={["dosage form"]} />}
+        </SummarySubsection>
+
+        <SummarySubsection title="Formulation differences">
+          {anyFormulationNoted ? (
+            allItems.filter(hasFormulationNote).map((i, idx) => <div key={idx} style={summaryLineStyle}>{i.label}: {i.ingredientsText || i.notesText}</div>)
+          ) : (
+            <div style={{ fontSize: 11.5, color: "#8A8272" }}>No documented additional ingredients beyond the core content for the products currently on file.</div>
+          )}
+        </SummarySubsection>
+
+        <SummarySubsection title="Pack size differences">
+          {allItems.some((i) => i.packSize)
+            ? allItems.map((i, idx) => <div key={idx} style={summaryLineStyle}>{i.label}: {i.packSize || "Not verified"}</div>)
+            : <IncompleteNotice missing={["pack size"]} />}
+        </SummarySubsection>
+
+        <SummarySubsection title="Price differences">
+          {anyPriceVerified ? (
+            <>
+              {ourItems.filter((i) => i.price !== "" && i.price != null).map((i, idx) => <div key={`o${idx}`} style={summaryLineStyle}>{i.label}: {i.price}</div>)}
+              {competitorItems.flatMap((i, idx) =>
+                i.retailerListings.filter((l) => l.displayedPrice !== "" && l.displayedPrice != null).map((l, lidx) => (
+                  <div key={`${idx}-${lidx}`} style={summaryLineStyle}>{i.label} ({l.retailer}): {l.currency || ""} {l.displayedPrice}</div>
+                ))
+              )}
+            </>
+          ) : <IncompleteNotice missing={["retailer/price information"]} />}
+        </SummarySubsection>
+
+        <SummarySubsection title="Information gaps">
+          {allItems.some((i) => i.missingFields.length > 0) ? (
+            allItems.filter((i) => i.missingFields.length > 0).map((i, idx) => (
+              <div key={idx} style={{ ...summaryLineStyle, color: "#8A6B3A" }}>⚠️ {i.label} — missing: {i.missingFields.join(", ")}</div>
+            ))
+          ) : <div style={{ fontSize: 11.5, color: "#8A8272" }}>No documented information gaps for the products currently on file.</div>}
+        </SummarySubsection>
+
+        <SummarySubsection title="If the doctor mentions a competitor">
+          <div style={{ fontSize: 12, marginBottom: 6 }}>
+            Acknowledge the competitor's form factually, then transition back to what's documented about our product — do not attack the competitor or claim superiority.
+          </div>
+          <div style={scientificContextStyle}>
+            "Methylcobalamin is one of the metabolically active forms of B12. Cyanocobalamin is another supplemental form that is converted into active forms by the body. Current evidence has not established superior absorption simply based on these forms."
+          </div>
+        </SummarySubsection>
+      </ExpandableDetails>
     </RecallSection>
   );
 }
