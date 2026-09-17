@@ -3098,6 +3098,577 @@ app.patch("/api/settings", async (req, res) => {
   }
 });
 
+// ---------- Recall (medical rep training/knowledge-reference module) ----------
+// Structure only — no clinical content ships here. Recall sits on top of
+// ProductCatalog (the master product list); it never duplicates it or
+// touches Products/Stock. See server/sheetsDb.js for the new tabs' schemas.
+
+// Fixed, stable slug ids — not auto-incrementing row numbers — so a category
+// can be referenced safely from RepCategoryAssignments/RecallIngredients
+// even if rows get reordered in the sheet.
+const RECALL_CATEGORIES_SEED = [
+  { id: "b-vitamins-b12", name: "B Vitamins / B12" },
+  { id: "vitamin-d", name: "Vitamin D" },
+  { id: "vitamin-c", name: "Vitamin C" },
+  { id: "magnesium", name: "Magnesium" },
+  { id: "calcium", name: "Calcium" },
+  { id: "iron", name: "Iron" },
+  { id: "zinc", name: "Zinc" },
+  { id: "omega-3", name: "Omega-3" },
+  { id: "coq10", name: "CoQ10" },
+  { id: "multivitamins", name: "Multivitamins" },
+  { id: "probiotics", name: "Probiotics" },
+  { id: "collagen", name: "Collagen" },
+  { id: "hair-skin-nails", name: "Hair / Skin / Nails" },
+  { id: "joint-bone-mobility", name: "Joint / Bone / Mobility" },
+  { id: "immune-support", name: "Immune Support" },
+  { id: "womens-health", name: "Women's Health" },
+  { id: "mens-health", name: "Men's Health" },
+  { id: "heart-cardiovascular", name: "Heart / Cardiovascular" },
+  { id: "digestive-gut-health", name: "Digestive / Gut Health" },
+  { id: "liver-detox-metabolic", name: "Liver / Detox / Metabolic" },
+  { id: "weight-management", name: "Weight Management" },
+  { id: "sports-nutrition-performance", name: "Sports Nutrition & Performance" },
+  { id: "sleep-stress-mood", name: "Sleep / Stress / Mood" },
+  { id: "eye-health-vision", name: "Eye Health & Vision" },
+  { id: "brain-cognitive-health-memory", name: "Brain / Cognitive Health & Memory" },
+  { id: "respiratory-allergy-seasonal-support", name: "Respiratory / Allergy / Seasonal Support" },
+];
+
+// Idempotent — checks before inserting, per the "no duplicates" rule. Runs
+// on first request rather than at deploy time, since this dev environment
+// has no credentials to write to the real production Sheet directly; this
+// makes the real deploy self-seed the first time anyone opens Recall.
+let recallCategoriesSeedChecked = false;
+async function ensureRecallCategoriesSeeded() {
+  if (recallCategoriesSeedChecked) return;
+  const existing = await db.getAllRows("RecallCategories");
+  const existingIds = new Set(existing.map((c) => c.id));
+  const missing = RECALL_CATEGORIES_SEED.filter((c) => !existingIds.has(c.id));
+  if (missing.length) {
+    await db.appendRows("RecallCategories", missing.map((c, i) => ({
+      id: c.id, name: c.name, description: "", displayOrder: existing.length + i + 1, active: "true",
+    })));
+  }
+  recallCategoriesSeedChecked = true;
+}
+
+// Taxonomy values only — how a product is administered, not clinical
+// content. Deliberately NOT auto-assigned to any existing product: a
+// product's dosage form must eventually trace to a label/manufacturer/
+// retailer source, so until that's entered explicitly it stays NOT
+// VERIFIED rather than guessed from the product name.
+const RECALL_DOSAGE_FORMS_SEED = [
+  "Tablet", "Capsule", "Softgel", "Chewable", "Gummy", "Lozenge", "Quick-Dissolve", "Sublingual",
+  "Effervescent", "Powder", "Sachet", "Liquid", "Syrup", "Drop", "Spray", "Oral Solution", "Injection",
+  "Intramuscular", "Intravenous", "Topical", "Cream", "Gel", "Patch",
+].map((name) => ({ id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""), name }));
+
+let recallDosageFormsSeedChecked = false;
+async function ensureRecallDosageFormsSeeded() {
+  if (recallDosageFormsSeedChecked) return;
+  const existing = await db.getAllRows("RecallDosageForms");
+  const existingIds = new Set(existing.map((f) => f.id));
+  const missing = RECALL_DOSAGE_FORMS_SEED.filter((f) => !existingIds.has(f.id));
+  if (missing.length) {
+    // route/releaseType/administrationMethod/description are left blank —
+    // only the name was given; nothing about route or release mechanism
+    // should be inferred without a source.
+    await db.appendRows("RecallDosageForms", missing.map((f) => ({
+      id: f.id, name: f.name, route: "", releaseType: "", administrationMethod: "", description: "",
+    })));
+  }
+  recallDosageFormsSeedChecked = true;
+}
+
+app.get("/api/recall/dosage-forms", async (req, res) => {
+  try {
+    await ensureRecallDosageFormsSeeded();
+    const forms = await db.getAllRows("RecallDosageForms");
+    res.json({ dosageForms: forms.map((f) => ({ id: f.id, name: f.name })) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- B12 vertical slice (Recall Phase 2) ----------
+// The FIRST real Recall content. Populated only with what was explicitly
+// given (named sources, named rules/claims) — never with plausible-sounding
+// textbook detail the user didn't state, even where such detail is common
+// knowledge. Several evidence topics below are intentionally left with an
+// empty `result` and evidenceLevel "NOT_VERIFIED": the user named these as
+// topics to cover, but their actual content lives in source documents
+// (the NIH ODS fact sheet, NICE NG239) this server cannot fetch — see the
+// implementation report for the full list of what's populated vs. pending.
+const B12_SOURCES_SEED = [
+  {
+    id: "src-nih-ods-b12", sourceType: "NIH", sourceName: "NIH Office of Dietary Supplements",
+    title: "Vitamin B12 Fact Sheet for Health Professionals",
+    url: "https://ods.od.nih.gov/factsheets/VitaminB12-HealthProfessional/",
+    sourceQuality: "Government health authority fact sheet",
+    notes: "Source URL as given; content used here is limited to what was explicitly stated in the request, not independently re-fetched.",
+  },
+  {
+    id: "src-nice-ng239", sourceType: "Clinical guideline", sourceName: "NICE",
+    title: "Vitamin B12 deficiency in over 16s (NG239)",
+    url: "https://www.nice.org.uk/guidance/ng239",
+    sourceQuality: "National clinical guideline",
+    notes: "Named as a core source; no specific guideline recommendation from it has been transcribed here yet.",
+  },
+  {
+    id: "src-pmid-29543316", sourceType: "Systematic review (Cochrane)", sourceName: "Cochrane",
+    title: "Oral vitamin B12 versus intramuscular vitamin B12 for vitamin B12 deficiency",
+    pmid: "29543316", url: "https://pubmed.ncbi.nlm.nih.gov/29543316/",
+    sourceQuality: "Cochrane systematic review",
+    notes: "PMID as given by the requester. URL mechanically derived from the standard PubMed URL pattern for this PMID, not independently fetched/verified in this session.",
+  },
+  {
+    id: "src-pmid-14616423", sourceType: "Study", sourceName: "PubMed",
+    title: "Sublingual versus oral vitamin B12",
+    pmid: "14616423", url: "https://pubmed.ncbi.nlm.nih.gov/14616423/",
+    sourceQuality: "Not specified by requester",
+    notes: "PMID as given by the requester. URL mechanically derived from the standard PubMed URL pattern for this PMID, not independently fetched/verified in this session.",
+  },
+  {
+    id: "src-repknowledge-drug-nutrient", sourceType: "Internal reference", sourceName: "KayBee reference content",
+    title: "Drug & Nutrient Depletion data (client/src/repKnowledge.js)",
+    url: "", sourceQuality: "Existing in-app reference, not independently re-verified in this phase",
+    notes: "Already-existing content in this app, reused rather than duplicated per the 'connect to the existing Drug-Nutrient Interaction architecture' instruction.",
+  },
+];
+
+// Evidence-level assignment methodology (not specified by the requester,
+// so applied here using a standard, disclosed convention rather than left
+// to guesswork): Cochrane systematic review = A; guideline/fact-sheet
+// synthesis and single studies of unstated design = B. Flagged in the
+// implementation report for review/override.
+const B12_EVIDENCE_SEED = [
+  { topic: "A. What vitamin B12 is", sourceId: "src-nih-ods-b12", evidenceLevel: "B",
+    result: "Vitamin B12 (cobalamin) is a water-soluble vitamin required for red blood cell formation, neurological function, and DNA synthesis." },
+  { topic: "B. Cyanocobalamin", sourceId: "src-nih-ods-b12", evidenceLevel: "B",
+    result: "Cyanocobalamin is a synthetic form of B12 commonly used in supplements and fortified foods; the body converts it into the metabolically active coenzyme forms." },
+  { topic: "C. Methylcobalamin", sourceId: "src-nih-ods-b12", evidenceLevel: "B",
+    result: "Methylcobalamin is one of the two metabolically active coenzyme forms of vitamin B12." },
+  { topic: "D. Hydroxocobalamin", sourceId: "src-nih-ods-b12", evidenceLevel: "B",
+    result: "Hydroxocobalamin is a form of B12 that the body converts into the metabolically active coenzyme forms." },
+  { topic: "E. Adenosylcobalamin", sourceId: "src-nih-ods-b12", evidenceLevel: "B",
+    result: "Adenosylcobalamin (5-deoxyadenosylcobalamin) is one of the two metabolically active coenzyme forms of vitamin B12." },
+  { topic: "F. Oral B12 absorption", sourceId: "src-nih-ods-b12", evidenceLevel: "NOT_VERIFIED", result: "" },
+  { topic: "G. High-dose oral B12 and passive diffusion", sourceId: "src-nih-ods-b12", evidenceLevel: "B",
+    result: "High-dose oral vitamin B12 can still be absorbed through passive diffusion even when intrinsic-factor-mediated absorption is limited." },
+  { topic: "H. Oral vs sublingual/quick-dissolve", sourceId: "src-nih-ods-b12", evidenceLevel: "B",
+    comparator: "Oral vs. sublingual/quick-dissolve B12",
+    result: "Current evidence has not established that supplemental B12 form (e.g., sublingual/quick-dissolve vs. oral) changes efficacy." },
+  { topic: "H. Oral vs sublingual/quick-dissolve", sourceId: "src-pmid-14616423", evidenceLevel: "B",
+    comparator: "Oral vs. sublingual B12", studyType: "Clinical study",
+    result: "Cited comparative study of sublingual vs. oral B12 replacement, consistent with no established efficacy advantage for either route." },
+  { topic: "I. Oral vs intramuscular B12", sourceId: "src-pmid-29543316", evidenceLevel: "A", studyType: "Systematic review",
+    comparator: "Oral vs. intramuscular B12",
+    result: "Cochrane systematic review comparing oral and intramuscular vitamin B12 for treating B12 deficiency. Route selection should account for clinical context (cause of deficiency, malabsorption, surgical history, severity, neurological involvement) rather than assuming the two are universally interchangeable." },
+  { topic: "J. B12 deficiency", sourceId: "src-nih-ods-b12", evidenceLevel: "NOT_VERIFIED", result: "" },
+  { topic: "K. Causes of B12 deficiency", sourceId: "src-nih-ods-b12", evidenceLevel: "NOT_VERIFIED", result: "" },
+  { topic: "L. Malabsorption", sourceId: "src-nih-ods-b12", evidenceLevel: "NOT_VERIFIED", result: "" },
+  { topic: "M. Metformin and B12", sourceId: "src-repknowledge-drug-nutrient", evidenceLevel: "B",
+    result: "Existing KayBee reference content lists Vitamin B12 among nutrients depleted by oral hypoglycemic (diabetes) medication." },
+  { topic: "N. Acid-suppressing medicines and B12", sourceId: "src-repknowledge-drug-nutrient", evidenceLevel: "B",
+    result: "Existing KayBee reference content: H2 antagonists deplete vitamin B12 (along with calcium, folic acid, iron, vitamin D); proton-pump inhibitors deplete vitamin B12 (along with magnesium)." },
+  { topic: "O. Neurological manifestations of deficiency", sourceId: "src-nih-ods-b12", evidenceLevel: "NOT_VERIFIED", result: "" },
+  { topic: "P. Hematological manifestations of deficiency", sourceId: "src-nih-ods-b12", evidenceLevel: "NOT_VERIFIED", result: "" },
+];
+
+const B12_INTERACTIONS_SEED = [
+  {
+    drugName: "Metformin", drugClass: "Biguanide (oral hypoglycemic)", direction: "depletes",
+    clinicalSignificance: "Associated with reduced vitamin B12 status with long-term use.",
+    evidenceLevel: "B", sourceId: "src-repknowledge-drug-nutrient",
+    pharmacistCheckpoint: "Consider B12 status with long-term metformin use.",
+  },
+  {
+    drugName: "Proton pump inhibitors (PPIs)", drugClass: "Acid-suppressing medication", direction: "depletes",
+    clinicalSignificance: "Reduced gastric acid may impair release of B12 from food/protein, lowering B12 status.",
+    evidenceLevel: "B", sourceId: "src-repknowledge-drug-nutrient",
+    pharmacistCheckpoint: "Consider B12 status with long-term PPI use.",
+  },
+  {
+    drugName: "H2-receptor antagonists", drugClass: "Acid-suppressing medication", direction: "depletes",
+    clinicalSignificance: "Reduced gastric acid may impair release of B12 from food/protein, lowering B12 status.",
+    evidenceLevel: "B", sourceId: "src-repknowledge-drug-nutrient",
+    pharmacistCheckpoint: "Consider B12 status with long-term H2-antagonist use.",
+  },
+];
+
+const B12_QUIZ_SEED = [
+  {
+    question: "Which of the following is a metabolically active B12 form?",
+    optionA: "Methylcobalamin", optionB: "Sodium ascorbate", optionC: "Calcium carbonate", optionD: "Folic acid",
+    correctAnswer: "A",
+    explanation: "Methylcobalamin (and adenosylcobalamin) are the metabolically active coenzyme forms of B12; cyanocobalamin and hydroxocobalamin are converted by the body into these active forms.",
+    sourceIds: "src-nih-ods-b12",
+  },
+  {
+    question: "Is methylcobalamin proven to have superior absorption compared with cyanocobalamin?",
+    optionA: "Yes, always", optionB: "No — current evidence has not established a difference", optionC: "Only at high doses", optionD: "Only sublingually",
+    correctAnswer: "B",
+    explanation: "NIH ODS states there is no evidence that absorption rates of supplemental B12 differ by form.",
+    sourceIds: "src-nih-ods-b12",
+  },
+  {
+    question: "Is sublingual B12 proven more effective than oral B12?",
+    optionA: "Yes", optionB: "No — evidence suggests no efficacy difference", optionC: "Only for deficiency", optionD: "Only quick-dissolve forms",
+    correctAnswer: "B",
+    explanation: "NIH ODS states evidence suggests no difference in efficacy between oral and sublingual B12.",
+    sourceIds: "src-nih-ods-b12,src-pmid-14616423",
+  },
+  {
+    question: "Why can high-dose oral B12 still be absorbed when intrinsic-factor-mediated absorption is impaired?",
+    optionA: "It cannot be absorbed", optionB: "A small amount is absorbed through passive diffusion", optionC: "It converts to injectable form", optionD: "Stomach acid is not required",
+    correctAnswer: "B",
+    explanation: "A small amount of B12 can be absorbed through passive diffusion, independent of intrinsic factor, which is why high-dose oral B12 can still work even when intrinsic-factor-mediated absorption is limited.",
+    sourceIds: "src-nih-ods-b12",
+  },
+];
+
+let recallB12SeedChecked = false;
+async function ensureRecallB12Seeded() {
+  if (recallB12SeedChecked) return;
+  const existing = await db.getAllRows("RecallIngredients");
+  if (!existing.some((i) => i.id === "vitamin-b12")) {
+    const sources = await db.getAllRows("RecallResearchSources");
+    const existingSourceIds = new Set(sources.map((s) => s.id));
+    const newSources = B12_SOURCES_SEED.filter((s) => !existingSourceIds.has(s.id));
+    if (newSources.length) {
+      await db.appendRows("RecallResearchSources", newSources.map((s) => ({
+        id: s.id, sourceType: s.sourceType, sourceName: s.sourceName, title: s.title, authors: "", journal: "",
+        pmid: s.pmid || "", pmcid: "", doi: "", url: s.url || "", publicationYear: "", sourceDate: "",
+        sourceQuality: s.sourceQuality || "", notes: s.notes || "",
+      })));
+    }
+
+    await db.appendRow("RecallIngredients", {
+      id: "vitamin-b12", categoryId: "b-vitamins-b12", name: "Vitamin B12", commonName: "Cobalamin", scientificName: "",
+      description: "Vitamin B12 (cobalamin) is a water-soluble vitamin required for red blood cell formation, neurological function, and DNA synthesis.",
+      physiologicalRole: "Cofactor for enzymes involved in red blood cell formation, neurological function, and DNA synthesis.",
+      clinicalUses: "Prevention and treatment of vitamin B12 deficiency.",
+      evidenceSummary: "See linked Clinical Evidence records for topic-specific evidence; this field intentionally does not summarize into a single verdict.",
+      evidenceLevel: "NOT_VERIFIED",
+      precautions: "", contraindications: "", drugInteractionSummary: "See linked Drug Interactions.",
+      clinicalCheckpoints: [
+        "Is B12 deficiency documented or suspected?",
+        "What is the suspected cause?",
+        "Is the patient taking metformin?",
+        "Is the patient taking a PPI or H2 blocker?",
+        "Is malabsorption suspected?",
+        "History of bariatric/gastric surgery?",
+        "Neurological symptoms?",
+        "Hematological findings?",
+        "Dietary risk?",
+      ].join("\n"),
+      repQuickTakeaway: [
+        "What is B12? A water-soluble vitamin needed for red blood cells, nerve function, and DNA synthesis.",
+        "Major forms: cyanocobalamin, methylcobalamin, hydroxocobalamin, adenosylcobalamin — cyanocobalamin and hydroxocobalamin are converted by the body into the two active coenzyme forms (methylcobalamin, adenosylcobalamin).",
+        "Cyanocobalamin vs methylcobalamin: different forms, not a better-vs-worse comparison — no established difference in absorption by form.",
+        "Oral vs sublingual: evidence suggests no efficacy difference.",
+        "Oral vs injection: route depends on clinical context (cause, malabsorption, severity, neurological involvement) — not universally interchangeable, but not automatically one-size-fits-all either.",
+        "Why high-dose oral B12 can work: a small amount is absorbed via passive diffusion even without intrinsic factor.",
+        "Medicines linked to lower B12 status: metformin, PPIs, H2-receptor antagonists.",
+        "Before discussing B12: check for documented/suspected deficiency, cause, relevant medications, malabsorption risk, and symptoms — see Clinical Checkpoints.",
+      ].join("\n"),
+      whatNotToClaim: [
+        "Do not claim methylcobalamin is universally better than cyanocobalamin.",
+        "Do not claim methylcobalamin is proven to be better absorbed.",
+        "Do not claim sublingual B12 is proven superior to oral B12.",
+        "Do not claim higher-dose B12 is automatically more effective.",
+        "Do not claim injections are always superior.",
+        "Do not claim B12 gives energy to everyone.",
+        "Do not claim B12 treats neuropathy regardless of deficiency status.",
+        "Do not claim B12 prevents disease in people who are not deficient.",
+      ].join("\n"),
+      lastReviewed: new Date().toISOString().slice(0, 10),
+    });
+
+    await db.appendRows("RecallIngredientForms", [
+      { id: "b12-form-cyanocobalamin", ingredientId: "vitamin-b12", formName: "Cyanocobalamin", chemicalName: "", formType: "chemical form",
+        compoundAmount: "", activeAmount: "", unit: "", conversionRequired: "true",
+        absorptionNotes: "", metabolicNotes: "Converted by the body into the metabolically active coenzyme forms.",
+        clinicalEvidence: "", evidenceComparison: "No established difference in absorption vs. other supplemental B12 forms (NIH ODS).",
+        documentedAdvantages: "", documentedLimitations: "", sourceIds: "src-nih-ods-b12", lastReviewed: new Date().toISOString().slice(0, 10) },
+      { id: "b12-form-methylcobalamin", ingredientId: "vitamin-b12", formName: "Methylcobalamin", chemicalName: "", formType: "chemical form",
+        compoundAmount: "", activeAmount: "", unit: "", conversionRequired: "false",
+        absorptionNotes: "", metabolicNotes: "One of the two metabolically active coenzyme forms.",
+        clinicalEvidence: "", evidenceComparison: "No established difference in absorption vs. other supplemental B12 forms (NIH ODS).",
+        documentedAdvantages: "", documentedLimitations: "", sourceIds: "src-nih-ods-b12", lastReviewed: new Date().toISOString().slice(0, 10) },
+      { id: "b12-form-hydroxocobalamin", ingredientId: "vitamin-b12", formName: "Hydroxocobalamin", chemicalName: "", formType: "chemical form",
+        compoundAmount: "", activeAmount: "", unit: "", conversionRequired: "true",
+        absorptionNotes: "", metabolicNotes: "Converted by the body into the metabolically active coenzyme forms.",
+        clinicalEvidence: "", evidenceComparison: "No established difference in absorption vs. other supplemental B12 forms (NIH ODS).",
+        documentedAdvantages: "", documentedLimitations: "", sourceIds: "src-nih-ods-b12", lastReviewed: new Date().toISOString().slice(0, 10) },
+      { id: "b12-form-adenosylcobalamin", ingredientId: "vitamin-b12", formName: "Adenosylcobalamin", chemicalName: "5-Deoxyadenosylcobalamin", formType: "chemical form",
+        compoundAmount: "", activeAmount: "", unit: "", conversionRequired: "false",
+        absorptionNotes: "", metabolicNotes: "One of the two metabolically active coenzyme forms.",
+        clinicalEvidence: "", evidenceComparison: "No established difference in absorption vs. other supplemental B12 forms (NIH ODS).",
+        documentedAdvantages: "", documentedLimitations: "", sourceIds: "src-nih-ods-b12", lastReviewed: new Date().toISOString().slice(0, 10) },
+    ]);
+
+    await db.appendRows("RecallClinicalEvidence", B12_EVIDENCE_SEED.map((e) => ({
+      id: `ce-b12-${crypto.randomUUID()}`, ingredientId: "vitamin-b12", productId: "", formId: "",
+      condition: e.topic, population: "", intervention: "", dose: "", route: "", duration: "",
+      comparator: e.comparator || "", outcome: "", result: e.result || "", clinicalSignificance: "",
+      evidenceLevel: e.evidenceLevel, studyType: e.studyType || "", sourceId: e.sourceId,
+      publicationYear: "", lastReviewed: new Date().toISOString().slice(0, 10),
+    })));
+
+    await db.appendRows("RecallDrugInteractions", B12_INTERACTIONS_SEED.map((i) => ({
+      id: `di-b12-${crypto.randomUUID()}`, ingredientId: "vitamin-b12", drugName: i.drugName, drugClass: i.drugClass,
+      direction: i.direction, mechanism: "", clinicalSignificance: i.clinicalSignificance, timing: "",
+      evidenceLevel: i.evidenceLevel, pharmacistCheckpoint: i.pharmacistCheckpoint, sourceId: i.sourceId,
+      lastReviewed: new Date().toISOString().slice(0, 10),
+    })));
+
+    await db.appendRows("RecallQuizQuestions", B12_QUIZ_SEED.map((q) => ({
+      id: `qz-b12-${crypto.randomUUID()}`, categoryId: "b-vitamins-b12", ingredientId: "vitamin-b12",
+      question: q.question, optionA: q.optionA, optionB: q.optionB, optionC: q.optionC, optionD: q.optionD,
+      correctAnswer: q.correctAnswer, explanation: q.explanation, sourceIds: q.sourceIds, active: "true",
+    })));
+  }
+  recallB12SeedChecked = true;
+}
+
+// One combined read per page load (categories + the three empty-for-now
+// knowledge tabs used to compute counts), rather than one Sheets call per
+// category — the whole point of Phase J's performance rule.
+app.get("/api/recall/categories", async (req, res) => {
+  try {
+    await ensureRecallCategoriesSeeded();
+    await ensureRecallB12Seeded();
+    const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
+      db.getAllRows("RecallCategories"),
+      db.getAllRows("RecallIngredients"),
+      db.getAllRows("RecallProductIngredients"),
+      db.getAllRows("RecallClinicalEvidence"),
+      req.repName ? db.getAllRows("RepCategoryAssignments") : Promise.resolve([]),
+    ]);
+    const ingredientIdsByCategory = new Map();
+    ingredients.forEach((ing) => {
+      const list = ingredientIdsByCategory.get(ing.categoryId) || [];
+      list.push(ing.id);
+      ingredientIdsByCategory.set(ing.categoryId, list);
+    });
+    const result = categories
+      .filter((c) => c.active !== "false")
+      .sort((a, b) => (Number(a.displayOrder) || 0) - (Number(b.displayOrder) || 0))
+      .map((c) => {
+        const ingredientIds = new Set(ingredientIdsByCategory.get(c.id) || []);
+        const productIds = new Set(
+          productIngredients.filter((pi) => ingredientIds.has(pi.ingredientId)).map((pi) => pi.productId)
+        );
+        const evidenceCount = evidence.filter((e) => ingredientIds.has(e.ingredientId)).length;
+        return {
+          id: c.id, name: c.name, description: c.description || "", displayOrder: Number(c.displayOrder) || 0,
+          productCount: productIds.size,
+          knowledgeCount: ingredientIds.size,
+          evidenceCount,
+        };
+      });
+    const myAssignedCategoryIds = req.repName
+      ? assignments.filter((a) => a.repId === req.repName).map((a) => a.categoryId)
+      : [];
+    res.json({ categories: result, myAssignedCategoryIds });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// A single detail bundle for one category — every section the category
+// page needs, computed from currently-empty tables. Sections legitimately
+// show real empty arrays right now; the client renders each as an
+// empty-state message rather than fabricating placeholder content.
+app.get("/api/recall/categories/:id", async (req, res) => {
+  try {
+    await ensureRecallCategoriesSeeded();
+    await ensureRecallB12Seeded();
+    const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels] = await Promise.all([
+      db.getAllRows("RecallCategories"),
+      db.getAllRows("RecallIngredients"),
+      db.getAllRows("RecallIngredientForms"),
+      db.getAllRows("RecallProductIngredients"),
+      db.getAllRows("RecallClinicalEvidence"),
+      db.getAllRows("RecallDrugInteractions"),
+      db.getAllRows("RecallQuizQuestions"),
+      db.getAllRows("ProductCatalog"),
+      db.getAllRows("RecallCompetitorRelationships"),
+    ]);
+    const category = categories.find((c) => c.id === req.params.id);
+    if (!category) return res.status(404).json({ error: "Recall category not found." });
+
+    const categoryIngredients = ingredients.filter((ing) => ing.categoryId === category.id);
+    const ingredientIds = new Set(categoryIngredients.map((ing) => ing.id));
+    const ingredientForms = forms.filter((f) => ingredientIds.has(f.ingredientId));
+    const links = productIngredients.filter((pi) => ingredientIds.has(pi.ingredientId));
+    const productIds = new Set(links.map((pi) => pi.productId));
+    const products = catalog.filter((p) => productIds.has(p.id));
+    const competitors = competitorRels.filter((r) => productIds.has(r.ourProductId));
+    const categoryEvidence = evidence.filter((e) => ingredientIds.has(e.ingredientId));
+    const categoryInteractions = interactions.filter((i) => ingredientIds.has(i.ingredientId));
+    const categoryQuiz = quiz.filter((q) => q.categoryId === category.id && q.active !== "false");
+
+    res.json({
+      category: { id: category.id, name: category.name, description: category.description || "" },
+      ingredients: categoryIngredients,
+      ingredientForms,
+      products,
+      competitors,
+      evidence: categoryEvidence,
+      interactions: categoryInteractions,
+      quizAvailable: categoryQuiz.length > 0,
+      quizQuestionCount: categoryQuiz.length,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/recall/assignments", requireManager, async (req, res) => {
+  try {
+    const { repName } = req.query;
+    if (!repName) return res.status(400).json({ error: "repName is required" });
+    const assignments = await db.getAllRows("RepCategoryAssignments");
+    const categoryIds = assignments.filter((a) => a.repId === repName).map((a) => a.categoryId);
+    res.json({ categoryIds });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Replace-set semantics, matching the checkbox-list UI a manager actually
+// uses (pick a rep, check/uncheck boxes, Save) — simpler and less
+// error-prone than separate add/remove endpoints, and only ever touches
+// this one rep's rows; every other rep's assignments are left untouched.
+app.post("/api/recall/assignments", requireManager, async (req, res) => {
+  try {
+    const { repName, categoryIds } = req.body;
+    if (!repName) return res.status(400).json({ error: "repName is required" });
+    const validCategoryIds = new Set(RECALL_CATEGORIES_SEED.map((c) => c.id));
+    const cleanIds = [...new Set(Array.isArray(categoryIds) ? categoryIds : [])].filter((id) => validCategoryIds.has(id));
+
+    const existing = await db.getAllRows("RepCategoryAssignments");
+    const keptForOtherReps = existing.filter((a) => a.repId !== repName);
+    const now = new Date().toISOString();
+    const newRowsForThisRep = cleanIds.map((categoryId) => ({
+      id: `rca${crypto.randomUUID()}`,
+      repId: repName,
+      categoryId,
+      assignedBy: req.repName || "Manager",
+      createdAt: now,
+    }));
+    await db.replaceAllRows("RepCategoryAssignments", [...keptForOtherReps, ...newRowsForThisRep]);
+    res.json({ ok: true, count: newRowsForThisRep.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// The only four sources approved for the Lebanese competitor-product
+// research effort. A listing naming anything else is rejected outright —
+// this is the actual enforcement of "approved sources," not just a comment.
+const APPROVED_RETAILERS = ["Skin Society", "Mazen Online", "Nicolas Care", "Sohati Care"];
+
+app.get("/api/recall/retailer-listings", async (req, res) => {
+  try {
+    const { competitorProductId } = req.query;
+    const listings = await db.getAllRows("RecallRetailerListings");
+    const filtered = competitorProductId ? listings.filter((l) => l.competitorProductId === competitorProductId) : listings;
+    res.json({ listings: filtered });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// One row per (competitor master product × retailer) — see the schema
+// comment in sheetsDb.js. Deliberately reads only the fields named here:
+// a caller sending "availability"/"inStock"/etc. in the body has it
+// silently ignored, the same allowlist enforcement used for competitor
+// products above. sourceUrl is a citation, not a live connection — no
+// polling or refresh job ever touches this table.
+app.post("/api/recall/retailer-listings", requireManager, async (req, res) => {
+  try {
+    const { competitorProductId, retailer, sourceUrl, displayedPrice, currency, researchDate, notes } = req.body;
+    if (!competitorProductId || !String(competitorProductId).trim()) return res.status(400).json({ error: "competitorProductId is required." });
+    if (!APPROVED_RETAILERS.includes(retailer)) {
+      return res.status(400).json({ error: `retailer must be one of: ${APPROVED_RETAILERS.join(", ")}` });
+    }
+    if (!sourceUrl || !String(sourceUrl).trim()) return res.status(400).json({ error: "sourceUrl is required — a listing is only as good as its citation." });
+
+    const competitorProducts = await db.getAllRows("CompetitorProducts");
+    if (!competitorProducts.some((p) => p.id === competitorProductId)) {
+      return res.status(404).json({ error: "That competitor product doesn't exist — add the master product first." });
+    }
+
+    const listing = {
+      id: `rl${crypto.randomUUID()}`,
+      competitorProductId,
+      retailer,
+      sourceUrl: String(sourceUrl).trim(),
+      displayedPrice: displayedPrice === "" || displayedPrice == null ? "" : Number(displayedPrice),
+      currency: currency || "",
+      researchDate: researchDate || new Date().toISOString().slice(0, 10),
+      notes: notes || "",
+      createdBy: req.repName || "Manager",
+      createdAt: new Date().toISOString(),
+    };
+    await db.appendRow("RecallRetailerListings", listing);
+    res.json(listing);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/recall/field-conflicts", async (req, res) => {
+  try {
+    const { entityType, entityId } = req.query;
+    const conflicts = await db.getAllRows("RecallFieldConflicts");
+    const filtered = conflicts.filter((c) => (!entityType || c.entityType === entityType) && (!entityId || c.entityId === entityId));
+    res.json({ conflicts: filtered });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Recording a conflict always keeps BOTH source values — there is no code
+// path here that lets one source's value silently win. If a caller can't
+// supply two distinct sourced values, it isn't a conflict; it's a single
+// (possibly still-unverified) value on the record itself.
+app.post("/api/recall/field-conflicts", requireManager, async (req, res) => {
+  try {
+    const { entityType, entityId, fieldName, sourceALabel, sourceAValue, sourceBLabel, sourceBValue, notes } = req.body;
+    if (!entityType || !entityId || !fieldName) return res.status(400).json({ error: "entityType, entityId, and fieldName are required." });
+    if (sourceAValue === undefined || sourceAValue === null || sourceAValue === "" || sourceBValue === undefined || sourceBValue === null || sourceBValue === "") {
+      return res.status(400).json({ error: "Both sourceAValue and sourceBValue are required — a conflict needs two disagreeing sourced values, not one." });
+    }
+    const conflict = {
+      id: `fc${crypto.randomUUID()}`,
+      entityType, entityId, fieldName,
+      sourceALabel: sourceALabel || "", sourceAValue: String(sourceAValue),
+      sourceBLabel: sourceBLabel || "", sourceBValue: String(sourceBValue),
+      status: "CONFLICT",
+      notes: notes || "",
+      createdAt: new Date().toISOString(),
+    };
+    await db.appendRow("RecallFieldConflicts", conflict);
+    res.json(conflict);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 const clientDist = path.join(__dirname, "..", "client", "dist");
 app.use(express.static(clientDist, {
   setHeaders: (res, filePath) => {
@@ -3942,577 +4513,6 @@ if (telegram.isConfigured()) {
       .catch((e) => console.error("telegram setWebhook failed", e));
   }
 }
-
-// ---------- Recall (medical rep training/knowledge-reference module) ----------
-// Structure only — no clinical content ships here. Recall sits on top of
-// ProductCatalog (the master product list); it never duplicates it or
-// touches Products/Stock. See server/sheetsDb.js for the new tabs' schemas.
-
-// Fixed, stable slug ids — not auto-incrementing row numbers — so a category
-// can be referenced safely from RepCategoryAssignments/RecallIngredients
-// even if rows get reordered in the sheet.
-const RECALL_CATEGORIES_SEED = [
-  { id: "b-vitamins-b12", name: "B Vitamins / B12" },
-  { id: "vitamin-d", name: "Vitamin D" },
-  { id: "vitamin-c", name: "Vitamin C" },
-  { id: "magnesium", name: "Magnesium" },
-  { id: "calcium", name: "Calcium" },
-  { id: "iron", name: "Iron" },
-  { id: "zinc", name: "Zinc" },
-  { id: "omega-3", name: "Omega-3" },
-  { id: "coq10", name: "CoQ10" },
-  { id: "multivitamins", name: "Multivitamins" },
-  { id: "probiotics", name: "Probiotics" },
-  { id: "collagen", name: "Collagen" },
-  { id: "hair-skin-nails", name: "Hair / Skin / Nails" },
-  { id: "joint-bone-mobility", name: "Joint / Bone / Mobility" },
-  { id: "immune-support", name: "Immune Support" },
-  { id: "womens-health", name: "Women's Health" },
-  { id: "mens-health", name: "Men's Health" },
-  { id: "heart-cardiovascular", name: "Heart / Cardiovascular" },
-  { id: "digestive-gut-health", name: "Digestive / Gut Health" },
-  { id: "liver-detox-metabolic", name: "Liver / Detox / Metabolic" },
-  { id: "weight-management", name: "Weight Management" },
-  { id: "sports-nutrition-performance", name: "Sports Nutrition & Performance" },
-  { id: "sleep-stress-mood", name: "Sleep / Stress / Mood" },
-  { id: "eye-health-vision", name: "Eye Health & Vision" },
-  { id: "brain-cognitive-health-memory", name: "Brain / Cognitive Health & Memory" },
-  { id: "respiratory-allergy-seasonal-support", name: "Respiratory / Allergy / Seasonal Support" },
-];
-
-// Idempotent — checks before inserting, per the "no duplicates" rule. Runs
-// on first request rather than at deploy time, since this dev environment
-// has no credentials to write to the real production Sheet directly; this
-// makes the real deploy self-seed the first time anyone opens Recall.
-let recallCategoriesSeedChecked = false;
-async function ensureRecallCategoriesSeeded() {
-  if (recallCategoriesSeedChecked) return;
-  const existing = await db.getAllRows("RecallCategories");
-  const existingIds = new Set(existing.map((c) => c.id));
-  const missing = RECALL_CATEGORIES_SEED.filter((c) => !existingIds.has(c.id));
-  if (missing.length) {
-    await db.appendRows("RecallCategories", missing.map((c, i) => ({
-      id: c.id, name: c.name, description: "", displayOrder: existing.length + i + 1, active: "true",
-    })));
-  }
-  recallCategoriesSeedChecked = true;
-}
-
-// Taxonomy values only — how a product is administered, not clinical
-// content. Deliberately NOT auto-assigned to any existing product: a
-// product's dosage form must eventually trace to a label/manufacturer/
-// retailer source, so until that's entered explicitly it stays NOT
-// VERIFIED rather than guessed from the product name.
-const RECALL_DOSAGE_FORMS_SEED = [
-  "Tablet", "Capsule", "Softgel", "Chewable", "Gummy", "Lozenge", "Quick-Dissolve", "Sublingual",
-  "Effervescent", "Powder", "Sachet", "Liquid", "Syrup", "Drop", "Spray", "Oral Solution", "Injection",
-  "Intramuscular", "Intravenous", "Topical", "Cream", "Gel", "Patch",
-].map((name) => ({ id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""), name }));
-
-let recallDosageFormsSeedChecked = false;
-async function ensureRecallDosageFormsSeeded() {
-  if (recallDosageFormsSeedChecked) return;
-  const existing = await db.getAllRows("RecallDosageForms");
-  const existingIds = new Set(existing.map((f) => f.id));
-  const missing = RECALL_DOSAGE_FORMS_SEED.filter((f) => !existingIds.has(f.id));
-  if (missing.length) {
-    // route/releaseType/administrationMethod/description are left blank —
-    // only the name was given; nothing about route or release mechanism
-    // should be inferred without a source.
-    await db.appendRows("RecallDosageForms", missing.map((f) => ({
-      id: f.id, name: f.name, route: "", releaseType: "", administrationMethod: "", description: "",
-    })));
-  }
-  recallDosageFormsSeedChecked = true;
-}
-
-app.get("/api/recall/dosage-forms", async (req, res) => {
-  try {
-    await ensureRecallDosageFormsSeeded();
-    const forms = await db.getAllRows("RecallDosageForms");
-    res.json({ dosageForms: forms.map((f) => ({ id: f.id, name: f.name })) });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ---------- B12 vertical slice (Recall Phase 2) ----------
-// The FIRST real Recall content. Populated only with what was explicitly
-// given (named sources, named rules/claims) — never with plausible-sounding
-// textbook detail the user didn't state, even where such detail is common
-// knowledge. Several evidence topics below are intentionally left with an
-// empty `result` and evidenceLevel "NOT_VERIFIED": the user named these as
-// topics to cover, but their actual content lives in source documents
-// (the NIH ODS fact sheet, NICE NG239) this server cannot fetch — see the
-// implementation report for the full list of what's populated vs. pending.
-const B12_SOURCES_SEED = [
-  {
-    id: "src-nih-ods-b12", sourceType: "NIH", sourceName: "NIH Office of Dietary Supplements",
-    title: "Vitamin B12 Fact Sheet for Health Professionals",
-    url: "https://ods.od.nih.gov/factsheets/VitaminB12-HealthProfessional/",
-    sourceQuality: "Government health authority fact sheet",
-    notes: "Source URL as given; content used here is limited to what was explicitly stated in the request, not independently re-fetched.",
-  },
-  {
-    id: "src-nice-ng239", sourceType: "Clinical guideline", sourceName: "NICE",
-    title: "Vitamin B12 deficiency in over 16s (NG239)",
-    url: "https://www.nice.org.uk/guidance/ng239",
-    sourceQuality: "National clinical guideline",
-    notes: "Named as a core source; no specific guideline recommendation from it has been transcribed here yet.",
-  },
-  {
-    id: "src-pmid-29543316", sourceType: "Systematic review (Cochrane)", sourceName: "Cochrane",
-    title: "Oral vitamin B12 versus intramuscular vitamin B12 for vitamin B12 deficiency",
-    pmid: "29543316", url: "https://pubmed.ncbi.nlm.nih.gov/29543316/",
-    sourceQuality: "Cochrane systematic review",
-    notes: "PMID as given by the requester. URL mechanically derived from the standard PubMed URL pattern for this PMID, not independently fetched/verified in this session.",
-  },
-  {
-    id: "src-pmid-14616423", sourceType: "Study", sourceName: "PubMed",
-    title: "Sublingual versus oral vitamin B12",
-    pmid: "14616423", url: "https://pubmed.ncbi.nlm.nih.gov/14616423/",
-    sourceQuality: "Not specified by requester",
-    notes: "PMID as given by the requester. URL mechanically derived from the standard PubMed URL pattern for this PMID, not independently fetched/verified in this session.",
-  },
-  {
-    id: "src-repknowledge-drug-nutrient", sourceType: "Internal reference", sourceName: "KayBee reference content",
-    title: "Drug & Nutrient Depletion data (client/src/repKnowledge.js)",
-    url: "", sourceQuality: "Existing in-app reference, not independently re-verified in this phase",
-    notes: "Already-existing content in this app, reused rather than duplicated per the 'connect to the existing Drug-Nutrient Interaction architecture' instruction.",
-  },
-];
-
-// Evidence-level assignment methodology (not specified by the requester,
-// so applied here using a standard, disclosed convention rather than left
-// to guesswork): Cochrane systematic review = A; guideline/fact-sheet
-// synthesis and single studies of unstated design = B. Flagged in the
-// implementation report for review/override.
-const B12_EVIDENCE_SEED = [
-  { topic: "A. What vitamin B12 is", sourceId: "src-nih-ods-b12", evidenceLevel: "B",
-    result: "Vitamin B12 (cobalamin) is a water-soluble vitamin required for red blood cell formation, neurological function, and DNA synthesis." },
-  { topic: "B. Cyanocobalamin", sourceId: "src-nih-ods-b12", evidenceLevel: "B",
-    result: "Cyanocobalamin is a synthetic form of B12 commonly used in supplements and fortified foods; the body converts it into the metabolically active coenzyme forms." },
-  { topic: "C. Methylcobalamin", sourceId: "src-nih-ods-b12", evidenceLevel: "B",
-    result: "Methylcobalamin is one of the two metabolically active coenzyme forms of vitamin B12." },
-  { topic: "D. Hydroxocobalamin", sourceId: "src-nih-ods-b12", evidenceLevel: "B",
-    result: "Hydroxocobalamin is a form of B12 that the body converts into the metabolically active coenzyme forms." },
-  { topic: "E. Adenosylcobalamin", sourceId: "src-nih-ods-b12", evidenceLevel: "B",
-    result: "Adenosylcobalamin (5-deoxyadenosylcobalamin) is one of the two metabolically active coenzyme forms of vitamin B12." },
-  { topic: "F. Oral B12 absorption", sourceId: "src-nih-ods-b12", evidenceLevel: "NOT_VERIFIED", result: "" },
-  { topic: "G. High-dose oral B12 and passive diffusion", sourceId: "src-nih-ods-b12", evidenceLevel: "B",
-    result: "High-dose oral vitamin B12 can still be absorbed through passive diffusion even when intrinsic-factor-mediated absorption is limited." },
-  { topic: "H. Oral vs sublingual/quick-dissolve", sourceId: "src-nih-ods-b12", evidenceLevel: "B",
-    comparator: "Oral vs. sublingual/quick-dissolve B12",
-    result: "Current evidence has not established that supplemental B12 form (e.g., sublingual/quick-dissolve vs. oral) changes efficacy." },
-  { topic: "H. Oral vs sublingual/quick-dissolve", sourceId: "src-pmid-14616423", evidenceLevel: "B",
-    comparator: "Oral vs. sublingual B12", studyType: "Clinical study",
-    result: "Cited comparative study of sublingual vs. oral B12 replacement, consistent with no established efficacy advantage for either route." },
-  { topic: "I. Oral vs intramuscular B12", sourceId: "src-pmid-29543316", evidenceLevel: "A", studyType: "Systematic review",
-    comparator: "Oral vs. intramuscular B12",
-    result: "Cochrane systematic review comparing oral and intramuscular vitamin B12 for treating B12 deficiency. Route selection should account for clinical context (cause of deficiency, malabsorption, surgical history, severity, neurological involvement) rather than assuming the two are universally interchangeable." },
-  { topic: "J. B12 deficiency", sourceId: "src-nih-ods-b12", evidenceLevel: "NOT_VERIFIED", result: "" },
-  { topic: "K. Causes of B12 deficiency", sourceId: "src-nih-ods-b12", evidenceLevel: "NOT_VERIFIED", result: "" },
-  { topic: "L. Malabsorption", sourceId: "src-nih-ods-b12", evidenceLevel: "NOT_VERIFIED", result: "" },
-  { topic: "M. Metformin and B12", sourceId: "src-repknowledge-drug-nutrient", evidenceLevel: "B",
-    result: "Existing KayBee reference content lists Vitamin B12 among nutrients depleted by oral hypoglycemic (diabetes) medication." },
-  { topic: "N. Acid-suppressing medicines and B12", sourceId: "src-repknowledge-drug-nutrient", evidenceLevel: "B",
-    result: "Existing KayBee reference content: H2 antagonists deplete vitamin B12 (along with calcium, folic acid, iron, vitamin D); proton-pump inhibitors deplete vitamin B12 (along with magnesium)." },
-  { topic: "O. Neurological manifestations of deficiency", sourceId: "src-nih-ods-b12", evidenceLevel: "NOT_VERIFIED", result: "" },
-  { topic: "P. Hematological manifestations of deficiency", sourceId: "src-nih-ods-b12", evidenceLevel: "NOT_VERIFIED", result: "" },
-];
-
-const B12_INTERACTIONS_SEED = [
-  {
-    drugName: "Metformin", drugClass: "Biguanide (oral hypoglycemic)", direction: "depletes",
-    clinicalSignificance: "Associated with reduced vitamin B12 status with long-term use.",
-    evidenceLevel: "B", sourceId: "src-repknowledge-drug-nutrient",
-    pharmacistCheckpoint: "Consider B12 status with long-term metformin use.",
-  },
-  {
-    drugName: "Proton pump inhibitors (PPIs)", drugClass: "Acid-suppressing medication", direction: "depletes",
-    clinicalSignificance: "Reduced gastric acid may impair release of B12 from food/protein, lowering B12 status.",
-    evidenceLevel: "B", sourceId: "src-repknowledge-drug-nutrient",
-    pharmacistCheckpoint: "Consider B12 status with long-term PPI use.",
-  },
-  {
-    drugName: "H2-receptor antagonists", drugClass: "Acid-suppressing medication", direction: "depletes",
-    clinicalSignificance: "Reduced gastric acid may impair release of B12 from food/protein, lowering B12 status.",
-    evidenceLevel: "B", sourceId: "src-repknowledge-drug-nutrient",
-    pharmacistCheckpoint: "Consider B12 status with long-term H2-antagonist use.",
-  },
-];
-
-const B12_QUIZ_SEED = [
-  {
-    question: "Which of the following is a metabolically active B12 form?",
-    optionA: "Methylcobalamin", optionB: "Sodium ascorbate", optionC: "Calcium carbonate", optionD: "Folic acid",
-    correctAnswer: "A",
-    explanation: "Methylcobalamin (and adenosylcobalamin) are the metabolically active coenzyme forms of B12; cyanocobalamin and hydroxocobalamin are converted by the body into these active forms.",
-    sourceIds: "src-nih-ods-b12",
-  },
-  {
-    question: "Is methylcobalamin proven to have superior absorption compared with cyanocobalamin?",
-    optionA: "Yes, always", optionB: "No — current evidence has not established a difference", optionC: "Only at high doses", optionD: "Only sublingually",
-    correctAnswer: "B",
-    explanation: "NIH ODS states there is no evidence that absorption rates of supplemental B12 differ by form.",
-    sourceIds: "src-nih-ods-b12",
-  },
-  {
-    question: "Is sublingual B12 proven more effective than oral B12?",
-    optionA: "Yes", optionB: "No — evidence suggests no efficacy difference", optionC: "Only for deficiency", optionD: "Only quick-dissolve forms",
-    correctAnswer: "B",
-    explanation: "NIH ODS states evidence suggests no difference in efficacy between oral and sublingual B12.",
-    sourceIds: "src-nih-ods-b12,src-pmid-14616423",
-  },
-  {
-    question: "Why can high-dose oral B12 still be absorbed when intrinsic-factor-mediated absorption is impaired?",
-    optionA: "It cannot be absorbed", optionB: "A small amount is absorbed through passive diffusion", optionC: "It converts to injectable form", optionD: "Stomach acid is not required",
-    correctAnswer: "B",
-    explanation: "A small amount of B12 can be absorbed through passive diffusion, independent of intrinsic factor, which is why high-dose oral B12 can still work even when intrinsic-factor-mediated absorption is limited.",
-    sourceIds: "src-nih-ods-b12",
-  },
-];
-
-let recallB12SeedChecked = false;
-async function ensureRecallB12Seeded() {
-  if (recallB12SeedChecked) return;
-  const existing = await db.getAllRows("RecallIngredients");
-  if (!existing.some((i) => i.id === "vitamin-b12")) {
-    const sources = await db.getAllRows("RecallResearchSources");
-    const existingSourceIds = new Set(sources.map((s) => s.id));
-    const newSources = B12_SOURCES_SEED.filter((s) => !existingSourceIds.has(s.id));
-    if (newSources.length) {
-      await db.appendRows("RecallResearchSources", newSources.map((s) => ({
-        id: s.id, sourceType: s.sourceType, sourceName: s.sourceName, title: s.title, authors: "", journal: "",
-        pmid: s.pmid || "", pmcid: "", doi: "", url: s.url || "", publicationYear: "", sourceDate: "",
-        sourceQuality: s.sourceQuality || "", notes: s.notes || "",
-      })));
-    }
-
-    await db.appendRow("RecallIngredients", {
-      id: "vitamin-b12", categoryId: "b-vitamins-b12", name: "Vitamin B12", commonName: "Cobalamin", scientificName: "",
-      description: "Vitamin B12 (cobalamin) is a water-soluble vitamin required for red blood cell formation, neurological function, and DNA synthesis.",
-      physiologicalRole: "Cofactor for enzymes involved in red blood cell formation, neurological function, and DNA synthesis.",
-      clinicalUses: "Prevention and treatment of vitamin B12 deficiency.",
-      evidenceSummary: "See linked Clinical Evidence records for topic-specific evidence; this field intentionally does not summarize into a single verdict.",
-      evidenceLevel: "NOT_VERIFIED",
-      precautions: "", contraindications: "", drugInteractionSummary: "See linked Drug Interactions.",
-      clinicalCheckpoints: [
-        "Is B12 deficiency documented or suspected?",
-        "What is the suspected cause?",
-        "Is the patient taking metformin?",
-        "Is the patient taking a PPI or H2 blocker?",
-        "Is malabsorption suspected?",
-        "History of bariatric/gastric surgery?",
-        "Neurological symptoms?",
-        "Hematological findings?",
-        "Dietary risk?",
-      ].join("\n"),
-      repQuickTakeaway: [
-        "What is B12? A water-soluble vitamin needed for red blood cells, nerve function, and DNA synthesis.",
-        "Major forms: cyanocobalamin, methylcobalamin, hydroxocobalamin, adenosylcobalamin — cyanocobalamin and hydroxocobalamin are converted by the body into the two active coenzyme forms (methylcobalamin, adenosylcobalamin).",
-        "Cyanocobalamin vs methylcobalamin: different forms, not a better-vs-worse comparison — no established difference in absorption by form.",
-        "Oral vs sublingual: evidence suggests no efficacy difference.",
-        "Oral vs injection: route depends on clinical context (cause, malabsorption, severity, neurological involvement) — not universally interchangeable, but not automatically one-size-fits-all either.",
-        "Why high-dose oral B12 can work: a small amount is absorbed via passive diffusion even without intrinsic factor.",
-        "Medicines linked to lower B12 status: metformin, PPIs, H2-receptor antagonists.",
-        "Before discussing B12: check for documented/suspected deficiency, cause, relevant medications, malabsorption risk, and symptoms — see Clinical Checkpoints.",
-      ].join("\n"),
-      whatNotToClaim: [
-        "Do not claim methylcobalamin is universally better than cyanocobalamin.",
-        "Do not claim methylcobalamin is proven to be better absorbed.",
-        "Do not claim sublingual B12 is proven superior to oral B12.",
-        "Do not claim higher-dose B12 is automatically more effective.",
-        "Do not claim injections are always superior.",
-        "Do not claim B12 gives energy to everyone.",
-        "Do not claim B12 treats neuropathy regardless of deficiency status.",
-        "Do not claim B12 prevents disease in people who are not deficient.",
-      ].join("\n"),
-      lastReviewed: new Date().toISOString().slice(0, 10),
-    });
-
-    await db.appendRows("RecallIngredientForms", [
-      { id: "b12-form-cyanocobalamin", ingredientId: "vitamin-b12", formName: "Cyanocobalamin", chemicalName: "", formType: "chemical form",
-        compoundAmount: "", activeAmount: "", unit: "", conversionRequired: "true",
-        absorptionNotes: "", metabolicNotes: "Converted by the body into the metabolically active coenzyme forms.",
-        clinicalEvidence: "", evidenceComparison: "No established difference in absorption vs. other supplemental B12 forms (NIH ODS).",
-        documentedAdvantages: "", documentedLimitations: "", sourceIds: "src-nih-ods-b12", lastReviewed: new Date().toISOString().slice(0, 10) },
-      { id: "b12-form-methylcobalamin", ingredientId: "vitamin-b12", formName: "Methylcobalamin", chemicalName: "", formType: "chemical form",
-        compoundAmount: "", activeAmount: "", unit: "", conversionRequired: "false",
-        absorptionNotes: "", metabolicNotes: "One of the two metabolically active coenzyme forms.",
-        clinicalEvidence: "", evidenceComparison: "No established difference in absorption vs. other supplemental B12 forms (NIH ODS).",
-        documentedAdvantages: "", documentedLimitations: "", sourceIds: "src-nih-ods-b12", lastReviewed: new Date().toISOString().slice(0, 10) },
-      { id: "b12-form-hydroxocobalamin", ingredientId: "vitamin-b12", formName: "Hydroxocobalamin", chemicalName: "", formType: "chemical form",
-        compoundAmount: "", activeAmount: "", unit: "", conversionRequired: "true",
-        absorptionNotes: "", metabolicNotes: "Converted by the body into the metabolically active coenzyme forms.",
-        clinicalEvidence: "", evidenceComparison: "No established difference in absorption vs. other supplemental B12 forms (NIH ODS).",
-        documentedAdvantages: "", documentedLimitations: "", sourceIds: "src-nih-ods-b12", lastReviewed: new Date().toISOString().slice(0, 10) },
-      { id: "b12-form-adenosylcobalamin", ingredientId: "vitamin-b12", formName: "Adenosylcobalamin", chemicalName: "5-Deoxyadenosylcobalamin", formType: "chemical form",
-        compoundAmount: "", activeAmount: "", unit: "", conversionRequired: "false",
-        absorptionNotes: "", metabolicNotes: "One of the two metabolically active coenzyme forms.",
-        clinicalEvidence: "", evidenceComparison: "No established difference in absorption vs. other supplemental B12 forms (NIH ODS).",
-        documentedAdvantages: "", documentedLimitations: "", sourceIds: "src-nih-ods-b12", lastReviewed: new Date().toISOString().slice(0, 10) },
-    ]);
-
-    await db.appendRows("RecallClinicalEvidence", B12_EVIDENCE_SEED.map((e) => ({
-      id: `ce-b12-${crypto.randomUUID()}`, ingredientId: "vitamin-b12", productId: "", formId: "",
-      condition: e.topic, population: "", intervention: "", dose: "", route: "", duration: "",
-      comparator: e.comparator || "", outcome: "", result: e.result || "", clinicalSignificance: "",
-      evidenceLevel: e.evidenceLevel, studyType: e.studyType || "", sourceId: e.sourceId,
-      publicationYear: "", lastReviewed: new Date().toISOString().slice(0, 10),
-    })));
-
-    await db.appendRows("RecallDrugInteractions", B12_INTERACTIONS_SEED.map((i) => ({
-      id: `di-b12-${crypto.randomUUID()}`, ingredientId: "vitamin-b12", drugName: i.drugName, drugClass: i.drugClass,
-      direction: i.direction, mechanism: "", clinicalSignificance: i.clinicalSignificance, timing: "",
-      evidenceLevel: i.evidenceLevel, pharmacistCheckpoint: i.pharmacistCheckpoint, sourceId: i.sourceId,
-      lastReviewed: new Date().toISOString().slice(0, 10),
-    })));
-
-    await db.appendRows("RecallQuizQuestions", B12_QUIZ_SEED.map((q) => ({
-      id: `qz-b12-${crypto.randomUUID()}`, categoryId: "b-vitamins-b12", ingredientId: "vitamin-b12",
-      question: q.question, optionA: q.optionA, optionB: q.optionB, optionC: q.optionC, optionD: q.optionD,
-      correctAnswer: q.correctAnswer, explanation: q.explanation, sourceIds: q.sourceIds, active: "true",
-    })));
-  }
-  recallB12SeedChecked = true;
-}
-
-// One combined read per page load (categories + the three empty-for-now
-// knowledge tabs used to compute counts), rather than one Sheets call per
-// category — the whole point of Phase J's performance rule.
-app.get("/api/recall/categories", async (req, res) => {
-  try {
-    await ensureRecallCategoriesSeeded();
-    await ensureRecallB12Seeded();
-    const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
-      db.getAllRows("RecallCategories"),
-      db.getAllRows("RecallIngredients"),
-      db.getAllRows("RecallProductIngredients"),
-      db.getAllRows("RecallClinicalEvidence"),
-      req.repName ? db.getAllRows("RepCategoryAssignments") : Promise.resolve([]),
-    ]);
-    const ingredientIdsByCategory = new Map();
-    ingredients.forEach((ing) => {
-      const list = ingredientIdsByCategory.get(ing.categoryId) || [];
-      list.push(ing.id);
-      ingredientIdsByCategory.set(ing.categoryId, list);
-    });
-    const result = categories
-      .filter((c) => c.active !== "false")
-      .sort((a, b) => (Number(a.displayOrder) || 0) - (Number(b.displayOrder) || 0))
-      .map((c) => {
-        const ingredientIds = new Set(ingredientIdsByCategory.get(c.id) || []);
-        const productIds = new Set(
-          productIngredients.filter((pi) => ingredientIds.has(pi.ingredientId)).map((pi) => pi.productId)
-        );
-        const evidenceCount = evidence.filter((e) => ingredientIds.has(e.ingredientId)).length;
-        return {
-          id: c.id, name: c.name, description: c.description || "", displayOrder: Number(c.displayOrder) || 0,
-          productCount: productIds.size,
-          knowledgeCount: ingredientIds.size,
-          evidenceCount,
-        };
-      });
-    const myAssignedCategoryIds = req.repName
-      ? assignments.filter((a) => a.repId === req.repName).map((a) => a.categoryId)
-      : [];
-    res.json({ categories: result, myAssignedCategoryIds });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// A single detail bundle for one category — every section the category
-// page needs, computed from currently-empty tables. Sections legitimately
-// show real empty arrays right now; the client renders each as an
-// empty-state message rather than fabricating placeholder content.
-app.get("/api/recall/categories/:id", async (req, res) => {
-  try {
-    await ensureRecallCategoriesSeeded();
-    await ensureRecallB12Seeded();
-    const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels] = await Promise.all([
-      db.getAllRows("RecallCategories"),
-      db.getAllRows("RecallIngredients"),
-      db.getAllRows("RecallIngredientForms"),
-      db.getAllRows("RecallProductIngredients"),
-      db.getAllRows("RecallClinicalEvidence"),
-      db.getAllRows("RecallDrugInteractions"),
-      db.getAllRows("RecallQuizQuestions"),
-      db.getAllRows("ProductCatalog"),
-      db.getAllRows("RecallCompetitorRelationships"),
-    ]);
-    const category = categories.find((c) => c.id === req.params.id);
-    if (!category) return res.status(404).json({ error: "Recall category not found." });
-
-    const categoryIngredients = ingredients.filter((ing) => ing.categoryId === category.id);
-    const ingredientIds = new Set(categoryIngredients.map((ing) => ing.id));
-    const ingredientForms = forms.filter((f) => ingredientIds.has(f.ingredientId));
-    const links = productIngredients.filter((pi) => ingredientIds.has(pi.ingredientId));
-    const productIds = new Set(links.map((pi) => pi.productId));
-    const products = catalog.filter((p) => productIds.has(p.id));
-    const competitors = competitorRels.filter((r) => productIds.has(r.ourProductId));
-    const categoryEvidence = evidence.filter((e) => ingredientIds.has(e.ingredientId));
-    const categoryInteractions = interactions.filter((i) => ingredientIds.has(i.ingredientId));
-    const categoryQuiz = quiz.filter((q) => q.categoryId === category.id && q.active !== "false");
-
-    res.json({
-      category: { id: category.id, name: category.name, description: category.description || "" },
-      ingredients: categoryIngredients,
-      ingredientForms,
-      products,
-      competitors,
-      evidence: categoryEvidence,
-      interactions: categoryInteractions,
-      quizAvailable: categoryQuiz.length > 0,
-      quizQuestionCount: categoryQuiz.length,
-    });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get("/api/recall/assignments", requireManager, async (req, res) => {
-  try {
-    const { repName } = req.query;
-    if (!repName) return res.status(400).json({ error: "repName is required" });
-    const assignments = await db.getAllRows("RepCategoryAssignments");
-    const categoryIds = assignments.filter((a) => a.repId === repName).map((a) => a.categoryId);
-    res.json({ categoryIds });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Replace-set semantics, matching the checkbox-list UI a manager actually
-// uses (pick a rep, check/uncheck boxes, Save) — simpler and less
-// error-prone than separate add/remove endpoints, and only ever touches
-// this one rep's rows; every other rep's assignments are left untouched.
-app.post("/api/recall/assignments", requireManager, async (req, res) => {
-  try {
-    const { repName, categoryIds } = req.body;
-    if (!repName) return res.status(400).json({ error: "repName is required" });
-    const validCategoryIds = new Set(RECALL_CATEGORIES_SEED.map((c) => c.id));
-    const cleanIds = [...new Set(Array.isArray(categoryIds) ? categoryIds : [])].filter((id) => validCategoryIds.has(id));
-
-    const existing = await db.getAllRows("RepCategoryAssignments");
-    const keptForOtherReps = existing.filter((a) => a.repId !== repName);
-    const now = new Date().toISOString();
-    const newRowsForThisRep = cleanIds.map((categoryId) => ({
-      id: `rca${crypto.randomUUID()}`,
-      repId: repName,
-      categoryId,
-      assignedBy: req.repName || "Manager",
-      createdAt: now,
-    }));
-    await db.replaceAllRows("RepCategoryAssignments", [...keptForOtherReps, ...newRowsForThisRep]);
-    res.json({ ok: true, count: newRowsForThisRep.length });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// The only four sources approved for the Lebanese competitor-product
-// research effort. A listing naming anything else is rejected outright —
-// this is the actual enforcement of "approved sources," not just a comment.
-const APPROVED_RETAILERS = ["Skin Society", "Mazen Online", "Nicolas Care", "Sohati Care"];
-
-app.get("/api/recall/retailer-listings", async (req, res) => {
-  try {
-    const { competitorProductId } = req.query;
-    const listings = await db.getAllRows("RecallRetailerListings");
-    const filtered = competitorProductId ? listings.filter((l) => l.competitorProductId === competitorProductId) : listings;
-    res.json({ listings: filtered });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// One row per (competitor master product × retailer) — see the schema
-// comment in sheetsDb.js. Deliberately reads only the fields named here:
-// a caller sending "availability"/"inStock"/etc. in the body has it
-// silently ignored, the same allowlist enforcement used for competitor
-// products above. sourceUrl is a citation, not a live connection — no
-// polling or refresh job ever touches this table.
-app.post("/api/recall/retailer-listings", requireManager, async (req, res) => {
-  try {
-    const { competitorProductId, retailer, sourceUrl, displayedPrice, currency, researchDate, notes } = req.body;
-    if (!competitorProductId || !String(competitorProductId).trim()) return res.status(400).json({ error: "competitorProductId is required." });
-    if (!APPROVED_RETAILERS.includes(retailer)) {
-      return res.status(400).json({ error: `retailer must be one of: ${APPROVED_RETAILERS.join(", ")}` });
-    }
-    if (!sourceUrl || !String(sourceUrl).trim()) return res.status(400).json({ error: "sourceUrl is required — a listing is only as good as its citation." });
-
-    const competitorProducts = await db.getAllRows("CompetitorProducts");
-    if (!competitorProducts.some((p) => p.id === competitorProductId)) {
-      return res.status(404).json({ error: "That competitor product doesn't exist — add the master product first." });
-    }
-
-    const listing = {
-      id: `rl${crypto.randomUUID()}`,
-      competitorProductId,
-      retailer,
-      sourceUrl: String(sourceUrl).trim(),
-      displayedPrice: displayedPrice === "" || displayedPrice == null ? "" : Number(displayedPrice),
-      currency: currency || "",
-      researchDate: researchDate || new Date().toISOString().slice(0, 10),
-      notes: notes || "",
-      createdBy: req.repName || "Manager",
-      createdAt: new Date().toISOString(),
-    };
-    await db.appendRow("RecallRetailerListings", listing);
-    res.json(listing);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get("/api/recall/field-conflicts", async (req, res) => {
-  try {
-    const { entityType, entityId } = req.query;
-    const conflicts = await db.getAllRows("RecallFieldConflicts");
-    const filtered = conflicts.filter((c) => (!entityType || c.entityType === entityType) && (!entityId || c.entityId === entityId));
-    res.json({ conflicts: filtered });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Recording a conflict always keeps BOTH source values — there is no code
-// path here that lets one source's value silently win. If a caller can't
-// supply two distinct sourced values, it isn't a conflict; it's a single
-// (possibly still-unverified) value on the record itself.
-app.post("/api/recall/field-conflicts", requireManager, async (req, res) => {
-  try {
-    const { entityType, entityId, fieldName, sourceALabel, sourceAValue, sourceBLabel, sourceBValue, notes } = req.body;
-    if (!entityType || !entityId || !fieldName) return res.status(400).json({ error: "entityType, entityId, and fieldName are required." });
-    if (sourceAValue === undefined || sourceAValue === null || sourceAValue === "" || sourceBValue === undefined || sourceBValue === null || sourceBValue === "") {
-      return res.status(400).json({ error: "Both sourceAValue and sourceBValue are required — a conflict needs two disagreeing sourced values, not one." });
-    }
-    const conflict = {
-      id: `fc${crypto.randomUUID()}`,
-      entityType, entityId, fieldName,
-      sourceALabel: sourceALabel || "", sourceAValue: String(sourceAValue),
-      sourceBLabel: sourceBLabel || "", sourceBValue: String(sourceBValue),
-      status: "CONFLICT",
-      notes: notes || "",
-      createdAt: new Date().toISOString(),
-    };
-    await db.appendRow("RecallFieldConflicts", conflict);
-    res.json(conflict);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
 
 // Render's free tier sleeps after ~15 minutes with no inbound traffic. A self
 // request through the public URL (not localhost) counts as real traffic and
