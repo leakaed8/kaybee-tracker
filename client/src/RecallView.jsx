@@ -253,8 +253,12 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
             {data.competitors.length === 0 ? (
               <EmptyState text="No competitor comparison has been added yet." />
             ) : (
+              // Competitor research is a shared rep+manager task (unlike
+              // Our Products/Product Catalog, which stays manager-only) —
+              // anyone who can see this page is authenticated, so canEdit
+              // is unconditional here.
               data.competitors.map((c) => (
-                <CompetitorCard key={c.id} rel={c} canEdit={role === "manager"} onSaved={load} />
+                <CompetitorCard key={c.id} rel={c} canEdit={true} onSaved={load} />
               ))
             )}
           </RecallSection>
@@ -276,6 +280,26 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
                   {e.evidenceLevel && e.evidenceLevel !== "NOT_VERIFIED" && (
                     <div style={{ fontSize: 10.5, color: "#8A8272", marginTop: 4 }}>Evidence level: {e.evidenceLevel}</div>
                   )}
+                </div>
+              ))
+            )}
+          </RecallSection>
+
+          <RecallSection title="Clinical References">
+            {(!data.references || data.references.length === 0) ? (
+              <EmptyState text="No PubMed/NCBI study citations have been added yet." />
+            ) : (
+              data.references.map((r) => (
+                <div key={r.id} style={{ fontSize: 12, marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid #F0EBE0" }}>
+                  <div style={{ fontWeight: 600, marginBottom: 2 }}>{r.title}</div>
+                  <div style={{ color: "#8A8272", fontSize: 11 }}>
+                    {[r.studyType, r.publicationYear, r.journal || r.sourceName].filter(Boolean).join(" · ")}
+                  </div>
+                  {r.keyFinding && <div style={{ marginTop: 4, color: "#5B5445" }}>{r.keyFinding}</div>}
+                  <div style={{ marginTop: 4, fontSize: 11 }}>
+                    PMID: {r.pmid}{" — "}
+                    <a href={r.url} target="_blank" rel="noreferrer">Read full study →</a>
+                  </div>
                 </div>
               ))
             )}
@@ -546,7 +570,7 @@ function CompetitorEditor({ competitorProduct: cp, retailerListings, onCancel, o
   );
 }
 
-function ConflictRow({ conflict, onSaved }) {
+function ConflictRow({ conflict, onSaved, canResolve }) {
   const [resolving, setResolving] = useState(false);
   const [error, setError] = useState("");
   const resolve = async (which) => {
@@ -571,22 +595,28 @@ function ConflictRow({ conflict, onSaved }) {
       <div>{conflict.sourceALabel || "Source A"}: {conflict.sourceAValue}</div>
       <div>{conflict.sourceBLabel || "Source B"}: {conflict.sourceBValue}</div>
       {error && <div style={{ color: "#B33A3A", marginTop: 4 }}>{error}</div>}
-      <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-        <button type="button" disabled={resolving} onClick={() => resolve("A")} style={cancelButtonStyle}>Use {conflict.sourceALabel || "Source A"}</button>
-        <button type="button" disabled={resolving} onClick={() => resolve("B")} style={cancelButtonStyle}>Use {conflict.sourceBLabel || "Source B"}</button>
-      </div>
+      {canResolve && (
+        <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+          <button type="button" disabled={resolving} onClick={() => resolve("A")} style={cancelButtonStyle}>Use {conflict.sourceALabel || "Source A"}</button>
+          <button type="button" disabled={resolving} onClick={() => resolve("B")} style={cancelButtonStyle}>Use {conflict.sourceBLabel || "Source B"}</button>
+        </div>
+      )}
     </div>
   );
 }
 
 // Only OPEN (status === "CONFLICT") rows render — a RESOLVED conflict stays
-// in the sheet as history but no longer needs a manager decision.
-function ConflictBanner({ conflicts, onSaved }) {
+// in the sheet as history but no longer needs a decision. canResolve gates
+// only the action buttons, not visibility — a conflict a viewer can't act
+// on (e.g. a rep looking at an our-product conflict, which stays
+// manager-only server-side) still stays visible, per "never hide a
+// conflict," it just shows read-only.
+function ConflictBanner({ conflicts, onSaved, canResolve }) {
   const open = (conflicts || []).filter((c) => c.status === "CONFLICT");
   if (open.length === 0) return null;
   return (
     <div style={{ marginTop: 6 }}>
-      {open.map((c) => <ConflictRow key={c.id} conflict={c} onSaved={onSaved} />)}
+      {open.map((c) => <ConflictRow key={c.id} conflict={c} onSaved={onSaved} canResolve={canResolve} />)}
     </div>
   );
 }
@@ -614,7 +644,7 @@ function OurProductCard({ product: p, canEdit, onSaved }) {
         </div>
       )}
       {p.price !== "" && p.price != null && <div style={{ color: "#8A8272", fontSize: 11.5, marginTop: 2 }}>Price: {p.price}</div>}
-      <ConflictBanner conflicts={p.conflicts} onSaved={onSaved} />
+      <ConflictBanner conflicts={p.conflicts} onSaved={onSaved} canResolve={canEdit} />
       <MissingInfoBadge researchStatus={p.verificationStatus} missingFields={p.missingFields} />
       {editing && <OurProductEditor product={p} onCancel={() => setEditing(false)} onSaved={() => { setEditing(false); onSaved(); }} />}
     </div>
@@ -648,7 +678,7 @@ function CompetitorCard({ rel: c, canEdit, onSaved }) {
           ))}
         </div>
       )}
-      <ConflictBanner conflicts={cp.conflicts} onSaved={onSaved} />
+      <ConflictBanner conflicts={cp.conflicts} onSaved={onSaved} canResolve={true} />
       <MissingInfoBadge researchStatus={cp.researchStatus} missingFields={cp.missingFields} />
       {editing && (
         <CompetitorEditor competitorProduct={cp} retailerListings={c.retailerListings} onCancel={() => setEditing(false)} onSaved={() => { setEditing(false); onSaved(); }} />

@@ -3920,7 +3920,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     await ensureRecallCategoriesSeeded();
     await ensureRecallB12Seeded();
     await ensureB12ProductDataSeeded();
-    const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts] = await Promise.all([
+    const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
       db.getAllRows("RecallIngredientForms"),
@@ -3933,6 +3933,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
       db.getAllRows("CompetitorProducts"),
       db.getAllRows("RecallRetailerListings"),
       db.getAllRows("RecallFieldConflicts"),
+      db.getAllRows("RecallResearchSources"),
     ]);
     const category = categories.find((c) => c.id === req.params.id);
     if (!category) return res.status(404).json({ error: "Recall category not found." });
@@ -4028,6 +4029,31 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     const categoryInteractions = interactions.filter((i) => ingredientIds.has(i.ingredientId));
     const categoryQuiz = quiz.filter((q) => q.categoryId === category.id && q.active !== "false");
 
+    // A compact study-citation list, not a copy of the evidence section —
+    // only sources with a real PMID (an actual PubMed/NCBI study, not a
+    // fact-sheet/internal reference) that this category's evidence
+    // actually cites. studyType/key finding are pulled from the linked
+    // RecallClinicalEvidence row(s) already on file — nothing new
+    // researched or invented here, just surfaced as its own compact list
+    // with a link out to the real source instead of buried in prose.
+    const categorySourceIds = new Set(categoryEvidence.map((e) => e.sourceId).filter(Boolean));
+    const references = sources
+      .filter((s) => categorySourceIds.has(s.id) && String(s.pmid || "").trim())
+      .map((s) => {
+        const relatedEvidence = categoryEvidence.filter((e) => e.sourceId === s.id);
+        return {
+          id: s.id,
+          title: s.title,
+          pmid: s.pmid,
+          url: s.url || `https://pubmed.ncbi.nlm.nih.gov/${s.pmid}/`,
+          sourceName: s.sourceName || "",
+          journal: s.journal || "",
+          publicationYear: s.publicationYear || "",
+          studyType: relatedEvidence.find((e) => e.studyType)?.studyType || "",
+          keyFinding: relatedEvidence.map((e) => e.result).filter(Boolean).join(" ") || "",
+        };
+      });
+
     res.json({
       category: { id: category.id, name: category.name, description: category.description || "" },
       ingredients: categoryIngredients,
@@ -4036,6 +4062,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
       competitors,
       evidence: categoryEvidence,
       interactions: categoryInteractions,
+      references,
       quizAvailable: categoryQuiz.length > 0,
       quizQuestionCount: categoryQuiz.length,
     });
@@ -4110,7 +4137,12 @@ app.get("/api/recall/retailer-listings", async (req, res) => {
 // silently ignored, the same allowlist enforcement used for competitor
 // products above. sourceUrl is a citation, not a live connection — no
 // polling or refresh job ever touches this table.
-app.post("/api/recall/retailer-listings", requireManager, async (req, res) => {
+// Open to any authenticated employee (not just managers) — completing
+// Lebanese competitor research is explicitly a shared rep+manager task;
+// this table only ever attaches to CompetitorProducts, never to our own
+// products, so it can't be used to touch the (still manager-only) Product
+// Catalog.
+app.post("/api/recall/retailer-listings", async (req, res) => {
   try {
     const { competitorProductId, retailer, sourceUrl, displayedPrice, currency, researchDate, notes } = req.body;
     if (!competitorProductId || !String(competitorProductId).trim()) return res.status(400).json({ error: "competitorProductId is required." });
@@ -4160,10 +4192,16 @@ app.get("/api/recall/field-conflicts", async (req, res) => {
 // path here that lets one source's value silently win. If a caller can't
 // supply two distinct sourced values, it isn't a conflict; it's a single
 // (possibly still-unverified) value on the record itself.
-app.post("/api/recall/field-conflicts", requireManager, async (req, res) => {
+// Any employee can record a conflict found on COMPETITOR research (shared
+// task); a conflict on OUR products (ProductCatalog/RecallProductIngredients)
+// stays manager-only, same as editing those records directly.
+app.post("/api/recall/field-conflicts", async (req, res) => {
   try {
     const { entityType, entityId, fieldName, sourceALabel, sourceAValue, sourceBLabel, sourceBValue, notes } = req.body;
     if (!entityType || !entityId || !fieldName) return res.status(400).json({ error: "entityType, entityId, and fieldName are required." });
+    if (entityType !== "CompetitorProducts" && req.role !== "manager") {
+      return res.status(403).json({ error: "Managers only." });
+    }
     if (sourceAValue === undefined || sourceAValue === null || sourceAValue === "" || sourceBValue === undefined || sourceBValue === null || sourceBValue === "") {
       return res.status(400).json({ error: "Both sourceAValue and sourceBValue are required — a conflict needs two disagreeing sourced values, not one." });
     }
@@ -4184,15 +4222,17 @@ app.post("/api/recall/field-conflicts", requireManager, async (req, res) => {
   }
 });
 
-// ---------- Recall Phase 2D: manager research/edit routes ----------
+// ---------- Recall research/edit routes ----------
 // These are DELIBERATELY separate from the app's existing, rep-open
 // /api/competitor-products/:id and /api/product-catalog/:id routes (used
-// for the day-to-day shared price list) — Recall's own research-completion
-// workflow is manager-only, per this phase's explicit permission rule, and
-// must not change who can edit the general price-list screens.
+// for the day-to-day shared price list) — kept as their own routes so
+// Recall's derived-status/missing-fields recompute always runs on save.
+// Competitor research is open to any employee (any authenticated user
+// reaches this line — see requireAuth mounted globally at the top of the
+// file); OUR products (Product Catalog) stay manager-only below.
 const RECALL_COMPETITOR_RESEARCH_FIELDS = ["genericName", "form", "dosage", "packSize", "manufacturer", "sku", "sourceLabel", "sourceUrl", "notes"];
 
-app.patch("/api/recall/competitor-research/:id", requireManager, async (req, res) => {
+app.patch("/api/recall/competitor-research/:id", async (req, res) => {
   try {
     const products = await db.getAllRows("CompetitorProducts");
     const existing = products.find((p) => p.id === req.params.id);
@@ -4265,9 +4305,9 @@ app.patch("/api/recall/our-products/:linkId", requireManager, async (req, res) =
 
 // Edits an EXISTING retailer listing (price/URL/notes/retailer) — never
 // creates a new one. Same allowlist-only field handling as the POST route
-// below it, so a caller sending "availability"/"inStock"/etc. is silently
-// ignored, not stored.
-app.patch("/api/recall/retailer-listings/:id", requireManager, async (req, res) => {
+// above, so a caller sending "availability"/"inStock"/etc. is silently
+// ignored, not stored. Open to any employee — see the POST route's comment.
+app.patch("/api/recall/retailer-listings/:id", async (req, res) => {
   try {
     const listings = await db.getAllRows("RecallRetailerListings");
     if (!listings.some((l) => l.id === req.params.id)) return res.status(404).json({ error: "Retailer listing not found." });
@@ -4294,8 +4334,9 @@ app.patch("/api/recall/retailer-listings/:id", requireManager, async (req, res) 
 // Resolving a conflict picks ONE source's value onto the actual record —
 // an explicit, auditable action, never automatic. The conflict row itself
 // is kept (status flipped to RESOLVED, not deleted) so both original
-// source values stay visible as history.
-app.patch("/api/recall/field-conflicts/:id/resolve", requireManager, async (req, res) => {
+// source values stay visible as history. Any employee can resolve a
+// COMPETITOR conflict; a conflict on OUR products stays manager-only.
+app.patch("/api/recall/field-conflicts/:id/resolve", async (req, res) => {
   try {
     const { resolution } = req.body;
     if (resolution !== "A" && resolution !== "B") return res.status(400).json({ error: "resolution must be 'A' or 'B'." });
@@ -4308,6 +4349,9 @@ app.patch("/api/recall/field-conflicts/:id/resolve", requireManager, async (req,
     const targetTable = conflict.entityType;
     if (!["CompetitorProducts", "RecallProductIngredients", "ProductCatalog"].includes(targetTable)) {
       return res.status(400).json({ error: `Cannot resolve a conflict on entityType "${targetTable}" — unsupported table.` });
+    }
+    if (targetTable !== "CompetitorProducts" && req.role !== "manager") {
+      return res.status(403).json({ error: "Managers only." });
     }
     const applied = await db.updateRowById(targetTable, conflict.entityId, { [conflict.fieldName]: chosenValue });
     if (!applied) return res.status(404).json({ error: "The record this conflict refers to no longer exists." });
