@@ -3978,6 +3978,45 @@ async function ensureRecallCategoriesSeeded() {
   recallCategoriesSeedChecked = true;
 }
 
+// Taxonomy values only — how a product is administered, not clinical
+// content. Deliberately NOT auto-assigned to any existing product: a
+// product's dosage form must eventually trace to a label/manufacturer/
+// retailer source, so until that's entered explicitly it stays NOT
+// VERIFIED rather than guessed from the product name.
+const RECALL_DOSAGE_FORMS_SEED = [
+  "Tablet", "Capsule", "Softgel", "Chewable", "Gummy", "Lozenge", "Quick-Dissolve", "Sublingual",
+  "Effervescent", "Powder", "Sachet", "Liquid", "Syrup", "Drop", "Spray", "Oral Solution", "Injection",
+  "Intramuscular", "Intravenous", "Topical", "Cream", "Gel", "Patch",
+].map((name) => ({ id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""), name }));
+
+let recallDosageFormsSeedChecked = false;
+async function ensureRecallDosageFormsSeeded() {
+  if (recallDosageFormsSeedChecked) return;
+  const existing = await db.getAllRows("RecallDosageForms");
+  const existingIds = new Set(existing.map((f) => f.id));
+  const missing = RECALL_DOSAGE_FORMS_SEED.filter((f) => !existingIds.has(f.id));
+  if (missing.length) {
+    // route/releaseType/administrationMethod/description are left blank —
+    // only the name was given; nothing about route or release mechanism
+    // should be inferred without a source.
+    await db.appendRows("RecallDosageForms", missing.map((f) => ({
+      id: f.id, name: f.name, route: "", releaseType: "", administrationMethod: "", description: "",
+    })));
+  }
+  recallDosageFormsSeedChecked = true;
+}
+
+app.get("/api/recall/dosage-forms", async (req, res) => {
+  try {
+    await ensureRecallDosageFormsSeeded();
+    const forms = await db.getAllRows("RecallDosageForms");
+    res.json({ dosageForms: forms.map((f) => ({ id: f.id, name: f.name })) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // One combined read per page load (categories + the three empty-for-now
 // knowledge tabs used to compute counts), rather than one Sheets call per
 // category — the whole point of Phase J's performance rule.

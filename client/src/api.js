@@ -135,4 +135,5 @@ export const api = {
   getRecallCategory: (id) => request(`/recall/categories/${id}`),
   getRecallAssignments: (repName) => request(`/recall/assignments?repName=${encodeURIComponent(repName)}`),
   saveRecallAssignments: (repName, categoryIds) => request("/recall/assignments", { method: "POST", body: JSON.stringify({ repName, categoryIds }) }),
+  getRecallDosageForms: () => request("/recall/dosage-forms"),
 };
