@@ -12,7 +12,7 @@ import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
   TrendingDown, TrendingUp, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
   Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar as RadarIcon, Search, BookOpen,
-  GraduationCap, Boxes, Swords, History, Brain, ClipboardList, CheckCircle2, ChevronDown,
+  GraduationCap, Boxes, Swords, History, Brain, ClipboardList, CheckCircle2, ChevronDown, Phone,
 } from "lucide-react";
 import { api } from "./api.js";
 import { TrainingVideosView, TrainingStudiesView } from "./TrainingView.jsx";
@@ -6202,11 +6202,16 @@ function TrainingTabView({ role, repName, isSupervisor, repNames, products }) {
         {!isSupervisor && (
           <button onClick={() => setSubTab("curriculum")} style={pillStyle(subTab === "curriculum")}>Curriculum</button>
         )}
+        {!isSupervisor && (
+          <button onClick={() => setSubTab("callscript")} style={pillStyle(subTab === "callscript")}>Call Script</button>
+        )}
         <button onClick={() => setSubTab("videos")} style={pillStyle(subTab === "videos")}>Videos</button>
         <button onClick={() => setSubTab("studies")} style={pillStyle(subTab === "studies")}>Studies</button>
       </div>
       {subTab === "curriculum" && !isSupervisor ? (
         <TrainingCurriculumView />
+      ) : subTab === "callscript" && !isSupervisor ? (
+        <TrainingCallScriptView />
       ) : subTab === "studies" ? (
         <TrainingStudiesView role={role} products={products} />
       ) : (
@@ -6356,6 +6361,184 @@ function TrainingCurriculumView() {
   );
 }
 
+// ---------- Training: worked sales-call example ----------
+// A separate tab from the Curriculum (principles) above — this is one full
+// worked example of a call, stage by stage, ending in an actual phone
+// script a rep can read almost verbatim. Static reference content, same
+// pattern as TrainingCurriculumView (own array, own component) so neither
+// tab risks the other.
+//
+// Grounded in facts already established elsewhere in this app rather than
+// invented: Mason Natural Vitamin B12 1,000 mcg Quick Dissolve is a real
+// product in the Product Catalog (Cyanocobalamin, dissolves under the
+// tongue per its own label — see Recall); long-term metformin use being
+// associated with reduced vitamin B12 status is the same sourced
+// drug-nutrient fact already in Recall's B12 category (from this app's
+// existing repKnowledge reference). This script never claims B12 improves
+// diabetes control or blood sugar — it only addresses the documented
+// deficiency-risk angle, consistent with the "never claim what you can't
+// source" rule above.
+const TRAINING_CALL_SCRIPT_STEPS = [
+  {
+    icon: Target,
+    label: "1. The plan, stage by stage",
+    summary: "How to present the whole sales plan before you ever pick up the phone",
+    points: [
+      "Stage 1 — Industry: \"We operate in a regulated, health-focused sector. Our stakeholders are physicians, pharmacists, wholesalers, and patients. Every sales decision flows through this ecosystem.\"",
+      "Stage 2 — Product & deficiency risk: Lead with the number — 400,000+ diabetics in Lebanon, roughly 12% of the population. Then pivot: \"Long-term metformin use is a well-documented cause of reduced vitamin B12 status. That's not new information to you — what's new is having an affordable, quick-dissolve B12 already available to close that gap before it shows up as fatigue, neuropathy, or anemia that gets blamed on the diabetes itself.\"",
+      "Stage 3 — Targeting: Primary — GPs, internists, and endocrinologists managing diabetic patients on long-term metformin. Secondary — pharmacists near diabetes clinics. Supporting — KOLs and diabetes associations. One sentence each, move on.",
+      "Stage 4 — Segmentation: \"We invest where patient potential is high but our brand's usage is low — that's the growth opportunity. A doctor with a large metformin panel who's never discussed B12 status with them is exactly that opportunity.\"",
+      "Stage 5 — SWOT: Read the strengths confidently, acknowledge the weaknesses honestly. \"Yes, most patients pay out of pocket for supplements — that's a real gap. But at this price point, it's an easy add for a patient who's already paying for metformin every month.\"",
+      "Stage 6 — SMARTI: Read the full objective out loud, slowly. \"Get Dr. [Name] to recommend Mason Natural Vitamin B12 1,000 mcg Quick-Dissolve to at least 3 patients who've been on metformin for 12+ months and haven't had their B12 status checked, within the next 7 days.\" Specific, Measurable, Achievable, Relevant, Time-bound, Individual.",
+      "Stage 7 — The call: this is the moment to perform, not read. Open with the problem (HGO), probe with EAR questions, deliver one product/one mechanism, handle objections with APACT, and close with a specific, small ask.",
+    ],
+  },
+  {
+    icon: Phone,
+    label: "2. Full call script — first call",
+    summary: "Opening Hook, Explore, Deliver, Handle objection, Close",
+    dialogue: [
+      { speaker: "DR. KARIM", line: "\"Allo?\"" },
+      { speaker: "REP", line: "\"Good morning Dr. Karim, this is [Your Name] from KayBee. How are you today?\"" },
+      { speaker: "DR. KARIM", line: "\"Fine thank you, what is this about?\"" },
+      { speaker: "— OPEN —", direction: true },
+      { speaker: "REP", line: "\"Doctor, I'll be brief and respectful of your time. I'm calling because a lot of your patients on metformin long-term are quietly running low on vitamin B12 — it's a well-documented interaction, and it often shows up as fatigue or tingling that gets written off as 'just the diabetes.' I have a simple, affordable way to close that gap. Can I take two minutes of your time?\"" },
+      { speaker: "DR. KARIM", line: "\"Yes go ahead, two minutes.\"" },
+      { speaker: "— EXPLORE —", direction: true },
+      { speaker: "REP", line: "\"Thank you Doctor. Quick question — of your Type 2 diabetes patients who've been on metformin for a year or more, how many have actually had their B12 status checked?\"" },
+      { speaker: "DR. KARIM", line: "\"Honestly, not many. It's not something I routinely order.\"" },
+      { speaker: "REP", line: "\"That's exactly what we're seeing across most practices — it's not on the routine panel, so it gets missed until a patient complains of fatigue or numbness. Does that match what you see?\"" },
+      { speaker: "DR. KARIM", line: "\"Yes, actually. I get that complaint a lot and usually chalk it up to the diabetes itself.\"" },
+      { speaker: "REP", line: "\"So if there was a simple, affordable way to address that risk for your long-term metformin patients — something you could recommend without adding real cost or complexity — that would be useful to have on hand?\"" },
+      { speaker: "DR. KARIM", line: "\"Sure, if it's straightforward.\"" },
+      { speaker: "— DELIVER —", direction: true },
+      { speaker: "REP", line: "\"Doctor, that's exactly what I'm calling about. Mason Natural Vitamin B12, 1,000 mcg, quick-dissolve — it dissolves right under the tongue, no water needed, once a day. It's a straightforward way to cover the B12 status of a patient who's been on metformin for the long haul.\"" },
+      { speaker: "REP", line: "\"To be clear, Doctor — this isn't a diabetes treatment, it doesn't touch their blood sugar. It's specifically for the B12 side of long-term metformin use, so you'd still manage the diabetes exactly as you do today.\"" },
+      { speaker: "DR. KARIM", line: "\"That makes sense. What does it cost?\"" },
+      { speaker: "REP", line: "\"It's priced to be an easy monthly add for a patient who's already budgeting for their metformin — a few dollars a month, not a few dollars a day. I can send you the product details by WhatsApp right after this call.\"" },
+      { speaker: "— HANDLE —", direction: true },
+      { speaker: "DR. KARIM", line: "\"Look, I don't usually push vitamins on my patients. Half of what's marketed as a supplement doesn't have real evidence behind it.\"" },
+      { speaker: "REP", line: "(Cushion) \"Doctor, I completely respect that — and honestly, that skepticism is a good thing. Most of what gets marketed as a supplement doesn't have a real mechanism behind it.\"" },
+      { speaker: "REP", line: "(Probe) \"But let me ask — if the concern here isn't 'does this vitamin do something magical,' but specifically 'is a patient on long-term metformin at real, documented risk of low B12,' does that change how you'd look at it?\"" },
+      { speaker: "DR. KARIM", line: "\"Well, if it's a documented interaction and not just marketing, that's different.\"" },
+      { speaker: "REP", line: "(Answer) \"It is documented — reduced B12 status with long-term metformin use is a recognized drug-nutrient interaction, not a marketing claim. This isn't about the vitamin doing something extraordinary — it's about covering a specific, known gap for a specific group of your patients.\"" },
+      { speaker: "REP", line: "(Check) \"Does that address the concern about it being 'just marketing'?\"" },
+      { speaker: "DR. KARIM", line: "\"Yes, that's a fair point actually.\"" },
+      { speaker: "REP", line: "(Transition) \"Good. So — can we agree you'll flag it for three of your long-term metformin patients this week, even just to ask whether they've had any fatigue or tingling?\"" },
+      { speaker: "— CLOSE —", direction: true },
+      { speaker: "REP", line: "\"Doctor, to summarize — your long-term metformin patients are a group with a real, documented risk of low B12 that isn't on a routine panel. Mason B12 Quick-Dissolve is a simple, affordable way to cover that gap without changing anything about how you manage their diabetes.\"" },
+      { speaker: "REP", line: "\"I'm asking for just three patients this week. I'll send the product details and the source on the metformin–B12 interaction over WhatsApp in the next five minutes. Can we agree on three patients?\"" },
+      { speaker: "DR. KARIM", line: "\"Alright, send it over and I'll keep it in mind for my next few metformin patients.\"" },
+      { speaker: "REP", line: "\"Perfect Doctor. Sending it now. I'll follow up in ten days to hear how it went. Does that work?\"" },
+      { speaker: "DR. KARIM", line: "\"Yes, fine.\"" },
+      { speaker: "REP", line: "\"Thank you Doctor, have a good day.\"" },
+      { speaker: "DR. KARIM", line: "\"Thank you. Bye.\"" },
+      { speaker: "[Rep hangs up. Immediately sends WhatsApp with the product sheet and source.]", direction: true },
+    ],
+  },
+  {
+    icon: History,
+    label: "3. Follow-up call — 10 days later",
+    summary: "Checking the ask you made, and asking for a little more",
+    dialogue: [
+      { speaker: "DR. KARIM", line: "\"Allo?\"" },
+      { speaker: "REP", line: "\"Good morning Dr. Karim, it's [Your Name] from KayBee. I'm following up on the metformin patients we discussed — how did the B12 conversation go?\"" },
+      { speaker: "DR. KARIM", line: "\"I mentioned it to two of them. One started taking it, said it was easy since it just dissolves. The other I haven't followed up with yet.\"" },
+      { speaker: "REP", line: "\"That's a good start, Doctor — the quick-dissolve format is exactly why patients tend to actually stick with it. Would you be comfortable flagging it for a few more of your long-term metformin patients this month?\"" },
+      { speaker: "DR. KARIM", line: "\"Let's see how these two go first, then yes.\"" },
+      { speaker: "REP", line: "\"Absolutely, that's fair. I'll check back with you at the end of the month. Thank you Doctor.\"" },
+    ],
+  },
+  {
+    icon: MessageCircle,
+    label: "4. Phone vs. in-person — what changes",
+    summary: "Three things that change when you lose the room",
+    points: [
+      "You lose eye contact, body language, and visual aids — so three things change. First, ask permission to continue right at the start (\"Can I take two minutes?\") — hanging up is one button away.",
+      "Second, your voice does all the work. Slow down on the key line — the metformin–B12 fact, the price — and let it land.",
+      "Third, always offer to send supporting material immediately by WhatsApp. It replaces the physical leave-behind and keeps the momentum going after the call ends.",
+      "The silence rule still applies on the close. Say \"Can we agree on three patients?\" and then say nothing. On a phone call that silence feels even more intense — which makes it even more powerful.",
+    ],
+  },
+];
+
+function TrainingCallScriptView() {
+  const [openIndex, setOpenIndex] = useState(0);
+
+  return (
+    <div>
+      <div style={{ marginBottom: 22 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600, letterSpacing: 0.3, color: "#B08D57" }}>KayBee Pharma · MedRep Training</div>
+        <h2 className="kb-font-display" style={{ margin: "4px 0 0", fontSize: 22, fontWeight: 600, color: "#1F3864" }}>A worked example: the full call</h2>
+        <p style={{ marginTop: 8, fontSize: 13, lineHeight: 1.5, color: "#5B6472" }}>
+          One complete, realistic example — from the sales plan to an actual phone script — built around a real product already in the catalog. Read it once end to end, then use it as a template.
+        </p>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {TRAINING_CALL_SCRIPT_STEPS.map((step, index) => {
+          const isOpen = openIndex === index;
+          const Icon = step.icon;
+          return (
+            <div key={step.label} style={{ overflow: "hidden", borderRadius: 12, border: "1px solid #E2E5EA", background: "#fff" }}>
+              <button
+                type="button"
+                onClick={() => setOpenIndex(isOpen ? -1 : index)}
+                aria-expanded={isOpen}
+                style={{ display: "flex", width: "100%", alignItems: "center", gap: 12, padding: "13px 16px", textAlign: "left", background: "none", border: "none", cursor: "pointer" }}
+              >
+                <span style={{ display: "flex", height: 36, width: 36, flex: "0 0 auto", alignItems: "center", justifyContent: "center", borderRadius: "50%", background: "#1F386419" }}>
+                  <Icon size={18} color="#1F3864" />
+                </span>
+                <span style={{ flex: 1 }}>
+                  <span style={{ display: "block", fontSize: 14.5, fontWeight: 600, color: "#1F3864" }}>{step.label}</span>
+                  <span style={{ display: "block", fontSize: 12.5, color: "#8A93A3" }}>{step.summary}</span>
+                </span>
+                <ChevronDown
+                  size={19}
+                  color="#9AA3B2"
+                  style={{ flex: "0 0 auto", transition: "transform 0.2s", transform: isOpen ? "rotate(180deg)" : "none" }}
+                />
+              </button>
+
+              {isOpen && (
+                <div style={{ borderTop: "1px solid #F0F1F3", padding: "2px 16px 16px" }}>
+                  {step.dialogue ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+                      {step.dialogue.map((turn, i) =>
+                        turn.direction ? (
+                          <div key={i} style={{ fontSize: 11.5, fontWeight: 600, color: "#B08D57", letterSpacing: 0.3, marginTop: i === 0 ? 0 : 4 }}>{turn.speaker}</div>
+                        ) : (
+                          <div key={i} style={{ fontSize: 13.5, lineHeight: 1.5, color: "#374151" }}>
+                            <span style={{ fontWeight: 700, color: turn.speaker === "REP" ? "#1F3864" : "#5B6472" }}>{turn.speaker}: </span>
+                            <span>{turn.line}</span>
+                          </div>
+                        )
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+                      {step.points.map((point, i) => (
+                        <div key={i} style={{ display: "flex", gap: 9, fontSize: 13.5, lineHeight: 1.5, color: "#374151" }}>
+                          <span style={{ marginTop: 7, height: 6, width: 6, flex: "0 0 auto", borderRadius: "50%", background: "#B08D57" }} />
+                          <span>{point}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ marginTop: 22, borderRadius: 12, background: "#1F3864", padding: 15, fontSize: 12.5, lineHeight: 1.5, color: "rgba(255,255,255,0.9)" }}>
+        The market data tells us metformin-related B12 depletion is real and common. The clinical literature backs the mechanism. The only variable is the rep in the room. That's us.
+      </div>
+    </div>
+  );
+}
 
 // ---------- Route View (simple nearest-neighbor route ordering) ----------
 function RouteView({ clients, doctors }) {
