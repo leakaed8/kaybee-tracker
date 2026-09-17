@@ -232,9 +232,13 @@ async function ensureSheets() {
     }
 
     for (const [tab, headers] of Object.entries(SCHEMAS)) {
+      // Must span the tab's real column count, not a hardcoded A1:Z1 — a
+      // schema with more than 26 columns (e.g. CompetitorProducts) would
+      // otherwise never be seen as "already topped up" past column Z, and
+      // get its header row rewritten on every single init.
       const existing = await sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID,
-        range: `${tab}!A1:Z1`,
+        range: `${tab}!A1:${columnLetter(headers.length)}1`,
       });
       const firstRow = existing.data.values?.[0];
       // Also tops up an existing tab whose header row is shorter than the
@@ -255,6 +259,24 @@ async function ensureSheets() {
     // Default sheet ("Sheet1") is left alone if present but unused.
   })();
   return initPromise;
+}
+
+// Standard spreadsheet base-26 column numbering (1 -> A, 26 -> Z, 27 -> AA,
+// 28 -> AB, ...). Every range built from a schema's column count MUST go
+// through this — String.fromCharCode(64 + n) silently breaks past 26
+// columns (e.g. n=28 produces character code 92, "\", an invalid A1
+// range) with no error until the Sheets API itself rejects the range.
+// CompetitorProducts crossed 26 columns when Phase 3 appended
+// researchStatus/missingFields; this derives correctly for any column
+// count so future schema growth (on any tab) can't reintroduce the bug.
+function columnLetter(n) {
+  let s = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
 }
 
 function rowToObject(headers, row) {
@@ -278,7 +300,7 @@ async function getAllRows(tab) {
   const headers = SCHEMAS[tab];
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: `${tab}!A2:${String.fromCharCode(64 + headers.length)}`,
+    range: `${tab}!A2:${columnLetter(headers.length)}`,
   });
   const rows = res.data.values || [];
   return rows
@@ -296,7 +318,7 @@ async function getAllRowsBatch(tabs) {
   const sheets = getSheets();
   const ranges = tabs.map((tab) => {
     const headers = SCHEMAS[tab];
-    return `${tab}!A2:${String.fromCharCode(64 + headers.length)}`;
+    return `${tab}!A2:${columnLetter(headers.length)}`;
   });
   const res = await sheets.spreadsheets.values.batchGet({
     spreadsheetId: SHEET_ID,
@@ -356,7 +378,7 @@ async function updateRowById(tab, id, patch) {
   const merged = { ...target, ...patch };
   await sheets.spreadsheets.values.update({
     spreadsheetId: SHEET_ID,
-    range: `${tab}!A${target._row}:${String.fromCharCode(64 + headers.length)}${target._row}`,
+    range: `${tab}!A${target._row}:${columnLetter(headers.length)}${target._row}`,
     valueInputOption: "RAW",
     requestBody: { values: [objectToRow(headers, merged)] },
   });
@@ -401,7 +423,7 @@ async function replaceAllRows(tab, objects) {
   // clear everything below the header row, then write the new rows in one shot
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SHEET_ID,
-    range: `${tab}!A2:${String.fromCharCode(64 + headers.length)}`,
+    range: `${tab}!A2:${columnLetter(headers.length)}`,
   });
   if (objects.length > 0) {
     await sheets.spreadsheets.values.update({
@@ -431,7 +453,7 @@ async function getAllRowsRaw(tab) {
   const headers = SCHEMAS[tab];
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: `${tab}!A2:${String.fromCharCode(64 + headers.length)}`,
+    range: `${tab}!A2:${columnLetter(headers.length)}`,
   });
   return res.data.values || [];
 }
