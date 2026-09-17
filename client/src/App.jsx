@@ -12,7 +12,7 @@ import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
   TrendingDown, TrendingUp, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
   Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar as RadarIcon, Search, BookOpen,
-  GraduationCap, Boxes, Swords, History, Brain, ClipboardList, CheckCircle2, ChevronDown, Phone,
+  GraduationCap, Boxes, History, Brain, ClipboardList, CheckCircle2, ChevronDown, Phone,
 } from "lucide-react";
 import { api } from "./api.js";
 import { TrainingVideosView, TrainingStudiesView } from "./TrainingView.jsx";
@@ -521,7 +521,6 @@ export default function App() {
         {!medRepOnly && <TabBtn active={tab === "supplementStores"} onClick={() => setTab("supplementStores")} icon={<Boxes size={15} />} label="Supplement Stores" />}
         {!isSupervisor && !supplementStoresOnly && <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />}
         {(role === "manager" || role === "rep") && <TabBtn active={tab === "cadence"} onClick={() => setTab("cadence")} icon={<History size={15} />} label="Visit Cadence" />}
-        {(role === "manager" || role === "rep") && <TabBtn active={tab === "competitors"} onClick={() => setTab("competitors")} icon={<Swords size={15} />} label="Competitors" />}
         <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />
         <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />
         <TabBtn active={tab === "recall"} onClick={() => setTab("recall")} icon={<Brain size={15} />} label="Recall" />
@@ -624,7 +623,20 @@ export default function App() {
               <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} products={products} />
             )}
             {tab === "recall" && (
-              <RecallView role={role} repName={repName} repNames={repNames} />
+              <RecallTabView
+                role={role}
+                repName={repName}
+                repNames={repNames}
+                competitors={competitors}
+                ourProducts={productCatalog}
+                onAdd={addCompetitor}
+                onUpdate={updateCompetitor}
+                onRemove={removeCompetitor}
+                onAddProduct={addCompetitorProduct}
+                onUpdateProduct={updateCompetitorProduct}
+                onRemoveProduct={removeCompetitorProduct}
+                onImportProducts={importCompetitorProductsBulk}
+              />
             )}
             {tab === "route" && role === "rep" && !isSupervisor && <RouteView clients={clients} doctors={doctors} />}
             {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} />}
@@ -636,20 +648,6 @@ export default function App() {
                 onDelete={deleteOrder}
                 onApproveDelete={approveDeleteOrder}
                 onDenyDelete={denyDeleteOrder}
-              />
-            )}
-            {tab === "competitors" && (role === "manager" || role === "rep") && (
-              <CompetitorsView
-                canEdit={role === "manager"}
-                competitors={competitors}
-                ourProducts={productCatalog}
-                onAdd={addCompetitor}
-                onUpdate={updateCompetitor}
-                onRemove={removeCompetitor}
-                onAddProduct={addCompetitorProduct}
-                onUpdateProduct={updateCompetitorProduct}
-                onRemoveProduct={removeCompetitorProduct}
-                onImportProducts={importCompetitorProductsBulk}
               />
             )}
             {tab === "locations" && (role === "manager" || isSupervisor) && (
@@ -6339,6 +6337,47 @@ function TrainingTabView({ role, repName, isSupervisor, repNames, products }) {
         <TrainingStudiesView role={role} products={products} />
       ) : (
         <TrainingVideosView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
+      )}
+    </div>
+  );
+}
+
+// Recall now hosts Competitors too (the standalone top-level Competitors
+// tab was removed) — "Categories" is Recall's own category browsing
+// (unchanged), "Competitors" is the exact same brand list / product list /
+// bulk import / compare tool that used to live in its own tab, just
+// reachable from here instead. A competitor product added or edited here
+// is the same CompetitorProducts record a category's own "Competitors"
+// section reads — no duplication, no separate list.
+function RecallTabView({ role, repName, repNames, competitors, ourProducts, onAdd, onUpdate, onRemove, onAddProduct, onUpdateProduct, onRemoveProduct, onImportProducts }) {
+  const [subTab, setSubTab] = useState("categories");
+  const pillStyle = (active) => ({
+    padding: "6px 14px", borderRadius: 16, fontSize: 12.5, fontWeight: 500,
+    border: active ? "1px solid #1F2A24" : "1px solid #E5DFD3",
+    background: active ? "#1F2A24" : "#fff", color: active ? "#FAF7F2" : "#5B5445",
+  });
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+        <button onClick={() => setSubTab("categories")} style={pillStyle(subTab === "categories")}>Categories</button>
+        <button onClick={() => setSubTab("competitors")} style={pillStyle(subTab === "competitors")}>Competitors</button>
+      </div>
+      {subTab === "categories" ? (
+        <RecallView role={role} repName={repName} repNames={repNames} />
+      ) : (
+        <CompetitorsView
+          canEdit={role === "manager"}
+          competitors={competitors}
+          ourProducts={ourProducts}
+          onAdd={onAdd}
+          onUpdate={onUpdate}
+          onRemove={onRemove}
+          onAddProduct={onAddProduct}
+          onUpdateProduct={onUpdateProduct}
+          onRemoveProduct={onRemoveProduct}
+          onImportProducts={onImportProducts}
+        />
       )}
     </div>
   );

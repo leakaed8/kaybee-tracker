@@ -204,7 +204,9 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
             )}
           </RecallSection>
 
-          <RecallAnalysisSection products={data.products} competitors={data.competitors} ingredient={data.ingredients[0]} role={role} onSaved={load} />
+          <RecallAnalysisSection products={data.products} ingredient={data.ingredients[0]} role={role} onSaved={load} />
+
+          <RecallCompetitorsSection competitors={data.competitors} products={data.products} role={role} onSaved={load} />
 
           <RecallSection title="Clinical References">
             {(!data.references || data.references.length === 0) ? (
@@ -727,15 +729,15 @@ function ExpandableDetails({ label, hideLabel, children }) {
   );
 }
 
-// ---------- Recall: Analysis (product comparison table + positioning) ----------
-// Replaces the old "Our Products" section, "Competitors" section, and the
-// long multi-part market-comparison writeup with ONE table (so a rep
-// compares products by looking, not reading paragraphs) plus a short
-// positioning conclusion — per explicit feedback that Recall repeated the
-// same facts in prose after already showing them elsewhere. Editing is
+// ---------- Recall: Analysis + Competitors (separate comparison tables) ----------
+// Two sibling sections, each with the same table shape (so a rep reads
+// them the same way) but scoped to one side of the comparison — "Analysis"
+// is just our own products, "Competitors" is just what's linked against
+// them. Split out of a single combined table per feedback that the two
+// belonged apart, not because the underlying data changed. Editing is
 // still available (managers on our products, any employee on competitor
-// research) but tucked behind a collapsed "Manage research" panel below,
-// so it's there when needed without cluttering the comparison itself.
+// research) but tucked behind a collapsed "Manage research" panel below
+// each table, so it's there when needed without cluttering the comparison.
 const analysisTableCellStyle = { padding: "8px 10px", fontSize: 12, borderBottom: "1px solid #F0EBE0", whiteSpace: "nowrap" };
 const analysisTableHeaderStyle = { ...analysisTableCellStyle, fontWeight: 700, color: "#8A8272", fontSize: 10.5, letterSpacing: 0.3, textTransform: "uppercase", borderBottom: "1px solid #E5DFD3" };
 // The Product column stays pinned while the rest of the table scrolls
@@ -751,122 +753,152 @@ function priceRows(pricePerPill) {
   ));
 }
 
-function RecallAnalysisSection({ products, competitors, ingredient, role, onSaved }) {
-  const ourRows = (products || []).map((p) => {
-    const metrics = computeMetrics(p);
-    return {
-      key: p.id,
-      isOurs: true,
-      name: p.name,
-      activeIngredient: p.chemicalForm || "",
-      dosePerUnit: p.compoundAmount ? `${p.compoundAmount}${p.unit ? ` ${p.unit}` : ""}` : "",
-      pillsPerBox: p.packSize || "",
-      servingSize: p.servingSize || "",
-      dosageForm: p.form || "",
-      pricePerPill: metrics.hasPrice && metrics.hasPackSize ? [{ label: "", value: metrics.costPerDose }] : [],
-      raw: p,
-    };
-  });
-  const competitorRows = (competitors || []).map((c) => {
-    const cp = c.competitorProduct;
-    const pricePerPill = (c.retailerListings || [])
-      .filter((l) => l.displayedPrice !== "" && l.displayedPrice != null && cp.packSize)
-      .map((l) => ({ label: l.retailer, value: computeMetrics({ price: l.displayedPrice, packSize: cp.packSize }).costPerDose }));
-    return {
-      key: c.id,
-      isOurs: false,
-      name: `${cp.competitorName} — ${cp.productName}`,
-      activeIngredient: cp.genericName || "",
-      dosePerUnit: cp.dosage || "",
-      pillsPerBox: cp.packSize || "",
-      servingSize: "", // not tracked on CompetitorProducts — never inferred
-      dosageForm: cp.form || "",
-      pricePerPill,
-      raw: cp,
-      rel: c,
-    };
-  });
-  const rows = [...ourRows, ...competitorRows];
+function ourProductRow(p) {
+  const metrics = computeMetrics(p);
+  return {
+    key: p.id,
+    isOurs: true,
+    name: p.name,
+    activeIngredient: p.chemicalForm || "",
+    dosePerUnit: p.compoundAmount ? `${p.compoundAmount}${p.unit ? ` ${p.unit}` : ""}` : "",
+    pillsPerBox: p.packSize || "",
+    servingSize: p.servingSize || "",
+    dosageForm: p.form || "",
+    pricePerPill: metrics.hasPrice && metrics.hasPackSize ? [{ label: "", value: metrics.costPerDose }] : [],
+    raw: p,
+  };
+}
 
+function competitorRow(c) {
+  const cp = c.competitorProduct;
+  const pricePerPill = (c.retailerListings || [])
+    .filter((l) => l.displayedPrice !== "" && l.displayedPrice != null && cp.packSize)
+    .map((l) => ({ label: l.retailer, value: computeMetrics({ price: l.displayedPrice, packSize: cp.packSize }).costPerDose }));
+  return {
+    key: c.id,
+    isOurs: false,
+    name: `${cp.competitorName} — ${cp.productName}`,
+    activeIngredient: cp.genericName || "",
+    dosePerUnit: cp.dosage || "",
+    pillsPerBox: cp.packSize || "",
+    servingSize: "", // not tracked on CompetitorProducts — never inferred
+    dosageForm: cp.form || "",
+    pricePerPill,
+    raw: cp,
+    rel: c,
+  };
+}
+
+// Shared by both the Analysis and Competitors tables — same columns, same
+// row rendering, so the two sections read as one system even though each
+// only shows its own side of the comparison.
+function ComparisonTable({ rows }) {
+  return (
+    <div style={{ overflowX: "auto", marginBottom: 14, border: "1px solid #E5DFD3", borderRadius: 8 }}>
+      <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 640 }}>
+        <thead>
+          <tr>
+            <th style={{ ...analysisTableHeaderStyle, ...analysisStickyColStyle, textAlign: "left", background: "#fff" }}>Product</th>
+            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Active ingredient</th>
+            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Dose per unit</th>
+            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Pills per box</th>
+            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Serving size</th>
+            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Dosage form</th>
+            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Price per pill</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.key} style={{ background: r.isOurs ? "#F4F8F5" : "#fff" }}>
+              <td style={{ ...analysisTableCellStyle, ...analysisStickyColStyle, fontWeight: 600, whiteSpace: "normal", background: r.isOurs ? "#F4F8F5" : "#fff", maxWidth: 150 }}>
+                {r.isOurs && <span style={{ fontSize: 9.5, fontWeight: 700, color: "#4C7A5E", display: "block" }}>OUR PRODUCT</span>}
+                {r.name}
+              </td>
+              <td style={analysisTableCellStyle}>{r.activeIngredient || "Not verified"}</td>
+              <td style={analysisTableCellStyle}>{r.dosePerUnit || "Not verified"}</td>
+              <td style={analysisTableCellStyle}>{r.pillsPerBox || "Not verified"}</td>
+              <td style={analysisTableCellStyle}>{r.servingSize || "Not verified"}</td>
+              <td style={analysisTableCellStyle}>{r.dosageForm || "Not verified"}</td>
+              <td style={analysisTableCellStyle}>{priceRows(r.pricePerPill)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Our own products only — the comparison table plus a positioning
+// conclusion built from those same documented facts.
+function RecallAnalysisSection({ products, ingredient, role, onSaved }) {
+  const ourRows = (products || []).map(ourProductRow);
   const whatNotToClaimFirstLine = (ingredient?.whatNotToClaim || "").split("\n").filter(Boolean)[0] || "";
 
   return (
     <RecallSection title="Analysis">
-      {rows.length === 0 ? (
-        <EmptyState text="No products or competitor research have been added to this category yet." />
+      {ourRows.length === 0 ? (
+        <EmptyState text="No our-products have been added to this category yet." />
       ) : (
         <>
-          <div style={{ overflowX: "auto", marginBottom: 14, border: "1px solid #E5DFD3", borderRadius: 8 }}>
-            <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 640 }}>
-              <thead>
-                <tr>
-                  <th style={{ ...analysisTableHeaderStyle, ...analysisStickyColStyle, textAlign: "left", background: "#fff" }}>Product</th>
-                  <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Active ingredient</th>
-                  <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Dose per unit</th>
-                  <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Pills per box</th>
-                  <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Serving size</th>
-                  <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Dosage form</th>
-                  <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Price per pill</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => (
-                  <tr key={r.key} style={{ background: r.isOurs ? "#F4F8F5" : "#fff" }}>
-                    <td style={{ ...analysisTableCellStyle, ...analysisStickyColStyle, fontWeight: 600, whiteSpace: "normal", background: r.isOurs ? "#F4F8F5" : "#fff", maxWidth: 150 }}>
-                      {r.isOurs && <span style={{ fontSize: 9.5, fontWeight: 700, color: "#4C7A5E", display: "block" }}>OUR PRODUCT</span>}
-                      {r.name}
-                    </td>
-                    <td style={analysisTableCellStyle}>{r.activeIngredient || "Not verified"}</td>
-                    <td style={analysisTableCellStyle}>{r.dosePerUnit || "Not verified"}</td>
-                    <td style={analysisTableCellStyle}>{r.pillsPerBox || "Not verified"}</td>
-                    <td style={analysisTableCellStyle}>{r.servingSize || "Not verified"}</td>
-                    <td style={analysisTableCellStyle}>{r.dosageForm || "Not verified"}</td>
-                    <td style={analysisTableCellStyle}>{priceRows(r.pricePerPill)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ComparisonTable rows={ourRows} />
 
           <div style={{ fontSize: 11, fontWeight: 700, color: "#5B5445", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 }}>
             How to position our product
           </div>
-          {ourRows.length === 0 ? (
-            <div style={{ fontSize: 11.5, color: "#8A8272", fontStyle: "italic", marginBottom: 12 }}>No our-products on file for this category yet.</div>
-          ) : (
-            ourRows.map((r, idx) => {
-              const facts = [r.dosePerUnit, r.activeIngredient].filter(Boolean).join(" ");
-              const formPhrase = r.dosageForm ? ` in a ${r.dosageForm.toLowerCase()} format` : "";
-              const whatCanBeSaid = facts ? `"Contains ${facts}${formPhrase}."` : "Not enough verified information to state yet.";
-              return (
-                <div key={r.key} style={{ marginBottom: 10, paddingBottom: 10, borderBottom: idx < ourRows.length - 1 ? "1px solid #F0EBE0" : "none" }}>
-                  <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 3 }}>{r.name}</div>
-                  <div style={{ fontSize: 12, color: "#2F5B41" }}>{whatCanBeSaid}</div>
-                  {whatNotToClaimFirstLine && (
-                    <div style={{ fontSize: 11.5, color: "#7A3B3B", marginTop: 2 }}>
-                      <strong>Do not claim:</strong> {whatNotToClaimFirstLine.replace(/^Do not claim /i, "")}
-                    </div>
-                  )}
-                </div>
-              );
-            })
-          )}
+          {ourRows.map((r, idx) => {
+            const facts = [r.dosePerUnit, r.activeIngredient].filter(Boolean).join(" ");
+            const formPhrase = r.dosageForm ? ` in a ${r.dosageForm.toLowerCase()} format` : "";
+            const whatCanBeSaid = facts ? `"Contains ${facts}${formPhrase}."` : "Not enough verified information to state yet.";
+            return (
+              <div key={r.key} style={{ marginBottom: 10, paddingBottom: 10, borderBottom: idx < ourRows.length - 1 ? "1px solid #F0EBE0" : "none" }}>
+                <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 3 }}>{r.name}</div>
+                <div style={{ fontSize: 12, color: "#2F5B41" }}>{whatCanBeSaid}</div>
+                {whatNotToClaimFirstLine && (
+                  <div style={{ fontSize: 11.5, color: "#7A3B3B", marginTop: 2 }}>
+                    <strong>Do not claim:</strong> {whatNotToClaimFirstLine.replace(/^Do not claim /i, "")}
+                  </div>
+                )}
+              </div>
+            );
+          })}
 
           <ExpandableDetails label="Manage research" hideLabel="Manage research">
             {ourRows.map((r) => (
               <OurProductCard key={r.key} product={r.raw} canEdit={role === "manager"} onSaved={onSaved} />
             ))}
-            {competitorRows.map((r) => (
-              <CompetitorCard key={r.key} rel={r.rel} canEdit={true} canUnlink={role === "manager"} onSaved={onSaved} />
-            ))}
-            <AddCompetitorToCategory
-              ourProducts={ourRows.map((r) => ({ id: r.raw.id, name: r.name }))}
-              existingCompetitorIds={new Set(competitorRows.map((r) => r.raw.id))}
-              onSaved={onSaved}
-            />
           </ExpandableDetails>
         </>
       )}
+    </RecallSection>
+  );
+}
+
+// Competitor products linked to THIS category only — the comparison table,
+// plus the tools to complete their research, link a new one in, or unlink
+// one, all scoped to this category the same way Analysis is scoped to our
+// own products.
+function RecallCompetitorsSection({ competitors, products, role, onSaved }) {
+  const competitorRows = (competitors || []).map(competitorRow);
+  const ourProducts = (products || []).map((p) => ({ id: p.id, name: p.name }));
+
+  return (
+    <RecallSection title="Competitors">
+      {competitorRows.length === 0 ? (
+        <EmptyState text="No competitor research has been linked to this category yet." />
+      ) : (
+        <ComparisonTable rows={competitorRows} />
+      )}
+
+      <ExpandableDetails label="Manage research" hideLabel="Manage research">
+        {competitorRows.map((r) => (
+          <CompetitorCard key={r.key} rel={r.rel} canEdit={true} canUnlink={role === "manager"} onSaved={onSaved} />
+        ))}
+        <AddCompetitorToCategory
+          ourProducts={ourProducts}
+          existingCompetitorIds={new Set(competitorRows.map((r) => r.raw.id))}
+          onSaved={onSaved}
+        />
+      </ExpandableDetails>
     </RecallSection>
   );
 }
