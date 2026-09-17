@@ -22,10 +22,19 @@ const SCHEMAS = {
   Competitors: ["id", "name", "supplierName", "supplierContact", "offerDetails", "notes", "createdAt"],
   CompetitorSightings: ["id", "visitId", "client", "repName", "competitorName", "notes", "date"],
   VisitComments: ["id", "visitId", "authorName", "text", "createdAt"],
+  // NEVER add a retailer stock-status field here (availability, inStock,
+  // outOfStock, soldOut, stockStatus, ...) — this table researches which
+  // products are LISTED by Lebanese retailers, not their current stock.
+  // A retailer's "Out of Stock" label on a listing is not a reason to
+  // exclude or remove a product. See RecallRetailerListings for per-source
+  // listing data (price/URL/date) — this master row is deliberately
+  // retailer-agnostic; a product doesn't get a second master row just
+  // because it's listed on more than one retailer site.
   CompetitorProducts: [
     "id", "competitorName", "productName", "genericName", "form", "dosage", "packSize", "price", "discountRate", "notes", "createdAt",
     "unitsPerDay", "ingredients", "manufacturer", "manufacturingCountry", "ingredientOrigin", "gmp", "thirdPartyCertification",
     "coaAvailability", "contaminantTesting", "expiryDate", "evidenceReferences", "otherIngredients", "createdBy", "updatedBy", "updatedAt",
+    "researchStatus", "missingFields",
   ],
   TrainingVideos: ["id", "title", "r2ObjectKey", "quiz", "createdAt"],
   TrainingProgress: ["id", "employeeId", "videoId", "completedAt", "quizResponses"],
@@ -86,6 +95,24 @@ const SCHEMAS = {
   RecallQuizQuestions: [
     "id", "categoryId", "ingredientId", "question", "optionA", "optionB", "optionC", "optionD",
     "correctAnswer", "explanation", "sourceIds", "active",
+  ],
+  // One row per (competitor master product × retailer). Deliberately has NO
+  // availability/inStock field — a retailer's page is a price/existence
+  // source, not a live stock feed, and the URL is a research citation, not
+  // a live connection this app polls. Never pick one listing's price as
+  // "the market price" — all listings for a product are shown side by side.
+  RecallRetailerListings: [
+    "id", "competitorProductId", "retailer", "sourceUrl", "displayedPrice", "currency",
+    "researchDate", "notes", "createdBy", "createdAt",
+  ],
+  // Generic: usable for a conflict on any entity/field (a competitor
+  // product's chemical form, one of our own ProductCatalog products'
+  // serving size, etc.) without needing a dedicated "conflict" column on
+  // every table. Recording a conflict always keeps BOTH source values —
+  // never resolved by silently picking one.
+  RecallFieldConflicts: [
+    "id", "entityType", "entityId", "fieldName", "sourceALabel", "sourceAValue",
+    "sourceBLabel", "sourceBValue", "status", "notes", "createdAt",
   ],
 };
 

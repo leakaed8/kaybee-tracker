@@ -2291,11 +2291,22 @@ app.delete("/api/competitors/:id", requireManager, async (req, res) => {
 // brand that has one, with prices) instead of digging through free-text
 // offer notes. Same manager-curated / rep-read-and-search governance as
 // the master list.
+// RULE (locked): never add a retailer stock-status field to this list —
+// availability/inStock/outOfStock/soldOut/stockStatus have no place on a
+// competitor product. Both routes below build the stored row by reading
+// ONLY the fields named here, so an unlisted field in a request body
+// (e.g. someone sending "availability") is never persisted regardless —
+// this allowlist IS the enforcement, not just a convention. Retailer-
+// specific data (price at a specific site, source URL, research date)
+// belongs on RecallRetailerListings, one row per (product × retailer),
+// never folded into this master row.
 const COMPETITOR_PRODUCT_FIELDS = [
   "competitorName", "productName", "genericName", "form", "dosage", "packSize", "price", "discountRate", "notes", "unitsPerDay",
 ];
 // Secondary/advanced fields — optional, shown behind "More product details"
 // client-side. Kept as plain strings; none of them feed the cost math.
+// coaAvailability is Certificate-of-Analysis availability (a documentation
+// field) — unrelated to retailer stock availability; do not conflate them.
 const COMPETITOR_PRODUCT_DETAIL_FIELDS = [
   "manufacturer", "manufacturingCountry", "ingredientOrigin", "gmp", "thirdPartyCertification",
   "coaAvailability", "contaminantTesting", "expiryDate", "evidenceReferences", "otherIngredients",
@@ -2346,6 +2357,15 @@ function validateCompetitorProductNumbers(body) {
   return null;
 }
 
+// RULE (locked): dosage form is part of a product's identity, never a
+// detail to infer from its name — "Mason Calcium + D3 Tablet" and
+// "...Chewable" are two separate, real products, not a naming variant of
+// one product or a source conflict to resolve. `form` here is always
+// whatever was explicitly typed/selected (client-side: a FORM_OPTIONS
+// dropdown), sourced from a label/manufacturer/retailer page — never
+// parsed or guessed from productName. Any future product-matching/dedup
+// logic must treat two records with the same name but different `form`
+// values as different products, not duplicates to merge.
 function validateCompetitorProductCreate(body) {
   if (!body.competitorName || !String(body.competitorName).trim()) return "Brand is required.";
   if (!body.productName || !String(body.productName).trim()) return "Product name is required.";
@@ -4147,6 +4167,103 @@ app.post("/api/recall/assignments", requireManager, async (req, res) => {
     }));
     await db.replaceAllRows("RepCategoryAssignments", [...keptForOtherReps, ...newRowsForThisRep]);
     res.json({ ok: true, count: newRowsForThisRep.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// The only four sources approved for the Lebanese competitor-product
+// research effort. A listing naming anything else is rejected outright —
+// this is the actual enforcement of "approved sources," not just a comment.
+const APPROVED_RETAILERS = ["Skin Society", "Mazen Online", "Nicolas Care", "Sohati Care"];
+
+app.get("/api/recall/retailer-listings", async (req, res) => {
+  try {
+    const { competitorProductId } = req.query;
+    const listings = await db.getAllRows("RecallRetailerListings");
+    const filtered = competitorProductId ? listings.filter((l) => l.competitorProductId === competitorProductId) : listings;
+    res.json({ listings: filtered });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// One row per (competitor master product × retailer) — see the schema
+// comment in sheetsDb.js. Deliberately reads only the fields named here:
+// a caller sending "availability"/"inStock"/etc. in the body has it
+// silently ignored, the same allowlist enforcement used for competitor
+// products above. sourceUrl is a citation, not a live connection — no
+// polling or refresh job ever touches this table.
+app.post("/api/recall/retailer-listings", requireManager, async (req, res) => {
+  try {
+    const { competitorProductId, retailer, sourceUrl, displayedPrice, currency, researchDate, notes } = req.body;
+    if (!competitorProductId || !String(competitorProductId).trim()) return res.status(400).json({ error: "competitorProductId is required." });
+    if (!APPROVED_RETAILERS.includes(retailer)) {
+      return res.status(400).json({ error: `retailer must be one of: ${APPROVED_RETAILERS.join(", ")}` });
+    }
+    if (!sourceUrl || !String(sourceUrl).trim()) return res.status(400).json({ error: "sourceUrl is required — a listing is only as good as its citation." });
+
+    const competitorProducts = await db.getAllRows("CompetitorProducts");
+    if (!competitorProducts.some((p) => p.id === competitorProductId)) {
+      return res.status(404).json({ error: "That competitor product doesn't exist — add the master product first." });
+    }
+
+    const listing = {
+      id: `rl${crypto.randomUUID()}`,
+      competitorProductId,
+      retailer,
+      sourceUrl: String(sourceUrl).trim(),
+      displayedPrice: displayedPrice === "" || displayedPrice == null ? "" : Number(displayedPrice),
+      currency: currency || "",
+      researchDate: researchDate || new Date().toISOString().slice(0, 10),
+      notes: notes || "",
+      createdBy: req.repName || "Manager",
+      createdAt: new Date().toISOString(),
+    };
+    await db.appendRow("RecallRetailerListings", listing);
+    res.json(listing);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/recall/field-conflicts", async (req, res) => {
+  try {
+    const { entityType, entityId } = req.query;
+    const conflicts = await db.getAllRows("RecallFieldConflicts");
+    const filtered = conflicts.filter((c) => (!entityType || c.entityType === entityType) && (!entityId || c.entityId === entityId));
+    res.json({ conflicts: filtered });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Recording a conflict always keeps BOTH source values — there is no code
+// path here that lets one source's value silently win. If a caller can't
+// supply two distinct sourced values, it isn't a conflict; it's a single
+// (possibly still-unverified) value on the record itself.
+app.post("/api/recall/field-conflicts", requireManager, async (req, res) => {
+  try {
+    const { entityType, entityId, fieldName, sourceALabel, sourceAValue, sourceBLabel, sourceBValue, notes } = req.body;
+    if (!entityType || !entityId || !fieldName) return res.status(400).json({ error: "entityType, entityId, and fieldName are required." });
+    if (sourceAValue === undefined || sourceAValue === null || sourceAValue === "" || sourceBValue === undefined || sourceBValue === null || sourceBValue === "") {
+      return res.status(400).json({ error: "Both sourceAValue and sourceBValue are required — a conflict needs two disagreeing sourced values, not one." });
+    }
+    const conflict = {
+      id: `fc${crypto.randomUUID()}`,
+      entityType, entityId, fieldName,
+      sourceALabel: sourceALabel || "", sourceAValue: String(sourceAValue),
+      sourceBLabel: sourceBLabel || "", sourceBValue: String(sourceBValue),
+      status: "CONFLICT",
+      notes: notes || "",
+      createdAt: new Date().toISOString(),
+    };
+    await db.appendRow("RecallFieldConflicts", conflict);
+    res.json(conflict);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
