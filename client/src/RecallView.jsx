@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { api } from "./api.js";
+import { computeMetrics, fmtMoney } from "./competitorCalc.js";
 
 // Kept local (not imported from App.jsx) to avoid a circular import between
 // the two files — same look as the rest of the app either way.
@@ -72,7 +73,6 @@ export function RecallView({ role, repName, repNames }) {
         <RecallHome
           role={role}
           categories={categories}
-          myAssignedCategoryIds={myAssignedCategoryIds}
           onOpenCategory={(id) => setView(id)}
           onOpenAssignments={() => setView("assignments")}
         />
@@ -98,14 +98,12 @@ export function RecallView({ role, repName, repNames }) {
   );
 }
 
-function RecallHome({ role, categories, myAssignedCategoryIds, onOpenCategory, onOpenAssignments }) {
-  // A manager has no personal "assigned categories" concept — they see the
-  // full list by default. A rep starts on their own assigned set and can
-  // switch to the full list — never the other way around, per "don't force
-  // all categories onto the rep's first screen."
-  const [scope, setScope] = useState(role === "manager" ? "all" : "mine");
-  const assignedSet = new Set(myAssignedCategoryIds);
-  const shown = role === "rep" && scope === "mine" ? categories.filter((c) => assignedSet.has(c.id)) : categories;
+// Simplified — every rep sees the same full category list a manager does,
+// no "My Categories" vs "All Categories" split. (The manager's Recall
+// Assignments screen still exists for whatever organizational use a
+// manager wants it for; it just no longer gates what a rep sees here.)
+function RecallHome({ role, categories, onOpenCategory, onOpenAssignments }) {
+  const shown = categories;
 
   return (
     <div>
@@ -120,37 +118,8 @@ function RecallHome({ role, categories, myAssignedCategoryIds, onOpenCategory, o
         </div>
       )}
 
-      {role === "rep" && (
-        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-          <button
-            onClick={() => setScope("mine")}
-            style={{
-              flex: 1, padding: "8px 14px", borderRadius: 8, fontSize: 12.5, fontWeight: 500,
-              border: scope === "mine" ? "1px solid #4C7A5E" : "1px solid #1F2A24",
-              background: scope === "mine" ? "#4C7A5E" : "#fff", color: scope === "mine" ? "#FAF7F2" : "#1F2A24",
-            }}
-          >
-            My Categories
-          </button>
-          <button
-            onClick={() => setScope("all")}
-            style={{
-              flex: 1, padding: "8px 14px", borderRadius: 8, fontSize: 12.5, fontWeight: 500,
-              border: scope === "all" ? "1px solid #4C7A5E" : "1px solid #1F2A24",
-              background: scope === "all" ? "#4C7A5E" : "#fff", color: scope === "all" ? "#FAF7F2" : "#1F2A24",
-            }}
-          >
-            All Categories
-          </button>
-        </div>
-      )}
-
-      <h3 style={{ fontSize: 13, fontWeight: 700, color: "#8A8272", letterSpacing: 0.4, margin: "0 0 10px" }}>
-        {role === "manager" ? "ALL CATEGORIES" : scope === "mine" ? "MY CATEGORIES" : "ALL CATEGORIES"}
-      </h3>
-
       {shown.length === 0 ? (
-        <EmptyState text={role === "rep" && scope === "mine" ? "No categories assigned yet — ask your manager, or switch to All Categories." : "No categories found."} />
+        <EmptyState text="No categories found." />
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 10 }}>
           {shown.map((c) => (
@@ -198,10 +167,10 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
         ← Back to categories
       </button>
 
-      {loading && <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>}
+      {loading && !data && <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>}
       {error && <div style={{ fontSize: 12.5, color: "#B33A3A" }}>{error}</div>}
 
-      {!loading && !error && data && (
+      {!error && data && (
         <>
           <h3 className="kb-font-display" style={{ fontSize: 18, fontWeight: 600, margin: "0 0 4px" }}>{data.category.name}</h3>
           {data.category.description && <p style={{ fontSize: 13, color: "#8A8272", margin: "0 0 18px" }}>{data.category.description}</p>}
@@ -235,51 +204,7 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
             )}
           </RecallSection>
 
-          <RecallSection title="Our Products">
-            {data.products.length === 0 ? (
-              <EmptyState text="No products have been linked to this category yet." />
-            ) : (
-              data.products.map((p) => (
-                <OurProductCard key={p.id} product={p} canEdit={role === "manager"} onSaved={load} />
-              ))
-            )}
-          </RecallSection>
-
-          <RecallSection title="Competitors">
-            {data.competitors.length === 0 ? (
-              <EmptyState text="No competitor comparison has been added yet." />
-            ) : (
-              // Competitor research is a shared rep+manager task (unlike
-              // Our Products/Product Catalog, which stays manager-only) —
-              // anyone who can see this page is authenticated, so canEdit
-              // is unconditional here.
-              data.competitors.map((c) => (
-                <CompetitorCard key={c.id} rel={c} canEdit={true} onSaved={load} />
-              ))
-            )}
-          </RecallSection>
-
-          <RecallComparisonSummary products={data.products} competitors={data.competitors} ingredient={data.ingredients[0]} />
-
-          <RecallSection title="Clinical Evidence">
-            {data.evidence.length === 0 ? (
-              <EmptyState text="Clinical evidence coming soon." />
-            ) : (
-              data.evidence.map((e) => (
-                <div key={e.id} style={{ fontSize: 12.5, marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid #F0EBE0" }}>
-                  <div style={{ fontWeight: 600, marginBottom: 2 }}>{e.condition}</div>
-                  {e.result ? (
-                    <div>{e.result}</div>
-                  ) : (
-                    <div style={{ color: "#B7AF9E", fontStyle: "italic" }}>Content pending — not yet extracted from the cited source.</div>
-                  )}
-                  {e.evidenceLevel && e.evidenceLevel !== "NOT_VERIFIED" && (
-                    <div style={{ fontSize: 10.5, color: "#8A8272", marginTop: 4 }}>Evidence level: {e.evidenceLevel}</div>
-                  )}
-                </div>
-              ))
-            )}
-          </RecallSection>
+          <RecallAnalysisSection products={data.products} competitors={data.competitors} ingredient={data.ingredients[0]} role={role} onSaved={load} />
 
           <RecallSection title="Clinical References">
             {(!data.references || data.references.length === 0) ? (
@@ -617,10 +542,14 @@ function ConflictBanner({ conflicts, onSaved, canResolve }) {
   );
 }
 
+// Deliberately minimal — the comparison table above already shows every
+// fact (dose, form, price, ...); repeating them here would be exactly the
+// "repetition of information" this section was simplified to avoid. This
+// is just an entry point to edit/complete research and see conflicts.
 function OurProductCard({ product: p, canEdit, onSaved }) {
   const [editing, setEditing] = useState(false);
   return (
-    <div style={{ fontSize: 12.5, marginBottom: 12, paddingBottom: 12, borderBottom: "1px solid #F0EBE0" }}>
+    <div style={{ fontSize: 12.5, marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid #F0EBE0" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
         <div style={{ fontWeight: 600 }}>{p.name}</div>
         {canEdit && (
@@ -629,17 +558,6 @@ function OurProductCard({ product: p, canEdit, onSaved }) {
           </button>
         )}
       </div>
-      {(p.compoundAmount || p.chemicalForm || p.form) && (
-        <div style={{ color: "#5B5445", marginTop: 2 }}>
-          {[p.compoundAmount ? `${p.compoundAmount} ${p.unit || ""}`.trim() : "", p.chemicalForm, p.form, p.packSize ? `pack of ${p.packSize}` : ""].filter(Boolean).join(" · ")}
-        </div>
-      )}
-      {(p.servingSize || p.dailyAmount) && (
-        <div style={{ color: "#8A8272", fontSize: 11.5, marginTop: 2 }}>
-          {[p.servingSize ? `Serving size: ${p.servingSize}` : "", p.dailyAmount ? `Daily use: ${p.dailyAmount}` : ""].filter(Boolean).join(" · ")}
-        </div>
-      )}
-      {p.price !== "" && p.price != null && <div style={{ color: "#8A8272", fontSize: 11.5, marginTop: 2 }}>Price: {p.price}</div>}
       <ConflictBanner conflicts={p.conflicts} onSaved={onSaved} canResolve={canEdit} />
       <MissingInfoBadge researchStatus={p.verificationStatus} missingFields={p.missingFields} />
       {editing && <OurProductEditor product={p} onCancel={() => setEditing(false)} onSaved={() => { setEditing(false); onSaved(); }} />}
@@ -651,7 +569,7 @@ function CompetitorCard({ rel: c, canEdit, onSaved }) {
   const [editing, setEditing] = useState(false);
   const cp = c.competitorProduct;
   return (
-    <div style={{ fontSize: 12.5, marginBottom: 12, paddingBottom: 12, borderBottom: "1px solid #F0EBE0" }}>
+    <div style={{ fontSize: 12.5, marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid #F0EBE0" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
         <div style={{ fontWeight: 600 }}>{cp.competitorName} — {cp.productName}</div>
         {canEdit && (
@@ -660,16 +578,11 @@ function CompetitorCard({ rel: c, canEdit, onSaved }) {
           </button>
         )}
       </div>
-      <div style={{ color: "#5B5445", marginTop: 2 }}>
-        {[cp.dosage, cp.genericName, cp.form, cp.packSize ? `pack of ${cp.packSize}` : ""].filter(Boolean).join(" · ")}
-      </div>
-      {c.notes && <div style={{ color: "#8A8272", fontSize: 11.5, marginTop: 4 }}>{c.notes}</div>}
       {c.retailerListings.length > 0 && (
-        <div style={{ marginTop: 6 }}>
+        <div style={{ marginTop: 4 }}>
           {c.retailerListings.map((l) => (
-            <div key={l.id} style={{ fontSize: 11.5, color: "#5B5445" }}>
-              {l.retailer}: {l.displayedPrice !== "" && l.displayedPrice != null ? `${l.currency || ""} ${l.displayedPrice}`.trim() : "price not verified"}
-              {" — "}{l.sourceUrl ? <a href={l.sourceUrl} target="_blank" rel="noreferrer">source</a> : "source URL not verified"}
+            <div key={l.id} style={{ fontSize: 11, color: "#8A8272" }}>
+              {l.retailer}{" — "}{l.sourceUrl ? <a href={l.sourceUrl} target="_blank" rel="noreferrer">source</a> : "source URL not verified"}
             </div>
           ))}
         </div>
@@ -683,25 +596,11 @@ function CompetitorCard({ rel: c, canEdit, onSaved }) {
   );
 }
 
-function distinctVerified(items, key) {
-  const vals = items.map((i) => i[key]).filter((v) => v && String(v).trim());
-  return [...new Set(vals)];
-}
-
-function SummarySubsection({ title, children }) {
-  return (
-    <div style={{ marginBottom: 14 }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: "#5B5445", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 }}>{title}</div>
-      {children}
-    </div>
-  );
-}
-
 // Collapsed by default — keeps the market-comparison section to its
 // conclusions on first look, per feedback that the full field-by-field
 // breakdown made Recall feel crowded. Nothing inside is removed, just
 // tucked behind a toggle for a rep who wants the underlying detail.
-function ExpandableDetails({ label, children }) {
+function ExpandableDetails({ label, hideLabel, children }) {
   const [open, setOpen] = useState(false);
   return (
     <div>
@@ -710,224 +609,148 @@ function ExpandableDetails({ label, children }) {
         onClick={() => setOpen((v) => !v)}
         style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11.5, color: "#4C7A5E", background: "none", border: "none", padding: "4px 0", cursor: "pointer", fontWeight: 500 }}
       >
-        {open ? "▾ Hide full market comparison details" : `▸ ${label}`}
+        {open ? `▾ ${hideLabel || `Hide ${label}`}` : `▸ ${label}`}
       </button>
       {open && <div style={{ marginTop: 8 }}>{children}</div>}
     </div>
   );
 }
 
-function IncompleteNotice({ missing }) {
-  return (
-    <div style={{ fontSize: 11.5, color: "#8A6B3A" }}>
-      ⚠️ Comparison incomplete<br />
-      Missing: {missing.join(", ")}
-    </div>
-  );
+// ---------- Recall: Analysis (product comparison table + positioning) ----------
+// Replaces the old "Our Products" section, "Competitors" section, and the
+// long multi-part market-comparison writeup with ONE table (so a rep
+// compares products by looking, not reading paragraphs) plus a short
+// positioning conclusion — per explicit feedback that Recall repeated the
+// same facts in prose after already showing them elsewhere. Editing is
+// still available (managers on our products, any employee on competitor
+// research) but tucked behind a collapsed "Manage research" panel below,
+// so it's there when needed without cluttering the comparison itself.
+const analysisTableCellStyle = { padding: "8px 10px", fontSize: 12, borderBottom: "1px solid #F0EBE0", whiteSpace: "nowrap" };
+const analysisTableHeaderStyle = { ...analysisTableCellStyle, fontWeight: 700, color: "#8A8272", fontSize: 10.5, letterSpacing: 0.3, textTransform: "uppercase", borderBottom: "1px solid #E5DFD3" };
+// The Product column stays pinned while the rest of the table scrolls
+// horizontally on a narrow screen — with 7 columns there's no way to fit
+// this without scrolling, but a rep should never lose track of which row
+// they're reading.
+const analysisStickyColStyle = { position: "sticky", left: 0, zIndex: 1 };
+
+function priceRows(pricePerPill) {
+  if (pricePerPill.length === 0) return "Not verified";
+  return pricePerPill.map((p, i) => (
+    <div key={i}>{p.label ? `${p.label}: ` : ""}{fmtMoney(p.value)}</div>
+  ));
 }
 
-// Built ENTIRELY from data.products/data.competitors already loaded for
-// this category — no separate fetch, no fabricated commentary. Every line
-// either states a value pulled straight from a record or explicitly says
-// "Not verified" / shows an "incomplete" notice; this is never a ranking
-// (see Phase 2D rule 14/Q — no best/winner/superior/strongest anywhere).
-function RecallComparisonSummary({ products, competitors, ingredient }) {
-  const ourItems = (products || []).map((p) => ({
-    label: p.name,
-    amount: p.compoundAmount ? `${p.compoundAmount}${p.unit ? ` ${p.unit}` : ""}` : "",
-    chemicalForm: p.chemicalForm || "",
-    dosageForm: p.form || "",
-    packSize: p.packSize || "",
-    price: p.price,
-    ingredientsText: p.ingredients || "",
-    notesText: [p.notes, p.linkNotes].filter(Boolean).join(" "),
-    missingFields: p.missingFields || [],
-  }));
-  const competitorItems = (competitors || []).map((c) => {
-    const cp = c.competitorProduct;
+function RecallAnalysisSection({ products, competitors, ingredient, role, onSaved }) {
+  const ourRows = (products || []).map((p) => {
+    const metrics = computeMetrics(p);
     return {
-      label: `${cp.competitorName} — ${cp.productName}`,
-      amount: cp.dosage || "",
-      chemicalForm: cp.genericName || "",
-      dosageForm: cp.form || "",
-      packSize: cp.packSize || "",
-      retailerListings: c.retailerListings || [],
-      ingredientsText: cp.ingredients || "",
-      notesText: cp.notes || "",
-      missingFields: cp.missingFields || [],
+      key: p.id,
+      isOurs: true,
+      name: p.name,
+      activeIngredient: p.chemicalForm || "",
+      dosePerUnit: p.compoundAmount ? `${p.compoundAmount}${p.unit ? ` ${p.unit}` : ""}` : "",
+      pillsPerBox: p.packSize || "",
+      servingSize: p.servingSize || "",
+      dosageForm: p.form || "",
+      pricePerPill: metrics.hasPrice && metrics.hasPackSize ? [{ label: "", value: metrics.costPerDose }] : [],
+      raw: p,
     };
   });
-  const allItems = [...ourItems, ...competitorItems];
-  if (allItems.length === 0) return null;
-
-  const chemicalFormGroups = new Map();
-  allItems.forEach((i) => {
-    const key = i.chemicalForm || "Not verified";
-    chemicalFormGroups.set(key, [...(chemicalFormGroups.get(key) || []), i.label]);
+  const competitorRows = (competitors || []).map((c) => {
+    const cp = c.competitorProduct;
+    const pricePerPill = (c.retailerListings || [])
+      .filter((l) => l.displayedPrice !== "" && l.displayedPrice != null && cp.packSize)
+      .map((l) => ({ label: l.retailer, value: computeMetrics({ price: l.displayedPrice, packSize: cp.packSize }).costPerDose }));
+    return {
+      key: c.id,
+      isOurs: false,
+      name: `${cp.competitorName} — ${cp.productName}`,
+      activeIngredient: cp.genericName || "",
+      dosePerUnit: cp.dosage || "",
+      pillsPerBox: cp.packSize || "",
+      servingSize: "", // not tracked on CompetitorProducts — never inferred
+      dosageForm: cp.form || "",
+      pricePerPill,
+      raw: cp,
+      rel: c,
+    };
   });
-  const dosageFormGroups = new Map();
-  allItems.forEach((i) => {
-    const key = i.dosageForm || "Not verified";
-    dosageFormGroups.set(key, [...(dosageFormGroups.get(key) || []), i.label]);
-  });
+  const rows = [...ourRows, ...competitorRows];
 
-  const anyChemicalFormVerified = allItems.some((i) => i.chemicalForm);
-  const anyDosageFormVerified = allItems.some((i) => i.dosageForm);
-  const anyAmountVerified = allItems.some((i) => i.amount);
-  const anyPriceVerified = ourItems.some((i) => i.price !== "" && i.price != null) || competitorItems.some((i) => i.retailerListings.some((l) => l.displayedPrice !== "" && l.displayedPrice != null));
-  const hasFormulationNote = (i) => i.ingredientsText || /also contains|includes|folic acid|folate|calcium/i.test(i.notesText);
-  const anyFormulationNoted = allItems.some(hasFormulationNote);
-
-  const differentiators = [];
-  if (distinctVerified(allItems, "amount").length > 1) differentiators.push("Dose");
-  if (distinctVerified(allItems, "chemicalForm").length > 1) differentiators.push("Chemical form");
-  if (distinctVerified(allItems, "dosageForm").length > 1) differentiators.push("Dosage form");
-  if (distinctVerified(allItems, "packSize").length > 1) differentiators.push("Pack size");
-  if (anyFormulationNoted) differentiators.push("Additional ingredients / combination formulation");
-  if (anyPriceVerified) differentiators.push("Retailer price");
-
-  const ingredientName = ingredient?.name || "This ingredient";
-  const quickTakeawayFirstLine = (ingredient?.repQuickTakeaway || "").split("\n").filter(Boolean)[0] || "";
   const whatNotToClaimFirstLine = (ingredient?.whatNotToClaim || "").split("\n").filter(Boolean)[0] || "";
 
   return (
-    <RecallSection title={`${ingredientName} market comparison`}>
-      <div style={{ fontSize: 11, color: "#8A8272", fontStyle: "italic", marginBottom: 10 }}>
-        This summarizes documented differences only — it does not recommend one product over another.
-      </div>
+    <RecallSection title="Analysis">
+      {rows.length === 0 ? (
+        <EmptyState text="No products or competitor research have been added to this category yet." />
+      ) : (
+        <>
+          <div style={{ overflowX: "auto", marginBottom: 14, border: "1px solid #E5DFD3", borderRadius: 8 }}>
+            <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 640 }}>
+              <thead>
+                <tr>
+                  <th style={{ ...analysisTableHeaderStyle, ...analysisStickyColStyle, textAlign: "left", background: "#fff" }}>Product</th>
+                  <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Active ingredient</th>
+                  <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Dose per unit</th>
+                  <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Pills per box</th>
+                  <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Serving size</th>
+                  <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Dosage form</th>
+                  <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Price per pill</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.key} style={{ background: r.isOurs ? "#F4F8F5" : "#fff" }}>
+                    <td style={{ ...analysisTableCellStyle, ...analysisStickyColStyle, fontWeight: 600, whiteSpace: "normal", background: r.isOurs ? "#F4F8F5" : "#fff", maxWidth: 150 }}>
+                      {r.isOurs && <span style={{ fontSize: 9.5, fontWeight: 700, color: "#4C7A5E", display: "block" }}>OUR PRODUCT</span>}
+                      {r.name}
+                    </td>
+                    <td style={analysisTableCellStyle}>{r.activeIngredient || "Not verified"}</td>
+                    <td style={analysisTableCellStyle}>{r.dosePerUnit || "Not verified"}</td>
+                    <td style={analysisTableCellStyle}>{r.pillsPerBox || "Not verified"}</td>
+                    <td style={analysisTableCellStyle}>{r.servingSize || "Not verified"}</td>
+                    <td style={analysisTableCellStyle}>{r.dosageForm || "Not verified"}</td>
+                    <td style={analysisTableCellStyle}>{priceRows(r.pricePerPill)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
 
-      {/* Conclusions first, always visible — this is what a rep actually
-          needs before a call. The full field-by-field breakdown these are
-          drawn from is available on demand below, not by default. */}
-      <SummarySubsection title="Pre-call — 30 second summary">
-        <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
-          <li style={{ marginBottom: 4 }}>Forms represented in this market: {distinctVerified(allItems, "chemicalForm").length > 0 ? distinctVerified(allItems, "chemicalForm").join(", ") : "Not verified"}.</li>
-          <li style={{ marginBottom: 4 }}>Our products use: {distinctVerified(ourItems, "chemicalForm").length > 0 ? distinctVerified(ourItems, "chemicalForm").join(", ") : "Not verified"}.</li>
-          <li style={{ marginBottom: 4 }}>Competitor dosage formats: {distinctVerified(competitorItems, "dosageForm").length > 0 ? distinctVerified(competitorItems, "dosageForm").join(", ") : "Not verified"}.</li>
-          <li style={{ marginBottom: 4 }}>Major formulation differences: {anyFormulationNoted ? "some products contain additional ingredients beyond the core content." : "None documented beyond dose/form."}</li>
-          <li style={{ marginBottom: 4 }}>Clinical point to remember: {quickTakeawayFirstLine || "See Clinical Evidence above."}</li>
-          <li>What NOT to claim: {whatNotToClaimFirstLine || "See What Not to Claim above."}</li>
-        </ol>
-      </SummarySubsection>
-
-      <SummarySubsection title="How to position our products">
-        {ourItems.length === 0 ? (
-          <div style={{ fontSize: 11.5, color: "#8A8272", fontStyle: "italic" }}>No our-products on file for this category yet.</div>
-        ) : (
-          ourItems.map((i, idx) => {
-            const amountForm = [i.amount, i.chemicalForm].filter(Boolean).join(" ");
-            const dosageFormPhrase = i.dosageForm ? ` in a ${i.dosageForm.toLowerCase()} format` : "";
-            const whatCanBeSaid = amountForm ? `"Contains ${amountForm}${dosageFormPhrase}."` : "Not enough verified information to state yet.";
-            return (
-              <div key={idx} style={{ marginBottom: 12, paddingBottom: 12, borderBottom: idx < ourItems.length - 1 ? "1px solid #F0EBE0" : "none" }}>
-                <div style={{ fontWeight: 600, marginBottom: 3 }}>{i.label}</div>
-                <div style={{ fontSize: 11.5, color: "#5B5445", marginBottom: 3 }}>
-                  <strong>What it contains:</strong> {[i.amount, i.chemicalForm, i.dosageForm].filter(Boolean).join(", ") || "Not enough verified information."}
-                </div>
-                {(i.ingredientsText || i.notesText) && (
-                  <div style={{ fontSize: 11.5, color: "#5B5445", marginBottom: 3 }}>
-                    <strong>What makes its formulation distinct:</strong> {i.ingredientsText || i.notesText}
-                  </div>
-                )}
-                <div style={{ fontSize: 11.5, color: "#2F5B41", marginBottom: 3 }}>
-                  <strong>What can be said:</strong> {whatCanBeSaid}
-                </div>
-                {whatNotToClaimFirstLine && (
-                  <div style={{ fontSize: 11.5, color: "#7A3B3B" }}>
-                    <strong>Do not claim:</strong> {whatNotToClaimFirstLine.replace(/^Do not claim /i, "")}
-                  </div>
-                )}
-              </div>
-            );
-          })
-        )}
-      </SummarySubsection>
-
-      <SummarySubsection title="What actually differentiates the products?">
-        {differentiators.length > 0 ? (
-          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
-            {differentiators.map((d) => <li key={d} style={{ marginBottom: 3 }}>{d}</li>)}
-          </ul>
-        ) : <div style={{ fontSize: 11.5, color: "#8A8272", fontStyle: "italic" }}>Not enough verified information to compare.</div>}
-      </SummarySubsection>
-
-      <ExpandableDetails label="Show full market comparison details">
-        <SummarySubsection title="Dose differences">
-          {anyAmountVerified
-            ? allItems.map((i, idx) => <div key={idx} style={summaryLineStyle}>{i.label}: {i.amount || "Not verified"}</div>)
-            : <IncompleteNotice missing={["amount"]} />}
-        </SummarySubsection>
-
-        <SummarySubsection title="Chemical form differences">
-          {anyChemicalFormVerified ? (
-            <>
-              {[...chemicalFormGroups.entries()].map(([form, labels]) => (
-                <div key={form} style={summaryLineStyle}><strong>{form}:</strong> {labels.join(", ")}</div>
-              ))}
-              <div style={scientificContextStyle}>
-                Methylcobalamin and adenosylcobalamin are metabolically active forms. Cyanocobalamin and hydroxocobalamin are converted by the body into active forms. Current evidence does not establish that methylcobalamin has superior absorption compared with cyanocobalamin.
-              </div>
-            </>
-          ) : <IncompleteNotice missing={["chemical form"]} />}
-        </SummarySubsection>
-
-        <SummarySubsection title="Dosage form differences">
-          {anyDosageFormVerified ? (
-            <>
-              {[...dosageFormGroups.entries()].map(([form, labels]) => (
-                <div key={form} style={summaryLineStyle}><strong>{form}:</strong> {labels.join(", ")}</div>
-              ))}
-              <div style={scientificContextStyle}>
-                Chemical form (e.g. Cyanocobalamin, Methylcobalamin) is what the active ingredient is; dosage form (e.g. Tablet, Quick-Dissolve, Lozenge) is how the product is taken — the two are independent facts. A "Quick-Dissolve" product is only described as sublingual when a source explicitly documents that it dissolves under the tongue; sublingual administration is never assumed from the format name alone, and no format is described as more effective than another.
-              </div>
-            </>
-          ) : <IncompleteNotice missing={["dosage form"]} />}
-        </SummarySubsection>
-
-        <SummarySubsection title="Formulation differences">
-          {anyFormulationNoted ? (
-            allItems.filter(hasFormulationNote).map((i, idx) => <div key={idx} style={summaryLineStyle}>{i.label}: {i.ingredientsText || i.notesText}</div>)
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#5B5445", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 }}>
+            How to position our product
+          </div>
+          {ourRows.length === 0 ? (
+            <div style={{ fontSize: 11.5, color: "#8A8272", fontStyle: "italic", marginBottom: 12 }}>No our-products on file for this category yet.</div>
           ) : (
-            <div style={{ fontSize: 11.5, color: "#8A8272" }}>No documented additional ingredients beyond the core content for the products currently on file.</div>
+            ourRows.map((r, idx) => {
+              const facts = [r.dosePerUnit, r.activeIngredient].filter(Boolean).join(" ");
+              const formPhrase = r.dosageForm ? ` in a ${r.dosageForm.toLowerCase()} format` : "";
+              const whatCanBeSaid = facts ? `"Contains ${facts}${formPhrase}."` : "Not enough verified information to state yet.";
+              return (
+                <div key={r.key} style={{ marginBottom: 10, paddingBottom: 10, borderBottom: idx < ourRows.length - 1 ? "1px solid #F0EBE0" : "none" }}>
+                  <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 3 }}>{r.name}</div>
+                  <div style={{ fontSize: 12, color: "#2F5B41" }}>{whatCanBeSaid}</div>
+                  {whatNotToClaimFirstLine && (
+                    <div style={{ fontSize: 11.5, color: "#7A3B3B", marginTop: 2 }}>
+                      <strong>Do not claim:</strong> {whatNotToClaimFirstLine.replace(/^Do not claim /i, "")}
+                    </div>
+                  )}
+                </div>
+              );
+            })
           )}
-        </SummarySubsection>
 
-        <SummarySubsection title="Pack size differences">
-          {allItems.some((i) => i.packSize)
-            ? allItems.map((i, idx) => <div key={idx} style={summaryLineStyle}>{i.label}: {i.packSize || "Not verified"}</div>)
-            : <IncompleteNotice missing={["pack size"]} />}
-        </SummarySubsection>
-
-        <SummarySubsection title="Price differences">
-          {anyPriceVerified ? (
-            <>
-              {ourItems.filter((i) => i.price !== "" && i.price != null).map((i, idx) => <div key={`o${idx}`} style={summaryLineStyle}>{i.label}: {i.price}</div>)}
-              {competitorItems.flatMap((i, idx) =>
-                i.retailerListings.filter((l) => l.displayedPrice !== "" && l.displayedPrice != null).map((l, lidx) => (
-                  <div key={`${idx}-${lidx}`} style={summaryLineStyle}>{i.label} ({l.retailer}): {l.currency || ""} {l.displayedPrice}</div>
-                ))
-              )}
-            </>
-          ) : <IncompleteNotice missing={["retailer/price information"]} />}
-        </SummarySubsection>
-
-        <SummarySubsection title="Information gaps">
-          {allItems.some((i) => i.missingFields.length > 0) ? (
-            allItems.filter((i) => i.missingFields.length > 0).map((i, idx) => (
-              <div key={idx} style={{ ...summaryLineStyle, color: "#8A6B3A" }}>⚠️ {i.label} — missing: {i.missingFields.join(", ")}</div>
-            ))
-          ) : <div style={{ fontSize: 11.5, color: "#8A8272" }}>No documented information gaps for the products currently on file.</div>}
-        </SummarySubsection>
-
-        <SummarySubsection title="If the doctor mentions a competitor">
-          <div style={{ fontSize: 12, marginBottom: 6 }}>
-            Acknowledge the competitor's form factually, then transition back to what's documented about our product — do not attack the competitor or claim superiority.
-          </div>
-          <div style={scientificContextStyle}>
-            "Methylcobalamin is one of the metabolically active forms of B12. Cyanocobalamin is another supplemental form that is converted into active forms by the body. Current evidence has not established superior absorption simply based on these forms."
-          </div>
-        </SummarySubsection>
-      </ExpandableDetails>
+          <ExpandableDetails label="Manage research" hideLabel="Manage research">
+            {ourRows.map((r) => (
+              <OurProductCard key={r.key} product={r.raw} canEdit={role === "manager"} onSaved={onSaved} />
+            ))}
+            {competitorRows.map((r) => (
+              <CompetitorCard key={r.key} rel={r.rel} canEdit={true} onSaved={onSaved} />
+            ))}
+          </ExpandableDetails>
+        </>
+      )}
     </RecallSection>
   );
 }
