@@ -406,6 +406,36 @@ async function updateRowById(tab, id, patch) {
   return true;
 }
 
+// Applies many patches to the SAME tab in one read + one write, instead of
+// updateRowById's one-read-plus-one-write PER call — a loop that patches
+// hundreds of rows (e.g. a name-derived field backfill over a large
+// imported table) must not turn into hundreds of sequential Sheets API
+// calls, which is exactly what blows through the per-minute read/write
+// quota in one page load.
+async function batchUpdateRows(tab, updates) {
+  if (!updates.length) return;
+  await ensureSheets();
+  const sheets = getSheets();
+  const headers = SCHEMAS[tab];
+  const rows = await getAllRows(tab);
+  const rowById = new Map(rows.map((r) => [String(r.id), r]));
+  const data = [];
+  for (const { id, patch } of updates) {
+    const target = rowById.get(String(id));
+    if (!target) continue;
+    const merged = { ...target, ...patch };
+    data.push({
+      range: `${tab}!A${target._row}:${columnLetter(headers.length)}${target._row}`,
+      values: [objectToRow(headers, merged)],
+    });
+  }
+  if (!data.length) return;
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId: SHEET_ID,
+    requestBody: { valueInputOption: "RAW", data },
+  });
+}
+
 async function deleteRowById(tab, id) {
   await ensureSheets();
   const sheets = getSheets();
@@ -524,6 +554,7 @@ module.exports = {
   appendRow,
   appendRows,
   updateRowById,
+  batchUpdateRows,
   deleteRowById,
   replaceAllRows,
   getSettings,

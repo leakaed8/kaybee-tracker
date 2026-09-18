@@ -4971,7 +4971,15 @@ async function ensureCompetitorMasterDataSeeded() {
   }
   if (newProductRows.length) await db.appendRows("CompetitorProducts", newProductRows);
   if (newListingRows.length) await db.appendRows("RecallRetailerListings", newListingRows);
-  for (const { id, patch, table } of reconcilePatches) await db.updateRowById(table || "CompetitorProducts", id, patch);
+  // Grouped by table and sent as one batched write per table (see
+  // sheetsDb.batchUpdateRows) instead of one Sheets API call per patch.
+  const reconcilePatchesByTable = new Map();
+  for (const { id, patch, table } of reconcilePatches) {
+    const t = table || "CompetitorProducts";
+    if (!reconcilePatchesByTable.has(t)) reconcilePatchesByTable.set(t, []);
+    reconcilePatchesByTable.get(t).push({ id, patch });
+  }
+  for (const [table, updates] of reconcilePatchesByTable) await db.batchUpdateRows(table, updates);
   if (newConflictRows.length) await db.appendRows("RecallFieldConflicts", newConflictRows);
 
   // ---- Link the B12/B-complex products into the b-vitamins-b12 category ----
@@ -5133,6 +5141,12 @@ let competitorNameDerivedFieldsChecked = false;
 async function ensureCompetitorNameDerivedFieldsBackfilled() {
   if (competitorNameDerivedFieldsChecked) return;
   const rows = await db.getAllRows("CompetitorProducts");
+  // Collected and sent as ONE batched write (see sheetsDb.batchUpdateRows)
+  // instead of one Sheets API call per row -- this table is large enough
+  // (thousands of rows, hundreds potentially patched in a single pass) that
+  // a per-row updateRowById loop blows through the Sheets API's per-minute
+  // quota in one page load.
+  const updates = [];
   for (const row of rows) {
     const name = row.productName || "";
     const patch = {};
@@ -5154,9 +5168,10 @@ async function ensureCompetitorNameDerivedFieldsBackfilled() {
       }
       patch.updatedBy = "Name-derived field backfill";
       patch.updatedAt = new Date().toISOString();
-      await db.updateRowById("CompetitorProducts", row.id, patch);
+      updates.push({ id: row.id, patch });
     }
   }
+  if (updates.length) await db.batchUpdateRows("CompetitorProducts", updates);
   competitorNameDerivedFieldsChecked = true;
 }
 
@@ -6182,7 +6197,7 @@ async function ensureOurProductsMasterDataSeeded() {
     });
   }
   if (newRows.length) await db.appendRows("ProductCatalog", newRows);
-  for (const { id, patch } of reconcilePatchesPC) await db.updateRowById("ProductCatalog", id, patch);
+  if (reconcilePatchesPC.length) await db.batchUpdateRows("ProductCatalog", reconcilePatchesPC);
   if (newConflictRowsPC.length) await db.appendRows("RecallFieldConflicts", newConflictRowsPC);
 
   // ---- Enrichment: fill blank fields on an already-existing product ----
