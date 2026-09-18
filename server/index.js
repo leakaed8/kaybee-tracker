@@ -909,6 +909,7 @@ app.get("/api/competitor-products", async (req, res) => {
     await ensureCompetitorMasterDataSeeded();
     await ensureCompetitorNameDerivedFieldsBackfilled();
     await ensureOurProductsMasterDataSeeded();
+    await ensurePhase1CategoriesSeeded();
     const { q, limit } = req.query;
     const rows = await db.getAllRows("CompetitorProducts");
     let products = rows.sort((a, b) => a.genericName.localeCompare(b.genericName));
@@ -4863,12 +4864,14 @@ function reconcileRecordFields({ entityType, entityId, existing, incoming, sourc
 async function ensureCompetitorMasterDataSeeded() {
   if (competitorMasterDataSeedChecked) return;
   // Self-sufficient rather than trusting every call site to sequence
-  // prerequisites correctly — this seed's B12-category linking step needs
-  // the B12 our-products to already exist. All three are idempotent
-  // (no-op after their first run), so calling them here is always safe.
+  // prerequisites correctly — this seed's per-category linking step (below)
+  // needs each category's own our-products to already exist, for B12 AND
+  // every Phase 1+ category. All are idempotent (no-op after their first
+  // run), so calling them here is always safe.
   await ensureRecallCategoriesSeeded();
   await ensureRecallB12Seeded();
   await ensureB12ProductDataSeeded();
+  await ensurePhase1CategoriesSeeded();
   const norm = (s) => String(s || "").trim().toLowerCase();
 
   const existingProducts = await db.getAllRows("CompetitorProducts");
@@ -4982,21 +4985,29 @@ async function ensureCompetitorMasterDataSeeded() {
   for (const [table, updates] of reconcilePatchesByTable) await db.batchUpdateRows(table, updates);
   if (newConflictRows.length) await db.appendRows("RecallFieldConflicts", newConflictRows);
 
-  // ---- Link the B12/B-complex products into the b-vitamins-b12 category ----
-  // (the only category with our-products loaded so far — see header note).
-  // Any one of Mason/ALFA's B12 products serves as the anchor product a
-  // relationship must point at; the Analysis/Competitors tables no longer
-  // group rows by "compared against X" (see the Recall simplification
-  // pass), so which specific our-product is picked has no visible effect.
+  // ---- Link competitor products into EVERY category that has our-products loaded ----
+  // Generalized from the original B12-only version of this step: any
+  // category with at least one of our own products linked (RecallIngredients
+  // -> RecallProductIngredients) gets an anchor product, and every
+  // COMPETITOR_MASTER_SEED item tagged with that SAME categoryId gets linked
+  // against it. The Analysis/Competitors tables don't group rows by
+  // "compared against X" (see the Recall simplification pass), so which
+  // specific our-product is picked as the anchor has no visible effect.
   const links = await db.getAllRows("RecallProductIngredients");
-  const b12ProductIds = [...new Set(links.filter((l) => l.ingredientId === "vitamin-b12").map((l) => l.productId))];
-  const anchorProductId = b12ProductIds[0];
-  if (anchorProductId) {
+  const allIngredients = await db.getAllRows("RecallIngredients");
+  const categoryIdByIngredientId = new Map(allIngredients.map((i) => [i.id, i.categoryId]));
+  const anchorProductIdByCategory = new Map();
+  for (const link of links) {
+    const categoryId = categoryIdByIngredientId.get(link.ingredientId);
+    if (categoryId && !anchorProductIdByCategory.has(categoryId)) anchorProductIdByCategory.set(categoryId, link.productId);
+  }
+  if (anchorProductIdByCategory.size) {
     const existingRels = await db.getAllRows("RecallCompetitorRelationships");
     const existingRelKeys = new Set(existingRels.map((r) => `${r.ourProductId}|${r.competitorProductId}`));
     const newRels = [];
     for (const item of COMPETITOR_MASTER_SEED.newProducts) {
-      if (item.categoryId !== "b-vitamins-b12") continue;
+      const anchorProductId = anchorProductIdByCategory.get(item.categoryId);
+      if (!anchorProductId) continue; // no our-product loaded for this category yet — nothing to compare against
       const key = `${norm(item.competitorName)}|${norm(item.productName)}`;
       const competitorProductId = productIdByKey.get(key) || createdIdByKey.get(key);
       if (!competitorProductId) continue;
@@ -6231,6 +6242,537 @@ async function ensureOurProductsMasterDataSeeded() {
   ourProductsMasterDataSeedChecked = true;
 }
 
+// ---------- Recall Phase 1: Vitamin D, Vitamin C, Magnesium, Calcium ----------
+// Extends the SAME architecture the B12 category already uses (RecallIngredients
+// / RecallIngredientForms / RecallClinicalEvidence / RecallDrugInteractions /
+// RecallProductIngredients) to four more categories — no new tables, no new
+// UI, no per-vitamin page. RecallCategories rows for all 23 target
+// categories (plus Iron/Zinc, deliberately left unpopulated per instruction
+// — they surface only as ingredients inside multivitamins/combinations, not
+// as their own category) already exist via RECALL_CATEGORIES_SEED; this is
+// purely the data-population step for four of them.
+//
+// Evidence sources below were looked up live via PubMed (see each
+// src-pmid-* entry's pmid/doi) rather than recalled from training — a wrong
+// PMID is indistinguishable from a fabricated one, so nothing here is typed
+// from memory. Evidence deliberately keeps conflicting findings visible
+// (e.g. vitamin D fracture-prevention trials do not agree with each other)
+// rather than resolving them into one verdict — the same "never silently
+// pick a winner" rule this file already applies to competing data sources,
+// applied here to competing STUDIES.
+const PHASE1_SOURCES_SEED = [
+  { id: "src-nih-ods-vitamind", sourceType: "NIH", sourceName: "NIH Office of Dietary Supplements",
+    title: "Vitamin D Fact Sheet for Health Professionals", url: "https://ods.od.nih.gov/factsheets/VitaminD-HealthProfessional/",
+    sourceQuality: "Government health authority fact sheet" },
+  { id: "src-nih-ods-vitaminc", sourceType: "NIH", sourceName: "NIH Office of Dietary Supplements",
+    title: "Vitamin C Fact Sheet for Health Professionals", url: "https://ods.od.nih.gov/factsheets/VitaminC-HealthProfessional/",
+    sourceQuality: "Government health authority fact sheet" },
+  { id: "src-nih-ods-magnesium", sourceType: "NIH", sourceName: "NIH Office of Dietary Supplements",
+    title: "Magnesium Fact Sheet for Health Professionals", url: "https://ods.od.nih.gov/factsheets/Magnesium-HealthProfessional/",
+    sourceQuality: "Government health authority fact sheet" },
+  { id: "src-nih-ods-calcium", sourceType: "NIH", sourceName: "NIH Office of Dietary Supplements",
+    title: "Calcium Fact Sheet for Health Professionals", url: "https://ods.od.nih.gov/factsheets/Calcium-HealthProfessional/",
+    sourceQuality: "Government health authority fact sheet" },
+  { id: "src-pmid-30415629", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Vitamin D Supplements and Prevention of Cancer and Cardiovascular Disease (the VITAL trial)",
+    pmid: "30415629", doi: "10.1056/NEJMoa1809944", journal: "New England Journal of Medicine", publicationYear: "2018",
+    url: "https://pubmed.ncbi.nlm.nih.gov/30415629/", sourceQuality: "Large nationwide RCT, n=25,871" },
+  { id: "src-pmid-29279934", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Association Between Calcium or Vitamin D Supplementation and Fracture Incidence in Community-Dwelling Older Adults",
+    pmid: "29279934", doi: "10.1001/jama.2017.19344", journal: "JAMA", publicationYear: "2017",
+    url: "https://pubmed.ncbi.nlm.nih.gov/29279934/", sourceQuality: "Meta-analysis of 33 RCTs, n=51,145" },
+  { id: "src-pmid-26510847", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Calcium plus vitamin D supplementation and risk of fractures: an updated meta-analysis from the National Osteoporosis Foundation",
+    pmid: "26510847", doi: "10.1007/s00198-015-3386-5", journal: "Osteoporosis International", publicationYear: "2015",
+    url: "https://pubmed.ncbi.nlm.nih.gov/26510847/", sourceQuality: "Meta-analysis of 8 RCTs, n=30,970" },
+  { id: "src-pmid-24119980", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Effects of vitamin D supplements on bone mineral density: a systematic review and meta-analysis",
+    pmid: "24119980", doi: "10.1016/S0140-6736(13)61647-5", journal: "The Lancet", publicationYear: "2013",
+    url: "https://pubmed.ncbi.nlm.nih.gov/24119980/", sourceQuality: "Meta-analysis of 23 RCTs, n=4,082" },
+  { id: "src-pmid-17720017", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Use of calcium or calcium in combination with vitamin D supplementation to prevent fractures and bone loss in people aged 50 years and older",
+    pmid: "17720017", doi: "10.1016/S0140-6736(07)61342-7", journal: "The Lancet", publicationYear: "2007",
+    url: "https://pubmed.ncbi.nlm.nih.gov/17720017/", sourceQuality: "Meta-analysis of 29 RCTs, n=63,897" },
+  { id: "src-pmid-23440782", sourceType: "Systematic review (Cochrane)", sourceName: "Cochrane",
+    title: "Vitamin C for preventing and treating the common cold",
+    pmid: "23440782", doi: "10.1002/14651858.CD000980.pub4", journal: "Cochrane Database of Systematic Reviews", publicationYear: "2013",
+    url: "https://pubmed.ncbi.nlm.nih.gov/23440782/", sourceQuality: "Cochrane systematic review" },
+  { id: "src-pmid-27402922", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Effects of Magnesium Supplementation on Blood Pressure: A Meta-Analysis of Randomized Double-Blind Placebo-Controlled Trials",
+    pmid: "27402922", doi: "10.1161/HYPERTENSIONAHA.116.07664", journal: "Hypertension", publicationYear: "2016",
+    url: "https://pubmed.ncbi.nlm.nih.gov/27402922/", sourceQuality: "Meta-analysis of 34 RCTs, n=2,028" },
+  { id: "src-pmid-29131326", sourceType: "Systematic review", sourceName: "PubMed",
+    title: "Magnesium in Migraine Prophylaxis — Is There an Evidence-Based Rationale? A Systematic Review",
+    pmid: "29131326", doi: "10.1111/head.13217", journal: "Headache", publicationYear: "2017",
+    url: "https://pubmed.ncbi.nlm.nih.gov/29131326/", sourceQuality: "Systematic review of 5 RCTs" },
+  { id: "src-pmid-35041150", sourceType: "Study", sourceName: "PubMed",
+    title: "Effects of short-term magnesium supplementation on ionized, total magnesium and other relevant electrolytes levels",
+    pmid: "35041150", doi: "10.1007/s10534-022-00363-y", journal: "Biometals", publicationYear: "2022",
+    url: "https://pubmed.ncbi.nlm.nih.gov/35041150/", sourceQuality: "Small short-term RCT, n=61, healthy young women" },
+  { id: "src-pmid-19437082", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Comparison of the absorption of calcium carbonate and calcium citrate after Roux-en-Y gastric bypass",
+    pmid: "19437082", doi: "10.1007/s11695-009-9850-6", journal: "Obesity Surgery", publicationYear: "2009",
+    url: "https://pubmed.ncbi.nlm.nih.gov/19437082/", sourceQuality: "Randomized crossover trial, n=18, gastric bypass patients only" },
+];
+
+// productMatch entries are matched by EXACT ProductCatalog name (as already
+// transcribed in OUR_PRODUCTS_MASTER_SEED/B12_OUR_PRODUCTS_SEED above) —
+// never fuzzy-matched, never a new product — and every amount below is
+// copied verbatim from that product's own already-recorded ingredients
+// text, never computed or unit-converted here. A combination product (e.g.
+// calcium + vitamin D) gets one productMatch entry per relevant ingredient,
+// because it genuinely belongs in both categories' comparison tables.
+const PHASE1_INGREDIENTS_SEED = [
+  {
+    id: "vitamin-d", categoryId: "vitamin-d", name: "Vitamin D", commonName: "Calciferol", scientificName: "",
+    description: "Vitamin D is a fat-soluble vitamin that functions like a prohormone, regulating intestinal absorption of calcium and phosphate and supporting bone mineralization.",
+    physiologicalRole: "Promotes intestinal calcium and phosphate absorption; supports bone mineralization; contributes to immune and cell-growth regulation.",
+    clinicalUses: "Prevention and treatment of vitamin D deficiency/insufficiency; commonly combined with calcium for bone-health formulations.",
+    evidenceSummary: "See linked Clinical Evidence records for topic-specific evidence; this field intentionally does not summarize into a single verdict.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "Adult Tolerable Upper Intake Level (UL) is 4,000 IU (100 mcg)/day per NIH ODS. Excess intake can raise serum calcium (hypercalcemia).",
+    contraindications: "", drugInteractionSummary: "See linked Drug Interactions.",
+    clinicalCheckpoints: [
+      "Is vitamin D deficiency/insufficiency documented (25(OH)D level) or suspected?",
+      "Limited sun exposure, higher skin pigmentation, or northern latitude?",
+      "History of malabsorption or bariatric surgery?",
+      "Is the patient on a thiazide diuretic, corticosteroid, orlistat, or an anticonvulsant?",
+      "Is calcium being taken together, and at what dose?",
+      "Renal or hepatic impairment that could affect vitamin D activation?",
+    ].join("\n"),
+    repQuickTakeaway: [
+      "What it is: a fat-soluble vitamin/prohormone that regulates calcium and phosphate absorption and bone mineralization.",
+      "Main role: enables the body to absorb and use calcium; without adequate vitamin D, dietary calcium is poorly absorbed.",
+      "Why people use it: documented deficiency/insufficiency, limited sun exposure, or as part of a bone-health regimen alongside calcium.",
+      "Form distinction: D3 (cholecalciferol) vs. D2 (ergocalciferol) — some evidence suggests D3 may be more effective at raising and maintaining serum 25(OH)D, though findings are not fully consistent.",
+      "Safety point: large RCTs (VITAL, JAMA 2017 meta-analysis) have not shown vitamin D supplementation reduces fracture, cancer, or cardiovascular risk in general (non-deficient) populations — evidence is mixed, not settled.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim vitamin D supplementation prevents fractures in the general population — the largest meta-analyses disagree with each other.",
+      "Do not claim vitamin D prevents cancer or cardiovascular disease — the VITAL trial found no reduction in either.",
+      "Do not claim D3 is proven superior to D2 — evidence suggests a possible advantage, not an established one.",
+      "Do not claim vitamin D gives energy or improves mood in people who are not deficient.",
+    ].join("\n"),
+    absorptionTimingNotes: [
+      "Fat-soluble — absorption is improved when taken with a meal containing some fat, rather than on an empty stomach.",
+      "Obesity/malabsorption/bariatric surgery can reduce absorption and may warrant higher or monitored dosing (NIH ODS).",
+    ].join("\n"),
+    repTakeawayQuestions: [
+      "Has a 25(OH)D level actually been tested, or is this empiric?",
+      "Is the patient on a thiazide, corticosteroid, orlistat, or anticonvulsant?",
+      "Is calcium being taken at the same time, and at what dose?",
+      "Any malabsorption, bariatric surgery, renal, or hepatic history?",
+    ].join("\n"),
+    repTakeaway30Second: "Vitamin D helps the body absorb calcium and supports bone mineralization. D3 and D2 are both used, with some evidence favoring D3 for raising and sustaining blood levels — but that evidence isn't fully consistent. The Upper Limit for adults is 4,000 IU/day. Large trials have not shown that supplementing vitamin D in people who aren't deficient reduces fractures, cancer, or cardiovascular events, so this is a deficiency-correction and bone-health-support product, not a general prevention claim.",
+    lastReviewed: new Date().toISOString().slice(0, 10),
+    forms: [
+      { id: "vitamind-form-d3", formName: "Cholecalciferol (D3)", chemicalName: "Cholecalciferol", formType: "chemical form",
+        metabolicNotes: "Produced in skin from UV exposure; also the form typically derived from animal sources in supplements.",
+        evidenceComparison: "Some evidence suggests D3 may be more effective than D2 at raising and maintaining serum 25(OH)D, though findings are not fully consistent (NIH ODS).",
+        sourceIds: "src-nih-ods-vitamind" },
+      { id: "vitamind-form-d2", formName: "Ergocalciferol (D2)", chemicalName: "Ergocalciferol", formType: "chemical form",
+        metabolicNotes: "Plant/fungal-derived form, often used in vegan formulations and some prescription-strength products.",
+        evidenceComparison: "Some evidence suggests D3 may be more effective than D2 at raising and maintaining serum 25(OH)D, though findings are not fully consistent (NIH ODS).",
+        sourceIds: "src-nih-ods-vitamind" },
+    ],
+    evidence: [
+      { topic: "Cardiovascular disease and cancer prevention", sourceId: "src-pmid-30415629", evidenceLevel: "B", studyType: "Randomized controlled trial",
+        population: "US adults, men ≥50 / women ≥55, general population (not selected for deficiency)", sampleSize: "25,871", intervention: "Vitamin D3 2,000 IU/day", comparator: "Placebo",
+        result: "No reduction in invasive cancer incidence (HR 0.96) or major cardiovascular events (HR 0.97) vs. placebo over a median 5.3 years.",
+        limitations: "General healthy-adult population, not selected for vitamin D deficiency; single fixed dose tested." },
+      { topic: "Fracture prevention", sourceId: "src-pmid-29279934", evidenceLevel: "B", studyType: "Systematic review and meta-analysis",
+        population: "Community-dwelling older adults", sampleSize: "51,145 (33 RCTs)", intervention: "Calcium, vitamin D, or both", comparator: "Placebo/no treatment",
+        result: "No significant association between calcium, vitamin D, or combined supplementation and reduced risk of hip, vertebral, nonvertebral, or total fractures.",
+        limitations: "Heterogeneous doses and populations across pooled trials; findings conflict with the 2015 NOF and 2007 Lancet meta-analyses below." },
+      { topic: "Fracture prevention (combined with calcium)", sourceId: "src-pmid-26510847", evidenceLevel: "B", studyType: "Systematic review and meta-analysis",
+        population: "Community-dwelling and institutionalized middle-aged to older adults", sampleSize: "30,970 (8 RCTs)", intervention: "Calcium + vitamin D", comparator: "Placebo/no treatment",
+        result: "15% reduction in total fractures and 30% reduction in hip fractures with combined calcium + vitamin D supplementation.",
+        limitations: "Relied partly on subgroup data from the Women's Health Initiative; conflicts with the 2017 JAMA meta-analysis above — this question remains genuinely unsettled in the literature." },
+      { topic: "Bone mineral density", sourceId: "src-pmid-24119980", evidenceLevel: "B", studyType: "Systematic review and meta-analysis",
+        population: "92% women, average age 59, mostly white populations", sampleSize: "4,082 (23 RCTs)", intervention: "Vitamin D (D2 or D3), without calcium co-administration", comparator: "Placebo/no treatment",
+        result: "Only a small benefit at the femoral neck (+0.8%) and no significant effect at other measured sites (total hip, spine, total body, forearm).",
+        limitations: "Most included trials used vitamin D doses under 800 IU/day; authors concluded routine use for osteoporosis prevention in adults without risk factors appears inappropriate." },
+    ],
+    interactions: [
+      { drugName: "Thiazide diuretics", drugClass: "Diuretic", direction: "interacts",
+        clinicalSignificance: "Thiazides reduce urinary calcium excretion; combined with vitamin D (and calcium), this raises the risk of hypercalcemia.",
+        evidenceLevel: "B", sourceId: "src-nih-ods-vitamind", pharmacistCheckpoint: "Check for concurrent calcium/vitamin D use in patients on thiazides; watch for hypercalcemia symptoms." },
+      { drugName: "Corticosteroids", drugClass: "Glucocorticoid", direction: "reduces effectiveness",
+        clinicalSignificance: "Long-term corticosteroid use can impair calcium absorption and vitamin D metabolism, contributing to bone loss.",
+        evidenceLevel: "B", sourceId: "src-nih-ods-vitamind", pharmacistCheckpoint: "Consider vitamin D/calcium status in patients on chronic corticosteroid therapy." },
+      { drugName: "Orlistat", drugClass: "Lipase inhibitor (weight management)", direction: "reduces absorption",
+        clinicalSignificance: "Orlistat reduces fat absorption and can reduce absorption of fat-soluble vitamins, including vitamin D.",
+        evidenceLevel: "B", sourceId: "src-nih-ods-vitamind", pharmacistCheckpoint: "Advise separating vitamin D dosing from orlistat administration; consider monitoring in long-term users." },
+      { drugName: "Anticonvulsants (e.g. phenytoin, phenobarbital)", drugClass: "Antiepileptic", direction: "reduces effectiveness",
+        clinicalSignificance: "Some anticonvulsants accelerate vitamin D catabolism, which can contribute to lower vitamin D status with long-term use.",
+        evidenceLevel: "B", sourceId: "src-nih-ods-vitamind", pharmacistCheckpoint: "Consider vitamin D status in patients on long-term enzyme-inducing anticonvulsants." },
+    ],
+    productMatches: [
+      { productName: "Mason Natural Vitamin D3 1000 CHEWABLE Tabs", chemicalForm: "Cholecalciferol (D3)", compoundAmount: 25, activeAmount: "", unit: "mcg", servingSize: "1 tablet", notes: "Labeled as 25 mcg (1,000 IU) per tablet." },
+      { productName: "Mason Natural Chewable Calcium 600 + Vitamin D3 100tab", chemicalForm: "Cholecalciferol (D3)", compoundAmount: 10, activeAmount: "", unit: "mcg", servingSize: "", notes: "Combination product; also linked under Calcium. Labeled as 10 mcg (400 IU) D3 per the product's own ingredient text." },
+      { productName: "Mason Natural Calcium Citrate+vit.d3 60 Caplets", chemicalForm: "Cholecalciferol (D3)", compoundAmount: 5, activeAmount: "", unit: "mcg", servingSize: "", notes: "Combination product; also linked under Calcium. Labeled as 5 mcg (200 IU) D3 per the product's own ingredient text." },
+      { productName: "Mason Natural Calcium 500+vit D3 - Oyster Shell 60 tabs", chemicalForm: "Cholecalciferol (D3)", compoundAmount: 400, activeAmount: "", unit: "IU", servingSize: "", notes: "Combination product; also linked under Calcium. Source text gives 400 IU only, no accompanying mcg figure — stored as given, not converted." },
+      { productName: "ALFA Calcium Magnesium Zinc + Vit.d", chemicalForm: "Cholecalciferol (D3)", compoundAmount: 3.325, activeAmount: "", unit: "mcg", servingSize: "1 caplet", notes: "Combination product; also linked under Calcium and Magnesium. Labeled as 3.325 mcg (133 IU) D3 per caplet." },
+    ],
+  },
+  {
+    id: "vitamin-c", categoryId: "vitamin-c", name: "Vitamin C", commonName: "Ascorbic acid", scientificName: "L-ascorbic acid",
+    description: "Vitamin C is a water-soluble vitamin and antioxidant required for collagen synthesis and several enzymatic reactions.",
+    physiologicalRole: "Cofactor for collagen, carnitine, and neurotransmitter (norepinephrine) synthesis; antioxidant; enhances non-heme (plant-source) iron absorption.",
+    clinicalUses: "Prevention/treatment of vitamin C deficiency (scurvy is rare in developed countries); general antioxidant supplementation; commonly paired with iron products to support absorption.",
+    evidenceSummary: "See linked Clinical Evidence records for topic-specific evidence; this field intentionally does not summarize into a single verdict.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "Adult UL is 2,000 mg/day (NIH ODS). Doses above roughly 1,000 mg commonly cause GI upset (diarrhea, nausea, abdominal cramping). High intake may increase kidney stone risk in predisposed individuals.",
+    contraindications: "", drugInteractionSummary: "See linked Drug Interactions.",
+    clinicalCheckpoints: [
+      "Is this being taken alongside an iron supplement (to aid absorption) or independently?",
+      "Any personal/family history of kidney stones (oxalate-forming)?",
+      "Is the patient a smoker or under heavy physical stress (may affect requirement)?",
+      "Dose relative to the 2,000 mg/day Upper Limit?",
+    ].join("\n"),
+    repQuickTakeaway: [
+      "What it is: a water-soluble vitamin and antioxidant needed for collagen synthesis and several enzyme reactions.",
+      "Main role: collagen formation, antioxidant defense, and enhancing absorption of non-heme (plant-source) iron.",
+      "Why people use it: general antioxidant support, paired with iron products, or during periods of increased physical stress.",
+      "Formulation distinction: plain ascorbic acid vs. mineral ascorbates (\"buffered\" sodium/calcium ascorbate, marketed as gentler on the stomach) — no verified evidence differentiates their effectiveness.",
+      "Safety point: regular high-dose vitamin C does not prevent colds in the general population (Cochrane); doses above the 2,000 mg/day UL commonly cause GI upset.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim vitamin C prevents the common cold in the general population — Cochrane found no reduction in incidence.",
+      "Do not claim high-dose vitamin C cures or shortens colds once symptoms start — therapeutic (post-onset) trials showed no consistent benefit.",
+      "Do not claim buffered/mineral ascorbate forms are proven better absorbed or tolerated than ascorbic acid — not established here.",
+      "Do not claim vitamin C is a substitute for iron therapy in diagnosed iron-deficiency anemia — it is an absorption aid, not an iron source.",
+    ].join("\n"),
+    absorptionTimingNotes: [
+      "Water-soluble; absorption does not require a fat-containing meal.",
+      "Taking vitamin C together with a meal containing non-heme iron (e.g. plant/fortified sources) can improve iron absorption from that meal (NIH ODS).",
+      "Very large single doses show diminishing absorption efficiency and are more likely to cause GI effects — splitting doses is commonly recommended clinically, though head-to-head dose-splitting trials are limited.",
+    ].join("\n"),
+    repTakeawayQuestions: [
+      "Is this meant to support iron absorption, general antioxidant use, or something else specific?",
+      "Any personal or family history of kidney stones?",
+      "What's the total daily dose relative to the 2,000 mg/day Upper Limit?",
+    ].join("\n"),
+    repTakeaway30Second: "Vitamin C is a water-soluble antioxidant vitamin involved in collagen synthesis and it improves absorption of non-heme iron from food. Cochrane's review found regular supplementation does not reduce cold incidence in the general population, though it modestly shortened cold duration and helped people under brief intense physical stress. The Upper Limit is 2,000 mg/day; higher doses commonly cause GI upset. This is a supportive/antioxidant and iron-absorption-aid product, not a proven cold-prevention product.",
+    lastReviewed: new Date().toISOString().slice(0, 10),
+    forms: [
+      { id: "vitaminc-form-ascorbic", formName: "Ascorbic acid", chemicalName: "L-ascorbic acid", formType: "chemical form",
+        metabolicNotes: "The standard, most common supplemental form of vitamin C.",
+        evidenceComparison: "No verified evidence in this file distinguishes ascorbic acid from mineral ascorbate forms on absorption or effectiveness.",
+        sourceIds: "src-nih-ods-vitaminc" },
+      { id: "vitaminc-form-mineral-ascorbate", formName: "Mineral ascorbates (sodium/calcium ascorbate)", chemicalName: "", formType: "chemical form",
+        metabolicNotes: "Marketed as \"buffered\", non-acidic vitamin C, intended to be gentler on the stomach.",
+        evidenceComparison: "NOT_VERIFIED — no evidence reviewed here confirms improved tolerability or absorption vs. ascorbic acid.",
+        sourceIds: "src-nih-ods-vitaminc" },
+    ],
+    evidence: [
+      { topic: "Common cold prevention and duration", sourceId: "src-pmid-23440782", evidenceLevel: "A", studyType: "Systematic review (Cochrane)",
+        population: "General community population (prevention trials) vs. marathon runners/skiers/soldiers under acute physical/cold stress (subgroup)",
+        sampleSize: "11,306 (29 comparisons, incidence); 9,745 episodes (duration)", intervention: "Regular vitamin C supplementation (≥0.2 g/day)", comparator: "Placebo",
+        result: "No reduction in cold incidence in the general community (RR 0.97), but incidence roughly halved (RR 0.48) in people under brief severe physical/cold stress. Regular supplementation shortened cold duration by ~8% in adults and ~14% in children. Therapeutic (post-onset) dosing showed no consistent benefit.",
+        limitations: "Effect on duration is modest; therapeutic-use trials were fewer and less consistent than prevention trials." },
+    ],
+    interactions: [
+      { drugName: "Aluminum-containing antacids", drugClass: "Antacid", direction: "increases absorption",
+        clinicalSignificance: "Vitamin C can increase intestinal absorption of aluminum from aluminum-containing antacids.",
+        evidenceLevel: "B", sourceId: "src-nih-ods-vitaminc", pharmacistCheckpoint: "Use caution with high-dose vitamin C in patients on aluminum-containing antacids, especially with renal impairment." },
+      { drugName: "Glucose/occult-blood diagnostic tests", drugClass: "Laboratory test", direction: "interferes",
+        clinicalSignificance: "High-dose vitamin C can cause false results on urine glucose and occult-blood (fecal/urine) tests.",
+        evidenceLevel: "B", sourceId: "src-nih-ods-vitaminc", pharmacistCheckpoint: "Flag high-dose vitamin C use if the patient has upcoming urine glucose or occult-blood testing." },
+    ],
+    productMatches: [
+      { productName: "Mason Natural Vitamin C 1,000 mg plus Rose Hips and Bioflavonoids Complex 60 tablets", chemicalForm: "Ascorbic acid", compoundAmount: 1000, activeAmount: "", unit: "mg", servingSize: "1 tablet", notes: "Also contains a 64 mg rose hips/citrus bioflavonoid blend, per the product's own ingredient text." },
+    ],
+  },
+  {
+    id: "magnesium", categoryId: "magnesium", name: "Magnesium", commonName: "Magnesium", scientificName: "",
+    description: "Magnesium is a mineral and cofactor for hundreds of enzymatic reactions, including energy production, muscle and nerve function, and blood pressure regulation.",
+    physiologicalRole: "Cofactor for ATP-dependent enzymatic reactions; supports normal muscle and nerve function, blood glucose control, blood pressure regulation, and bone structure.",
+    clinicalUses: "Prevention/treatment of magnesium deficiency; adjunct in blood pressure management; used for migraine prophylaxis, muscle cramps, and constipation (form-dependent).",
+    evidenceSummary: "See linked Clinical Evidence records for topic-specific evidence; this field intentionally does not summarize into a single verdict.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "There is no UL for magnesium from food, but the UL for supplemental magnesium is 350 mg/day (elemental) for adults (NIH ODS) due to diarrhea risk at higher supplemental intakes. Impaired renal function increases risk of magnesium accumulation/toxicity.",
+    contraindications: "", drugInteractionSummary: "See linked Drug Interactions.",
+    clinicalCheckpoints: [
+      "Is the amount being discussed the COMPOUND weight (e.g. \"magnesium oxide 500 mg\") or the ELEMENTAL magnesium content (e.g. \"300 mg elemental\")? These are not the same number.",
+      "Is the patient on a tetracycline or fluoroquinolone antibiotic, levothyroxine, or a PPI?",
+      "Any renal impairment (affects magnesium clearance)?",
+      "Is GI tolerance (diarrhea) a concern — has the form/dose caused loose stools before?",
+    ].join("\n"),
+    repQuickTakeaway: [
+      "What it is: a mineral cofactor for hundreds of enzymatic reactions — energy production, muscle/nerve function, blood pressure, bone structure.",
+      "Main role: supports normal neuromuscular and cardiovascular function; used clinically for deficiency, blood pressure support, migraine prophylaxis, and muscle cramps.",
+      "Why people use it: documented or suspected deficiency, blood pressure support, migraine prevention, sleep/muscle-cramp complaints.",
+      "Critical formulation distinction: COMPOUND weight (e.g. \"magnesium oxide 500 mg\") is not the same as ELEMENTAL magnesium content (e.g. \"300 mg elemental\") — never compare two products by compound weight alone.",
+      "Safety point: supplemental magnesium's GI tolerance (diarrhea) varies by form and dose; a small 2022 study even found oxide had comparable or better short-term bioavailability than citrate/carbonate, which runs against common assumptions — treat form comparisons as unsettled, not textbook fact.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not compare two magnesium products using compound weight (e.g. \"500 mg\") as if it were elemental magnesium — always check whether the elemental amount is stated.",
+      "Do not claim magnesium citrate or glycinate is proven to be better absorbed than magnesium oxide — evidence is mixed and one recent small study found the opposite.",
+      "Do not claim magnesium cures migraines — a systematic review rated the evidence \"Grade C\" (possibly effective), not established.",
+      "Do not claim magnesium is a substitute for antihypertensive medication — its blood-pressure effect in trials was modest (a few mmHg).",
+    ].join("\n"),
+    absorptionTimingNotes: [
+      "Bioavailability differs by chemical form, but head-to-head evidence is limited and sometimes contradicts common assumptions (see the 2022 short-term bioavailability study below) — do not present any one form as definitively best-absorbed.",
+      "GI tolerance (diarrhea) is dose- and form-related; magnesium oxide and citrate are more commonly associated with a laxative effect than magnesium glycinate, based on clinical experience, though rigorous head-to-head GI-tolerance trials are limited.",
+      "Splitting the daily dose can reduce GI upset for some patients, especially at higher elemental amounts.",
+    ].join("\n"),
+    repTakeawayQuestions: [
+      "Is the number on this label the compound weight or the elemental magnesium amount?",
+      "Is the patient on a tetracycline, fluoroquinolone, levothyroxine, or PPI?",
+      "What's the actual reason for use — deficiency, blood pressure, migraine, cramps, sleep?",
+      "Any prior GI intolerance to a specific magnesium form?",
+    ].join("\n"),
+    repTakeaway30Second: "Magnesium is a mineral cofactor for hundreds of enzyme reactions, including muscle, nerve, and cardiovascular function. The most important thing to get right with any magnesium product is the elemental content, not the compound weight — \"500 mg magnesium oxide\" is not \"500 mg of magnesium.\" Evidence supports a modest blood-pressure-lowering effect and Grade-C (possibly effective) support for migraine prophylaxis. Form-to-form absorption comparisons are less settled than commonly assumed — don't overstate any one form's superiority.",
+    lastReviewed: new Date().toISOString().slice(0, 10),
+    forms: [
+      { id: "magnesium-form-oxide", formName: "Magnesium oxide", chemicalName: "Magnesium oxide", formType: "chemical form",
+        metabolicNotes: "Higher elemental magnesium percentage by weight than citrate, but traditionally considered less bioavailable — though a 2022 short-term study found otherwise (see linked evidence).",
+        evidenceComparison: "Bioavailability findings are mixed across studies; do not present as definitively lower- or higher-absorbed without qualification.",
+        sourceIds: "src-nih-ods-magnesium,src-pmid-35041150" },
+      { id: "magnesium-form-citrate", formName: "Magnesium citrate", chemicalName: "Magnesium citrate", formType: "chemical form",
+        metabolicNotes: "Commonly used form; also used at higher doses as an osmotic laxative.",
+        evidenceComparison: "Bioavailability findings are mixed across studies; do not present as definitively lower- or higher-absorbed without qualification.",
+        sourceIds: "src-nih-ods-magnesium,src-pmid-35041150" },
+      { id: "magnesium-form-glycinate", formName: "Magnesium glycinate", chemicalName: "Magnesium bisglycinate", formType: "chemical form",
+        metabolicNotes: "Often marketed as better tolerated (less GI upset) than oxide/citrate.",
+        evidenceComparison: "NOT_VERIFIED — no rigorous head-to-head GI-tolerance trial reviewed here confirms this.",
+        sourceIds: "src-nih-ods-magnesium" },
+    ],
+    evidence: [
+      { topic: "Blood pressure", sourceId: "src-pmid-27402922", evidenceLevel: "B", studyType: "Systematic review and meta-analysis",
+        population: "Normotensive and hypertensive adults", sampleSize: "2,028 (34 RCTs)", intervention: "Oral magnesium supplementation, median dose 368 mg/day for a median 3 months", comparator: "Placebo",
+        result: "Systolic BP reduced by 2.00 mmHg and diastolic BP by 1.78 mmHg vs. placebo, alongside a modest rise in serum magnesium.",
+        limitations: "Effect size is modest; residual heterogeneity remained even after accounting for trial quality and dropout rate." },
+      { topic: "Migraine prophylaxis", sourceId: "src-pmid-29131326", evidenceLevel: "C", studyType: "Systematic review",
+        population: "Adult migraineurs, ages 18-65", sampleSize: "5 RCTs (204 search results screened)", intervention: "Prophylactic oral magnesium (e.g. magnesium dicitrate 600 mg)", comparator: "Placebo",
+        result: "1 of 2 higher-quality (Class I) trials showed a significant reduction in migraine attacks; 2 of 3 lower-quality (Class III) trials showed significant reduction. Authors rated this Grade C (\"possibly effective\").",
+        limitations: "Very small evidence base (5 trials total); mixed trial quality." },
+      { topic: "Bioavailability by chemical form", sourceId: "src-pmid-35041150", evidenceLevel: "C", studyType: "Randomized controlled trial",
+        population: "Healthy young adult women", sampleSize: "61", intervention: "10-day supplementation with magnesium oxide, citrate, or carbonate (effervescent)", comparator: "Baseline / between forms",
+        result: "Magnesium oxide showed a rise in both ionized and total magnesium fraction, outperforming citrate and carbonate in this specific short-term comparison — contrary to the common assumption that oxide is poorly absorbed.",
+        limitations: "Small (n=61), short-term (10 days), healthy young women only — should not be generalized to other populations or read as settling the form-bioavailability question." },
+    ],
+    interactions: [
+      { drugName: "Tetracyclines", drugClass: "Antibiotic", direction: "reduces absorption of both",
+        clinicalSignificance: "Magnesium chelates with tetracyclines, reducing absorption of the antibiotic (and of magnesium).",
+        evidenceLevel: "A", sourceId: "src-nih-ods-magnesium", pharmacistCheckpoint: "Separate magnesium and tetracycline dosing by at least 2 hours before or 4-6 hours after." },
+      { drugName: "Fluoroquinolones", drugClass: "Antibiotic", direction: "reduces absorption of both",
+        clinicalSignificance: "Magnesium chelates with fluoroquinolones, reducing antibiotic absorption and effectiveness.",
+        evidenceLevel: "A", sourceId: "src-nih-ods-magnesium", pharmacistCheckpoint: "Separate magnesium and fluoroquinolone dosing — typically several hours apart per product labeling." },
+      { drugName: "Levothyroxine", drugClass: "Thyroid hormone replacement", direction: "reduces absorption",
+        clinicalSignificance: "Magnesium can reduce levothyroxine absorption if taken close together.",
+        evidenceLevel: "B", sourceId: "src-nih-ods-magnesium", pharmacistCheckpoint: "Separate magnesium and levothyroxine dosing by at least 4 hours." },
+      { drugName: "Proton pump inhibitors (PPIs)", drugClass: "Acid-suppressing medication", direction: "depletes",
+        clinicalSignificance: "Long-term PPI use has been associated with hypomagnesemia (FDA safety communication).",
+        evidenceLevel: "B", sourceId: "src-nih-ods-magnesium", pharmacistCheckpoint: "Consider magnesium status in patients on long-term PPI therapy." },
+    ],
+    productMatches: [
+      { productName: "ALFA MAGNESIUM + MELATONIN 60 CAPS", chemicalForm: "Magnesium citrate + magnesium oxide blend", compoundAmount: 1400, activeAmount: 420, unit: "mg", servingSize: "2 capsules", notes: "Also contains melatonin 10 mg/2 capsules, per the product's own ingredient text." },
+      { productName: "ALFA MAGNESIUM + VITAMIN B6", chemicalForm: "Magnesium oxide", compoundAmount: 500, activeAmount: 300, unit: "mg", servingSize: "1 capsule", notes: "Also contains vitamin B6 50 mg/capsule, per the product's own ingredient text." },
+      { productName: "ALFA MAGNESIUM CITRATE 60 CAPS", chemicalForm: "Magnesium citrate + magnesium oxide blend", compoundAmount: 1400, activeAmount: 420, unit: "mg", servingSize: "2 capsules", notes: "Also contains L-taurine 150 mg/2 capsules, per the product's own ingredient text." },
+      { productName: "ALFA MAGNESIUM GLYCINATE 2500mg 90CAPS", chemicalForm: "Magnesium glycinate", compoundAmount: 2500, activeAmount: 350, unit: "mg", servingSize: "", notes: "" },
+      { productName: "Mason Natural MAGNESIUM CITRATE 250MG 60 SOFTGELS", chemicalForm: "Magnesium citrate", compoundAmount: 250, activeAmount: "", unit: "mg", servingSize: "", notes: "Source ingredient text does not separately state an elemental amount." },
+      { productName: "Mason Natural Magnesium Gluconate 550mg 100tab", chemicalForm: "Magnesium gluconate", compoundAmount: 500, activeAmount: 30, unit: "mg", servingSize: "", notes: "Product name states 550 mg; the product's own ingredient text states \"30 mg elemental magnesium (from 500 mg magnesium gluconate)\" — the ingredient-text figures are used here, as given, not reconciled with the name." },
+      { productName: "Mason Natural MAGNESIUM GLYCINATE with BIOPERINE 60 CAPSULES", chemicalForm: "Magnesium glycinate", compoundAmount: 240, activeAmount: "", unit: "mg", servingSize: "", notes: "Also contains BioPerine 2 mg, per the product's own ingredient text." },
+      { productName: "Mason Natural Calcium Magnesium Zinc100tab", chemicalForm: "", compoundAmount: 134, activeAmount: "", unit: "mg", servingSize: "", notes: "Combination product; also linked under Calcium. Source text states \"Magnesium 134 mg\" without naming a specific compound." },
+      { productName: "ALFA Calcium Magnesium Zinc + Vit.d", chemicalForm: "", compoundAmount: 133, activeAmount: "", unit: "mg", servingSize: "1 caplet", notes: "Combination product; also linked under Calcium and Vitamin D. Source text states \"Mg 133 mg\" without naming a specific compound." },
+    ],
+  },
+  {
+    id: "calcium", categoryId: "calcium", name: "Calcium", commonName: "Calcium", scientificName: "",
+    description: "Calcium is a mineral required for bone and teeth structure, muscle contraction, nerve transmission, and blood clotting.",
+    physiologicalRole: "Primary structural mineral of bone and teeth; required for muscle contraction, nerve signaling, vascular contraction/vasodilation, and blood clotting.",
+    clinicalUses: "Prevention/treatment of calcium deficiency; adjunct in bone-health management, typically combined with vitamin D.",
+    evidenceSummary: "See linked Clinical Evidence records for topic-specific evidence; this field intentionally does not summarize into a single verdict.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "Adult UL is 2,000-2,500 mg/day depending on age (NIH ODS). High supplemental calcium intake has been raised as a possible cardiovascular risk factor in some (not all) studies; evidence is mixed.",
+    contraindications: "", drugInteractionSummary: "See linked Drug Interactions.",
+    clinicalCheckpoints: [
+      "What calcium salt is this (carbonate vs. citrate) and does the patient have normal stomach acid (relevant to carbonate absorption)?",
+      "Is the patient on levothyroxine, a bisphosphonate, a tetracycline, or a fluoroquinolone?",
+      "Is the total elemental calcium dose being split (≤500-600 mg elemental per dose) for better absorption?",
+      "Is vitamin D being taken alongside it?",
+    ].join("\n"),
+    repQuickTakeaway: [
+      "What it is: the primary structural mineral in bone/teeth, also essential for muscle contraction, nerve signaling, and blood clotting.",
+      "Main role: skeletal structure and mineralization, plus core neuromuscular and cardiovascular functions.",
+      "Why people use it: bone-health support, often combined with vitamin D, especially for people with low dietary intake.",
+      "Formulation distinction: calcium carbonate (40% elemental, needs stomach acid/food) vs. calcium citrate (21% elemental, absorbed well with or without food, and preferred in patients with reduced stomach acid or after bariatric surgery).",
+      "Safety point: fracture-prevention evidence for calcium (with or without vitamin D) is genuinely mixed across large meta-analyses — do not present it as settled.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim calcium supplementation reliably prevents fractures — large meta-analyses disagree with each other on this.",
+      "Do not claim calcium carbonate and calcium citrate are interchangeable at the same elemental dose without noting the absorption/food-timing difference.",
+      "Do not claim high-dose calcium supplementation is risk-free — a cardiovascular risk signal has been raised in some studies (evidence mixed, not settled).",
+    ].join("\n"),
+    absorptionTimingNotes: [
+      "Calcium carbonate requires stomach acid for absorption — best taken WITH food; may be poorly absorbed on an empty stomach or in patients on acid-suppressing therapy.",
+      "Calcium citrate is absorbed well with or without food, and is generally preferred for patients with reduced stomach acid (e.g. long-term PPI use) or after bariatric surgery — supported by a randomized crossover trial in gastric bypass patients (see linked evidence).",
+      "The body absorbs elemental calcium most efficiently in doses of about 500-600 mg or less at a time — splitting a larger daily total into two or more doses is standard practice (NIH ODS).",
+    ].join("\n"),
+    repTakeawayQuestions: [
+      "Carbonate or citrate — and does that match this patient's stomach-acid status?",
+      "Is the daily elemental calcium dose split into ≤500-600 mg servings?",
+      "Is vitamin D being taken alongside it?",
+      "Any bisphosphonate, levothyroxine, tetracycline, or fluoroquinolone use to space out?",
+    ].join("\n"),
+    repTakeaway30Second: "Calcium is the primary structural mineral in bone, and also essential for muscle, nerve, and clotting function. The two common supplemental forms differ in real, practical ways: carbonate has more elemental calcium per tablet but needs stomach acid and food to absorb well, while citrate absorbs with or without food and is often preferred for patients with reduced stomach acid. Large trials genuinely disagree on whether supplementation reduces fracture risk — some show a real benefit, others show none — so this is positioned as a bone-health-support product taken alongside vitamin D, not a guaranteed fracture-prevention product.",
+    lastReviewed: new Date().toISOString().slice(0, 10),
+    forms: [
+      { id: "calcium-form-carbonate", formName: "Calcium carbonate", chemicalName: "Calcium carbonate", formType: "chemical form",
+        metabolicNotes: "About 40% elemental calcium by weight; requires stomach acid for optimal absorption — best taken with food.",
+        evidenceComparison: "In gastric-bypass patients, calcium citrate showed significantly higher absorption than calcium carbonate (see linked evidence) — carbonate's dependence on stomach acid is the likely mechanism.",
+        sourceIds: "src-nih-ods-calcium,src-pmid-19437082" },
+      { id: "calcium-form-citrate", formName: "Calcium citrate", chemicalName: "Calcium citrate", formType: "chemical form",
+        metabolicNotes: "About 21% elemental calcium by weight; absorbed well with or without food, generally preferred with reduced stomach acid (e.g. long-term PPI use, achlorhydria) or after bariatric surgery.",
+        evidenceComparison: "Showed significantly higher absorption than calcium carbonate in gastric-bypass patients (see linked evidence).",
+        sourceIds: "src-nih-ods-calcium,src-pmid-19437082" },
+    ],
+    evidence: [
+      { topic: "Fracture prevention", sourceId: "src-pmid-29279934", evidenceLevel: "B", studyType: "Systematic review and meta-analysis",
+        population: "Community-dwelling older adults", sampleSize: "51,145 (33 RCTs)", intervention: "Calcium, vitamin D, or both", comparator: "Placebo/no treatment",
+        result: "No significant association between calcium (alone or with vitamin D) and reduced risk of hip, vertebral, nonvertebral, or total fractures.",
+        limitations: "Heterogeneous doses/populations; conflicts with the 2015 NOF and 2007 Lancet meta-analyses below." },
+      { topic: "Fracture prevention (combined with vitamin D)", sourceId: "src-pmid-26510847", evidenceLevel: "B", studyType: "Systematic review and meta-analysis",
+        population: "Community-dwelling and institutionalized middle-aged to older adults", sampleSize: "30,970 (8 RCTs)", intervention: "Calcium + vitamin D", comparator: "Placebo/no treatment",
+        result: "15% reduction in total fractures and 30% reduction in hip fractures with combined supplementation.",
+        limitations: "Relied partly on Women's Health Initiative subgroup data; conflicts with the 2017 JAMA meta-analysis above." },
+      { topic: "Fracture prevention (dose-response)", sourceId: "src-pmid-17720017", evidenceLevel: "B", studyType: "Systematic review and meta-analysis",
+        population: "Adults aged 50 and older", sampleSize: "63,897 (29 RCTs)", intervention: "Calcium, alone or with vitamin D", comparator: "Placebo/no treatment",
+        result: "12% overall reduction in fracture risk; effect was larger (24%) in trials with high compliance, and better with calcium doses ≥1,200 mg/day plus vitamin D ≥800 IU/day.",
+        limitations: "Older meta-analysis; more recent, larger trials above have found null results, so this should be read alongside them, not in isolation." },
+      { topic: "Absorption: calcium citrate vs. carbonate", sourceId: "src-pmid-19437082", evidenceLevel: "B", studyType: "Randomized controlled crossover trial",
+        population: "Post-Roux-en-Y gastric bypass patients", sampleSize: "18", intervention: "Calcium citrate", comparator: "Calcium carbonate",
+        result: "Calcium citrate produced significantly higher serum calcium peak and AUC, and a greater PTH suppression, than calcium carbonate.",
+        limitations: "Small trial (n=18) restricted to gastric bypass patients — should not be generalized to patients with normal stomach acid without qualification, though the underlying acid-dependence mechanism is well established." },
+    ],
+    interactions: [
+      { drugName: "Levothyroxine", drugClass: "Thyroid hormone replacement", direction: "reduces absorption",
+        clinicalSignificance: "Calcium binds levothyroxine in the gut, reducing its absorption and effectiveness.",
+        evidenceLevel: "A", sourceId: "src-nih-ods-calcium", pharmacistCheckpoint: "Separate calcium and levothyroxine dosing by at least 4 hours." },
+      { drugName: "Tetracyclines", drugClass: "Antibiotic", direction: "reduces absorption of both",
+        clinicalSignificance: "Calcium chelates with tetracyclines, reducing absorption of the antibiotic.",
+        evidenceLevel: "A", sourceId: "src-nih-ods-calcium", pharmacistCheckpoint: "Separate calcium and tetracycline dosing by at least 2 hours before or 4-6 hours after." },
+      { drugName: "Fluoroquinolones", drugClass: "Antibiotic", direction: "reduces absorption of both",
+        clinicalSignificance: "Calcium chelates with fluoroquinolones, reducing antibiotic absorption and effectiveness.",
+        evidenceLevel: "A", sourceId: "src-nih-ods-calcium", pharmacistCheckpoint: "Separate calcium and fluoroquinolone dosing — typically several hours apart per product labeling." },
+      { drugName: "Bisphosphonates", drugClass: "Bone-resorption inhibitor", direction: "reduces absorption",
+        clinicalSignificance: "Calcium significantly reduces bisphosphonate absorption if taken together.",
+        evidenceLevel: "A", sourceId: "src-nih-ods-calcium", pharmacistCheckpoint: "Bisphosphonates should be taken well before calcium (per product labeling, often 30-60 minutes before any food/supplement)." },
+      { drugName: "Thiazide diuretics", drugClass: "Diuretic", direction: "interacts",
+        clinicalSignificance: "Thiazides reduce urinary calcium excretion; combined with calcium (and vitamin D), this raises the risk of hypercalcemia.",
+        evidenceLevel: "B", sourceId: "src-nih-ods-calcium", pharmacistCheckpoint: "Watch for hypercalcemia symptoms in thiazide users taking calcium supplements." },
+    ],
+    productMatches: [
+      { productName: "Mason Natural Calcium 600MG 100tab", chemicalForm: "Calcium carbonate", compoundAmount: 600, activeAmount: "", unit: "mg", servingSize: "", notes: "" },
+      { productName: "Mason Natural Calcium Citrate+vit.d3 60 Caplets", chemicalForm: "Calcium citrate", compoundAmount: 315, activeAmount: "", unit: "mg", servingSize: "", notes: "Combination product; also linked under Vitamin D." },
+      { productName: "Mason Natural Calcium 500+vit D3 - Oyster Shell 60 tabs", chemicalForm: "Calcium (oyster shell source)", compoundAmount: 500, activeAmount: "", unit: "mg", servingSize: "", notes: "Combination product; also linked under Vitamin D. Source text does not name the specific calcium compound beyond \"oyster shell\"." },
+      { productName: "Mason Natural Chewable Calcium 600 + Vitamin D3 100tab", chemicalForm: "", compoundAmount: 600, activeAmount: "", unit: "mg", servingSize: "", notes: "Combination product; also linked under Vitamin D. Source text states \"Calcium 600 mg\" without naming a specific compound." },
+      { productName: "Mason Natural Calcium Magnesium Zinc100tab", chemicalForm: "", compoundAmount: 334, activeAmount: "", unit: "mg", servingSize: "", notes: "Combination product; also linked under Magnesium. Source text states \"Calcium 334 mg\" without naming a specific compound." },
+      { productName: "ALFA Calcium Magnesium Zinc + Vit.d", chemicalForm: "", compoundAmount: 300, activeAmount: "", unit: "mg", servingSize: "1 caplet", notes: "Combination product; also linked under Magnesium and Vitamin D. Source text states \"Ca 300 mg\" without naming a specific compound." },
+    ],
+  },
+];
+
+let phase1CategoriesSeedChecked = false;
+async function ensurePhase1CategoriesSeeded() {
+  if (phase1CategoriesSeedChecked) return;
+  // Self-sufficient, same reasoning as the other ensure* functions above —
+  // needs RecallCategories to exist and the Mason/ALFA catalog rows these
+  // product matches look up by name to already be there.
+  await ensureRecallCategoriesSeeded();
+  await ensureRecallB12Seeded();
+  await ensureB12ProductDataSeeded();
+  await ensureOurProductsMasterDataSeeded();
+  const today = new Date().toISOString().slice(0, 10);
+
+  const existingIngredients = await db.getAllRows("RecallIngredients");
+  const existingIngredientIds = new Set(existingIngredients.map((i) => i.id));
+  const missingIngredientDefs = PHASE1_INGREDIENTS_SEED.filter((def) => !existingIngredientIds.has(def.id));
+  if (missingIngredientDefs.length === 0) { phase1CategoriesSeedChecked = true; return; }
+
+  const existingSources = await db.getAllRows("RecallResearchSources");
+  const existingSourceIds = new Set(existingSources.map((s) => s.id));
+  const newSources = PHASE1_SOURCES_SEED.filter((s) => !existingSourceIds.has(s.id));
+  if (newSources.length) {
+    await db.appendRows("RecallResearchSources", newSources.map((s) => ({
+      id: s.id, sourceType: s.sourceType, sourceName: s.sourceName, title: s.title, authors: "",
+      journal: s.journal || "", pmid: s.pmid || "", pmcid: "", doi: s.doi || "", url: s.url || "",
+      publicationYear: s.publicationYear || "", sourceDate: "", sourceQuality: s.sourceQuality || "", notes: "",
+    })));
+  }
+
+  const catalog = await db.getAllRows("ProductCatalog");
+  const catalogByName = new Map(catalog.map((p) => [p.name, p]));
+  const newIngredientRows = [];
+  const newFormRows = [];
+  const newEvidenceRows = [];
+  const newInteractionRows = [];
+  const newLinkRows = [];
+
+  for (const def of missingIngredientDefs) {
+    newIngredientRows.push({
+      id: def.id, categoryId: def.categoryId, name: def.name, commonName: def.commonName || "", scientificName: def.scientificName || "",
+      description: def.description || "", physiologicalRole: def.physiologicalRole || "", clinicalUses: def.clinicalUses || "",
+      evidenceSummary: def.evidenceSummary || "", evidenceLevel: def.evidenceLevel || "NOT_VERIFIED",
+      precautions: def.precautions || "", contraindications: def.contraindications || "", drugInteractionSummary: def.drugInteractionSummary || "",
+      clinicalCheckpoints: def.clinicalCheckpoints || "", repQuickTakeaway: def.repQuickTakeaway || "", whatNotToClaim: def.whatNotToClaim || "",
+      lastReviewed: today, absorptionTimingNotes: def.absorptionTimingNotes || "",
+      repTakeawayQuestions: def.repTakeawayQuestions || "", repTakeaway30Second: def.repTakeaway30Second || "",
+    });
+
+    for (const f of def.forms || []) {
+      newFormRows.push({
+        id: f.id, ingredientId: def.id, formName: f.formName, chemicalName: f.chemicalName || "", formType: f.formType || "chemical form",
+        compoundAmount: "", activeAmount: "", unit: "", conversionRequired: "",
+        absorptionNotes: f.absorptionNotes || "", metabolicNotes: f.metabolicNotes || "", clinicalEvidence: "",
+        evidenceComparison: f.evidenceComparison || "", documentedAdvantages: f.documentedAdvantages || "", documentedLimitations: f.documentedLimitations || "",
+        sourceIds: f.sourceIds || "", lastReviewed: today,
+      });
+    }
+
+    for (const e of def.evidence || []) {
+      newEvidenceRows.push({
+        id: `ce-${def.id}-${crypto.randomUUID()}`, ingredientId: def.id, productId: "", formId: "",
+        condition: e.topic, population: e.population || "", intervention: e.intervention || "", dose: e.dose || "",
+        route: e.route || "", duration: e.duration || "", comparator: e.comparator || "", outcome: e.outcome || "",
+        result: e.result || "", clinicalSignificance: e.clinicalSignificance || "", evidenceLevel: e.evidenceLevel || "NOT_VERIFIED",
+        studyType: e.studyType || "", sourceId: e.sourceId || "", publicationYear: "", lastReviewed: today,
+        sampleSize: e.sampleSize || "", limitations: e.limitations || "",
+      });
+    }
+
+    for (const i of def.interactions || []) {
+      newInteractionRows.push({
+        id: `di-${def.id}-${crypto.randomUUID()}`, ingredientId: def.id, drugName: i.drugName, drugClass: i.drugClass || "",
+        direction: i.direction || "", mechanism: i.mechanism || "", clinicalSignificance: i.clinicalSignificance || "",
+        timing: i.timing || "", evidenceLevel: i.evidenceLevel || "NOT_VERIFIED", pharmacistCheckpoint: i.pharmacistCheckpoint || "",
+        sourceId: i.sourceId || "", lastReviewed: today,
+      });
+    }
+
+    for (const m of def.productMatches || []) {
+      const product = catalogByName.get(m.productName);
+      if (!product) continue; // never invents a product — only links one that's already in the catalog
+      newLinkRows.push({
+        id: `rpi-${def.id}-${crypto.randomUUID()}`, productId: product.id, ingredientId: def.id,
+        chemicalForm: m.chemicalForm || "", compoundAmount: m.compoundAmount ?? "", activeAmount: m.activeAmount ?? "", unit: m.unit || "",
+        servingSize: m.servingSize || "", dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "PARTIALLY_VERIFIED",
+        notes: m.notes || "", missingFields: "", sku: "", manufacturer: "", sourceLabel: "Product catalog import", sourceUrl: "",
+      });
+    }
+  }
+
+  if (newIngredientRows.length) await db.appendRows("RecallIngredients", newIngredientRows);
+  if (newFormRows.length) await db.appendRows("RecallIngredientForms", newFormRows);
+  if (newEvidenceRows.length) await db.appendRows("RecallClinicalEvidence", newEvidenceRows);
+  if (newInteractionRows.length) await db.appendRows("RecallDrugInteractions", newInteractionRows);
+  if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
+
+  phase1CategoriesSeedChecked = true;
+}
+
 // ---------- Recall Phase 2D: research status derivation + editing ----------
 // A record's researchStatus/missingFields are ALWAYS derived here from its
 // own current field values — never accepted verbatim from a client patch.
@@ -6343,6 +6885,7 @@ app.get("/api/recall/categories", async (req, res) => {
     await ensureCompetitorMasterDataSeeded();
     await ensureCompetitorNameDerivedFieldsBackfilled();
     await ensureOurProductsMasterDataSeeded();
+    await ensurePhase1CategoriesSeeded();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
@@ -6394,6 +6937,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     await ensureCompetitorMasterDataSeeded();
     await ensureCompetitorNameDerivedFieldsBackfilled();
     await ensureOurProductsMasterDataSeeded();
+    await ensurePhase1CategoriesSeeded();
     const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
@@ -6522,9 +7066,14 @@ app.get("/api/recall/categories/:id", async (req, res) => {
           url: s.url || `https://pubmed.ncbi.nlm.nih.gov/${s.pmid}/`,
           sourceName: s.sourceName || "",
           journal: s.journal || "",
-          publicationYear: s.publicationYear || "",
+          publicationYear: s.publicationYear || relatedEvidence.find((e) => e.publicationYear)?.publicationYear || "",
           studyType: relatedEvidence.find((e) => e.studyType)?.studyType || "",
+          population: relatedEvidence.find((e) => e.population)?.population || "",
+          sampleSize: relatedEvidence.find((e) => e.sampleSize)?.sampleSize || "",
+          intervention: relatedEvidence.find((e) => e.intervention)?.intervention || "",
+          comparator: relatedEvidence.find((e) => e.comparator)?.comparator || "",
           keyFinding: relatedEvidence.map((e) => e.result).filter(Boolean).join(" ") || "",
+          limitations: relatedEvidence.map((e) => e.limitations).filter(Boolean).join(" ") || "",
         };
       });
 

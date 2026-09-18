@@ -70,10 +70,15 @@ const SCHEMAS = {
   // without it there is no way to know which ingredients belong to which
   // Recall category, which every downstream count/query in this phase
   // depends on. Flagged in the implementation report.
+  // absorptionTimingNotes/repTakeawayQuestions/repTakeaway30Second appended
+  // (Recall Phase 1) — the "Absorption & Timing" and "Rep Takeaway" sections
+  // needed fields that didn't exist yet; repQuickTakeaway/clinicalCheckpoints
+  // already covered the rest of those two sections' content.
   RecallIngredients: [
     "id", "categoryId", "name", "commonName", "scientificName", "description", "physiologicalRole",
     "clinicalUses", "evidenceSummary", "evidenceLevel", "precautions", "contraindications",
     "drugInteractionSummary", "clinicalCheckpoints", "repQuickTakeaway", "whatNotToClaim", "lastReviewed",
+    "absorptionTimingNotes", "repTakeawayQuestions", "repTakeaway30Second",
   ],
   RecallIngredientForms: [
     "id", "ingredientId", "formName", "chemicalName", "formType", "compoundAmount", "activeAmount", "unit",
@@ -95,10 +100,12 @@ const SCHEMAS = {
     "servingSize", "dailyAmount", "amountBasis", "sourceId", "verificationStatus", "notes", "missingFields",
     "sku", "manufacturer", "sourceLabel", "sourceUrl",
   ],
+  // sampleSize/limitations appended (Recall Phase 1) — needed for the
+  // evidence-card format (N, limitations) alongside the fields already here.
   RecallClinicalEvidence: [
     "id", "ingredientId", "productId", "formId", "condition", "population", "intervention", "dose", "route",
     "duration", "comparator", "outcome", "result", "clinicalSignificance", "evidenceLevel", "studyType",
-    "sourceId", "publicationYear", "lastReviewed",
+    "sourceId", "publicationYear", "lastReviewed", "sampleSize", "limitations",
   ],
   RecallResearchSources: [
     "id", "sourceType", "sourceName", "title", "authors", "journal", "pmid", "pmcid", "doi", "url",

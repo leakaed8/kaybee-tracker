@@ -208,6 +208,8 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
 
           <RecallCompetitorsSection competitors={data.competitors} products={data.products} role={role} onSaved={load} />
 
+          <MarketSnapshotSection products={data.products} competitors={data.competitors} />
+
           <RecallSection title="Clinical References">
             {(!data.references || data.references.length === 0) ? (
               <EmptyState text="No PubMed/NCBI study citations have been added yet." />
@@ -218,7 +220,11 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
                   <div style={{ color: "#8A8272", fontSize: 11 }}>
                     {[r.studyType, r.publicationYear, r.journal || r.sourceName].filter(Boolean).join(" · ")}
                   </div>
-                  {r.keyFinding && <div style={{ marginTop: 4, color: "#5B5445" }}>{r.keyFinding}</div>}
+                  {r.population && <div style={{ marginTop: 3, fontSize: 11 }}><strong>Population:</strong> {r.population}{r.sampleSize ? ` (N=${r.sampleSize})` : ""}</div>}
+                  {r.intervention && <div style={{ fontSize: 11 }}><strong>Intervention:</strong> {r.intervention}</div>}
+                  {r.comparator && <div style={{ fontSize: 11 }}><strong>Comparator:</strong> {r.comparator}</div>}
+                  {r.keyFinding && <div style={{ marginTop: 4, color: "#5B5445" }}><strong>Key finding:</strong> {r.keyFinding}</div>}
+                  {r.limitations && <div style={{ marginTop: 3, fontSize: 11, color: "#8A8272" }}><strong>Limitations:</strong> {r.limitations}</div>}
                   <div style={{ marginTop: 4, fontSize: 11 }}>
                     PMID: {r.pmid}{" — "}
                     <a href={r.url} target="_blank" rel="noreferrer">Read full study →</a>
@@ -238,6 +244,25 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
                   {i.pharmacistCheckpoint && <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 2 }}>Checkpoint: {i.pharmacistCheckpoint}</div>}
                 </div>
               ))
+            )}
+          </RecallSection>
+
+          <RecallSection title="Absorption &amp; Timing">
+            {data.ingredients.filter((i) => i.absorptionTimingNotes).length === 0 && data.ingredientForms.filter((f) => f.absorptionNotes).length === 0 ? (
+              <EmptyState text="No absorption/timing guidance has been added yet." />
+            ) : (
+              <>
+                {data.ingredients.filter((i) => i.absorptionTimingNotes).map((i) => (
+                  <ul key={i.id} style={{ margin: 0, paddingLeft: 18, fontSize: 12.5 }}>
+                    {i.absorptionTimingNotes.split("\n").filter(Boolean).map((line, idx) => <li key={idx} style={{ marginBottom: 4 }}>{line}</li>)}
+                  </ul>
+                ))}
+                {data.ingredientForms.filter((f) => f.absorptionNotes).map((f) => (
+                  <div key={f.id} style={{ fontSize: 12, marginTop: 8 }}>
+                    <strong>{f.formName}:</strong> {f.absorptionNotes}
+                  </div>
+                ))}
+              </>
             )}
           </RecallSection>
 
@@ -261,6 +286,41 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
                 <ul key={i.id} style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: "#7A3B3B" }}>
                   {i.whatNotToClaim.split("\n").filter(Boolean).map((line, idx) => <li key={idx} style={{ marginBottom: 4 }}>{line}</li>)}
                 </ul>
+              ))
+            )}
+          </RecallSection>
+
+          <RecallSection title="Rep Takeaway">
+            {data.ingredients.filter((i) => i.clinicalCheckpoints || i.repTakeawayQuestions || i.repTakeaway30Second).length === 0 ? (
+              <EmptyState text="No rep takeaway has been added yet." />
+            ) : (
+              data.ingredients.map((i) => (
+                (i.clinicalCheckpoints || i.repTakeawayQuestions || i.repTakeaway30Second) && (
+                  <div key={i.id} style={{ marginBottom: 12 }}>
+                    {i.clinicalCheckpoints && (
+                      <div style={{ marginBottom: 8 }}>
+                        <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 3 }}>Know this before the call</div>
+                        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5 }}>
+                          {i.clinicalCheckpoints.split("\n").filter(Boolean).map((line, idx) => <li key={idx} style={{ marginBottom: 3 }}>{line}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                    {i.repTakeawayQuestions && (
+                      <div style={{ marginBottom: 8 }}>
+                        <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 3 }}>Questions to ask the physician</div>
+                        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5 }}>
+                          {i.repTakeawayQuestions.split("\n").filter(Boolean).map((line, idx) => <li key={idx} style={{ marginBottom: 3 }}>{line}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                    {i.repTakeaway30Second && (
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 3 }}>30-second explanation</div>
+                        <div style={{ fontSize: 12.5, color: "#5B5445" }}>{i.repTakeaway30Second}</div>
+                      </div>
+                    )}
+                  </div>
+                )
               ))
             )}
           </RecallSection>
@@ -899,6 +959,52 @@ function RecallCompetitorsSection({ competitors, products, role, onSaved }) {
           onSaved={onSaved}
         />
       </ExpandableDetails>
+    </RecallSection>
+  );
+}
+
+// Simple factual counts, computed from data already loaded for the Analysis
+// and Competitors sections above — no ranking, no score, no "winner". Just
+// how many of what exists in this category right now.
+function statTileStyle() {
+  return { background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "10px 12px", minWidth: 100 };
+}
+function MarketSnapshotSection({ products, competitors }) {
+  const ourProducts = products || [];
+  const competitorProducts = (competitors || []).map((c) => c.competitorProduct).filter(Boolean);
+  const brands = new Set(competitorProducts.map((cp) => cp.competitorName).filter(Boolean));
+  const formulations = new Set([
+    ...ourProducts.map((p) => p.chemicalForm).filter(Boolean),
+    ...competitorProducts.map((cp) => cp.genericName).filter(Boolean),
+  ]);
+  const dosageForms = new Set([
+    ...ourProducts.map((p) => p.form).filter(Boolean),
+    ...competitorProducts.map((cp) => cp.form).filter(Boolean),
+  ]);
+  const verifiedCount =
+    ourProducts.filter((p) => p.verificationStatus === "VERIFIED").length +
+    competitorProducts.filter((cp) => cp.researchStatus === "VERIFIED").length;
+  const totalCount = ourProducts.length + competitorProducts.length;
+
+  const tiles = [
+    { label: "Our products", value: ourProducts.length },
+    { label: "Competitor products", value: competitorProducts.length },
+    { label: "Brands", value: brands.size },
+    { label: "Formulations", value: formulations.size },
+    { label: "Dosage forms", value: dosageForms.size },
+    { label: "Verified research", value: `${verifiedCount}/${totalCount}` },
+  ];
+
+  return (
+    <RecallSection title="Market Snapshot">
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        {tiles.map((t) => (
+          <div key={t.label} style={statTileStyle()}>
+            <div style={{ fontSize: 16, fontWeight: 700 }}>{t.value}</div>
+            <div style={{ fontSize: 10.5, color: "#8A8272", textTransform: "uppercase", letterSpacing: 0.3 }}>{t.label}</div>
+          </div>
+        ))}
+      </div>
     </RecallSection>
   );
 }
