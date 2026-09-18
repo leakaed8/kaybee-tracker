@@ -907,6 +907,7 @@ app.get("/api/competitor-products", async (req, res) => {
     await ensureRecallB12Seeded();
     await ensureB12ProductDataSeeded();
     await ensureCompetitorMasterDataSeeded();
+    await ensureCompetitorNameDerivedFieldsBackfilled();
     await ensureOurProductsMasterDataSeeded();
     const { q, limit } = req.query;
     const rows = await db.getAllRows("CompetitorProducts");
@@ -5005,6 +5006,160 @@ async function ensureCompetitorMasterDataSeeded() {
   competitorMasterDataSeedChecked = true;
 }
 
+// ---------- Recall: infer generic name / form / dosage from a competitor
+// product's own name text ----------
+// The bulk retail price-list import that built most of CompetitorProducts
+// left genericName/form/dosage blank on the large majority of rows (no
+// generic/form/dosage column existed in that source) — same situation as
+// this seed's own "unambiguous from the product name" rule already used
+// elsewhere. This is that same rule, generalized to run over every
+// CompetitorProducts row, not just the ones this file's seed constants
+// know about. Deliberately conservative: reads only the name string, never
+// a real label or retailer page, and only ever fills a field that's
+// currently blank — an existing value (verified or not) is never touched.
+const COMPETITOR_GENERIC_NAME_KEYWORDS = [
+  // Bare "B6"/"B12"-style tokens (no "Vitamin" prefix, e.g. "Magne B6") are
+  // trusted here too — in this exclusively supplement/vitamin product
+  // catalog a bare B-number token is unambiguous, unlike a bare single
+  // letter (A/C/D/E/K), which stays gated behind the full "Vitamin X" word.
+  [/vitamin\s*b\s*-?\s*12|\bb[\s-]?12\b|cobalamin/i, "Vitamin B12"],
+  [/vitamin\s*b\s*-?\s*1\b|\bb[\s-]?1\b|thiamine|thiamin\b/i, "Vitamin B1"],
+  [/vitamin\s*b\s*-?\s*2\b|\bb[\s-]?2\b|riboflavin/i, "Vitamin B2"],
+  [/vitamin\s*b\s*-?\s*6\b|\bb[\s-]?6\b|pyridoxine/i, "Vitamin B6"],
+  [/\bb[\s-]?complex\b/i, "B-complex"],
+  [/vitamin\s*c\b|ascorbic/i, "Vitamin C"],
+  [/vitamin\s*d\s*-?\s*3?\b|cholecalciferol/i, "Vitamin D"],
+  [/vitamin\s*e\b|tocopherol/i, "Vitamin E"],
+  [/vitamin\s*k\b/i, "Vitamin K"],
+  [/vitamin\s*a\b/i, "Vitamin A"],
+  [/omega[\s-]?3/i, "Omega-3"],
+  [/fish\s*oil/i, "Fish oil"],
+  [/cod\s*liver\s*oil/i, "Cod liver oil"],
+  [/salmon\s*oil/i, "Salmon oil"],
+  [/evening\s*primrose/i, "Evening primrose oil"],
+  [/magnesium|magnesie|\bmagne\b/i, "Magnesium"],
+  [/calcium/i, "Calcium"],
+  [/\bzinc\b/i, "Zinc"],
+  [/\biron\b/i, "Iron"],
+  [/selenium/i, "Selenium"],
+  [/chromium/i, "Chromium"],
+  [/co\s*-?\s*enzyme\s*q\s*-?\s*10|co\s*-?\s*q\s*-?\s*10|ubiquinone/i, "Coenzyme Q10"],
+  [/collagen/i, "Collagen"],
+  [/biotin/i, "Biotin"],
+  [/ashwagandha/i, "Ashwagandha"],
+  [/ginkgo/i, "Ginkgo biloba"],
+  [/ginseng/i, "Ginseng"],
+  [/melatonin/i, "Melatonin"],
+  [/probiotic/i, "Probiotic"],
+  [/l[\s-]?carnitine/i, "L-carnitine"],
+  [/l[\s-]?glutamine/i, "L-glutamine"],
+  [/l[\s-]?arginine/i, "L-arginine"],
+  [/\bbcaa\b/i, "BCAA"],
+  [/creatine/i, "Creatine"],
+  [/apple\s*cider\s*vinegar/i, "Apple cider vinegar"],
+  [/\bcla\b/i, "CLA"],
+  [/echinacea/i, "Echinacea"],
+  [/folate|folic\s*acid/i, "Folate/Folic acid"],
+  [/\bgarlic\b/i, "Garlic"],
+  [/turmeric|curcumin/i, "Turmeric/Curcumin"],
+  [/milk\s*thistle/i, "Milk thistle"],
+  [/spirulina/i, "Spirulina"],
+  [/resveratrol/i, "Resveratrol"],
+  [/saw\s*palmetto/i, "Saw palmetto"],
+  [/methylcobalamin/i, "Methylcobalamin"],
+  [/cyanocobalamin/i, "Cyanocobalamin"],
+];
+// Tier 1: words that unambiguously name a physical dosage-unit form. Tier 2:
+// words that often double as an INGREDIENT descriptor rather than the
+// product's actual form (e.g. "Fish Oil ... Softgels" — the real form is
+// Softgel, not "Oil"), so they're only trusted when no tier-1 form word is
+// present anywhere else in the name.
+const COMPETITOR_FORM_KEYWORDS_TIER1 = [
+  [/soft\s*-?\s*gels?\b/i, "Softgel"],
+  [/cap(sule)?s?\b/i, "Capsule"],
+  [/caplets?\b/i, "Caplet"],
+  [/chewables?\b/i, "Chewable"],
+  [/gum(m)?(y|ies)\b/i, "Gummy"],
+  [/effervescent\b/i, "Effervescent"],
+  [/lozenges?\b/i, "Lozenge"],
+  [/sachets?\b/i, "Sachet"],
+  [/sublingual\b/i, "Sublingual"],
+  [/syrup\b|sirop\b/i, "Syrup"],
+  [/tab(let)?s?\b|comp(rim[ée])?s?\.?\b/i, "Tablet"],
+];
+const COMPETITOR_FORM_KEYWORDS_TIER2 = [
+  [/drops?\b/i, "Drop"],
+  [/powder\b|poudre\b/i, "Powder"],
+  [/cream\b/i, "Cream"],
+  [/\bgel\b/i, "Gel"],
+  [/spray\b/i, "Spray"],
+  [/\boil\b/i, "Oil"],
+];
+// A number immediately followed by one of these count/container words is a
+// pack-size or container token, not a dose — excluded from dosage matching.
+const COMPETITOR_DOSE_EXCLUDE_UNITS = "tab(let)?s?|cap(sule)?s?|caplets?|comp(rim[ée])?s?\\.?|softgels?|chewables?|gum(m)?(y|ies)|sachets?|lozenges?|pcs?|pieces?|drops?|amp(oules?)?";
+const COMPETITOR_DOSE_RE_SOURCE = "(?<![\\w.])\\d{1,6}(?:[.,]\\d+)?\\s*(?:mcg|mg|ug|g|i\\.?u\\.?|ui)\\b\\.?(?!\\s*(?:" + COMPETITOR_DOSE_EXCLUDE_UNITS + "))";
+
+function earliestKeywordMatch(name, keywords) {
+  let best = null;
+  for (const [rx, label] of keywords) {
+    const m = rx.exec(name);
+    if (m && (!best || m.index < best[0])) best = [m.index, label];
+  }
+  return best ? best[1] : "";
+}
+function inferCompetitorGenericName(name) {
+  const found = [];
+  const seen = new Set();
+  for (const [rx, label] of COMPETITOR_GENERIC_NAME_KEYWORDS) {
+    const m = rx.exec(name);
+    if (m && !seen.has(label)) { found.push([m.index, label]); seen.add(label); }
+  }
+  if (!found.length) return "";
+  found.sort((a, b) => a[0] - b[0]);
+  return found.map((f) => f[1]).join(", ");
+}
+function inferCompetitorForm(name) {
+  return earliestKeywordMatch(name, COMPETITOR_FORM_KEYWORDS_TIER1) || earliestKeywordMatch(name, COMPETITOR_FORM_KEYWORDS_TIER2);
+}
+function inferCompetitorDosage(name) {
+  const matches = name.match(new RegExp(COMPETITOR_DOSE_RE_SOURCE, "gi"));
+  if (!matches || !matches.length) return "";
+  return [...new Set(matches)].join(" + ");
+}
+
+const COMPETITOR_NAME_DERIVED_NOTE = "Generic/form/dosage/pack values added only where unambiguous from the product name; exact label verification still required.";
+let competitorNameDerivedFieldsChecked = false;
+async function ensureCompetitorNameDerivedFieldsBackfilled() {
+  if (competitorNameDerivedFieldsChecked) return;
+  const rows = await db.getAllRows("CompetitorProducts");
+  for (const row of rows) {
+    const name = row.productName || "";
+    const patch = {};
+    if (!row.genericName) {
+      const g = inferCompetitorGenericName(name);
+      if (g) patch.genericName = g;
+    }
+    if (!row.form) {
+      const f = inferCompetitorForm(name);
+      if (f) patch.form = f;
+    }
+    if (!row.dosage) {
+      const d = inferCompetitorDosage(name);
+      if (d) patch.dosage = d;
+    }
+    if (Object.keys(patch).length) {
+      if (!String(row.notes || "").includes(COMPETITOR_NAME_DERIVED_NOTE)) {
+        patch.notes = [row.notes, COMPETITOR_NAME_DERIVED_NOTE].filter(Boolean).join(" ");
+      }
+      patch.updatedBy = "Name-derived field backfill";
+      patch.updatedAt = new Date().toISOString();
+      await db.updateRowById("CompetitorProducts", row.id, patch);
+    }
+  }
+  competitorNameDerivedFieldsChecked = true;
+}
+
 // ---------- Recall: our own product catalog (Mason + ALFA master list) ----------
 // Transcribed from a user-provided Excel export (100 rows: 55 Alfa Vitamins
 // + 45 Mason, once fully researched — an earlier version of this file had
@@ -6171,6 +6326,7 @@ app.get("/api/recall/categories", async (req, res) => {
     await ensureRecallB12Seeded();
     await ensureB12ProductDataSeeded();
     await ensureCompetitorMasterDataSeeded();
+    await ensureCompetitorNameDerivedFieldsBackfilled();
     await ensureOurProductsMasterDataSeeded();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
       db.getAllRows("RecallCategories"),
@@ -6221,6 +6377,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     await ensureRecallB12Seeded();
     await ensureB12ProductDataSeeded();
     await ensureCompetitorMasterDataSeeded();
+    await ensureCompetitorNameDerivedFieldsBackfilled();
     await ensureOurProductsMasterDataSeeded();
     const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources] = await Promise.all([
       db.getAllRows("RecallCategories"),
