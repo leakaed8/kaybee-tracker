@@ -4822,6 +4822,39 @@ const COMPETITOR_MASTER_SEED = {
 };
 
 let competitorMasterDataSeedChecked = false;
+// Reconciles an incoming fact set against an already-existing record —
+// fills in whichever fields are currently blank, and records an open
+// RecallFieldConflicts row for any field where the two sources actually
+// disagree. Never overwrites a value that's already there, and never picks
+// a winner itself. Used whenever a seed's "this already exists" match
+// shouldn't mean "nothing more to learn from this row" — a pre-existing
+// record (from an earlier seed, or a manager's own prior data entry) is
+// very often only partially filled in.
+function reconcileRecordFields({ entityType, entityId, existing, incoming, sourceLabel, existingConflictKeys }) {
+  const patch = {};
+  const conflicts = [];
+  for (const [field, rawValue] of Object.entries(incoming)) {
+    if (rawValue === "" || rawValue == null) continue; // nothing new to contribute for this field
+    const existingValue = existing[field];
+    const existingFilled = existingValue !== "" && existingValue != null;
+    if (!existingFilled) {
+      patch[field] = rawValue;
+    } else if (String(existingValue) !== String(rawValue)) {
+      const conflictKey = `${entityType}|${entityId}|${field}`;
+      if (existingConflictKeys.has(conflictKey)) continue; // already flagged on an earlier run
+      existingConflictKeys.add(conflictKey);
+      conflicts.push({
+        id: `fc-recon-${crypto.randomUUID()}`, entityType, entityId, fieldName: field,
+        sourceALabel: "Existing data", sourceAValue: String(existingValue),
+        sourceBLabel: sourceLabel, sourceBValue: String(rawValue),
+        status: "CONFLICT", notes: "", createdAt: new Date().toISOString(),
+        resolution: "", resolvedBy: "", resolvedAt: "",
+      });
+    }
+  }
+  return { patch, conflicts };
+}
+
 async function ensureCompetitorMasterDataSeeded() {
   if (competitorMasterDataSeedChecked) return;
   // Self-sufficient rather than trusting every call site to sequence
@@ -4852,44 +4885,89 @@ async function ensureCompetitorMasterDataSeeded() {
   }
 
   // ---- New competitor products + retailer listings ----
+  // A name match against an EXISTING row (from an earlier seed, or a
+  // manager's own prior data entry — this table can predate this seed
+  // entirely) is never just skipped: whatever fields are still blank on
+  // that record get filled in, and a genuine disagreement is recorded as an
+  // open conflict, never silently overwritten.
+  const existingConflictRows = await db.getAllRows("RecallFieldConflicts");
+  const existingConflictKeys = new Set(existingConflictRows.map((c) => `${c.entityType}|${c.entityId}|${c.fieldName}`));
   const newProductRows = [];
   const newListingRows = [];
+  const reconcilePatches = [];
+  const newConflictRows = [];
   const createdIdByKey = new Map();
+  const listingKey = (competitorProductId, retailer) => `${competitorProductId}|${norm(retailer)}`;
+  const existingListingByKey = new Map(existingListings.map((l) => [listingKey(l.competitorProductId, l.retailer), l]));
+
   for (const item of COMPETITOR_MASTER_SEED.newProducts) {
     const key = `${norm(item.competitorName)}|${norm(item.productName)}`;
-    if (productIdByKey.has(key) || createdIdByKey.has(key)) continue; // already exists — never duplicate
-    const id = `cp${crypto.randomUUID()}`;
-    const row = { id, createdAt: new Date().toISOString(), createdBy: "Recall competitor master data seed", updatedBy: "", updatedAt: "" };
-    for (const f of COMPETITOR_PRODUCT_FIELDS) row[f] = "";
-    for (const f of COMPETITOR_PRODUCT_DETAIL_FIELDS) row[f] = "";
-    row.competitorName = item.competitorName;
-    row.productName = item.productName;
-    row.genericName = item.genericName || "";
-    row.form = item.form || "";
-    row.dosage = item.dosage || "";
-    row.packSize = item.packSize;
-    // Price stays on the retailer listing, not the master product — see
-    // Phase 2C rule 12 ("prices belong to retailer listings").
-    row.price = "";
-    row.notes = item.notes || "";
-    row.researchStatus = "PARTIALLY_VERIFIED";
-    row.missingFields = "";
-    row.sourceLabel = "";
-    row.sourceUrl = item.sourceUrl || "";
-    newProductRows.push(row);
-    createdIdByKey.set(key, id);
+    const existingId = productIdByKey.get(key) || createdIdByKey.get(key);
 
-    if (item.retailer) {
+    if (existingId) {
+      const existingRow = existingProducts.find((p) => p.id === existingId);
+      if (existingRow) {
+        const { patch, conflicts } = reconcileRecordFields({
+          entityType: "CompetitorProducts", entityId: existingId, existing: existingRow,
+          incoming: { genericName: item.genericName, form: item.form, dosage: item.dosage, packSize: item.packSize, sourceUrl: item.sourceUrl },
+          sourceLabel: "Competitor master data import", existingConflictKeys,
+        });
+        if (Object.keys(patch).length) {
+          patch.updatedBy = "Recall competitor master data seed"; patch.updatedAt = new Date().toISOString();
+          reconcilePatches.push({ id: existingId, patch });
+        }
+        newConflictRows.push(...conflicts);
+      }
+    } else {
+      const id = `cp${crypto.randomUUID()}`;
+      const row = { id, createdAt: new Date().toISOString(), createdBy: "Recall competitor master data seed", updatedBy: "", updatedAt: "" };
+      for (const f of COMPETITOR_PRODUCT_FIELDS) row[f] = "";
+      for (const f of COMPETITOR_PRODUCT_DETAIL_FIELDS) row[f] = "";
+      row.competitorName = item.competitorName;
+      row.productName = item.productName;
+      row.genericName = item.genericName || "";
+      row.form = item.form || "";
+      row.dosage = item.dosage || "";
+      row.packSize = item.packSize;
+      // Price stays on the retailer listing, not the master product — see
+      // Phase 2C rule 12 ("prices belong to retailer listings").
+      row.price = "";
+      row.notes = item.notes || "";
+      row.researchStatus = "PARTIALLY_VERIFIED";
+      row.missingFields = "";
+      row.sourceLabel = "";
+      row.sourceUrl = item.sourceUrl || "";
+      newProductRows.push(row);
+      createdIdByKey.set(key, id);
+    }
+
+    if (!item.retailer) continue;
+    const targetId = existingId || createdIdByKey.get(key);
+    const existingListing = existingListingByKey.get(listingKey(targetId, item.retailer));
+    if (!existingListing) {
       newListingRows.push({
-        id: `rl-cm-${crypto.randomUUID()}`, competitorProductId: id, retailer: item.retailer,
+        id: `rl-cm-${crypto.randomUUID()}`, competitorProductId: targetId, retailer: item.retailer,
         sourceUrl: item.sourceUrl || "", displayedPrice: item.displayedPrice === "" ? "" : item.displayedPrice,
         currency: item.displayedPrice === "" ? "" : "USD", researchDate: "", notes: "",
         createdBy: "Recall competitor master data seed", createdAt: new Date().toISOString(),
       });
+    } else {
+      const { patch, conflicts } = reconcileRecordFields({
+        entityType: "RecallRetailerListings", entityId: existingListing.id, existing: existingListing,
+        incoming: { displayedPrice: item.displayedPrice, sourceUrl: item.sourceUrl },
+        sourceLabel: "Competitor master data import", existingConflictKeys,
+      });
+      if (Object.keys(patch).length) {
+        patch.updatedBy = "Recall competitor master data seed";
+        reconcilePatches.push({ id: existingListing.id, patch, table: "RecallRetailerListings" });
+      }
+      newConflictRows.push(...conflicts);
     }
   }
   if (newProductRows.length) await db.appendRows("CompetitorProducts", newProductRows);
   if (newListingRows.length) await db.appendRows("RecallRetailerListings", newListingRows);
+  for (const { id, patch, table } of reconcilePatches) await db.updateRowById(table || "CompetitorProducts", id, patch);
+  if (newConflictRows.length) await db.appendRows("RecallFieldConflicts", newConflictRows);
 
   // ---- Link the B12/B-complex products into the b-vitamins-b12 category ----
   // (the only category with our-products loaded so far — see header note).
@@ -5862,10 +5940,38 @@ async function ensureOurProductsMasterDataSeeded() {
   const catalog = await db.getAllRows("ProductCatalog");
   const catalogIdByName = new Map(catalog.map((p) => [norm(p.name), p.id]));
 
-  // ---- New products: match-or-skip, never duplicate ----
+  // ---- New products: reconcile a name match instead of skipping ----
+  // A match here can be an earlier seed's own row OR pre-existing data that
+  // predates any of this — either way, fill in whatever's still blank
+  // rather than treating "already exists" as "nothing more to learn".
+  const existingConflictRowsPC = await db.getAllRows("RecallFieldConflicts");
+  const existingConflictKeysPC = new Set(existingConflictRowsPC.map((c) => `${c.entityType}|${c.entityId}|${c.fieldName}`));
   const newRows = [];
+  const reconcilePatchesPC = [];
+  const newConflictRowsPC = [];
   for (const item of OUR_PRODUCTS_MASTER_SEED) {
-    if (catalogIdByName.has(norm(item.name))) continue;
+    const existingId = catalogIdByName.get(norm(item.name));
+    if (existingId) {
+      const existingRow = catalog.find((p) => p.id === existingId);
+      if (existingRow) {
+        const { patch, conflicts } = reconcileRecordFields({
+          entityType: "ProductCatalog", entityId: existingId, existing: existingRow,
+          incoming: { price: item.price, form: item.form, packSize: item.packSize },
+          sourceLabel: "Mason/ALFA product list import", existingConflictKeys: existingConflictKeysPC,
+        });
+        // Ingredients is a JSON array, not a plain field — handled
+        // separately so an existing "[]" (semantically empty) doesn't get
+        // treated as a filled value by the generic string comparison above.
+        const currentIngredients = (() => { try { return JSON.parse(existingRow.ingredients || "[]"); } catch { return []; } })();
+        if (currentIngredients.length === 0 && item.ingredients) patch.ingredients = item.ingredients;
+        if (Object.keys(patch).length) {
+          patch.updatedBy = "Mason/ALFA product list import"; patch.updatedAt = new Date().toISOString();
+          reconcilePatchesPC.push({ id: existingId, patch });
+        }
+        newConflictRowsPC.push(...conflicts);
+      }
+      continue;
+    }
     newRows.push({
       id: `pc${crypto.randomUUID()}`, name: item.name, price: item.price,
       form: item.form, packSize: item.packSize, unitsPerDay: "",
@@ -5875,6 +5981,8 @@ async function ensureOurProductsMasterDataSeeded() {
     });
   }
   if (newRows.length) await db.appendRows("ProductCatalog", newRows);
+  for (const { id, patch } of reconcilePatchesPC) await db.updateRowById("ProductCatalog", id, patch);
+  if (newConflictRowsPC.length) await db.appendRows("RecallFieldConflicts", newConflictRowsPC);
 
   // ---- Enrichment: fill blank fields on an already-existing product ----
   for (const [productName, enrich] of Object.entries(OUR_PRODUCTS_EXISTING_MATCH_ENRICHMENTS)) {
@@ -6515,10 +6623,13 @@ app.patch("/api/recall/field-conflicts/:id/resolve", async (req, res) => {
 
     const chosenValue = resolution === "A" ? conflict.sourceAValue : conflict.sourceBValue;
     const targetTable = conflict.entityType;
-    if (!["CompetitorProducts", "RecallProductIngredients", "ProductCatalog"].includes(targetTable)) {
+    if (!["CompetitorProducts", "RecallProductIngredients", "ProductCatalog", "RecallRetailerListings"].includes(targetTable)) {
       return res.status(400).json({ error: `Cannot resolve a conflict on entityType "${targetTable}" — unsupported table.` });
     }
-    if (targetTable !== "CompetitorProducts" && req.role !== "manager") {
+    // Retailer-listing conflicts (a price/URL discrepancy on one retailer's
+    // listing) are competitor research, same as CompetitorProducts itself —
+    // open to any employee, matching the shared editing rule for that data.
+    if (!["CompetitorProducts", "RecallRetailerListings"].includes(targetTable) && req.role !== "manager") {
       return res.status(403).json({ error: "Managers only." });
     }
     const applied = await db.updateRowById(targetTable, conflict.entityId, { [conflict.fieldName]: chosenValue });
