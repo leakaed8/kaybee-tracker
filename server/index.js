@@ -3465,12 +3465,16 @@ const B12_OUR_PRODUCTS_SEED = [
     matchName: "Mason Natural Vitamin B12 1,000 mcg Quick Dissolve",
     catalog: {
       name: "Mason Natural Vitamin B12 1,000 mcg Quick Dissolve",
-      price: 31.12, form: "Quick-Dissolve", packSize: 100, unitsPerDay: "",
+      price: 34, form: "Quick-Dissolve", packSize: 100, unitsPerDay: "",
       // Structured (not free text) so the general Settings -> Product
       // Catalog ingredients editor can display/edit it like any other
       // product's ingredients, not just show a blob of text.
       ingredients: JSON.stringify([{ name: "Vitamin B12 (Cyanocobalamin)", form: "", amount: 1000, unit: "mcg" }]),
-      notes: "Price is a previously documented retailer price, pending re-verification. Administration: dissolves under the tongue, as explicitly stated.",
+      // Corrected from an earlier 31.12 figure once confirmed: that was the
+      // pre-VAT price, and 34 is the real, tax-inclusive (TTC) selling
+      // price — the same basis used for every other Mason/ALFA price in
+      // this file, not a second disagreeing source.
+      notes: "Price confirmed as 34 (TTC, VAT-inclusive) — matches the Mason/ALFA product list import. Administration: dissolves under the tongue, as explicitly stated.",
     },
     link: {
       chemicalForm: "Cyanocobalamin", compoundAmount: 1000, activeAmount: "", unit: "mcg",
@@ -5939,6 +5943,22 @@ const OUR_PRODUCTS_EXISTING_MATCH_ENRICHMENTS = {
   },
 };
 
+// Corrected knowledge, not a second disagreeing source: a field where an
+// earlier seed run (or a pre-existing live record) may still hold a value
+// that's since been directly confirmed wrong by the person who owns this
+// data. Applied during reconciliation below instead of left as an open
+// CONFLICT for a manager to click through -- but still recorded (as an
+// already-RESOLVED conflict, both values kept) rather than silently
+// overwritten with no trace.
+const OUR_PRODUCTS_CONFIRMED_RESOLUTIONS = [
+  {
+    productName: "Mason Natural Vitamin B12 1,000 mcg Quick Dissolve",
+    fieldName: "price",
+    confirmedValue: 34,
+    resolution: "31.12 was the pre-VAT price; 34 is the real tax-inclusive (TTC) selling price used throughout the Mason/ALFA import (31.12 x 1.11 VAT ~= 34) -- confirmed directly, not a genuine second source.",
+  },
+];
+
 let ourProductsMasterDataSeedChecked = false;
 async function ensureOurProductsMasterDataSeeded() {
   if (ourProductsMasterDataSeedChecked) return;
@@ -5972,6 +5992,19 @@ async function ensureOurProductsMasterDataSeeded() {
           incoming: { price: item.price, form: item.form, packSize: item.packSize },
           sourceLabel: "Mason/ALFA product list import", existingConflictKeys: existingConflictKeysPC,
         });
+        // Apply any confirmed correction directly instead of leaving it as
+        // an open conflict — see OUR_PRODUCTS_CONFIRMED_RESOLUTIONS above.
+        const settledConflicts = conflicts.map((conflict) => {
+          const resolved = OUR_PRODUCTS_CONFIRMED_RESOLUTIONS.find(
+            (r) => norm(r.productName) === norm(item.name) && r.fieldName === conflict.fieldName
+          );
+          if (!resolved) return conflict;
+          patch[conflict.fieldName] = resolved.confirmedValue;
+          return {
+            ...conflict, status: "RESOLVED", resolution: resolved.resolution,
+            resolvedBy: "Mason/ALFA product list import (confirmed)", resolvedAt: new Date().toISOString(),
+          };
+        });
         // Ingredients is a JSON array, not a plain field — handled
         // separately so an existing "[]" (semantically empty) doesn't get
         // treated as a filled value by the generic string comparison above.
@@ -5981,7 +6014,7 @@ async function ensureOurProductsMasterDataSeeded() {
           patch.updatedBy = "Mason/ALFA product list import"; patch.updatedAt = new Date().toISOString();
           reconcilePatchesPC.push({ id: existingId, patch });
         }
-        newConflictRowsPC.push(...conflicts);
+        newConflictRowsPC.push(...settledConflicts);
       }
       continue;
     }
