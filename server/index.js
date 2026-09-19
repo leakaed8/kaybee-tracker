@@ -928,6 +928,7 @@ app.get("/api/competitor-products", async (req, res) => {
     await ensureCompetitorNameDerivedFieldsBackfilled();
     await ensureOurProductsMasterDataSeeded();
     await ensurePhase1CategoriesSeeded();
+    await ensurePhase2CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const { q, limit } = req.query;
@@ -4892,6 +4893,7 @@ async function ensureCompetitorMasterDataSeeded() {
   await ensureRecallB12Seeded();
   await ensureB12ProductDataSeeded();
   await ensurePhase1CategoriesSeeded();
+  await ensurePhase2CategoriesSeeded();
   const norm = (s) => String(s || "").trim().toLowerCase();
 
   const existingProducts = await db.getAllRows("CompetitorProducts");
@@ -6793,6 +6795,384 @@ async function ensurePhase1CategoriesSeeded() {
   phase1CategoriesSeedChecked = true;
 }
 
+// ---------- Recall Phase 2: Omega-3, CoQ10, Multivitamins ----------
+// Same extension pattern as Phase 1 above — no new tables, no new UI, pure
+// data population for three more categories. Evidence below was looked up
+// live via PubMed (see each src-pmid-* entry's pmid/doi), same rule as
+// Phase 1: nothing here is typed from memory. Two well-known claims that
+// didn't have a verifiable citation available in this session (the exact
+// NIH ODS/NCCIH fact-sheet URLs for omega-3/CoQ10/multivitamins) were left
+// out entirely rather than guessed — every source below is a real,
+// PubMed-verified study or systematic review.
+const PHASE2_SOURCES_SEED = [
+  { id: "src-pmid-30415637", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Marine n-3 Fatty Acids and Prevention of Cardiovascular Disease and Cancer (the VITAL trial)",
+    pmid: "30415637", doi: "10.1056/NEJMoa1811403", journal: "New England Journal of Medicine", publicationYear: "2018",
+    url: "https://pubmed.ncbi.nlm.nih.gov/30415637/", sourceQuality: "Large nationwide RCT, n=25,871" },
+  { id: "src-pmid-30415628", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Cardiovascular Risk Reduction with Icosapent Ethyl for Hypertriglyceridemia (REDUCE-IT)",
+    pmid: "30415628", doi: "10.1056/NEJMoa1812792", journal: "New England Journal of Medicine", publicationYear: "2018",
+    url: "https://pubmed.ncbi.nlm.nih.gov/30415628/", sourceQuality: "Multicenter RCT, n=8,179" },
+  { id: "src-pmid-23203133", sourceType: "Review", sourceName: "PubMed",
+    title: "Marine omega-3 phospholipids: metabolism and biological activities",
+    pmid: "23203133", doi: "10.3390/ijms131115401", journal: "International Journal of Molecular Sciences", publicationYear: "2012",
+    url: "https://pubmed.ncbi.nlm.nih.gov/23203133/", sourceQuality: "Narrative review" },
+  { id: "src-pmid-23102888", sourceType: "Review", sourceName: "PubMed",
+    title: "Stearidonic acid as a supplemental source of omega-3 polyunsaturated fatty acids to enhance status for improved human health",
+    pmid: "23102888", doi: "10.1016/j.nut.2012.06.003", journal: "Nutrition", publicationYear: "2012",
+    url: "https://pubmed.ncbi.nlm.nih.gov/23102888/", sourceQuality: "Narrative review" },
+  { id: "src-pmid-30371340", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Effects of Coenzyme Q10 on Statin-Induced Myopathy: An Updated Meta-Analysis of Randomized Controlled Trials",
+    pmid: "30371340", doi: "10.1161/JAHA.118.009835", journal: "Journal of the American Heart Association", publicationYear: "2018",
+    url: "https://pubmed.ncbi.nlm.nih.gov/30371340/", sourceQuality: "Meta-analysis of 12 RCTs, n=575" },
+  { id: "src-pmid-25282031", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "The effect of coenzyme Q10 on morbidity and mortality in chronic heart failure: results from Q-SYMBIO: a randomized double-blind trial",
+    pmid: "25282031", doi: "10.1016/j.jchf.2014.06.008", journal: "JACC: Heart Failure", publicationYear: "2014",
+    url: "https://pubmed.ncbi.nlm.nih.gov/25282031/", sourceQuality: "Multicenter RCT, n=420" },
+  { id: "src-pmid-15728298", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Efficacy of coenzyme Q10 in migraine prophylaxis: a randomized controlled trial",
+    pmid: "15728298", doi: "10.1212/01.WNL.0000151975.03598.ED", journal: "Neurology", publicationYear: "2005",
+    url: "https://pubmed.ncbi.nlm.nih.gov/15728298/", sourceQuality: "Small RCT, n=42" },
+  { id: "src-pmid-12069102", sourceType: "Study", sourceName: "PubMed",
+    title: "Coenzyme Q10: absorption, antioxidative properties, determinants, and plasma levels",
+    pmid: "12069102", doi: "10.1080/10715760290021234", journal: "Free Radical Research", publicationYear: "2002",
+    url: "https://pubmed.ncbi.nlm.nih.gov/12069102/", sourceQuality: "Placebo-controlled clinical studies (summary)" },
+  { id: "src-pmid-23162860", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Multivitamins in the Prevention of Cancer in Men: The Physicians' Health Study II Randomized Controlled Trial",
+    pmid: "23162860", doi: "10.1001/jama.2012.14641", journal: "JAMA", publicationYear: "2012",
+    url: "https://pubmed.ncbi.nlm.nih.gov/23162860/", sourceQuality: "Large RCT, n=14,641" },
+  { id: "src-pmid-36102337", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Effects of cocoa extract and a multivitamin on cognitive function: A randomized clinical trial (COSMOS-Mind)",
+    pmid: "36102337", doi: "10.1002/alz.12767", journal: "Alzheimer's & Dementia", publicationYear: "2022",
+    url: "https://pubmed.ncbi.nlm.nih.gov/36102337/", sourceQuality: "Large pragmatic RCT, n=2,262" },
+  { id: "src-pmid-22419320", sourceType: "Systematic review (Cochrane)", sourceName: "Cochrane",
+    title: "Antioxidant supplements for prevention of mortality in healthy participants and patients with various diseases",
+    pmid: "22419320", doi: "10.1002/14651858.CD007176.pub2", journal: "Cochrane Database of Systematic Reviews", publicationYear: "2012",
+    url: "https://pubmed.ncbi.nlm.nih.gov/22419320/", sourceQuality: "Cochrane meta-analysis of 78 RCTs, n=296,707" },
+];
+
+const PHASE2_INGREDIENTS_SEED = [
+  {
+    id: "omega-3", categoryId: "omega-3", name: "Omega-3 (EPA/DHA)", commonName: "Fish oil (EPA/DHA)",
+    scientificName: "Eicosapentaenoic acid (EPA) / Docosahexaenoic acid (DHA)",
+    description: "Omega-3 polyunsaturated fatty acids are essential fats obtained primarily from marine sources (EPA, DHA) or plant sources (ALA), incorporated into cell membranes throughout the body and used as precursors for anti-inflammatory signaling molecules.",
+    physiologicalRole: "Structural component of cell membranes, particularly in the retina and brain; precursor for anti-inflammatory eicosanoids and resolvins; at pharmacologic doses, lowers serum triglycerides.",
+    clinicalUses: "General cardiovascular and cognitive-support supplementation; prescription-strength purified EPA is used for triglyceride-lowering in patients already on statin therapy with elevated triglycerides. Evidence for general-population cardiovascular/cancer prevention at typical OTC doses is mixed.",
+    evidenceSummary: "See linked Clinical Evidence records for topic-specific evidence; this field intentionally does not summarize into a single verdict.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "REDUCE-IT (4 g/day purified EPA ethyl ester in statin-treated patients) found a higher rate of hospitalization for atrial fibrillation/flutter (3.1% vs. 2.1%) and a non-statistically-significant increase in serious bleeding (2.7% vs. 2.1%, P=0.06) versus placebo. VITAL (1 g/day mixed EPA+DHA in a general population) reported no excess bleeding or other serious adverse events at that lower dose.",
+    contraindications: "", drugInteractionSummary: "See linked Drug Interactions.",
+    clinicalCheckpoints: [
+      "Is the patient on an anticoagulant (warfarin, a DOAC) or an antiplatelet agent (aspirin, clopidogrel)?",
+      "Is this being used for general wellness, or for a specific triglyceride-lowering indication alongside statin therapy?",
+      "Does the labeled \"fish oil\" amount reflect total oil weight, or the actual EPA+DHA content? These are often very different numbers.",
+      "Any known fish or shellfish allergy?",
+      "Is the product a marine EPA/DHA source, or a plant-based ALA source (e.g. flaxseed) — these are not interchangeable at the same milligram dose.",
+    ].join("\n"),
+    repQuickTakeaway: [
+      "What it is: essential polyunsaturated fats — marine EPA/DHA or plant-derived ALA — incorporated into cell membranes and involved in anti-inflammatory signaling.",
+      "Main role: membrane structure (especially brain/retina) and, at higher pharmacologic doses, meaningful triglyceride-lowering.",
+      "Why people use it: general cardiovascular/wellness support, or specifically to lower triglycerides alongside statin therapy.",
+      "Form distinction: marine EPA/DHA (fish/krill oil) is not the same as plant-based ALA (flaxseed) — the body converts ALA to EPA/DHA very inefficiently.",
+      "Safety point: the large VITAL trial found no reduction in major cardiovascular events or cancer at a general-population dose (1 g/day); a purified high-dose prescription EPA (4 g/day, REDUCE-IT) did reduce cardiovascular events in statin-treated patients with high triglycerides, but also raised atrial fibrillation risk — two very different doses and populations, not interchangeable evidence.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim a standard 1 g/day fish oil supplement will prevent heart attacks, strokes, or cancer in the general population — VITAL found no significant reduction in either composite outcome.",
+      "Do not present REDUCE-IT's cardiovascular benefit as evidence for ordinary over-the-counter fish oil — that trial used a specific purified prescription-strength EPA ethyl ester at 4 g/day in a selected statin-treated, high-triglyceride population.",
+      "Do not claim omega-3 supplementation is risk-free for patients on blood thinners — both a bleeding and an atrial-fibrillation signal have been reported in trials.",
+      "Do not claim a plant-based ALA product (e.g. flaxseed oil) delivers the same EPA/DHA benefit as a marine fish-oil product at an equivalent milligram dose — conversion of ALA to EPA/DHA in the body is poor.",
+    ].join("\n"),
+    absorptionTimingNotes: [
+      "Taking omega-3 supplements with a meal containing some fat improves absorption versus an empty stomach.",
+      "Dietary form matters: natural triglyceride, ethyl ester, re-esterified triglyceride, and phospholipid (krill) forms are metabolized differently, and available evidence does not treat them as interchangeable (see linked Forms).",
+      "ALA (plant-based) requires enzymatic conversion to EPA and especially DHA, and that conversion is inefficient in humans — a plant-based source is not a direct substitute for marine EPA/DHA milligram-for-milligram.",
+    ].join("\n"),
+    repTakeawayQuestions: [
+      "Is this a marine EPA/DHA product or a plant-based ALA (flaxseed) product — and does the patient understand those aren't interchangeable?",
+      "Is the patient on any anticoagulant or antiplatelet medication?",
+      "Is the goal general wellness, or a specific triglyceride-lowering target?",
+      "Does the labeled dose reflect total fish oil weight or the actual EPA+DHA content?",
+    ].join("\n"),
+    repTakeaway30Second: "Omega-3s are essential fats used for cell-membrane structure and anti-inflammatory signaling. Marine EPA/DHA (fish/krill oil) and plant-based ALA (flaxseed) are not interchangeable — the body converts ALA to EPA/DHA poorly. At a typical general-wellness dose (~1 g/day), the large VITAL trial found no reduction in heart attacks, strokes, or cancer; a purified prescription-strength EPA (4 g/day, REDUCE-IT) did reduce cardiovascular events in statin-treated patients with elevated triglycerides, but also increased atrial fibrillation risk — so match the evidence to the dose and population being discussed, not the ingredient name alone.",
+    lastReviewed: new Date().toISOString().slice(0, 10),
+    forms: [
+      { id: "omega3-form-marine", formName: "Marine triglyceride / ethyl ester / phospholipid forms", chemicalName: "EPA/DHA (varying esterification)", formType: "chemical form",
+        metabolicNotes: "Marine omega-3 (fish/krill oil) EPA and DHA are sold in different chemical forms — natural triglyceride, ethyl ester (concentrated), re-esterified triglyceride, or phospholipid (krill) — which differ in how they're metabolized and absorbed.",
+        evidenceComparison: "A 2012 review of marine omega-3 phospholipids notes that dietary form (triglyceride vs. ethyl ester vs. phospholipid) affects metabolic bioavailability, but head-to-head quantified comparisons across all forms are limited — do not present any one form as definitively best-absorbed without qualification.",
+        sourceIds: "src-pmid-23203133" },
+      { id: "omega3-form-ala", formName: "Plant-based ALA (alpha-linolenic acid)", chemicalName: "alpha-Linolenic acid", formType: "chemical form",
+        metabolicNotes: "Found in flaxseed and other plant oils; the body must convert ALA to EPA and then DHA via a multi-step enzymatic pathway.",
+        evidenceComparison: "Conversion of ALA to the longer-chain EPA and especially DHA is documented as inefficient in humans — an ALA-only product should not be presented as an equivalent source of EPA/DHA at the same milligram dose.",
+        sourceIds: "src-pmid-23102888" },
+    ],
+    evidence: [
+      { topic: "Cardiovascular disease and cancer prevention (general population)", sourceId: "src-pmid-30415637", evidenceLevel: "B", studyType: "Randomized controlled trial",
+        population: "US adults, men ≥50 / women ≥55, general population (not selected for high triglycerides or cardiovascular risk)", sampleSize: "25,871", intervention: "Marine n-3 fatty acids (EPA+DHA) 1 g/day", comparator: "Placebo",
+        result: "No significant reduction in major cardiovascular events (HR 0.92, 95% CI 0.80-1.06) or invasive cancer (HR 1.03, 95% CI 0.93-1.13) over a median 5.3 years. A secondary/component endpoint, total myocardial infarction, was significantly reduced (HR 0.72, 95% CI 0.59-0.90).",
+        limitations: "General population not selected for elevated triglycerides or high cardiovascular risk; a fixed 1 g/day dose; the significant MI reduction was a secondary/component endpoint, not the primary composite result." },
+      { topic: "Cardiovascular event reduction with prescription-strength EPA (elevated triglycerides, on statin therapy)", sourceId: "src-pmid-30415628", evidenceLevel: "A", studyType: "Randomized controlled trial",
+        population: "Statin-treated patients with established cardiovascular disease or diabetes plus risk factors, triglycerides 135-499 mg/dL", sampleSize: "8,179", intervention: "Icosapent ethyl (purified EPA ethyl ester) 4 g/day", comparator: "Placebo (mineral oil)",
+        result: "25% relative risk reduction in the primary composite cardiovascular endpoint (17.2% vs. 22.0%, HR 0.75, 95% CI 0.68-0.83) over a median 4.9 years. Hospitalization for atrial fibrillation/flutter was more frequent with icosapent ethyl (3.1% vs. 2.1%).",
+        limitations: "A specific purified prescription-strength EPA product at a much higher dose than typical OTC fish oil, in a selected high-risk population already on statins — not generalizable to general-wellness fish oil use." },
+    ],
+    interactions: [
+      { drugName: "Warfarin", drugClass: "Anticoagulant (vitamin K antagonist)", direction: "interacts",
+        clinicalSignificance: "Omega-3 fatty acids have mild antiplatelet activity; combined with warfarin this may increase bleeding risk, and REDUCE-IT (at a much higher pharmacologic EPA dose) observed a numerical increase in serious bleeding events.",
+        evidenceLevel: "B", sourceId: "src-pmid-30415628", pharmacistCheckpoint: "Monitor for bruising/bleeding signs in patients on warfarin or other anticoagulants who add omega-3 supplementation." },
+      { drugName: "Antiplatelet agents (aspirin, clopidogrel)", drugClass: "Antiplatelet", direction: "interacts",
+        clinicalSignificance: "Additive antiplatelet effect may increase bleeding risk when combined with omega-3 supplementation, particularly at higher pharmacologic doses.",
+        evidenceLevel: "B", sourceId: "src-pmid-30415628", pharmacistCheckpoint: "Flag concurrent antiplatelet therapy, especially at higher omega-3 doses; watch for bleeding/bruising." },
+    ],
+    productMatches: [
+      { productName: "ALFA Omega-3 Fish Oil 60 Softgels", chemicalForm: "Fish oil (EPA/DHA, esterification not specified on label)", compoundAmount: 1000, activeAmount: 300, unit: "mg", servingSize: "1 softgel", notes: "Labeled as fish oil 1,000 mg with omega-3 300 mg (EPA 180 mg + DHA 120 mg) per the product's own ingredient text (60-count label)." },
+      { productName: "Mason Natural Omega-3 Fish Oil 60 Caps", chemicalForm: "Fish oil (EPA/DHA, esterification not specified on label)", compoundAmount: 1000, activeAmount: 300, unit: "mg", servingSize: "1 softgel", notes: "Labeled as fish oil 1,000 mg providing EPA 180 mg + DHA 120 mg = 300 mg omega-3, per the product's own ingredient text." },
+      { productName: "ALFA Salmon Oil Omega 3 100 Softgels", chemicalForm: "Salmon oil (EPA/DHA amounts not captured)", compoundAmount: 1000, activeAmount: "", unit: "mg", servingSize: "1 softgel", notes: "Source text states salmon oil 1,000 mg/softgel; EPA/DHA amounts are listed on the label but were not captured in the product's own ingredient text." },
+      { productName: "ALFA Cod Liver Oil 100 Softgels", chemicalForm: "Cod liver oil", compoundAmount: 415, activeAmount: 64, unit: "mg", servingSize: "1 softgel", notes: "Also contains Vitamin A 1,250 IU + Vitamin D 135 IU per softgel — a combination product, not a pure omega-3 source. EPA 32 mg + DHA 32 mg (64 mg total) per the product's own ingredient text." },
+      { productName: "Mason Natural Cod Liver Oil 100 Softgels", chemicalForm: "Cod liver oil", compoundAmount: 415, activeAmount: "", unit: "mg", servingSize: "1 softgel", notes: "Also contains Vitamin A 1,250 IU + Vitamin D3 135 IU per softgel — a combination product, not a pure omega-3 source. Source ingredient text does not separately state an EPA/DHA amount." },
+      { productName: "ALFA Omega 3.6.9 Flax Oil 1000 Mg", chemicalForm: "Alpha-linolenic acid (ALA, plant-based)", compoundAmount: 500, activeAmount: "", unit: "mg", servingSize: "1 softgel", notes: "Plant-based ALA source, not marine EPA/DHA — conversion of ALA to EPA/DHA in the body is inefficient (see linked Forms). Also contains Omega-6 (linoleic acid) 120 mg and Omega-9 (oleic acid) 150 mg per the product's own ingredient text." },
+    ],
+  },
+  {
+    id: "coq10", categoryId: "coq10", name: "Coenzyme Q10 (CoQ10)", commonName: "Ubiquinone / Ubiquinol", scientificName: "2,3-dimethoxy-5-methyl-6-decaprenyl-1,4-benzoquinone",
+    description: "Coenzyme Q10 is a naturally occurring, fat-soluble compound present in nearly every cell, functioning as an electron carrier in the mitochondrial respiratory chain and as an antioxidant in its reduced (ubiquinol) form.",
+    physiologicalRole: "Essential cofactor for mitochondrial ATP production (electron transport chain, Complexes I/II to III); functions as a lipid-soluble antioxidant in its reduced (ubiquinol) form.",
+    clinicalUses: "Statins reduce endogenous CoQ10 synthesis via the shared mevalonate biosynthetic pathway; CoQ10 supplementation has been studied as adjunctive therapy for statin-associated muscle symptoms, chronic heart failure, and migraine prophylaxis.",
+    evidenceSummary: "See linked Clinical Evidence records for topic-specific evidence; this field intentionally does not summarize into a single verdict.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "Generally well tolerated in the trials reviewed here — Q-SYMBIO reported it as safe over 2 years of adjunctive use. One study found oral CoQ10 absorption rose in a dose-dependent way only up to about 200 mg/day; doses beyond that have less-established additional benefit.",
+    contraindications: "", drugInteractionSummary: "See linked Drug Interactions.",
+    clinicalCheckpoints: [
+      "Is the patient on a statin and reporting muscle pain, weakness, cramping, or fatigue (possible statin-associated muscle symptoms)?",
+      "Is this being used for a specific indication (heart failure adjunct, migraine prophylaxis, statin myopathy) or general wellness?",
+      "Ubiquinone or ubiquinol — has the patient been told one is \"better absorbed,\" and is that claim actually verified?",
+      "If used for heart failure, is it being positioned as an add-on to standard therapy, or (incorrectly) as a replacement?",
+    ].join("\n"),
+    repQuickTakeaway: [
+      "What it is: a fat-soluble compound that acts as an electron carrier in mitochondrial energy production and as an antioxidant in its reduced form.",
+      "Main role: supports cellular energy (ATP) production; levels can be reduced by statin therapy, which shares a biosynthetic pathway with cholesterol.",
+      "Why people use it: statin-associated muscle symptoms, as an adjunct in chronic heart failure, or migraine prophylaxis.",
+      "Form distinction: ubiquinone (oxidized, more common, less expensive) vs. ubiquinol (reduced, marketed as better absorbed) — that absorption claim is not confirmed by a head-to-head trial reviewed here.",
+      "Safety point: a meta-analysis found CoQ10 improved statin-associated muscle SYMPTOMS (pain, weakness, cramp, tiredness) but did NOT lower creatine kinase — it may help how a patient feels without changing an objective muscle-damage marker.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim CoQ10 cures or reverses statin-induced muscle damage — the meta-analysis reviewed here found symptom improvement but no change in plasma creatine kinase levels.",
+      "Do not claim ubiquinol is proven better absorbed than ubiquinone — no head-to-head absorption trial is reviewed here to confirm this common marketing claim.",
+      "Do not claim CoQ10 is a substitute for guideline-directed heart failure therapy — Q-SYMBIO tested it strictly as an add-on to standard therapy, not a replacement.",
+      "Do not claim CoQ10 is an established migraine treatment — supporting evidence here is a single small trial (n=42), not a large or replicated body of evidence.",
+    ].join("\n"),
+    absorptionTimingNotes: [
+      "Fat-soluble — take with a meal containing some fat to improve absorption.",
+      "Oral CoQ10 absorption is dose-dependent, with one study finding increases in plasma CoQ10 up to a daily dose of about 200 mg, beyond which additional benefit is less established.",
+      "Concurrent high-dose vitamin E supplementation was observed to lower plasma CoQ10 levels in at least one study — worth noting for patients stacking multiple antioxidant supplements.",
+    ].join("\n"),
+    repTakeawayQuestions: [
+      "Is the patient on a statin and reporting muscle-related symptoms?",
+      "What's the actual goal — statin-symptom relief, heart failure support, or migraine prevention?",
+      "Has the patient been sold on a specific form (ubiquinol) based on an absorption claim — and do they understand that claim isn't head-to-head verified here?",
+    ].join("\n"),
+    repTakeaway30Second: "CoQ10 is a mitochondrial cofactor for energy production that statins can deplete, since both share a biosynthetic pathway. The best-supported use here is for statin-associated muscle symptoms — a meta-analysis of 12 RCTs found real symptom improvement (pain, weakness, cramp, tiredness) but no change in creatine kinase, so it helps how patients feel without necessarily reversing measurable muscle injury. A larger heart-failure trial (Q-SYMBIO) found CoQ10 as an add-on to standard therapy reduced major cardiovascular events and mortality. Ubiquinol's \"better absorbed\" claim over ubiquinone is common marketing, not something confirmed by a head-to-head trial reviewed here.",
+    lastReviewed: new Date().toISOString().slice(0, 10),
+    forms: [
+      { id: "coq10-form-ubiquinone", formName: "Ubiquinone (oxidized form)", chemicalName: "Ubiquinone", formType: "chemical form",
+        metabolicNotes: "The oxidized form; more common and typically less expensive. Oral absorption is dose-dependent, with one study finding increases up to roughly a 200 mg/day dose.",
+        evidenceComparison: "NOT_VERIFIED — no head-to-head absorption trial against ubiquinol is reviewed here.",
+        sourceIds: "src-pmid-12069102" },
+      { id: "coq10-form-ubiquinol", formName: "Ubiquinol (reduced form)", chemicalName: "Ubiquinol", formType: "chemical form",
+        metabolicNotes: "The reduced, antioxidant-active form; marketed as better absorbed than ubiquinone, generally at a higher price point.",
+        evidenceComparison: "NOT_VERIFIED — the \"better absorbed\" claim is common in marketing but is not confirmed by a head-to-head bioavailability trial reviewed here.",
+        sourceIds: "src-pmid-12069102" },
+    ],
+    evidence: [
+      { topic: "Statin-associated muscle symptoms", sourceId: "src-pmid-30371340", evidenceLevel: "B", studyType: "Systematic review and meta-analysis",
+        population: "Statin-treated patients reporting muscle-related symptoms", sampleSize: "575 (12 RCTs; 294 CoQ10 / 281 placebo)", intervention: "Oral CoQ10 supplementation", comparator: "Placebo",
+        result: "CoQ10 significantly improved muscle pain, weakness, cramp, and tiredness scores versus placebo, but did not significantly reduce plasma creatine kinase levels.",
+        limitations: "Relatively small pooled sample (575 patients across 12 trials); symptom scores are subjective outcomes, and the lack of CK change means an objective muscle-injury marker was unaffected." },
+      { topic: "Chronic heart failure — morbidity and mortality", sourceId: "src-pmid-25282031", evidenceLevel: "A", studyType: "Randomized controlled trial (Q-SYMBIO)",
+        population: "Patients with moderate to severe chronic heart failure, on standard therapy", sampleSize: "420", intervention: "CoQ10 100 mg three times daily (300 mg/day) as an add-on to standard therapy, for 2 years", comparator: "Placebo",
+        result: "Major adverse cardiovascular events occurred in 15% of the CoQ10 group vs. 26% of the placebo group (HR 0.50, 95% CI 0.32-0.80). Cardiovascular mortality (9% vs. 16%) and all-cause mortality (10% vs. 18%) were both significantly lower with CoQ10.",
+        limitations: "Tested strictly as an add-on to standard heart-failure therapy, not as a replacement; short-term (16-week) functional endpoints (NYHA class, 6-minute walk, NT-proBNP) did not show significant change — only the long-term (2-year) outcome did." },
+      { topic: "Migraine prophylaxis", sourceId: "src-pmid-15728298", evidenceLevel: "C", studyType: "Randomized controlled trial",
+        population: "Adult migraine patients", sampleSize: "42", intervention: "CoQ10 100 mg three times daily (300 mg/day)", comparator: "Placebo",
+        result: "CoQ10 was superior to placebo for attack frequency, headache-days, and days-with-nausea by the third treatment month; the 50%-responder rate was 47.6% for CoQ10 vs. 14.4% for placebo (number-needed-to-treat: 3).",
+        limitations: "Small single trial (n=42) — should not be presented as an established, widely-replicated migraine therapy." },
+    ],
+    interactions: [
+      { drugName: "Statins (HMG-CoA reductase inhibitors)", drugClass: "Lipid-lowering agent", direction: "interacts",
+        clinicalSignificance: "Statins inhibit the same biosynthetic pathway (mevalonate pathway) used to produce both cholesterol and endogenous CoQ10, which can lower circulating CoQ10 levels — the rationale examined in trials of CoQ10 for statin-associated muscle symptoms.",
+        evidenceLevel: "B", sourceId: "src-pmid-30371340", pharmacistCheckpoint: "This is the core rationale for CoQ10 supplementation in statin users reporting muscle symptoms." },
+    ],
+    productMatches: [
+      { productName: "ALFA Co Q-10 100mg 30 Softgels", chemicalForm: "Ubiquinone", compoundAmount: 100, activeAmount: "", unit: "mg", servingSize: "1 softgel", notes: "Labeled as CoQ10 100 mg (ubiquinone) per softgel, per the product's own ingredient text." },
+    ],
+  },
+  {
+    id: "multivitamins", categoryId: "multivitamins", name: "Multivitamin / Multimineral", commonName: "Multivitamin", scientificName: "",
+    description: "Multivitamin/multimineral products combine multiple vitamins and minerals — typically at levels near the Recommended Dietary Allowance — into a single daily supplement intended to fill dietary gaps rather than treat a specific diagnosed deficiency.",
+    physiologicalRole: "Provides a combination of essential micronutrients, each with its own physiological role — see the individual nutrient categories in this Recall module (Vitamin D, Vitamin C, Calcium, Magnesium, B12, etc.) for ingredient-specific detail.",
+    clinicalUses: "General nutritional supplementation for individuals with dietary gaps; studied at a population level for cancer prevention and cognitive protection in older adults.",
+    evidenceSummary: "See linked Clinical Evidence records for topic-specific evidence; this field intentionally does not summarize into a single verdict.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "Individual formulations vary widely in composition and dose — always check the specific product's own label for actual nutrient amounts rather than assuming a standard formula. A large Cochrane review of SINGLE-nutrient antioxidant supplements (beta-carotene, vitamin A, vitamin C, vitamin E, selenium) found beta-carotene and vitamin E significantly increased all-cause mortality in trials with low risk of bias — relevant context when a multivitamin contains these at higher-than-RDA doses.",
+    contraindications: "", drugInteractionSummary: "This category is a combination product — see each contained nutrient's own category page (e.g. Vitamin D, Calcium, Magnesium, Vitamin C, B12) for nutrient-specific drug interactions.",
+    clinicalCheckpoints: [
+      "Does this patient actually have a dietary gap a multivitamin would fill, or a specific single-nutrient deficiency that needs targeted (not combination) treatment?",
+      "Is this an iron-containing or iron-free formulation — does the patient's iron status (age, sex, menstrual status) make one more appropriate than the other?",
+      "Does the product contain vitamin A, vitamin E, or beta-carotene at doses meaningfully above the RDA — relevant given the Cochrane mortality signal for these specific antioxidants at supplemental doses?",
+      "Is the patient already taking single-nutrient supplements that could result in double-dosing when combined with a multivitamin?",
+    ].join("\n"),
+    repQuickTakeaway: [
+      "What it is: a combination product bundling multiple vitamins/minerals, usually near RDA levels, into one daily dose.",
+      "Main role: fills general dietary gaps rather than treating a specific diagnosed deficiency — for that, single-nutrient products are usually more appropriate.",
+      "Why people use it: general nutritional insurance, especially with limited dietary variety.",
+      "Formulation distinction: iron-containing vs. iron-free — iron-free formulas are commonly chosen for men and postmenopausal women who don't need supplemental iron, to avoid unnecessary iron accumulation.",
+      "Evidence point: in the Physicians' Health Study II (male physicians), a daily multivitamin modestly reduced total cancer incidence; in COSMOS-Mind (older adults), a daily multivitamin-mineral modestly improved global cognition, memory, and executive function over 3 years versus placebo.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim a multivitamin is a substitute for treating a diagnosed, specific single-nutrient deficiency — it's a general supplement, not targeted therapy.",
+      "Do not overstate the PHS-II cancer-prevention finding — it was in male physicians specifically, the effect was modest, and there was no significant effect on prostate or colorectal cancer specifically, or on cancer mortality.",
+      "Do not claim all multivitamins are proven to protect cognition — COSMOS-Mind's benefit is one large trial, not a settled consensus, and it did not test every commercial multivitamin formulation.",
+      "Do not claim antioxidant vitamins in a multivitamin are automatically safe at any dose — the Cochrane review found real mortality signals for beta-carotene and vitamin E at supplemental doses when taken as standalone antioxidant supplements.",
+    ].join("\n"),
+    absorptionTimingNotes: [
+      "Fat-soluble vitamins in the formulation (A, D, E, K, if present) are better absorbed when taken with a meal containing some fat.",
+      "Iron (if present) is better absorbed on an empty stomach or with vitamin C, but is also more likely to cause GI upset that way — many patients take iron-containing multivitamins with food specifically to improve tolerance, at some cost to absorption.",
+    ].join("\n"),
+    repTakeawayQuestions: [
+      "Is there an actual dietary gap here, or a specific deficiency that needs targeted treatment instead?",
+      "Iron-containing or iron-free — does that match this patient's actual iron needs?",
+      "Is the patient stacking this with other single-nutrient supplements that could cause double-dosing?",
+    ].join("\n"),
+    repTakeaway30Second: "A multivitamin bundles multiple nutrients, usually near RDA levels, to cover general dietary gaps — it's not targeted therapy for a diagnosed deficiency. Two large trials give real, if modest, supportive evidence: PHS-II found a small reduction in total cancer in male physicians, and COSMOS-Mind found a modest cognitive benefit in older adults over 3 years. But a separate Cochrane review is an important caution: some individual antioxidant vitamins (beta-carotene, vitamin E) increased mortality in trials as STANDALONE high-dose supplements — so a multivitamin's actual nutrient doses matter, and this isn't a \"more vitamins is always safer\" story.",
+    lastReviewed: new Date().toISOString().slice(0, 10),
+    forms: [
+      { id: "multivitamin-form-iron-free", formName: "Iron-free formulation", chemicalName: "", formType: "formulation",
+        metabolicNotes: "Formulated without supplemental iron; commonly chosen for men and postmenopausal women, who typically do not need extra dietary iron and are the population most often warned to avoid accidental iron overload.",
+        evidenceComparison: "NOT_VERIFIED — this file does not review a head-to-head outcomes trial comparing iron-containing vs. iron-free multivitamin formulations; the iron-free-for-men/postmenopausal-women convention reflects standard clinical/nutritional practice rather than a specific trial finding.",
+        sourceIds: "" },
+      { id: "multivitamin-form-iron-containing", formName: "Iron-containing formulation", chemicalName: "", formType: "formulation",
+        metabolicNotes: "Formulated with supplemental iron; typically intended for populations with higher iron needs (e.g. premenopausal/menstruating women).",
+        evidenceComparison: "NOT_VERIFIED — see the iron-free formulation note.",
+        sourceIds: "" },
+    ],
+    evidence: [
+      { topic: "Total cancer prevention (men)", sourceId: "src-pmid-23162860", evidenceLevel: "B", studyType: "Randomized controlled trial (Physicians' Health Study II)",
+        population: "14,641 male US physicians aged 50+ (mean age 64.3)", sampleSize: "14,641", intervention: "Daily multivitamin", comparator: "Placebo",
+        result: "Daily multivitamin use was associated with a statistically significant reduction in total cancer incidence (HR 0.92, 95% CI 0.86-0.998) over a median 11.2 years. No significant effect was found on prostate cancer, colorectal cancer, other site-specific cancers, or cancer mortality specifically.",
+        limitations: "Male physicians only — not generalizable to women or non-physician populations; the overall effect size, while statistically significant, was modest." },
+      { topic: "Cognitive function in older adults", sourceId: "src-pmid-36102337", evidenceLevel: "B", studyType: "Randomized controlled trial (COSMOS-Mind)",
+        population: "Older US adults, mean age 73, 60% women", sampleSize: "2,262", intervention: "Daily multivitamin-mineral supplement, 3 years", comparator: "Placebo",
+        result: "Daily multivitamin-mineral supplementation produced a statistically significant benefit on global cognition (mean z-score difference 0.07, 95% CI 0.02-0.12) versus placebo, with benefits also seen for memory and executive function; the effect was more pronounced in participants with a history of cardiovascular disease.",
+        limitations: "89% non-Hispanic White participants — findings may not generalize to more diverse populations; a companion arm of the same trial (cocoa extract) showed no cognitive benefit, underscoring that not every supplement in this trial worked." },
+      { topic: "All-cause mortality — single-nutrient antioxidant supplements", sourceId: "src-pmid-22419320", evidenceLevel: "A", studyType: "Systematic review and meta-analysis (Cochrane)",
+        population: "Healthy participants and patients with various diseases, mean age 63, across 78 trials", sampleSize: "296,707", intervention: "Beta-carotene, vitamin A, vitamin C, vitamin E, or selenium (standalone antioxidant supplements, not necessarily as part of a multivitamin)", comparator: "Placebo/no intervention",
+        result: "In trials with low risk of bias, antioxidant supplements overall significantly increased mortality (RR 1.04, 95% CI 1.01-1.07). Beta-carotene (RR 1.05) and vitamin E (RR 1.03) significantly increased mortality; vitamin A, vitamin C, and selenium did not show a significant mortality effect.",
+        limitations: "This review evaluated STANDALONE single-nutrient antioxidant supplements, often at doses higher than typically found in a multivitamin — it should not be read as a direct verdict on multivitamin/multimineral products, but is relevant context for antioxidant-heavy formulations." },
+    ],
+    interactions: [],
+    productMatches: [
+      { productName: "ALFA Multivitamins GUMMIES Adult", chemicalForm: "Multivitamin/mineral blend, iron-free, gummy form", compoundAmount: "", activeAmount: "", unit: "", servingSize: "", notes: "Contains Vitamin A, C, D, E, niacin, B6, folate, B12, biotin, pantothenic acid, sodium, and inositol per the product's own ingredient text; does not contain iron." },
+      { productName: "Mason Natural Daily Multi Vitamins Iron Free 100 Tabs", chemicalForm: "Multivitamin/mineral blend, iron-free, caplet form", compoundAmount: "", activeAmount: "", unit: "", servingSize: "1 caplet", notes: "Contains Vitamin A, C, D3, E, B1, B2, niacin, B6, folate, B12, pantothenic acid, and calcium per the product's own ingredient text; explicitly iron-free per product name." },
+    ],
+  },
+];
+
+let phase2CategoriesSeedChecked = false;
+async function ensurePhase2CategoriesSeeded() {
+  if (phase2CategoriesSeedChecked) return;
+  // Self-sufficient, same reasoning as ensurePhase1CategoriesSeeded above.
+  await ensureRecallCategoriesSeeded();
+  await ensureRecallB12Seeded();
+  await ensureB12ProductDataSeeded();
+  await ensureOurProductsMasterDataSeeded();
+  await ensurePhase1CategoriesSeeded();
+  const today = new Date().toISOString().slice(0, 10);
+
+  const existingIngredients = await db.getAllRows("RecallIngredients");
+  const existingIngredientIds = new Set(existingIngredients.map((i) => i.id));
+  const missingIngredientDefs = PHASE2_INGREDIENTS_SEED.filter((def) => !existingIngredientIds.has(def.id));
+  if (missingIngredientDefs.length === 0) { phase2CategoriesSeedChecked = true; return; }
+
+  const existingSources = await db.getAllRows("RecallResearchSources");
+  const existingSourceIds = new Set(existingSources.map((s) => s.id));
+  const newSources = PHASE2_SOURCES_SEED.filter((s) => !existingSourceIds.has(s.id));
+  if (newSources.length) {
+    await db.appendRows("RecallResearchSources", newSources.map((s) => ({
+      id: s.id, sourceType: s.sourceType, sourceName: s.sourceName, title: s.title, authors: "",
+      journal: s.journal || "", pmid: s.pmid || "", pmcid: "", doi: s.doi || "", url: s.url || "",
+      publicationYear: s.publicationYear || "", sourceDate: "", sourceQuality: s.sourceQuality || "", notes: "",
+    })));
+  }
+
+  const catalog = await db.getAllRows("ProductCatalog");
+  const catalogByName = new Map(catalog.map((p) => [p.name, p]));
+  const newIngredientRows = [];
+  const newFormRows = [];
+  const newEvidenceRows = [];
+  const newInteractionRows = [];
+  const newLinkRows = [];
+
+  for (const def of missingIngredientDefs) {
+    newIngredientRows.push({
+      id: def.id, categoryId: def.categoryId, name: def.name, commonName: def.commonName || "", scientificName: def.scientificName || "",
+      description: def.description || "", physiologicalRole: def.physiologicalRole || "", clinicalUses: def.clinicalUses || "",
+      evidenceSummary: def.evidenceSummary || "", evidenceLevel: def.evidenceLevel || "NOT_VERIFIED",
+      precautions: def.precautions || "", contraindications: def.contraindications || "", drugInteractionSummary: def.drugInteractionSummary || "",
+      clinicalCheckpoints: def.clinicalCheckpoints || "", repQuickTakeaway: def.repQuickTakeaway || "", whatNotToClaim: def.whatNotToClaim || "",
+      lastReviewed: today, absorptionTimingNotes: def.absorptionTimingNotes || "",
+      repTakeawayQuestions: def.repTakeawayQuestions || "", repTakeaway30Second: def.repTakeaway30Second || "",
+    });
+
+    for (const f of def.forms || []) {
+      newFormRows.push({
+        id: f.id, ingredientId: def.id, formName: f.formName, chemicalName: f.chemicalName || "", formType: f.formType || "chemical form",
+        compoundAmount: "", activeAmount: "", unit: "", conversionRequired: "",
+        absorptionNotes: f.absorptionNotes || "", metabolicNotes: f.metabolicNotes || "", clinicalEvidence: "",
+        evidenceComparison: f.evidenceComparison || "", documentedAdvantages: f.documentedAdvantages || "", documentedLimitations: f.documentedLimitations || "",
+        sourceIds: f.sourceIds || "", lastReviewed: today,
+      });
+    }
+
+    for (const e of def.evidence || []) {
+      newEvidenceRows.push({
+        id: `ce-${def.id}-${crypto.randomUUID()}`, ingredientId: def.id, productId: "", formId: "",
+        condition: e.topic, population: e.population || "", intervention: e.intervention || "", dose: e.dose || "",
+        route: e.route || "", duration: e.duration || "", comparator: e.comparator || "", outcome: e.outcome || "",
+        result: e.result || "", clinicalSignificance: e.clinicalSignificance || "", evidenceLevel: e.evidenceLevel || "NOT_VERIFIED",
+        studyType: e.studyType || "", sourceId: e.sourceId || "", publicationYear: "", lastReviewed: today,
+        sampleSize: e.sampleSize || "", limitations: e.limitations || "",
+      });
+    }
+
+    for (const i of def.interactions || []) {
+      newInteractionRows.push({
+        id: `di-${def.id}-${crypto.randomUUID()}`, ingredientId: def.id, drugName: i.drugName, drugClass: i.drugClass || "",
+        direction: i.direction || "", mechanism: i.mechanism || "", clinicalSignificance: i.clinicalSignificance || "",
+        timing: i.timing || "", evidenceLevel: i.evidenceLevel || "NOT_VERIFIED", pharmacistCheckpoint: i.pharmacistCheckpoint || "",
+        sourceId: i.sourceId || "", lastReviewed: today,
+      });
+    }
+
+    for (const m of def.productMatches || []) {
+      const product = catalogByName.get(m.productName);
+      if (!product) continue; // never invents a product — only links one that's already in the catalog
+      newLinkRows.push({
+        id: `rpi-${def.id}-${crypto.randomUUID()}`, productId: product.id, ingredientId: def.id,
+        chemicalForm: m.chemicalForm || "", compoundAmount: m.compoundAmount ?? "", activeAmount: m.activeAmount ?? "", unit: m.unit || "",
+        servingSize: m.servingSize || "", dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "PARTIALLY_VERIFIED",
+        notes: m.notes || "", missingFields: "", sku: "", manufacturer: "", sourceLabel: "Product catalog import", sourceUrl: "",
+      });
+    }
+  }
+
+  if (newIngredientRows.length) await db.appendRows("RecallIngredients", newIngredientRows);
+  if (newFormRows.length) await db.appendRows("RecallIngredientForms", newFormRows);
+  if (newEvidenceRows.length) await db.appendRows("RecallClinicalEvidence", newEvidenceRows);
+  if (newInteractionRows.length) await db.appendRows("RecallDrugInteractions", newInteractionRows);
+  if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
+
+  phase2CategoriesSeedChecked = true;
+}
+
 // ---------- Recall: auto-link ANY competitor product into its matching
 // category, by shared ingredient ----------
 // Not a one-time seed step like the functions above — a competitor product
@@ -7011,6 +7391,7 @@ app.get("/api/recall/categories", async (req, res) => {
     await ensureCompetitorNameDerivedFieldsBackfilled();
     await ensureOurProductsMasterDataSeeded();
     await ensurePhase1CategoriesSeeded();
+    await ensurePhase2CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
@@ -7065,6 +7446,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     await ensureCompetitorNameDerivedFieldsBackfilled();
     await ensureOurProductsMasterDataSeeded();
     await ensurePhase1CategoriesSeeded();
+    await ensurePhase2CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources] = await Promise.all([
