@@ -632,9 +632,13 @@ export default function App() {
                 role={role}
                 isSupervisor={isSupervisor}
                 repNames={repNames}
+                products={products}
+                offers={offers}
+                clients={clients}
                 onDelete={deleteOrder}
                 onApproveDelete={approveDeleteOrder}
                 onDenyDelete={denyDeleteOrder}
+                onUpdateOrder={updateOrder}
               />
             )}
             {tab === "locations" && (role === "manager" || isSupervisor) && (
@@ -3276,7 +3280,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
 // endpoint, kept as separate compact screens rather than one giant table
 // with everything in it — a pill toggle switches between them, both live
 // under the same "Orders" nav slot.
-function OrdersTabView({ role, isSupervisor, repNames, onDelete, onApproveDelete, onDenyDelete }) {
+function OrdersTabView({ role, isSupervisor, repNames, products, offers, clients, onDelete, onApproveDelete, onDenyDelete, onUpdateOrder }) {
   const [subTab, setSubTab] = useState("history"); // history | pending
 
   return (
@@ -3304,7 +3308,10 @@ function OrdersTabView({ role, isSupervisor, repNames, onDelete, onApproveDelete
         </button>
       </div>
       {subTab === "history" ? (
-        <OrderHistoryView role={role} repNames={repNames} onDelete={onDelete} onApproveDelete={onApproveDelete} onDenyDelete={onDenyDelete} />
+        <OrderHistoryView
+          role={role} repNames={repNames} products={products} offers={offers} clients={clients}
+          onDelete={onDelete} onApproveDelete={onApproveDelete} onDenyDelete={onDenyDelete} onUpdateOrder={onUpdateOrder}
+        />
       ) : (
         <PendingPOSView isSupervisor={isSupervisor} />
       )}
@@ -3318,8 +3325,9 @@ function OrdersTabView({ role, isSupervisor, repNames, onDelete, onApproveDelete
 // every open session on a timer was exactly the pattern that made Excel
 // imports (and, over time, this table itself) slow the whole app down.
 const ORDER_HISTORY_PAGE_SIZE = 25;
-function OrderHistoryView({ role, repNames, onDelete, onApproveDelete, onDenyDelete }) {
+function OrderHistoryView({ role, repNames, products, offers, clients, onDelete, onApproveDelete, onDenyDelete, onUpdateOrder }) {
   const [confirmIds, setConfirmIds] = useState(new Set());
+  const [editingOrderId, setEditingOrderId] = useState(null);
   const [repFilter, setRepFilter] = useState("");
   const [clientFilter, setClientFilter] = useState("");
   const [productFilter, setProductFilter] = useState("");
@@ -3383,45 +3391,73 @@ function OrderHistoryView({ role, repNames, onDelete, onApproveDelete, onDenyDel
             style={{
               background: o.status === "deletion_requested" ? "#FBF3F0" : "#fff",
               border: o.status === "deletion_requested" ? "1px solid #E5B8B0" : "1px solid #E5DFD3",
-              borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8,
+              borderRadius: 10, padding: 12,
             }}
           >
-            <div>
-              <div style={{ fontWeight: 600, fontSize: 13.5 }}>{o.clientName}{o.repName ? ` · ${o.repName}` : ""}</div>
-              <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
-                {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })} · {o.items.length} item{o.items.length === 1 ? "" : "s"} · collected {Number(o.netTotal ?? o.total).toFixed(2)}
-                {o.discountRate > 0 ? ` (list ${o.total.toFixed(2)}, ${o.discountRate}% off)` : ""}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 13.5 }}>{o.clientName}{o.repName ? ` · ${o.repName}` : ""}</div>
+                <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
+                  {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })} · {o.items.length} item{o.items.length === 1 ? "" : "s"} · collected {Number(o.netTotal ?? o.total).toFixed(2)}
+                  {o.discountRate > 0 ? ` (list ${o.total.toFixed(2)}, ${o.discountRate}% off)` : ""}
+                </div>
+                {o.status === "deletion_requested" && <div style={{ fontSize: 11.5, color: "#B33A3A", marginTop: 4 }}>Rep requested deletion</div>}
+                <div style={{ fontSize: 11, marginTop: 4 }}>
+                  {o.posEntered ? (
+                    <span style={{ color: "#4C7A5E", fontWeight: 600 }}>
+                      ✓ POS Entered{o.posEnteredBy ? ` — ${o.posEnteredBy}` : ""}{o.posEnteredAt ? `, ${new Date(o.posEnteredAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}` : ""}
+                    </span>
+                  ) : (
+                    <span style={{ color: "#C17817", fontWeight: 600 }}>Pending POS</span>
+                  )}
+                </div>
               </div>
-              {o.status === "deletion_requested" && <div style={{ fontSize: 11.5, color: "#B33A3A", marginTop: 4 }}>Rep requested deletion</div>}
-              <div style={{ fontSize: 11, marginTop: 4 }}>
-                {o.posEntered ? (
-                  <span style={{ color: "#4C7A5E", fontWeight: 600 }}>
-                    ✓ POS Entered{o.posEnteredBy ? ` — ${o.posEnteredBy}` : ""}{o.posEnteredAt ? `, ${new Date(o.posEnteredAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}` : ""}
-                  </span>
-                ) : (
-                  <span style={{ color: "#C17817", fontWeight: 600 }}>Pending POS</span>
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <button onClick={() => downloadOrderPdf(o)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12, fontWeight: 500 }}>
+                  <Download size={13} /> PDF
+                </button>
+                {/* Editing is blocked once POS is entered, same rule as the
+                    check-in wizard's own "edit today's order" feature — a
+                    financially-reconciled order shouldn't be alterable from
+                    either entry point. */}
+                {canManage && !o.posEntered && o.status !== "deletion_requested" && (
+                  <button
+                    onClick={() => setEditingOrderId((id) => (id === o.id ? null : o.id))}
+                    style={{ fontSize: 12, color: "#5B5445", background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "7px 12px" }}
+                  >
+                    {editingOrderId === o.id ? "Close" : "Edit"}
+                  </button>
                 )}
+                {canManage && (o.status === "deletion_requested" ? (
+                  <>
+                    <button onClick={() => doApprove(o.id)} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "7px 12px" }}>Approve delete</button>
+                    <button onClick={() => doDeny(o.id)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "7px 12px" }}>Deny</button>
+                  </>
+                ) : confirmIds.has(o.id) ? (
+                  <>
+                    <span style={{ fontSize: 11.5, color: "#B33A3A" }}>Delete?</span>
+                    <button onClick={() => doDelete(o.id)} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}>Yes</button>
+                    <button onClick={() => cancelConfirm(o.id)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Cancel</button>
+                  </>
+                ) : (
+                  <button onClick={() => askConfirm(o.id)} style={{ fontSize: 12, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "7px 12px" }}>Delete</button>
+                ))}
               </div>
             </div>
-            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              <button onClick={() => downloadOrderPdf(o)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12, fontWeight: 500 }}>
-                <Download size={13} /> PDF
-              </button>
-              {canManage && (o.status === "deletion_requested" ? (
-                <>
-                  <button onClick={() => doApprove(o.id)} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "7px 12px" }}>Approve delete</button>
-                  <button onClick={() => doDeny(o.id)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "7px 12px" }}>Deny</button>
-                </>
-              ) : confirmIds.has(o.id) ? (
-                <>
-                  <span style={{ fontSize: 11.5, color: "#B33A3A" }}>Delete?</span>
-                  <button onClick={() => doDelete(o.id)} style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "6px 10px" }}>Yes</button>
-                  <button onClick={() => cancelConfirm(o.id)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>Cancel</button>
-                </>
-              ) : (
-                <button onClick={() => askConfirm(o.id)} style={{ fontSize: 12, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "7px 12px" }}>Delete</button>
-              ))}
-            </div>
+
+            {editingOrderId === o.id && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3" }}>
+                <OrderBuilder
+                  clientName={o.clientName}
+                  products={products}
+                  offers={offers}
+                  clients={clients}
+                  editOrder={o}
+                  onUpdateOrder={onUpdateOrder}
+                  onDone={() => { setEditingOrderId(null); load(); }}
+                />
+              </div>
+            )}
           </div>
         ))}
         {!loading && result.orders.length === 0 && <EmptyState text="No orders found." />}
