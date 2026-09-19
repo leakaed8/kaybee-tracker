@@ -288,13 +288,17 @@ function buildCleanOrderItems(items) {
 // — never trusting the client's isFree/unitPrice pair beyond that.
 async function validateOfferGroups(cleanItems) {
   const offerRows = await db.getAllRows("Offers");
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const activeOffers = offerRows.map(parseOffer).filter((o) => o.active && (!o.expiresAt || o.expiresAt >= todayStr));
-  const activeOfferById = new Map(activeOffers.map((o) => [o.id, o]));
+  // Looked up by id across ALL offers, not just currently-active ones — an
+  // offer being deactivated/expired doesn't change its buy/get requirement,
+  // it just hides it from NEW selection. Editing an order that still
+  // contains items from that offer must keep enforcing the same rule the
+  // order was originally saved under, not silently stop checking. Only a
+  // fully DELETED offer row has nothing left to validate against.
+  const offerById = new Map(offerRows.map(parseOffer).map((o) => [o.id, o]));
   const groupIds = [...new Set(cleanItems.map((it) => it.offerId).filter(Boolean))];
   for (const offerId of groupIds) {
-    const offer = activeOfferById.get(offerId);
-    if (!offer) return "One of the selected offers is no longer available. Please review this order's offer groups.";
+    const offer = offerById.get(offerId);
+    if (!offer) continue; // offer row was deleted entirely — nothing to validate against
     const groupItems = cleanItems.filter((it) => it.offerId === offerId);
     const groupQty = groupItems.reduce((sum, it) => sum + it.qty, 0);
     const required = offer.buyQty + offer.getQty;

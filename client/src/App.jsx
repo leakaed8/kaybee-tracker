@@ -2929,10 +2929,12 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     setItems((prev) => prev.map((it) => (it.offerId === fromOfferId ? { ...it, offerId: toOfferId } : it)));
   };
 
-  // Items whose offerId doesn't resolve to a currently-active offer (never
-  // assigned, or the offer was deactivated after assignment) fall back to
-  // "regular" rather than forming a dead, unvalidatable group.
-  const regularItems = items.filter((it) => !it.offerId || !activeOfferIds.has(it.offerId));
+  // Never-assigned items are "regular". Items whose offerId points at an
+  // offer that's since been deactivated, expired, or deleted are kept
+  // SEPARATE from regular — they still carry a real offer history that
+  // must not be silently discarded on save (see orphanedOfferItems below).
+  const regularItems = items.filter((it) => !it.offerId);
+  const orphanedOfferItems = items.filter((it) => it.offerId && !activeOfferIds.has(it.offerId));
   const groupIds = [];
   items.forEach((it) => {
     if (it.offerId && activeOfferIds.has(it.offerId) && !groupIds.includes(it.offerId)) groupIds.push(it.offerId);
@@ -2962,7 +2964,19 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   });
 
   const regularTagged = regularItems.map((it) => ({ ...it, offerId: "" }));
-  const allDisplayItems = [...offerGroups.flatMap((g) => g.taggedDisplayItems), ...regularTagged];
+  // Orphaned items pass through completely unchanged — same qty/price/
+  // offerId as they already had. They aren't re-validated as a group (the
+  // offer that defined their buy/get requirement no longer exists or isn't
+  // currently active, so there's nothing current to validate against), and
+  // saving the order must not strip their offerId — that would be the same
+  // silent history loss this exists to prevent.
+  const orphanedTagged = orphanedOfferItems;
+  // Every orphaned item's original offer, looked up from the FULL offers
+  // list (not just active ones) so a merely-deactivated/expired offer still
+  // shows its real label — only a fully deleted offer falls back to "no
+  // longer available".
+  const orphanedOfferInfo = (offerId) => offers.find((o) => o.id === offerId) || null;
+  const allDisplayItems = [...offerGroups.flatMap((g) => g.taggedDisplayItems), ...orphanedTagged, ...regularTagged];
   const total = allDisplayItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
   const netTotal = total * (1 - (Number(discountRate) || 0) / 100);
 
@@ -3161,6 +3175,30 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
           </div>
         );
       })}
+
+      {orphanedOfferItems.length > 0 && (
+        <div style={{ ...groupCardStyle, background: "#FBF3E8", borderColor: "#E9C88A" }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#C17817", marginBottom: 6 }}>
+            From an offer no longer available — kept as originally recorded
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            {orphanedOfferItems.map((it) => {
+              const offer = orphanedOfferInfo(it.offerId);
+              return (
+                <div key={it.key} style={{ fontSize: 12.5 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span>{it.name} × {it.qty}</span>
+                    <button onClick={() => removeItem(it.key)} style={{ background: "none", border: "none", color: "#B7AF9E" }}><X size={12} /></button>
+                  </div>
+                  <div style={{ fontSize: 11, color: "#8A8272" }}>
+                    {offer ? `Was part of "${offer.label}" (offer no longer active)` : "Was part of an offer that has since been deleted"}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {regularItems.length > 0 && (
         <div style={groupCardStyle}>
