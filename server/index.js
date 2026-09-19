@@ -271,12 +271,21 @@ function buildCleanOrderItems(items) {
 // An order can carry several independent offers at once (e.g. 8 units under
 // 7+1 plus 14 units under 12+2 plus plain items), so each item is tagged
 // client-side with which offer group it belongs to ("" for regular/no-offer).
-// Re-derive validity per group purely from submitted quantities — never from
-// client-sent isFree flags — so a crafted payload can't bypass it. Groups
-// referencing an offer that isn't currently active are rejected outright
-// (fail closed) rather than silently skipped. Returns an error string, or
-// null if every group is valid. Shared by order creation and order editing
-// so the two can never drift apart.
+// Groups referencing an offer that isn't currently active are rejected
+// outright (fail closed) rather than silently skipped. Returns an error
+// string, or null if every group is valid. Shared by order creation and
+// order editing so the two can never drift apart.
+//
+// This used to check ONLY the group's total submitted quantity against
+// buyQty+getQty — which confirms the right number of PHYSICAL units are
+// present, but says nothing about how many of them are priced as free. A
+// client-side miscalculation (or a hand-crafted payload) could satisfy that
+// check while marking every unit in the group isFree, undercharging the
+// whole group instead of just its getQty units — exactly what "everything
+// was too free" on a 12+2/14+2 order looks like from a rep's side. The two
+// checks below close that gap: exactly getQty units may be marked free (no
+// more, no fewer), and every unit marked free must actually be priced at 0
+// — never trusting the client's isFree/unitPrice pair beyond that.
 async function validateOfferGroups(cleanItems) {
   const offerRows = await db.getAllRows("Offers");
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -286,10 +295,19 @@ async function validateOfferGroups(cleanItems) {
   for (const offerId of groupIds) {
     const offer = activeOfferById.get(offerId);
     if (!offer) return "One of the selected offers is no longer available. Please review this order's offer groups.";
-    const groupQty = cleanItems.filter((it) => it.offerId === offerId).reduce((sum, it) => sum + it.qty, 0);
+    const groupItems = cleanItems.filter((it) => it.offerId === offerId);
+    const groupQty = groupItems.reduce((sum, it) => sum + it.qty, 0);
     const required = offer.buyQty + offer.getQty;
     if (groupQty !== required) {
       return `${offer.label} requires exactly ${required} units. This order currently has ${groupQty} units assigned to it. Please adjust the quantities to ${required} units to continue.`;
+    }
+    const freeQty = groupItems.filter((it) => it.isFree).reduce((sum, it) => sum + it.qty, 0);
+    if (freeQty !== offer.getQty) {
+      return `${offer.label} should give exactly ${offer.getQty} free unit${offer.getQty === 1 ? "" : "s"} — this order has ${freeQty} marked free. Please re-add this offer's items so the free quantity is recalculated correctly.`;
+    }
+    const mispricedFreeItem = groupItems.find((it) => it.isFree && it.unitPrice !== 0);
+    if (mispricedFreeItem) {
+      return `${offer.label}: "${mispricedFreeItem.name}" is marked free but isn't priced at 0. Please re-add this offer's items so pricing is recalculated correctly.`;
     }
   }
   return null;
