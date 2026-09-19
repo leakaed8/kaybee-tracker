@@ -911,6 +911,7 @@ app.get("/api/competitor-products", async (req, res) => {
     await ensureOurProductsMasterDataSeeded();
     await ensurePhase1CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
+    await ensureExcludedCompetitorBrandsRemoved();
     const { q, limit } = req.query;
     const rows = await db.getAllRows("CompetitorProducts");
     let products = rows.sort((a, b) => a.genericName.localeCompare(b.genericName));
@@ -6833,6 +6834,52 @@ async function ensureCompetitorIngredientAutoLinking() {
   if (newRels.length) await db.appendRows("RecallCompetitorRelationships", newRels);
 }
 
+// ---------- Recall: one-time removal of miscategorized/excluded competitor brands ----------
+// The bulk retail price-list import that seeded most of CompetitorProducts
+// (predates this session) included our OWN brands -- "Mason" and
+// "Alfa"/"Alfa Sports" -- as if they were competitor rows, which is exactly
+// backwards: they're our own products, not a rival brand, and showing them
+// as a "competitor" in a category comparison is a real data error, not a
+// judgment call. "Healthy Sense" is a genuine Lebanese-market brand (it's
+// in the user-provided market reference list) but was explicitly requested
+// for removal too. Matched by EXACT competitorName (case-insensitive), never
+// a substring of the product name, so this can't collateral-damage an
+// unrelated brand that merely mentions one of these words.
+//
+// A real, permanent delete (per explicit instruction) -- not a "hide from
+// comparisons" toggle. Uses replaceAllRows (one clear + one rewrite per
+// table) instead of looping deleteRowById per row, which would repeat the
+// exact Sheets-API-quota mistake already fixed once this session for a
+// table this size.
+const EXCLUDED_COMPETITOR_BRAND_NAMES = ["mason", "mason natural", "alfa", "alfa sports", "healthy sense"];
+let excludedCompetitorBrandsRemoved = false;
+async function ensureExcludedCompetitorBrandsRemoved() {
+  if (excludedCompetitorBrandsRemoved) return;
+  const norm = (s) => String(s || "").trim().toLowerCase();
+  const [products, listings, rels, conflicts] = await Promise.all([
+    db.getAllRows("CompetitorProducts"),
+    db.getAllRows("RecallRetailerListings"),
+    db.getAllRows("RecallCompetitorRelationships"),
+    db.getAllRows("RecallFieldConflicts"),
+  ]);
+  const removedIds = new Set(products.filter((p) => EXCLUDED_COMPETITOR_BRAND_NAMES.includes(norm(p.competitorName))).map((p) => p.id));
+  if (removedIds.size === 0) { excludedCompetitorBrandsRemoved = true; return; }
+
+  const keptProducts = products.filter((p) => !removedIds.has(p.id));
+  const keptListings = listings.filter((l) => !removedIds.has(l.competitorProductId));
+  const keptRels = rels.filter((r) => !removedIds.has(r.competitorProductId));
+  const keptConflicts = conflicts.filter((c) => !(c.entityType === "CompetitorProducts" && removedIds.has(c.entityId)));
+
+  // Only rewrite a table that actually lost rows — a table with nothing to
+  // remove doesn't need a clear+rewrite round trip.
+  await db.replaceAllRows("CompetitorProducts", keptProducts);
+  if (keptListings.length !== listings.length) await db.replaceAllRows("RecallRetailerListings", keptListings);
+  if (keptRels.length !== rels.length) await db.replaceAllRows("RecallCompetitorRelationships", keptRels);
+  if (keptConflicts.length !== conflicts.length) await db.replaceAllRows("RecallFieldConflicts", keptConflicts);
+
+  excludedCompetitorBrandsRemoved = true;
+}
+
 // ---------- Recall Phase 2D: research status derivation + editing ----------
 // A record's researchStatus/missingFields are ALWAYS derived here from its
 // own current field values — never accepted verbatim from a client patch.
@@ -6947,6 +6994,7 @@ app.get("/api/recall/categories", async (req, res) => {
     await ensureOurProductsMasterDataSeeded();
     await ensurePhase1CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
+    await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
@@ -7000,6 +7048,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     await ensureOurProductsMasterDataSeeded();
     await ensurePhase1CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
+    await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
