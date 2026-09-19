@@ -910,6 +910,7 @@ app.get("/api/competitor-products", async (req, res) => {
     await ensureCompetitorNameDerivedFieldsBackfilled();
     await ensureOurProductsMasterDataSeeded();
     await ensurePhase1CategoriesSeeded();
+    await ensureCompetitorIngredientAutoLinking();
     const { q, limit } = req.query;
     const rows = await db.getAllRows("CompetitorProducts");
     let products = rows.sort((a, b) => a.genericName.localeCompare(b.genericName));
@@ -6773,6 +6774,65 @@ async function ensurePhase1CategoriesSeeded() {
   phase1CategoriesSeedChecked = true;
 }
 
+// ---------- Recall: auto-link ANY competitor product into its matching
+// category, by shared ingredient ----------
+// Not a one-time seed step like the functions above — a competitor product
+// can get its genericName filled in at any time (manual research, bulk
+// import, or the name-derived backfill), and the moment that happens it
+// should show up in the matching category's comparison table without
+// anyone manually searching for it and clicking "Add existing competitor".
+// Runs on every category read; cheap (a handful of full-table reads plus
+// in-memory matching) and safe to re-run (the existing-relationship check
+// below makes it a no-op once a pair is already linked) — this is the same
+// "recompute live, never trust what was last written" approach already
+// used for research-status derivation elsewhere in this file, not a new
+// pattern.
+//
+// Matching is by EXACT (case-insensitive) ingredient name, never a fuzzy
+// guess: a competitor's genericName is split on commas (it's already a
+// comma-separated ingredient list, e.g. "Vitamin B12, Vitamin B1"), and
+// each piece is checked against real RecallIngredients.name values. A term
+// that doesn't exactly match a real ingredient name is simply not linked —
+// never partially matched or inferred.
+async function ensureCompetitorIngredientAutoLinking() {
+  const norm = (s) => String(s || "").trim().toLowerCase();
+  const [allIngredients, links, competitorProducts, existingRels] = await Promise.all([
+    db.getAllRows("RecallIngredients"),
+    db.getAllRows("RecallProductIngredients"),
+    db.getAllRows("CompetitorProducts"),
+    db.getAllRows("RecallCompetitorRelationships"),
+  ]);
+  const categoryIdByIngredientId = new Map(allIngredients.map((i) => [i.id, i.categoryId]));
+  const anchorProductIdByCategory = new Map();
+  for (const link of links) {
+    const categoryId = categoryIdByIngredientId.get(link.ingredientId);
+    if (categoryId && !anchorProductIdByCategory.has(categoryId)) anchorProductIdByCategory.set(categoryId, link.productId);
+  }
+  if (anchorProductIdByCategory.size === 0) return; // no our-products loaded into any category yet
+
+  const categoryIdByNormalizedIngredientName = new Map(allIngredients.map((i) => [norm(i.name), i.categoryId]));
+  const existingRelKeys = new Set(existingRels.map((r) => `${r.ourProductId}|${r.competitorProductId}`));
+  const newRels = [];
+  for (const cp of competitorProducts) {
+    if (!cp.genericName) continue;
+    const matchedCategoryIds = new Set(
+      cp.genericName.split(",").map((term) => categoryIdByNormalizedIngredientName.get(norm(term))).filter(Boolean)
+    );
+    for (const categoryId of matchedCategoryIds) {
+      const anchorProductId = anchorProductIdByCategory.get(categoryId);
+      if (!anchorProductId) continue;
+      const relKey = `${anchorProductId}|${cp.id}`;
+      if (existingRelKeys.has(relKey)) continue;
+      newRels.push({
+        id: `cr-auto-${crypto.randomUUID()}`, ourProductId: anchorProductId, competitorProductId: cp.id,
+        comparisonType: "dose-and-form-comparison", notes: "", sourceIds: "", createdAt: new Date().toISOString(),
+      });
+      existingRelKeys.add(relKey);
+    }
+  }
+  if (newRels.length) await db.appendRows("RecallCompetitorRelationships", newRels);
+}
+
 // ---------- Recall Phase 2D: research status derivation + editing ----------
 // A record's researchStatus/missingFields are ALWAYS derived here from its
 // own current field values — never accepted verbatim from a client patch.
@@ -6886,6 +6946,7 @@ app.get("/api/recall/categories", async (req, res) => {
     await ensureCompetitorNameDerivedFieldsBackfilled();
     await ensureOurProductsMasterDataSeeded();
     await ensurePhase1CategoriesSeeded();
+    await ensureCompetitorIngredientAutoLinking();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
@@ -6938,6 +6999,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     await ensureCompetitorNameDerivedFieldsBackfilled();
     await ensureOurProductsMasterDataSeeded();
     await ensurePhase1CategoriesSeeded();
+    await ensureCompetitorIngredientAutoLinking();
     const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
@@ -7030,6 +7092,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
                 id: cp.id, competitorName: cp.competitorName, productName: cp.productName,
                 genericName: cp.genericName || "", form: cp.form || "", dosage: cp.dosage || "", packSize: cp.packSize || "",
                 ingredients: cp.ingredients || "", sku: cp.sku || "", manufacturer: cp.manufacturer || "",
+                unitsPerDay: cp.unitsPerDay || "", discountRate: cp.discountRate || "", manufacturingCountry: cp.manufacturingCountry || "",
                 sourceLabel: cp.sourceLabel || "", sourceUrl: cp.sourceUrl || "",
                 researchStatus, notes: cp.notes || "",
                 missingFields,

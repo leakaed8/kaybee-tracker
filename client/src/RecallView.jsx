@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { api } from "./api.js";
-import { computeMetrics, fmtMoney } from "./competitorCalc.js";
+import { computeMetrics, fmtMoney, fmtDays } from "./competitorCalc.js";
 
 // Kept local (not imported from App.jsx) to avoid a circular import between
 // the two files — same look as the rest of the app either way.
@@ -822,15 +822,19 @@ function ourProductRow(p) {
     activeIngredient: p.chemicalForm || "",
     dosePerUnit: p.compoundAmount ? `${p.compoundAmount}${p.unit ? ` ${p.unit}` : ""}` : "",
     pillsPerBox: p.packSize || "",
+    daysSupply: metrics.daysSupply != null ? fmtDays(metrics.daysSupply) : "",
     servingSize: p.servingSize || "",
     dosageForm: p.form || "",
     pricePerPill: metrics.hasPrice && metrics.hasPackSize ? [{ label: "", value: metrics.costPerDose }] : [],
+    countryOfOrigin: "", // not applicable — this is our own manufacturer/distributor relationship, not a sourced competitor product
+    pharmacyDiscount: "", // not applicable to our own products
     raw: p,
   };
 }
 
 function competitorRow(c) {
   const cp = c.competitorProduct;
+  const metrics = computeMetrics(cp);
   const pricePerPill = (c.retailerListings || [])
     .filter((l) => l.displayedPrice !== "" && l.displayedPrice != null && cp.packSize)
     .map((l) => ({ label: l.retailer, value: computeMetrics({ price: l.displayedPrice, packSize: cp.packSize }).costPerDose }));
@@ -841,9 +845,12 @@ function competitorRow(c) {
     activeIngredient: cp.genericName || "",
     dosePerUnit: cp.dosage || "",
     pillsPerBox: cp.packSize || "",
+    daysSupply: metrics.daysSupply != null ? fmtDays(metrics.daysSupply) : "",
     servingSize: "", // not tracked on CompetitorProducts — never inferred
     dosageForm: cp.form || "",
     pricePerPill,
+    countryOfOrigin: cp.manufacturingCountry || "",
+    pharmacyDiscount: cp.discountRate !== "" && cp.discountRate != null ? `${cp.discountRate}%` : "",
     raw: cp,
     rel: c,
   };
@@ -862,9 +869,12 @@ function ComparisonTable({ rows }) {
             <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Active ingredient</th>
             <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Dose per unit</th>
             <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Pills per box</th>
+            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Days supply</th>
             <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Serving size</th>
             <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Dosage form</th>
             <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Price per pill</th>
+            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Country of origin</th>
+            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Pharmacy discount</th>
           </tr>
         </thead>
         <tbody>
@@ -877,9 +887,12 @@ function ComparisonTable({ rows }) {
               <td style={analysisTableCellStyle}>{r.activeIngredient || "Not verified"}</td>
               <td style={analysisTableCellStyle}>{r.dosePerUnit || "Not verified"}</td>
               <td style={analysisTableCellStyle}>{r.pillsPerBox || "Not verified"}</td>
+              <td style={analysisTableCellStyle}>{r.daysSupply || "Not verified"}</td>
               <td style={analysisTableCellStyle}>{r.servingSize || "Not verified"}</td>
               <td style={analysisTableCellStyle}>{r.dosageForm || "Not verified"}</td>
               <td style={analysisTableCellStyle}>{priceRows(r.pricePerPill)}</td>
+              <td style={analysisTableCellStyle}>{r.countryOfOrigin || (r.isOurs ? "—" : "Not verified")}</td>
+              <td style={analysisTableCellStyle}>{r.pharmacyDiscount || (r.isOurs ? "—" : "Not verified")}</td>
             </tr>
           ))}
         </tbody>
