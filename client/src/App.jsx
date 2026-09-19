@@ -623,20 +623,7 @@ export default function App() {
               <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} products={products} />
             )}
             {tab === "recall" && (
-              <RecallTabView
-                role={role}
-                repName={repName}
-                repNames={repNames}
-                competitors={competitors}
-                ourProducts={productCatalog}
-                onAdd={addCompetitor}
-                onUpdate={updateCompetitor}
-                onRemove={removeCompetitor}
-                onAddProduct={addCompetitorProduct}
-                onUpdateProduct={updateCompetitorProduct}
-                onRemoveProduct={removeCompetitorProduct}
-                onImportProducts={importCompetitorProductsBulk}
-              />
+              <RecallView role={role} repName={repName} repNames={repNames} />
             )}
             {tab === "route" && role === "rep" && !isSupervisor && <RouteView clients={clients} doctors={doctors} />}
             {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} />}
@@ -702,6 +689,14 @@ export default function App() {
                 onUpdateCatalogProduct={updateCatalogProduct}
                 onRemoveCatalogProduct={removeCatalogProduct}
                 onBulkImportCatalogProducts={bulkImportCatalogProducts}
+                competitors={competitors}
+                onAddCompetitor={addCompetitor}
+                onUpdateCompetitor={updateCompetitor}
+                onRemoveCompetitor={removeCompetitor}
+                onAddCompetitorProduct={addCompetitorProduct}
+                onUpdateCompetitorProduct={updateCompetitorProduct}
+                onRemoveCompetitorProduct={removeCompetitorProduct}
+                onImportCompetitorProducts={importCompetitorProductsBulk}
               />
             )}
           </>
@@ -6342,46 +6337,6 @@ function TrainingTabView({ role, repName, isSupervisor, repNames, products }) {
   );
 }
 
-// Recall now hosts Competitors too (the standalone top-level Competitors
-// tab was removed) — "Categories" is Recall's own category browsing
-// (unchanged), "Competitors" is the exact same brand list / product list /
-// bulk import / compare tool that used to live in its own tab, just
-// reachable from here instead. A competitor product added or edited here
-// is the same CompetitorProducts record a category's own "Competitors"
-// section reads — no duplication, no separate list.
-function RecallTabView({ role, repName, repNames, competitors, ourProducts, onAdd, onUpdate, onRemove, onAddProduct, onUpdateProduct, onRemoveProduct, onImportProducts }) {
-  const [subTab, setSubTab] = useState("categories");
-  const pillStyle = (active) => ({
-    padding: "6px 14px", borderRadius: 16, fontSize: 12.5, fontWeight: 500,
-    border: active ? "1px solid #1F2A24" : "1px solid #E5DFD3",
-    background: active ? "#1F2A24" : "#fff", color: active ? "#FAF7F2" : "#5B5445",
-  });
-
-  return (
-    <div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-        <button onClick={() => setSubTab("categories")} style={pillStyle(subTab === "categories")}>Categories</button>
-        <button onClick={() => setSubTab("competitors")} style={pillStyle(subTab === "competitors")}>Competitors</button>
-      </div>
-      {subTab === "categories" ? (
-        <RecallView role={role} repName={repName} repNames={repNames} />
-      ) : (
-        <CompetitorsView
-          canEdit={role === "manager"}
-          competitors={competitors}
-          ourProducts={ourProducts}
-          onAdd={onAdd}
-          onUpdate={onUpdate}
-          onRemove={onRemove}
-          onAddProduct={onAddProduct}
-          onUpdateProduct={onUpdateProduct}
-          onRemoveProduct={onRemoveProduct}
-          onImportProducts={onImportProducts}
-        />
-      )}
-    </div>
-  );
-}
 
 // ---------- Training curriculum (MedRep Training Guide) ----------
 // Distinct from the video+quiz Training sub-tab (TrainingVideosView, in its
@@ -9073,7 +9028,7 @@ function PharmacyPickupImportSection() {
 }
 
 // ---------- Settings ----------
-function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts }) {
+function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts, competitors, onAddCompetitor, onUpdateCompetitor, onRemoveCompetitor, onAddCompetitorProduct, onUpdateCompetitorProduct, onRemoveCompetitorProduct, onImportCompetitorProducts }) {
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Settings</h2>
@@ -9098,6 +9053,23 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
           onRemove={onRemoveCatalogProduct}
           onImportBulk={onBulkImportCatalogProducts}
         />
+      )}
+
+      {role === "manager" && (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+          <CompetitorsView
+            canEdit={role === "manager"}
+            competitors={competitors}
+            ourProducts={productCatalog}
+            onAdd={onAddCompetitor}
+            onUpdate={onUpdateCompetitor}
+            onRemove={onRemoveCompetitor}
+            onAddProduct={onAddCompetitorProduct}
+            onUpdateProduct={onUpdateCompetitorProduct}
+            onRemoveProduct={onRemoveCompetitorProduct}
+            onImportProducts={onImportCompetitorProducts}
+          />
+        </div>
       )}
 
       {role === "manager" && <StockMovementImportSection />}

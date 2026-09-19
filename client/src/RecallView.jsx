@@ -338,11 +338,23 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
   );
 }
 
-function RecallSection({ title, children }) {
+// Collapsed by default — a category page stacks a dozen of these, and
+// showing every one expanded at once buried the parts a rep actually came
+// for. Click the title to expand; nothing inside changed, just whether
+// it's shown right away.
+function RecallSection({ title, children, defaultOpen = false }) {
+  const [open, setOpen] = useState(defaultOpen);
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14, marginBottom: 12 }}>
-      <div style={{ fontSize: 11.5, fontWeight: 700, color: "#8A8272", letterSpacing: 0.4, marginBottom: 8 }}>{title.toUpperCase()}</div>
-      {children}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer" }}
+      >
+        <span style={{ fontSize: 11.5, fontWeight: 700, color: "#8A8272", letterSpacing: 0.4 }}>{title.toUpperCase()}</span>
+        <span style={{ fontSize: 11, color: "#8A8272" }}>{open ? "▾" : "▸"}</span>
+      </button>
+      {open && <div style={{ marginTop: 8 }}>{children}</div>}
     </div>
   );
 }
@@ -604,84 +616,6 @@ function ConflictBanner({ conflicts, onSaved, canResolve }) {
   );
 }
 
-// Deliberately minimal — the comparison table above already shows every
-// fact (dose, form, price, ...); repeating them here would be exactly the
-// "repetition of information" this section was simplified to avoid. This
-// is just an entry point to edit/complete research and see conflicts.
-function OurProductCard({ product: p, canEdit, onSaved }) {
-  const [editing, setEditing] = useState(false);
-  return (
-    <div style={{ fontSize: 12.5, marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid #F0EBE0" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
-        <div style={{ fontWeight: 600 }}>{p.name}</div>
-        {canEdit && (
-          <button type="button" onClick={() => setEditing((v) => !v)} style={editButtonStyle}>
-            {editing ? "Close" : "Edit / Complete Research"}
-          </button>
-        )}
-      </div>
-      <ConflictBanner conflicts={p.conflicts} onSaved={onSaved} canResolve={canEdit} />
-      <MissingInfoBadge researchStatus={p.verificationStatus} missingFields={p.missingFields} />
-      {editing && <OurProductEditor product={p} onCancel={() => setEditing(false)} onSaved={() => { setEditing(false); onSaved(); }} />}
-    </div>
-  );
-}
-
-function CompetitorCard({ rel: c, canEdit, canUnlink, onSaved }) {
-  const [editing, setEditing] = useState(false);
-  const [unlinking, setUnlinking] = useState(false);
-  const [error, setError] = useState("");
-  const cp = c.competitorProduct;
-  const unlink = async () => {
-    setUnlinking(true);
-    setError("");
-    try {
-      // Only removes the comparison link (RecallCompetitorRelationships) —
-      // the competitor product itself is untouched and still lives under
-      // the Competitors tab, unlinked from any category.
-      await api.removeRecallCompetitorRelationship(c.id);
-      onSaved();
-    } catch (e) {
-      setError(e.message || "Couldn't remove this comparison.");
-      setUnlinking(false);
-    }
-  };
-  return (
-    <div style={{ fontSize: 12.5, marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid #F0EBE0" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
-        <div style={{ fontWeight: 600 }}>{cp.competitorName} — {cp.productName}</div>
-        <div style={{ display: "flex", gap: 6 }}>
-          {canEdit && (
-            <button type="button" onClick={() => setEditing((v) => !v)} style={editButtonStyle}>
-              {editing ? "Close" : "Edit / Complete Research"}
-            </button>
-          )}
-          {canUnlink && (
-            <button type="button" disabled={unlinking} onClick={unlink} style={cancelButtonStyle}>
-              {unlinking ? "Removing…" : "Remove from comparison"}
-            </button>
-          )}
-        </div>
-      </div>
-      {error && <div style={{ color: "#B33A3A", fontSize: 11, marginTop: 4 }}>{error}</div>}
-      {c.retailerListings.length > 0 && (
-        <div style={{ marginTop: 4 }}>
-          {c.retailerListings.map((l) => (
-            <div key={l.id} style={{ fontSize: 11, color: "#8A8272" }}>
-              {l.retailer}{" — "}{l.sourceUrl ? <a href={l.sourceUrl} target="_blank" rel="noreferrer">source</a> : "source URL not verified"}
-            </div>
-          ))}
-        </div>
-      )}
-      <ConflictBanner conflicts={cp.conflicts} onSaved={onSaved} canResolve={true} />
-      <MissingInfoBadge researchStatus={cp.researchStatus} missingFields={cp.missingFields} />
-      {editing && (
-        <CompetitorEditor competitorProduct={cp} retailerListings={c.retailerListings} onCancel={() => setEditing(false)} onSaved={() => { setEditing(false); onSaved(); }} />
-      )}
-    </div>
-  );
-}
-
 // Attaches an EXISTING competitor product (already in the Competitors tab)
 // to this category, by linking it against one of the category's own
 // products. Never creates a competitor product here — search only finds
@@ -769,26 +703,6 @@ function AddCompetitorToCategory({ ourProducts, existingCompetitorIds, onSaved }
   );
 }
 
-// Collapsed by default — keeps the market-comparison section to its
-// conclusions on first look, per feedback that the full field-by-field
-// breakdown made Recall feel crowded. Nothing inside is removed, just
-// tucked behind a toggle for a rep who wants the underlying detail.
-function ExpandableDetails({ label, hideLabel, children }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11.5, color: "#4C7A5E", background: "none", border: "none", padding: "4px 0", cursor: "pointer", fontWeight: 500 }}
-      >
-        {open ? `▾ ${hideLabel || `Hide ${label}`}` : `▸ ${label}`}
-      </button>
-      {open && <div style={{ marginTop: 8 }}>{children}</div>}
-    </div>
-  );
-}
-
 // ---------- Recall: Analysis + Competitors (separate comparison tables) ----------
 // Two sibling sections, each with the same table shape (so a rep reads
 // them the same way) but scoped to one side of the comparison — "Analysis"
@@ -858,8 +772,12 @@ function competitorRow(c) {
 
 // Shared by both the Analysis and Competitors tables — same columns, same
 // row rendering, so the two sections read as one system even though each
-// only shows its own side of the comparison.
-function ComparisonTable({ rows }) {
+// only shows its own side of the comparison. Editing lives directly in the
+// table now (an Actions column + an inline expanded row) instead of a
+// separate "Manage research" list below — the same fact was otherwise
+// showing up twice.
+function ComparisonTable({ rows, expandedKey, onToggleExpanded, renderExpanded }) {
+  const hasActions = !!onToggleExpanded;
   return (
     <div style={{ overflowX: "auto", marginBottom: 14, border: "1px solid #E5DFD3", borderRadius: 8 }}>
       <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 640 }}>
@@ -875,26 +793,48 @@ function ComparisonTable({ rows }) {
             <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Price per pill</th>
             <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Country of origin</th>
             <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Pharmacy discount</th>
+            {hasActions && <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Actions</th>}
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
-            <tr key={r.key} style={{ background: r.isOurs ? "#F4F8F5" : "#fff" }}>
-              <td style={{ ...analysisTableCellStyle, ...analysisStickyColStyle, fontWeight: 600, whiteSpace: "normal", background: r.isOurs ? "#F4F8F5" : "#fff", maxWidth: 150 }}>
-                {r.isOurs && <span style={{ fontSize: 9.5, fontWeight: 700, color: "#4C7A5E", display: "block" }}>OUR PRODUCT</span>}
-                {r.name}
-              </td>
-              <td style={analysisTableCellStyle}>{r.activeIngredient || "Not verified"}</td>
-              <td style={analysisTableCellStyle}>{r.dosePerUnit || "Not verified"}</td>
-              <td style={analysisTableCellStyle}>{r.pillsPerBox || "Not verified"}</td>
-              <td style={analysisTableCellStyle}>{r.daysSupply || "Not verified"}</td>
-              <td style={analysisTableCellStyle}>{r.servingSize || "Not verified"}</td>
-              <td style={analysisTableCellStyle}>{r.dosageForm || "Not verified"}</td>
-              <td style={analysisTableCellStyle}>{priceRows(r.pricePerPill)}</td>
-              <td style={analysisTableCellStyle}>{r.countryOfOrigin || (r.isOurs ? "—" : "Not verified")}</td>
-              <td style={analysisTableCellStyle}>{r.pharmacyDiscount || (r.isOurs ? "—" : "Not verified")}</td>
-            </tr>
-          ))}
+          {rows.map((r) => {
+            const hasOpenConflict = (r.raw.conflicts || []).some((c) => c.status === "CONFLICT");
+            const isExpanded = expandedKey === r.key;
+            return (
+              <React.Fragment key={r.key}>
+                <tr style={{ background: r.isOurs ? "#F4F8F5" : "#fff" }}>
+                  <td style={{ ...analysisTableCellStyle, ...analysisStickyColStyle, fontWeight: 600, whiteSpace: "normal", background: r.isOurs ? "#F4F8F5" : "#fff", maxWidth: 150 }}>
+                    {r.isOurs && <span style={{ fontSize: 9.5, fontWeight: 700, color: "#4C7A5E", display: "block" }}>OUR PRODUCT</span>}
+                    {r.name}
+                    {hasOpenConflict && <span style={{ fontSize: 10, fontWeight: 700, color: "#8A6B1A", display: "block" }}>⚠ conflict</span>}
+                  </td>
+                  <td style={analysisTableCellStyle}>{r.activeIngredient || "Not verified"}</td>
+                  <td style={analysisTableCellStyle}>{r.dosePerUnit || "Not verified"}</td>
+                  <td style={analysisTableCellStyle}>{r.pillsPerBox || "Not verified"}</td>
+                  <td style={analysisTableCellStyle}>{r.daysSupply || "Not verified"}</td>
+                  <td style={analysisTableCellStyle}>{r.servingSize || "Not verified"}</td>
+                  <td style={analysisTableCellStyle}>{r.dosageForm || "Not verified"}</td>
+                  <td style={analysisTableCellStyle}>{priceRows(r.pricePerPill)}</td>
+                  <td style={analysisTableCellStyle}>{r.countryOfOrigin || (r.isOurs ? "—" : "Not verified")}</td>
+                  <td style={analysisTableCellStyle}>{r.pharmacyDiscount || (r.isOurs ? "—" : "Not verified")}</td>
+                  {hasActions && (
+                    <td style={analysisTableCellStyle}>
+                      <button type="button" onClick={() => onToggleExpanded(r.key)} style={editButtonStyle}>
+                        {isExpanded ? "Close" : "Edit"}
+                      </button>
+                    </td>
+                  )}
+                </tr>
+                {isExpanded && (
+                  <tr>
+                    <td colSpan={hasActions ? 11 : 10} style={{ padding: "10px 12px", background: "#FAF7F2", borderBottom: "1px solid #E5DFD3" }}>
+                      {renderExpanded(r)}
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -902,10 +842,15 @@ function ComparisonTable({ rows }) {
 }
 
 // Our own products only — the comparison table plus a positioning
-// conclusion built from those same documented facts.
+// conclusion built from those same documented facts. Editing (and its
+// conflict/missing-info detail) now lives directly in the table's Actions
+// column instead of a separate "Manage research" list below — the two used
+// to show the exact same product twice.
 function RecallAnalysisSection({ products, ingredient, role, onSaved }) {
   const ourRows = (products || []).map(ourProductRow);
   const whatNotToClaimFirstLine = (ingredient?.whatNotToClaim || "").split("\n").filter(Boolean)[0] || "";
+  const [expandedKey, setExpandedKey] = useState(null);
+  const canEdit = role === "manager";
 
   return (
     <RecallSection title="Analysis">
@@ -913,7 +858,22 @@ function RecallAnalysisSection({ products, ingredient, role, onSaved }) {
         <EmptyState text="No our-products have been added to this category yet." />
       ) : (
         <>
-          <ComparisonTable rows={ourRows} />
+          <ComparisonTable
+            rows={ourRows}
+            expandedKey={expandedKey}
+            onToggleExpanded={(key) => setExpandedKey((k) => (k === key ? null : key))}
+            renderExpanded={(r) => (
+              <div>
+                <ConflictBanner conflicts={r.raw.conflicts} onSaved={onSaved} canResolve={canEdit} />
+                <MissingInfoBadge researchStatus={r.raw.verificationStatus} missingFields={r.raw.missingFields} />
+                {canEdit ? (
+                  <OurProductEditor product={r.raw} onCancel={() => setExpandedKey(null)} onSaved={() => { onSaved(); setExpandedKey(null); }} />
+                ) : (
+                  <div style={{ fontSize: 12, color: "#8A8272", fontStyle: "italic" }}>Only a manager can edit our own product research.</div>
+                )}
+              </div>
+            )}
+          />
 
           <div style={{ fontSize: 11, fontWeight: 700, color: "#5B5445", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 }}>
             How to position our product
@@ -934,45 +894,90 @@ function RecallAnalysisSection({ products, ingredient, role, onSaved }) {
               </div>
             );
           })}
-
-          <ExpandableDetails label="Manage research" hideLabel="Manage research">
-            {ourRows.map((r) => (
-              <OurProductCard key={r.key} product={r.raw} canEdit={role === "manager"} onSaved={onSaved} />
-            ))}
-          </ExpandableDetails>
         </>
       )}
     </RecallSection>
   );
 }
 
-// Competitor products linked to THIS category only — the comparison table,
-// plus the tools to complete their research, link a new one in, or unlink
-// one, all scoped to this category the same way Analysis is scoped to our
-// own products.
+// Competitor products linked to THIS category only (now auto-linked by
+// shared ingredient, see ensureCompetitorIngredientAutoLinking server-side
+// — "+ Add existing competitor" below still covers the rare case that
+// needs a manual link). Editing lives directly in the table, same as
+// Analysis above.
 function RecallCompetitorsSection({ competitors, products, role, onSaved }) {
   const competitorRows = (competitors || []).map(competitorRow);
   const ourProducts = (products || []).map((p) => ({ id: p.id, name: p.name }));
+  const [expandedKey, setExpandedKey] = useState(null);
 
   return (
     <RecallSection title="Competitors">
       {competitorRows.length === 0 ? (
         <EmptyState text="No competitor research has been linked to this category yet." />
       ) : (
-        <ComparisonTable rows={competitorRows} />
+        <ComparisonTable
+          rows={competitorRows}
+          expandedKey={expandedKey}
+          onToggleExpanded={(key) => setExpandedKey((k) => (k === key ? null : key))}
+          renderExpanded={(r) => (
+            <CompetitorExpandedContent
+              rel={r.rel}
+              canUnlink={role === "manager"}
+              onSaved={onSaved}
+              onClose={() => setExpandedKey(null)}
+            />
+          )}
+        />
       )}
 
-      <ExpandableDetails label="Manage research" hideLabel="Manage research">
-        {competitorRows.map((r) => (
-          <CompetitorCard key={r.key} rel={r.rel} canEdit={true} canUnlink={role === "manager"} onSaved={onSaved} />
-        ))}
-        <AddCompetitorToCategory
-          ourProducts={ourProducts}
-          existingCompetitorIds={new Set(competitorRows.map((r) => r.raw.id))}
-          onSaved={onSaved}
-        />
-      </ExpandableDetails>
+      <AddCompetitorToCategory
+        ourProducts={ourProducts}
+        existingCompetitorIds={new Set(competitorRows.map((r) => r.raw.id))}
+        onSaved={onSaved}
+      />
     </RecallSection>
+  );
+}
+
+function CompetitorExpandedContent({ rel: c, canUnlink, onSaved, onClose }) {
+  const cp = c.competitorProduct;
+  const [unlinking, setUnlinking] = useState(false);
+  const [error, setError] = useState("");
+  const unlink = async () => {
+    setUnlinking(true);
+    setError("");
+    try {
+      // Only removes the comparison link (RecallCompetitorRelationships) —
+      // the competitor product itself is untouched and still lives under
+      // Settings' competitor data list, unlinked from this category.
+      await api.removeRecallCompetitorRelationship(c.id);
+      onSaved();
+    } catch (e) {
+      setError(e.message || "Couldn't remove this comparison.");
+      setUnlinking(false);
+    }
+  };
+  return (
+    <div>
+      {c.retailerListings.length > 0 && (
+        <div style={{ marginBottom: 6 }}>
+          {c.retailerListings.map((l) => (
+            <div key={l.id} style={{ fontSize: 11, color: "#8A8272" }}>
+              {l.retailer}{" — "}{l.sourceUrl ? <a href={l.sourceUrl} target="_blank" rel="noreferrer">source</a> : "source URL not verified"}
+            </div>
+          ))}
+        </div>
+      )}
+      <ConflictBanner conflicts={cp.conflicts} onSaved={onSaved} canResolve={true} />
+      <MissingInfoBadge researchStatus={cp.researchStatus} missingFields={cp.missingFields} />
+      <CompetitorEditor competitorProduct={cp} retailerListings={c.retailerListings} onCancel={onClose} onSaved={() => { onSaved(); onClose(); }} />
+      {error && <div style={{ color: "#B33A3A", fontSize: 11, marginTop: 4 }}>{error}</div>}
+      {canUnlink && (
+        <button type="button" disabled={unlinking} onClick={unlink} style={{ ...cancelButtonStyle, marginTop: 8 }}>
+          {unlinking ? "Removing…" : "Remove from comparison"}
+        </button>
+      )}
+    </div>
   );
 }
 
