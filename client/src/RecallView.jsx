@@ -712,14 +712,6 @@ function AddCompetitorToCategory({ ourProducts, existingCompetitorIds, onSaved }
 // still available (managers on our products, any employee on competitor
 // research) but tucked behind a collapsed "Manage research" panel below
 // each table, so it's there when needed without cluttering the comparison.
-const analysisTableCellStyle = { padding: "8px 10px", fontSize: 12, borderBottom: "1px solid #F0EBE0", whiteSpace: "nowrap" };
-const analysisTableHeaderStyle = { ...analysisTableCellStyle, fontWeight: 700, color: "#8A8272", fontSize: 10.5, letterSpacing: 0.3, textTransform: "uppercase", borderBottom: "1px solid #E5DFD3" };
-// The Product column stays pinned while the rest of the table scrolls
-// horizontally on a narrow screen — with 7 columns there's no way to fit
-// this without scrolling, but a rep should never lose track of which row
-// they're reading.
-const analysisStickyColStyle = { position: "sticky", left: 0, zIndex: 1 };
-
 function priceRows(pricePerPill) {
   if (pricePerPill.length === 0) return "Not verified";
   return pricePerPill.map((p, i) => (
@@ -770,73 +762,63 @@ function competitorRow(c) {
   };
 }
 
-// Shared by both the Analysis and Competitors tables — same columns, same
-// row rendering, so the two sections read as one system even though each
-// only shows its own side of the comparison. Editing lives directly in the
-// table now (an Actions column + an inline expanded row) instead of a
-// separate "Manage research" list below — the same fact was otherwise
-// showing up twice.
+function ComparisonField({ label, value }) {
+  return (
+    <div style={{ minWidth: 96 }}>
+      <div style={{ fontSize: 9.5, fontWeight: 700, color: "#8A8272", textTransform: "uppercase", letterSpacing: 0.3 }}>{label}</div>
+      <div style={{ fontSize: 12.5, marginTop: 2, color: value ? "#1F2A24" : "#B7AF9E" }}>{value || "Not verified"}</div>
+    </div>
+  );
+}
+
+// Shared by both the Analysis and Competitors sections — same fields, same
+// card rendering, so the two read as one system even though each only
+// shows its own side of the comparison. A stacked card per product instead
+// of a wide table — a 10-column table meant endless horizontal swiping on
+// a phone; a card's fields just wrap to the next line instead. Editing
+// lives directly in the card (an Edit button + an inline expanded panel)
+// instead of a separate "Manage research" list below — the same fact was
+// otherwise showing up twice.
 function ComparisonTable({ rows, expandedKey, onToggleExpanded, renderExpanded }) {
   const hasActions = !!onToggleExpanded;
   return (
-    <div style={{ overflowX: "auto", marginBottom: 14, border: "1px solid #E5DFD3", borderRadius: 8 }}>
-      <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 640 }}>
-        <thead>
-          <tr>
-            <th style={{ ...analysisTableHeaderStyle, ...analysisStickyColStyle, textAlign: "left", background: "#fff" }}>Product</th>
-            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Active ingredient</th>
-            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Dose per unit</th>
-            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Pills per box</th>
-            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Days supply</th>
-            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Serving size</th>
-            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Dosage form</th>
-            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Price per pill</th>
-            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Country of origin</th>
-            <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Pharmacy discount</th>
-            {hasActions && <th style={{ ...analysisTableHeaderStyle, textAlign: "left" }}>Actions</th>}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => {
-            const hasOpenConflict = (r.raw.conflicts || []).some((c) => c.status === "CONFLICT");
-            const isExpanded = expandedKey === r.key;
-            return (
-              <React.Fragment key={r.key}>
-                <tr style={{ background: r.isOurs ? "#F4F8F5" : "#fff" }}>
-                  <td style={{ ...analysisTableCellStyle, ...analysisStickyColStyle, fontWeight: 600, whiteSpace: "normal", background: r.isOurs ? "#F4F8F5" : "#fff", maxWidth: 150 }}>
-                    {r.isOurs && <span style={{ fontSize: 9.5, fontWeight: 700, color: "#4C7A5E", display: "block" }}>OUR PRODUCT</span>}
-                    {r.name}
-                    {hasOpenConflict && <span style={{ fontSize: 10, fontWeight: 700, color: "#8A6B1A", display: "block" }}>⚠ conflict</span>}
-                  </td>
-                  <td style={analysisTableCellStyle}>{r.activeIngredient || "Not verified"}</td>
-                  <td style={analysisTableCellStyle}>{r.dosePerUnit || "Not verified"}</td>
-                  <td style={analysisTableCellStyle}>{r.pillsPerBox || "Not verified"}</td>
-                  <td style={analysisTableCellStyle}>{r.daysSupply || "Not verified"}</td>
-                  <td style={analysisTableCellStyle}>{r.servingSize || "Not verified"}</td>
-                  <td style={analysisTableCellStyle}>{r.dosageForm || "Not verified"}</td>
-                  <td style={analysisTableCellStyle}>{priceRows(r.pricePerPill)}</td>
-                  <td style={analysisTableCellStyle}>{r.countryOfOrigin || (r.isOurs ? "—" : "Not verified")}</td>
-                  <td style={analysisTableCellStyle}>{r.pharmacyDiscount || (r.isOurs ? "—" : "Not verified")}</td>
-                  {hasActions && (
-                    <td style={analysisTableCellStyle}>
-                      <button type="button" onClick={() => onToggleExpanded(r.key)} style={editButtonStyle}>
-                        {isExpanded ? "Close" : "Edit"}
-                      </button>
-                    </td>
-                  )}
-                </tr>
-                {isExpanded && (
-                  <tr>
-                    <td colSpan={hasActions ? 11 : 10} style={{ padding: "10px 12px", background: "#FAF7F2", borderBottom: "1px solid #E5DFD3" }}>
-                      {renderExpanded(r)}
-                    </td>
-                  </tr>
-                )}
-              </React.Fragment>
-            );
-          })}
-        </tbody>
-      </table>
+    <div style={{ marginBottom: 14 }}>
+      {rows.map((r) => {
+        const hasOpenConflict = (r.raw.conflicts || []).some((c) => c.status === "CONFLICT");
+        const isExpanded = expandedKey === r.key;
+        return (
+          <div key={r.key} style={{ background: r.isOurs ? "#F4F8F5" : "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: 12, marginBottom: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, marginBottom: 10 }}>
+              <div>
+                {r.isOurs && <div style={{ fontSize: 9.5, fontWeight: 700, color: "#4C7A5E" }}>OUR PRODUCT</div>}
+                <div style={{ fontWeight: 600, fontSize: 13 }}>{r.name}</div>
+                {hasOpenConflict && <div style={{ fontSize: 10, fontWeight: 700, color: "#8A6B1A" }}>⚠ conflict</div>}
+              </div>
+              {hasActions && (
+                <button type="button" onClick={() => onToggleExpanded(r.key)} style={{ ...editButtonStyle, flexShrink: 0 }}>
+                  {isExpanded ? "Close" : "Edit"}
+                </button>
+              )}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))", gap: 10 }}>
+              <ComparisonField label="Active ingredient" value={r.activeIngredient} />
+              <ComparisonField label="Dose per unit" value={r.dosePerUnit} />
+              <ComparisonField label="Pills per box" value={r.pillsPerBox} />
+              <ComparisonField label="Days supply" value={r.daysSupply} />
+              <ComparisonField label="Serving size" value={r.servingSize} />
+              <ComparisonField label="Dosage form" value={r.dosageForm} />
+              <ComparisonField label="Price per pill" value={priceRows(r.pricePerPill)} />
+              <ComparisonField label="Country of origin" value={r.countryOfOrigin || (r.isOurs ? "—" : "")} />
+              <ComparisonField label="Pharmacy discount" value={r.pharmacyDiscount || (r.isOurs ? "—" : "")} />
+            </div>
+            {isExpanded && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3" }}>
+                {renderExpanded(r)}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
