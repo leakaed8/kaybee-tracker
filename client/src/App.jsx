@@ -2796,9 +2796,10 @@ const batchLabel = (p) => `${p.name} — exp ${fmtDate(p.expiry)} (${p.qty} in s
 
 // Given exactly what the rep entered (never mutated for offers), works out
 // which single offer — if any — the order qualifies for, and automatically
-// carves its free unit(s) out of whichever already-ordered line is closest
-// to the rounded-down average price. Pure/derived, so it's always correct
-// no matter what gets added or removed afterward — nothing to keep in sync.
+// carves its free unit(s) out of whichever already-ordered line(s) are
+// closest to the rounded-down average price. Pure/derived, so it's always
+// correct no matter what gets added or removed afterward — nothing to keep
+// in sync.
 function applyOfferToItems(rawItems, offers) {
   const totalQty = rawItems.reduce((sum, it) => sum + it.qty, 0);
   if (totalQty === 0) return { displayItems: rawItems, appliedOffer: null, avg: 0, roundedAvg: 0 };
@@ -2821,32 +2822,37 @@ function applyOfferToItems(rawItems, offers) {
   const priced = rawItems.filter((it) => it.unitPrice > 0);
   if (priced.length === 0) return { displayItems: rawItems, appliedOffer: null, avg, roundedAvg };
 
-  // Closest to the rounded-down average by plain distance — not restricted
-  // to prices at or below it. A tie breaks toward the lower price, the more
-  // conservative choice.
-  const chosen = priced.reduce((best, it) => {
-    const d = Math.abs(it.unitPrice - roundedAvg);
-    const bd = Math.abs(best.unitPrice - roundedAvg);
-    if (d < bd) return it;
-    if (d === bd && it.unitPrice < best.unitPrice) return it;
-    return best;
-  }, priced[0]);
+  // A basket of many DIFFERENT single-unit products (a common mixed-basket
+  // order) can't have its whole free allocation carved out of one line —
+  // e.g. "buy 12 get 2 free" across 13 distinct qty-1 products needs 2
+  // SEPARATE products marked free, not one product capped at qty 1. So this
+  // greedily repeats the same "closest to rounded average price" pick
+  // (ties break toward the lower price) against whatever quantity remains
+  // across lines, consuming one line at a time, until the offer's full
+  // getQty has been allocated or there's nothing left to give away.
+  const working = rawItems.map((it) => ({ ...it }));
+  const freeLines = [];
+  let remainingFreeQty = offer.getQty;
+  while (remainingFreeQty > 0) {
+    const candidates = working.filter((it) => it.unitPrice > 0 && it.qty > 0);
+    if (candidates.length === 0) break;
+    const chosen = candidates.reduce((best, it) => {
+      const d = Math.abs(it.unitPrice - roundedAvg);
+      const bd = Math.abs(best.unitPrice - roundedAvg);
+      if (d < bd) return it;
+      if (d === bd && it.unitPrice < best.unitPrice) return it;
+      return best;
+    }, candidates[0]);
+    const take = Math.min(remainingFreeQty, chosen.qty);
+    chosen.qty -= take;
+    freeLines.push({ ...chosen, qty: take, unitPrice: 0, originalPrice: chosen.unitPrice, isFree: true, viaOfferId: offer.id });
+    remainingFreeQty -= take;
+  }
+  const freeQty = offer.getQty - remainingFreeQty;
 
-  const freeQty = Math.min(offer.getQty, chosen.qty);
-  const remainingQty = chosen.qty - freeQty;
-  const displayItems = rawItems
-    .map((it) => (it === chosen ? { ...it, qty: remainingQty } : it))
-    .filter((it) => it.qty > 0);
-  displayItems.push({
-    ...chosen,
-    qty: freeQty,
-    unitPrice: 0,
-    originalPrice: chosen.unitPrice,
-    isFree: true,
-    viaOfferId: offer.id,
-  });
+  const displayItems = [...working.filter((it) => it.qty > 0), ...freeLines];
 
-  return { displayItems, appliedOffer: offer, avg, roundedAvg, freeItem: chosen, freeQty };
+  return { displayItems, appliedOffer: offer, avg, roundedAvg, freeItems: freeLines, freeQty };
 }
 
 function OrderBuilder({ clientName, visitId, products, offers, clients, onCreateOrder, onUpdateOrder, onQueueOrderOffline, pendingVisitLocalKey, onAttachPendingOrder, editOrder, onDone }) {
@@ -2950,7 +2956,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     const rawItems = items.filter((it) => it.offerId === offerId);
     const totalQty = rawItems.reduce((sum, it) => sum + it.qty, 0);
     const required = offer.buyQty + offer.getQty;
-    const { displayItems, appliedOffer, avg, roundedAvg, freeItem, freeQty } = applyOfferToItems(rawItems, [offer]);
+    const { displayItems, appliedOffer, avg, roundedAvg, freeItems, freeQty } = applyOfferToItems(rawItems, [offer]);
     return {
       offerId,
       offer,
@@ -2959,7 +2965,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
       required,
       valid: totalQty === required,
       taggedDisplayItems: displayItems.map((it) => ({ ...it, offerId })),
-      appliedOffer, avg, roundedAvg, freeItem, freeQty,
+      appliedOffer, avg, roundedAvg, freeItems, freeQty,
     };
   });
 
@@ -3146,9 +3152,9 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
                 </div>
               ))}
             </div>
-            {g.valid && g.freeItem && (
+            {g.valid && g.freeItems && g.freeItems.length > 0 && (
               <div style={{ fontSize: 11.5, color: "#4C7A5E", marginTop: 6 }}>
-                Free: {g.freeItem.name} × {g.freeQty} (auto-selected)
+                Free: {g.freeItems.map((it) => `${it.name} × ${it.qty}`).join(", ")} (auto-selected)
               </div>
             )}
             {!g.valid && g.totalQty < g.required && (
