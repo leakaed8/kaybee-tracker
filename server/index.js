@@ -3136,8 +3136,14 @@ function parseRepTarget(t) {
   return out;
 }
 
-app.get("/api/rep-targets", requireManager, async (req, res) => {
+// Read access extended to isSupervisor — the Head of Sales already has
+// team-wide Performance/Locations visibility (see requireManager comment
+// history elsewhere), and RepTargets carries no sensitive data (unlike
+// GET /api/reps, which includes passcodes and stays manager-only). Writing
+// a target profile stays manager-only (PUT below).
+app.get("/api/rep-targets", async (req, res) => {
   try {
+    if (req.role !== "manager" && !req.isSupervisor) return res.status(403).json({ error: "Managers only." });
     const rows = await db.getAllRows("RepTargets");
     res.json({ targets: rows.map(parseRepTarget) });
   } catch (e) {

@@ -6332,7 +6332,7 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
   const entityWordCap = isSupplementStore ? "Supplement store" : "Pharmacy";
   const [completingId, setCompletingId] = useState(null);
   const [historyId, setHistoryId] = useState(null);
-  const [historyRows, setHistoryRows] = useState([]);
+  const [historyProfile, setHistoryProfile] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [name, setName] = useState("");
@@ -6352,12 +6352,19 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
 
   // The last few visits to this pharmacy, newest first — fetched only once
   // its history panel is actually expanded, not held for every row.
+  // Manager Performance Management redesign — the History toggle now shows
+  // the full structured Timeline (DoctorTimeline, generalized) via the same
+  // profile-aggregation endpoint doctors already use (/api/clients/:name/
+  // profile mirrors /api/doctors/:name/profile), instead of a hand-rolled
+  // 5-raw-visit dump. Every doctor-only field is simply blank on a pharmacy
+  // visit, which DoctorTimeline's existing Legacy-note fallback already
+  // renders correctly — no component change needed.
   useEffect(() => {
-    if (!historyId) { setHistoryRows([]); return; }
+    if (!historyId) { setHistoryProfile(null); return; }
     const c = clients.find((cl) => cl.id === historyId);
     if (!c) return;
-    api.getVisits({ client: c.name, limit: 5 }).then((data) => setHistoryRows(data.visits || [])).catch(() => setHistoryRows([]));
-  }, [historyId]);
+    api.getClientProfile(c.name).then(setHistoryProfile).catch(() => setHistoryProfile(null));
+  }, [historyId, clients]);
 
   // Same navigator.geolocation pattern used for Punch In / Check-In — a GPS
   // fix taken while standing at the pharmacy is more accurate than
@@ -6600,23 +6607,8 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
               <button onClick={() => onRemove(c.id)} style={{ background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
             </div>
             {historyId === c.id && (
-              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-                {historyRows.map((v) => (
-                  <div key={v.id} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 10px", fontSize: 12 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", color: "#8A8272", fontSize: 11 }}>
-                      <span>{v.repName || "unknown rep"}</span>
-                      <span className="kb-font-mono">{new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</span>
-                    </div>
-                    {v.notes && <div style={{ marginTop: 3 }}>{v.notes}</div>}
-                    {v.mentionedItems && v.mentionedItems.length > 0 && (
-                      <div style={{ marginTop: 3, color: "#5B5445" }}>
-                        <strong style={{ fontWeight: 600 }}>Discussed: </strong>{v.mentionedItems.map((it) => it.name).join(", ")}
-                      </div>
-                    )}
-                    {v.objectionTag && <div style={{ marginTop: 3, color: "#B33A3A" }}>{v.objectionTag}</div>}
-                  </div>
-                ))}
-                {historyRows.length === 0 && <EmptyState text="No visits logged yet." />}
+              <div style={{ marginTop: 8 }}>
+                {historyProfile ? <DoctorTimeline visits={historyProfile.timeline} /> : <EmptyState text="Loading…" />}
               </div>
             )}
             {role === "rep" && completingId === c.id && (
@@ -8555,7 +8547,11 @@ function PerformanceView({
   useEffect(() => {
     api.getVisits({ all: true }).then((data) => setVisits(data.visits || [])).catch(() => {});
     api.getOrders({ all: true }).then((data) => setOrders(data.orders || [])).catch(() => {});
-    api.getReps().then(setReps).catch(() => setReps([]));
+    // GET /api/reps is manager-only server-side (it includes passcodes) —
+    // a supervisor session gets a 403 here, which the .catch below turns
+    // into an empty list (role labels just fall back to a sensible default
+    // in repRoleLabel) rather than a broken Performance tab.
+    api.getReps().then((data) => setReps(Array.isArray(data) ? data : [])).catch(() => setReps([]));
     api.getRepTargets().then((data) => {
       const byName = {};
       (data.targets || []).forEach((t) => { byName[t.repName] = t; });
