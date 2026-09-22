@@ -171,6 +171,16 @@ const DEFAULT_SETTINGS = {
   monthlyVisitTarget: 60,
   monthlyRevenueTarget: 10000,
   templates: defaultTemplates,
+  // Manager Performance Management redesign — both manager-configurable,
+  // never hard-coded in the math that reads them. qualityCallRequiredFields
+  // names which Visits columns must be non-empty on a doctor visit for it to
+  // count as a "Quality Call"; tierVisitFrequency is the expected in-person
+  // visits/month per customer priority tier (A/B/C), used only by the new
+  // Territory Coverage / frequency-compliance features — deliberately kept
+  // separate from the existing day-based TIER_CADENCE (client/src/helpers.js)
+  // so the already-shipped overdue-badge feature can't regress.
+  qualityCallRequiredFields: ["reaction", "commitment", "callOutcome"],
+  tierVisitFrequency: { A: { perMonth: 2 }, B: { perMonth: 1 }, C: { perMonth: 0.4 } },
 };
 
 function parseSettings(raw) {
@@ -183,6 +193,10 @@ function parseSettings(raw) {
     monthlyRevenueTarget:
       raw.monthlyRevenueTarget !== undefined ? Number(raw.monthlyRevenueTarget) : DEFAULT_SETTINGS.monthlyRevenueTarget,
     templates: raw.templates ? JSON.parse(raw.templates) : DEFAULT_SETTINGS.templates,
+    qualityCallRequiredFields: raw.qualityCallRequiredFields
+      ? JSON.parse(raw.qualityCallRequiredFields) : DEFAULT_SETTINGS.qualityCallRequiredFields,
+    tierVisitFrequency: raw.tierVisitFrequency
+      ? JSON.parse(raw.tierVisitFrequency) : DEFAULT_SETTINGS.tierVisitFrequency,
   };
 }
 
@@ -260,7 +274,58 @@ function sanitizeDoctorVisitFields(body) {
   const callOutcome = DOCTOR_CALL_OUTCOME_CODES.has(body.callOutcome) ? body.callOutcome : "";
   const keyLearning = typeof body.keyLearning === "string" ? body.keyLearning.trim() : "";
   const nextAction = DOCTOR_NEXT_ACTION_CODES.has(body.nextAction) ? body.nextAction : "";
-  return { objective, doctorNeeds, reaction, concern, doctorInsight, commitment, patientsToTry, callOutcome, keyLearning, nextAction };
+  // Manager Performance Management redesign — quality-call planning fields.
+  // All free text, all optional; only trimmed, never validated against an
+  // allow-list (there's no fixed vocabulary for a treatment goal or a key
+  // message the way there is for reaction/commitment/etc.).
+  const treatmentGoal = typeof body.treatmentGoal === "string" ? body.treatmentGoal.trim() : "";
+  const keyMessage = typeof body.keyMessage === "string" ? body.keyMessage.trim() : "";
+  const plannedObjectionHandling = typeof body.plannedObjectionHandling === "string" ? body.plannedObjectionHandling.trim() : "";
+  const plannedClose = typeof body.plannedClose === "string" ? body.plannedClose.trim() : "";
+  const buyingMotive = typeof body.buyingMotive === "string" ? body.buyingMotive.trim() : "";
+  const customerComments = typeof body.customerComments === "string" ? body.customerComments.trim() : "";
+  return {
+    objective, doctorNeeds, reaction, concern, doctorInsight, commitment, patientsToTry, callOutcome, keyLearning, nextAction,
+    treatmentGoal, keyMessage, plannedObjectionHandling, plannedClose, buyingMotive, customerComments,
+  };
+}
+const DOCTOR_VISIT_FIELD_NAMES = [
+  "objective", "doctorNeeds", "reaction", "concern", "doctorInsight", "commitment", "patientsToTry",
+  "callOutcome", "keyLearning", "nextAction",
+  "treatmentGoal", "keyMessage", "plannedObjectionHandling", "plannedClose", "buyingMotive", "customerComments",
+];
+
+// Interaction Type — required on every new visit going forward (Manager
+// Performance Management redesign). A visit row with "" for this column
+// predates the field entirely and is always treated as "in_person" for KPI
+// math, since that's the only kind of visit the app could log before this.
+const INTERACTION_TYPE_CODES = new Set(["in_person", "phone", "whatsapp", "video", "other"]);
+const INTERACTION_TYPE_LABELS = {
+  in_person: "In-person visit", phone: "Phone call", whatsapp: "WhatsApp / Message",
+  video: "Video call", other: "Other", "": "Legacy / Not specified",
+};
+function effectiveInteractionType(visit) {
+  // "" (legacy, pre-dates the field) counts as in_person for KPI purposes —
+  // it always was one. Display code should still show the raw stored value
+  // (via INTERACTION_TYPE_LABELS) so a legacy row reads "Legacy / Not
+  // specified" rather than being silently relabeled "In-person visit."
+  return visit.interactionType || "in_person";
+}
+
+// Generic, append-only audit-trail writer (Manager Performance Management
+// redesign) — reused by every "record who changed what" requirement in the
+// spec (rep targets, interaction-type corrections, customer reassignment,
+// follow-up edits, manager notes). Never updates or deletes a prior row.
+async function writeAuditLog({ entityType, entityId, field, oldValue, newValue, changedBy, reason }) {
+  await db.appendRow("AuditLog", {
+    id: `al${crypto.randomUUID()}`,
+    entityType, entityId, field,
+    oldValue: oldValue === undefined || oldValue === null ? "" : String(oldValue),
+    newValue: newValue === undefined || newValue === null ? "" : String(newValue),
+    changedBy: changedBy || "",
+    changedAt: new Date().toISOString(),
+    reason: reason || "",
+  });
 }
 
 function parseProduct(p) {
@@ -538,6 +603,15 @@ function parseVisit(v) {
     doctorInsight: v.doctorInsight || "", commitment: v.commitment || "",
     patientsToTry: v.patientsToTry !== "" && v.patientsToTry != null && !Number.isNaN(Number(v.patientsToTry)) ? Number(v.patientsToTry) : null,
     callOutcome: v.callOutcome || "", keyLearning: v.keyLearning || "", nextAction: v.nextAction || "",
+    // Manager Performance Management redesign fields — "" on any visit that
+    // predates this change (see effectiveInteractionType for the KPI
+    // fallback rule on interactionType specifically).
+    interactionType: v.interactionType || "",
+    locationVerified: v.locationVerified === "true" ? true : v.locationVerified === "false" ? false : null,
+    distanceFromCustomerKm: v.distanceFromCustomerKm !== "" && v.distanceFromCustomerKm != null && !Number.isNaN(Number(v.distanceFromCustomerKm)) ? Number(v.distanceFromCustomerKm) : null,
+    treatmentGoal: v.treatmentGoal || "", keyMessage: v.keyMessage || "",
+    plannedObjectionHandling: v.plannedObjectionHandling || "", plannedClose: v.plannedClose || "",
+    buyingMotive: v.buyingMotive || "", customerComments: v.customerComments || "",
   };
 }
 // Same formula as haversineKm in client/src/helpers.js — used here to check
@@ -588,6 +662,12 @@ function visitToRow(v) {
     reaction: v.reaction || "", concern: v.concern || "", doctorInsight: v.doctorInsight || "",
     commitment: v.commitment || "", patientsToTry: v.patientsToTry ?? "",
     callOutcome: v.callOutcome || "", keyLearning: v.keyLearning || "", nextAction: v.nextAction || "",
+    interactionType: v.interactionType || "",
+    locationVerified: v.locationVerified === true ? "true" : v.locationVerified === false ? "false" : "",
+    distanceFromCustomerKm: v.distanceFromCustomerKm ?? "",
+    treatmentGoal: v.treatmentGoal || "", keyMessage: v.keyMessage || "",
+    plannedObjectionHandling: v.plannedObjectionHandling || "", plannedClose: v.plannedClose || "",
+    buyingMotive: v.buyingMotive || "", customerComments: v.customerComments || "",
   };
 }
 
@@ -1349,14 +1429,24 @@ app.post("/api/visits", async (req, res) => {
   try {
     const { client, notes, coords, mentionedItems, competitorName, competitorNotes } = req.body;
     if (!client) return res.status(400).json({ error: "client is required" });
+    // Interaction Type (Manager Performance Management redesign) — required
+    // going forward. A missing/unrecognized value defaults to "in_person"
+    // rather than being rejected outright, so an in-flight client build from
+    // just before this change (or a hand-crafted request) doesn't suddenly
+    // fail to log a visit at all — it's simply treated the same as every
+    // pre-existing row already is.
+    const interactionType = INTERACTION_TYPE_CODES.has(req.body.interactionType) ? req.body.interactionType : "in_person";
+    const isInPerson = interactionType === "in_person";
     // Enforced server-side too, not just disabled in the UI — a visit with
     // no location proves nothing about whether the rep was actually there.
+    // Only required for in-person visits — a phone/WhatsApp/video contact
+    // has no physical location to verify.
     // (The Telegram "Sign in" follow-up flow creates visits through a
     // separate internal path, not this route, so it's unaffected.)
     // TEMPORARY: the Head of Sales (isSupervisor) is exempted while Rabih's
     // phone's location permissions get sorted out — remove this carve-out
     // (and the matching one in CheckInView client-side) once that's fixed.
-    if ((!coords || !coords.lat || !coords.lng) && !req.isSupervisor) {
+    if (isInPerson && (!coords || !coords.lat || !coords.lng) && !req.isSupervisor) {
       return res.status(400).json({ error: "GPS location is required to log a visit." });
     }
 
@@ -1385,6 +1475,21 @@ app.post("/api/visits", async (req, res) => {
       return res.status(403).json({ error: "Your account is limited to doctors." });
     }
 
+    // Location verification (Manager Performance Management redesign) is
+    // computed once, here, at save time, and frozen onto the row — never
+    // recomputed later against the customer's possibly-since-edited saved
+    // coordinates (that's what the older LocationsView mismatch-notification
+    // logic below does, and it's a live/drifting number by design; this is a
+    // permanent historical record instead). Only meaningful for an in-person
+    // visit against an entity that has its own saved coordinates.
+    const verifiedAgainst = matchedClient || matchedDoctor;
+    let locationVerified = null;
+    let distanceFromCustomerKm = null;
+    if (isInPerson && coords?.lat && coords?.lng && verifiedAgainst?.coordsLat && verifiedAgainst?.coordsLng) {
+      distanceFromCustomerKm = haversineKmServer(Number(coords.lat), Number(coords.lng), Number(verifiedAgainst.coordsLat), Number(verifiedAgainst.coordsLng));
+      locationVerified = distanceFromCustomerKm <= LOCATION_MISMATCH_KM;
+    }
+
     const visit = {
       id: `v${crypto.randomUUID()}`,
       client,
@@ -1394,6 +1499,9 @@ app.post("/api/visits", async (req, res) => {
       repName: req.repName || "",
       mentionedItems: Array.isArray(mentionedItems) ? mentionedItems : [],
       objectionTag: classifyObjection(notes),
+      interactionType,
+      locationVerified,
+      distanceFromCustomerKm,
       ...sanitizeDoctorVisitFields(req.body),
     };
     const row = visitToRow(visit);
@@ -1410,7 +1518,7 @@ app.post("/api/visits", async (req, res) => {
     // leave the assignment alone but flag it so both the rep (in the
     // response) and the manager (via push) know this crosses territories.
     let assignedRepWarning = null;
-    if (req.repName) {
+    if (isInPerson && req.repName) {
       if (matchedClient) {
         if (!matchedClient.assignedRep) {
           await db.updateRowById("Clients", matchedClient.id, { assignedRep: req.repName });
@@ -1434,6 +1542,16 @@ app.post("/api/visits", async (req, res) => {
           }).catch((e) => console.error("cross-rep telegram notify failed", e));
         }
       }
+      // Same auto-claim behavior extended to Doctors (Manager Performance
+      // Management redesign — Doctors.assignedRep is new; every pre-existing
+      // doctor row is unassigned until claimed this way or set manually by a
+      // manager). No cross-rep Telegram/push notification for doctors yet —
+      // that flow was built specifically around pharmacy territory disputes;
+      // reusing it here isn't asked for, so a doctor visited by a second rep
+      // just leaves the original assignment alone with no separate alert.
+      if (matchedDoctor && !matchedDoctor.assignedRep) {
+        await db.updateRowById("Doctors", matchedDoctor.id, { assignedRep: req.repName });
+      }
     }
 
     // Cross-checks the check-in GPS against the pharmacy's own saved
@@ -1441,7 +1559,7 @@ app.post("/api/visits", async (req, res) => {
     // this is what actually answers "were they really there," not just
     // that some GPS was captured. Only meaningful once the pharmacy has a
     // saved location of its own to compare against.
-    if (matchedClient?.coordsLat && matchedClient?.coordsLng && coords?.lat && coords?.lng) {
+    if (isInPerson && matchedClient?.coordsLat && matchedClient?.coordsLng && coords?.lat && coords?.lng) {
       const distanceKm = haversineKmServer(Number(coords.lat), Number(coords.lng), Number(matchedClient.coordsLat), Number(matchedClient.coordsLng));
       if (distanceKm > LOCATION_MISMATCH_KM) {
         notifyManagers({
@@ -1510,11 +1628,14 @@ app.patch("/api/visits/:id", async (req, res) => {
     if (Array.isArray(mentionedItems)) {
       patch.itemsMentioned = mentionedItems.length ? JSON.stringify(mentionedItems) : "";
     }
-    // Doctor-visit redesign fields — only ever sent by the doctor branch of
-    // Check-In's Back/edit flow, but harmless (and unused) if a pharmacy
-    // edit ever included them. Same allow-list sanitizer as POST /api/visits.
-    const hasDoctorVisitFields = ["objective", "doctorNeeds", "reaction", "concern", "doctorInsight", "commitment", "patientsToTry", "callOutcome", "keyLearning", "nextAction"]
-      .some((k) => req.body[k] !== undefined);
+    // Doctor-visit redesign + quality-call planning fields — only ever sent
+    // by the doctor branch of Check-In's Back/edit flow, but harmless (and
+    // unused) if a pharmacy edit ever included them. Same allow-list
+    // sanitizer as POST /api/visits. Note: interactionType is deliberately
+    // NOT in this list and can never be changed here — see
+    // PATCH /api/visits/:id/interaction-type below for the only sanctioned,
+    // audited way to correct it after submission.
+    const hasDoctorVisitFields = DOCTOR_VISIT_FIELD_NAMES.some((k) => req.body[k] !== undefined);
     if (hasDoctorVisitFields) {
       const sanitized = sanitizeDoctorVisitFields(req.body);
       patch.objective = sanitized.objective;
@@ -1523,6 +1644,9 @@ app.patch("/api/visits/:id", async (req, res) => {
       patch.doctorInsight = sanitized.doctorInsight; patch.commitment = sanitized.commitment;
       patch.patientsToTry = sanitized.patientsToTry;
       patch.callOutcome = sanitized.callOutcome; patch.keyLearning = sanitized.keyLearning; patch.nextAction = sanitized.nextAction;
+      patch.treatmentGoal = sanitized.treatmentGoal; patch.keyMessage = sanitized.keyMessage;
+      patch.plannedObjectionHandling = sanitized.plannedObjectionHandling; patch.plannedClose = sanitized.plannedClose;
+      patch.buyingMotive = sanitized.buyingMotive; patch.customerComments = sanitized.customerComments;
     }
     if (Object.keys(patch).length > 0) {
       await db.updateRowById("Visits", req.params.id, patch);
@@ -1568,6 +1692,67 @@ app.patch("/api/visits/:id", async (req, res) => {
     }
 
     res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// The ONLY sanctioned way to change a visit's interaction type after it's
+// been submitted (Manager Performance Management redesign). A rep can never
+// silently convert a Phone call into an In-person visit via the regular
+// PATCH /api/visits/:id above (interactionType isn't in its patch list at
+// all) — only a manager can correct it here, and only with a reason, which
+// is written to AuditLog alongside the original/new values, who made the
+// change, and when. The visit row itself is updated in place; its GPS
+// verification fields are intentionally left as originally recorded (a type
+// correction doesn't retroactively invent a location that was never
+// captured).
+app.patch("/api/visits/:id/interaction-type", requireManager, async (req, res) => {
+  try {
+    const { interactionType, reason } = req.body;
+    if (!INTERACTION_TYPE_CODES.has(interactionType)) {
+      return res.status(400).json({ error: "interactionType must be one of: " + [...INTERACTION_TYPE_CODES].join(", ") });
+    }
+    if (!reason || !String(reason).trim()) {
+      return res.status(400).json({ error: "A reason is required to correct an interaction type." });
+    }
+    const visits = await db.getAllRows("Visits");
+    const visit = visits.find((v) => v.id === req.params.id);
+    if (!visit) return res.status(404).json({ error: "Visit not found." });
+    const oldType = visit.interactionType || "in_person";
+    if (oldType === interactionType) {
+      return res.json({ ok: true, unchanged: true });
+    }
+    await db.updateRowById("Visits", req.params.id, { interactionType });
+    await writeAuditLog({
+      entityType: "visit_interaction_type",
+      entityId: req.params.id,
+      field: "interactionType",
+      oldValue: oldType,
+      newValue: interactionType,
+      changedBy: req.repName || "Manager",
+      reason: String(reason).trim(),
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Manager-only, paginated read of the audit trail — used by the "corrected"
+// badge popover on a visit, the Targets page's change history, and anywhere
+// else a manager needs to see who changed what and why.
+app.get("/api/audit-log", requireManager, async (req, res) => {
+  try {
+    const { entityType, entityId } = req.query;
+    let rows = await db.getAllRows("AuditLog");
+    if (entityType) rows = rows.filter((r) => r.entityType === entityType);
+    if (entityId) rows = rows.filter((r) => r.entityId === entityId);
+    rows.sort((a, b) => new Date(b.changedAt) - new Date(a.changedAt));
+    const limit = clampLimit(req.query.limit, 100, 500);
+    res.json({ entries: rows.slice(0, limit) });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -2662,8 +2847,43 @@ app.patch("/api/clients/:id", requireManager, async (req, res) => {
     if (req.body.assignedRep !== undefined) patch.assignedRep = req.body.assignedRep;
     if (req.body.discountRate !== undefined) patch.discountRate = req.body.discountRate;
     if (req.body.nameAr !== undefined) patch.nameAr = req.body.nameAr;
+    let previous = null;
+    if (patch.assignedRep !== undefined) {
+      const clients = await db.getAllRows("Clients");
+      previous = clients.find((c) => c.id === req.params.id) || null;
+    }
     const ok = await db.updateRowById("Clients", req.params.id, patch);
     if (!ok) return res.status(404).json({ error: "Client not found" });
+    if (previous && (previous.assignedRep || "") !== patch.assignedRep) {
+      await writeAuditLog({
+        entityType: "customer_assignment", entityId: req.params.id, field: "assignedRep",
+        oldValue: previous.assignedRep, newValue: patch.assignedRep, changedBy: req.repName || "Manager",
+      });
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Manager-only reassignment for Doctors — mirrors PATCH /api/clients/:id's
+// assignedRep handling. There was no general-purpose PATCH /api/doctors/:id
+// route before this (only the narrow rep-facing complete-info one below),
+// so this is new, not a widened surface on an existing route.
+app.patch("/api/doctors/:id", requireManager, async (req, res) => {
+  try {
+    if (req.body.assignedRep === undefined) return res.status(400).json({ error: "Nothing to update." });
+    const doctors = await db.getAllRows("Doctors");
+    const previous = doctors.find((d) => d.id === req.params.id);
+    if (!previous) return res.status(404).json({ error: "Doctor not found" });
+    await db.updateRowById("Doctors", req.params.id, { assignedRep: req.body.assignedRep });
+    if ((previous.assignedRep || "") !== req.body.assignedRep) {
+      await writeAuditLog({
+        entityType: "customer_assignment", entityId: req.params.id, field: "assignedRep",
+        oldValue: previous.assignedRep, newValue: req.body.assignedRep, changedBy: req.repName || "Manager",
+      });
+    }
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -2895,6 +3115,167 @@ app.delete("/api/reps/:id", requireManager, async (req, res) => {
   }
 });
 
+// ---------- Rep Targets (Manager Performance Management redesign) ----------
+// One row per rep, upserted by repName (never duplicated). Every numeric
+// field here is independent per rep and manager-set — there is no fallback
+// derivation from role/entity-type flags baked in here; the client falls
+// back to the pre-existing global Settings.monthlyVisitTarget only for a rep
+// who has no RepTargets row yet at all.
+const REP_TARGET_NUMERIC_FIELDS = [
+  "fieldDaysPerMonth", "fieldHoursPerDay", "minVisitsPerDay", "targetVisitsPerDay", "stretchVisitsPerDay",
+  "monthlyVisitTargetOverride", "doctorVisitTarget", "pharmacyVisitTarget", "followUpTarget",
+  "coverageTargetPct", "qualityCallTargetPct", "revenueTarget", "conversionTargetPct",
+];
+function parseRepTarget(t) {
+  const out = { id: t.id, repName: t.repName, territory: t.territory || "" };
+  for (const f of REP_TARGET_NUMERIC_FIELDS) {
+    out[f] = t[f] !== "" && t[f] != null && !Number.isNaN(Number(t[f])) ? Number(t[f]) : null;
+  }
+  out.updatedBy = t.updatedBy || "";
+  out.updatedAt = t.updatedAt || "";
+  return out;
+}
+
+app.get("/api/rep-targets", requireManager, async (req, res) => {
+  try {
+    const rows = await db.getAllRows("RepTargets");
+    res.json({ targets: rows.map(parseRepTarget) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Upsert by repName — a rep's target profile is a single row that gets
+// edited over time, not re-created; every changed field is diffed against
+// the previous value and written to AuditLog individually so the Targets
+// page's history reads as "fieldDaysPerMonth: 18 -> 20", not one opaque
+// "target changed" line.
+app.put("/api/rep-targets/:repName", requireManager, async (req, res) => {
+  try {
+    const repName = req.params.repName;
+    const rows = await db.getAllRows("RepTargets");
+    const existing = rows.find((t) => t.repName === repName);
+    const now = new Date().toISOString();
+    const changedBy = req.repName || "Manager";
+
+    const nextValues = { territory: req.body.territory !== undefined ? String(req.body.territory).trim() : (existing?.territory || "") };
+    for (const f of REP_TARGET_NUMERIC_FIELDS) {
+      if (req.body[f] !== undefined) {
+        const n = Number(req.body[f]);
+        nextValues[f] = req.body[f] === "" || req.body[f] === null ? "" : (Number.isNaN(n) ? (existing?.[f] ?? "") : n);
+      } else {
+        nextValues[f] = existing?.[f] ?? "";
+      }
+    }
+
+    const auditWrites = [];
+    const fieldsToDiff = ["territory", ...REP_TARGET_NUMERIC_FIELDS];
+    for (const f of fieldsToDiff) {
+      const oldVal = existing?.[f] ?? "";
+      const newVal = nextValues[f] ?? "";
+      if (String(oldVal) !== String(newVal)) {
+        auditWrites.push({ entityType: "rep_target", entityId: repName, field: f, oldValue: oldVal, newValue: newVal, changedBy });
+      }
+    }
+
+    if (existing) {
+      await db.updateRowById("RepTargets", existing.id, { ...nextValues, updatedBy: changedBy, updatedAt: now });
+    } else {
+      await db.appendRow("RepTargets", {
+        id: `rt${crypto.randomUUID()}`, repName, ...nextValues, updatedBy: changedBy, updatedAt: now,
+      });
+    }
+    for (const w of auditWrites) await writeAuditLog(w);
+    res.json({ ok: true, changedFields: auditWrites.map((w) => w.field) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Follow-ups list + edit (Manager Performance Management redesign) ----------
+// There was previously no way to read FollowUps back through the API at
+// all — every mutation happened via CheckInView or Telegram callbacks, and
+// the only "overdue" signal in-app was an unrelated cadence-based headcount.
+// This gives the Manager Attention section and a rep's own Follow-ups tab
+// real, queryable data.
+app.get("/api/followups", async (req, res) => {
+  try {
+    const isTeamWide = req.role === "manager" || req.isSupervisor;
+    if (!isTeamWide && !req.repName) return res.status(403).json({ error: "Reps only." });
+    let rows = await db.getAllRows("FollowUps");
+    if (!isTeamWide) rows = rows.filter((f) => f.repName === req.repName);
+    if (req.query.status) rows = rows.filter((f) => f.status === req.query.status);
+    if (req.query.repName && isTeamWide) rows = rows.filter((f) => f.repName === req.query.repName);
+    rows.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+    res.json({ followups: rows });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Manager-only edit (reschedule a due date, or force a status change) — the
+// existing in-app "stop" and Telegram reschedule flows are untouched and
+// remain the normal way this happens; this is specifically for a manager
+// correcting a follow-up from the new Manager Attention list.
+app.patch("/api/followups/:id", requireManager, async (req, res) => {
+  try {
+    const rows = await db.getAllRows("FollowUps");
+    const existing = rows.find((f) => f.id === req.params.id);
+    if (!existing) return res.status(404).json({ error: "Follow-up not found." });
+    const patch = {};
+    if (req.body.dueDate !== undefined) patch.dueDate = req.body.dueDate;
+    if (req.body.status !== undefined) patch.status = req.body.status;
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
+    await db.updateRowById("FollowUps", req.params.id, patch);
+    for (const [field, newValue] of Object.entries(patch)) {
+      if (String(existing[field] || "") !== String(newValue)) {
+        await writeAuditLog({ entityType: "followup", entityId: req.params.id, field, oldValue: existing[field], newValue, changedBy: req.repName || "Manager" });
+      }
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Manager coaching notes (Manager Performance Management redesign) ----------
+// Always appended, never overwritten or edited — "Coaching Priority" is a
+// running history per rep, not a single mutable note.
+app.get("/api/manager-notes", requireManager, async (req, res) => {
+  try {
+    let rows = await db.getAllRows("ManagerNotes");
+    if (req.query.repName) rows = rows.filter((n) => n.repName === req.query.repName);
+    rows.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    res.json({ notes: rows });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/manager-notes", requireManager, async (req, res) => {
+  try {
+    const { repName, note, coachingAction, reviewDate } = req.body;
+    if (!repName || !note) return res.status(400).json({ error: "repName and note are required" });
+    const entry = {
+      id: `mn${crypto.randomUUID()}`,
+      repName, note: String(note).trim(),
+      coachingAction: coachingAction || "", reviewDate: reviewDate || "",
+      createdBy: req.repName || "Manager", createdAt: new Date().toISOString(),
+    };
+    await db.appendRow("ManagerNotes", entry);
+    await writeAuditLog({ entityType: "manager_note", entityId: entry.id, field: "note", oldValue: "", newValue: entry.note, changedBy: entry.createdBy });
+    res.json(entry);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/clients/import-bulk", requireManager, async (req, res) => {
   try {
     const { toAdd, type } = req.body;
@@ -2989,9 +3370,13 @@ app.post("/api/clients/visit-stats", async (req, res) => {
 
 app.post("/api/doctors", async (req, res) => {
   try {
-    const { name, hospital, area, phone, specialty, tier, registrationNumber, address, coordsLat, coordsLng } = req.body;
+    const { name, hospital, area, phone, specialty, tier, registrationNumber, address, coordsLat, coordsLng, assignedRep } = req.body;
     if (!name) return res.status(400).json({ error: "name is required" });
     const coords = coordsLat && coordsLng ? { lat: coordsLat, lng: coordsLng } : await geocodeAddress(address);
+    // Mirrors Clients' resolvedAssignedRep — a rep adding a doctor claims it
+    // for themselves by default; a manager can leave it unassigned or set it
+    // explicitly.
+    const resolvedAssignedRep = req.repName ? req.repName : (assignedRep || "");
     const doctor = {
       id: `doc${crypto.randomUUID()}`,
       name,
@@ -3004,6 +3389,7 @@ app.post("/api/doctors", async (req, res) => {
       address: address || "",
       coordsLat: coords ? coords.lat : "",
       coordsLng: coords ? coords.lng : "",
+      assignedRep: resolvedAssignedRep,
     };
     await db.appendRow("Doctors", doctor);
     res.json(doctor);
@@ -3171,9 +3557,42 @@ function buildDoctorMemory(visits, sightings, nextFollowUp) {
   };
 }
 
-// One combined read for the doctor Pre-Call brief + full Timeline — same
-// "one request, aggregate in memory" shape as /api/recall/categories and
+// One combined read for the Pre-Call brief + full Timeline — same "one
+// request, aggregate in memory" shape as /api/recall/categories and
 // /api/doctors/visit-stats above, rather than one Sheets call per section.
+// Shared by /api/doctors/:name/profile and /api/clients/:name/profile
+// (Manager Performance Management redesign, Section 17/18 — "every doctor/
+// pharmacy must have a permanent chronological history") so pharmacies get
+// the same structured Timeline/Legacy-note rendering doctors already have,
+// without a second parallel aggregation implementation. The doctor-only
+// structured fields simply stay blank on pharmacy visits, which the
+// existing client-side Legacy-note rule already renders correctly.
+async function buildEntityProfile(entityRow, entityType, name) {
+  const [visitRows, followUpRows, sightingRows] = await Promise.all([
+    db.getAllRows("Visits"), db.getAllRows("FollowUps"), db.getAllRows("CompetitorSightings"),
+  ]);
+  const visits = visitRows
+    .map(parseVisit)
+    .filter((v) => v.client.toLowerCase().trim() === name)
+    .sort((a, b) => new Date(b.time) - new Date(a.time))
+    .slice(0, 30);
+  const sightings = sightingRows
+    .filter((s) => String(s.client || "").toLowerCase().trim() === name)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+  const nextFollowUp = followUpRows
+    .filter((f) => String(f.entityName || "").toLowerCase().trim() === name && f.entityType === entityType
+      && (f.status === "pending" || f.status === "reminded"))
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0] || null;
+
+  return {
+    entity: { id: entityRow.id, name: entityRow.name, tier: entityRow.tier || "", entityType },
+    doctor: { id: entityRow.id, name: entityRow.name, tier: entityRow.tier || "" }, // kept for existing doctor-profile client callers
+    lastVisit: buildLastVisitCard(visits[0], nextFollowUp),
+    memory: buildDoctorMemory(visits, sightings, nextFollowUp),
+    timeline: visits,
+  };
+}
+
 app.get("/api/doctors/:name/profile", async (req, res) => {
   try {
     const name = String(req.params.name || "").toLowerCase().trim();
@@ -3181,29 +3600,24 @@ app.get("/api/doctors/:name/profile", async (req, res) => {
     const doctors = await db.getAllRows("Doctors");
     const doctor = doctors.find((d) => d.name.toLowerCase().trim() === name);
     if (!doctor) return res.status(404).json({ error: "Doctor not found." });
+    res.json(await buildEntityProfile(doctor, "doctor", name));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
 
-    const [visitRows, followUpRows, sightingRows] = await Promise.all([
-      db.getAllRows("Visits"), db.getAllRows("FollowUps"), db.getAllRows("CompetitorSightings"),
-    ]);
-    const visits = visitRows
-      .map(parseVisit)
-      .filter((v) => v.client.toLowerCase().trim() === name)
-      .sort((a, b) => new Date(b.time) - new Date(a.time))
-      .slice(0, 30);
-    const sightings = sightingRows
-      .filter((s) => String(s.client || "").toLowerCase().trim() === name)
-      .sort((a, b) => new Date(b.date) - new Date(a.date));
-    const nextFollowUp = followUpRows
-      .filter((f) => String(f.entityName || "").toLowerCase().trim() === name && f.entityType === "doctor"
-        && (f.status === "pending" || f.status === "reminded"))
-      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0] || null;
-
-    res.json({
-      doctor: { id: doctor.id, name: doctor.name, tier: doctor.tier || "" },
-      lastVisit: buildLastVisitCard(visits[0], nextFollowUp),
-      memory: buildDoctorMemory(visits, sightings, nextFollowUp),
-      timeline: visits,
-    });
+// Pharmacy/supplement-store equivalent — gives ClientsView's History toggle
+// the same rich Timeline that DoctorsView already has, instead of the older
+// raw 5-visit list.
+app.get("/api/clients/:name/profile", async (req, res) => {
+  try {
+    const name = String(req.params.name || "").toLowerCase().trim();
+    if (!name) return res.status(400).json({ error: "Client name is required." });
+    const clients = await db.getAllRows("Clients");
+    const client = clients.find((c) => c.name.toLowerCase().trim() === name);
+    if (!client) return res.status(404).json({ error: "Client not found." });
+    res.json(await buildEntityProfile(client, client.type === "supplement_store" ? "supplement_store" : "pharmacy", name));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

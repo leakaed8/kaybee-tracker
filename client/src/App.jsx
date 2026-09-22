@@ -513,7 +513,7 @@ export default function App() {
         {(role === "manager" || isSupervisor) && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<RadarIcon size={15} />} label="Locations" />}
         {role === "manager" && <TabBtn active={tab === "outreach"} onClick={() => setTab("outreach")} icon={<MessageCircle size={15} />} label="Outreach" />}
         {role === "manager" && <TabBtn active={tab === "broadcast"} onClick={() => setTab("broadcast")} icon={<Megaphone size={15} />} label="Broadcast" />}
-        {role === "rep" && <TabBtn active={tab === "checkin"} onClick={() => setTab("checkin")} icon={<MapPin size={15} />} label="Check-In" />}
+        {role === "rep" && <TabBtn active={tab === "checkin"} onClick={() => setTab("checkin")} icon={<MapPin size={15} />} label="Log Contact" />}
         {role === "rep" && !isSupervisor && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
         <TabBtn active={tab === "stock"} onClick={() => setTab("stock")} icon={<Boxes size={15} />} label="Stock" />
         <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />
@@ -892,6 +892,22 @@ const NEXT_ACTION_OPTIONS = [
   { key: "discuss_another_product", label: "Discuss another product" },
   { key: "no_followup_needed", label: "No follow-up needed" },
 ];
+
+// ---------- Manager Performance Management redesign: Visit ≠ Contact ----------
+// Mirrors the server's INTERACTION_TYPE_CODES allow-list key-for-key. Only
+// "in_person" counts toward the field-visit KPI everywhere in the app —
+// PerformanceView/RepDashboard/Territory Coverage all filter on this.
+const INTERACTION_TYPE_OPTIONS = [
+  { key: "in_person", label: "In-person visit" },
+  { key: "phone", label: "Phone call" },
+  { key: "whatsapp", label: "WhatsApp / Message" },
+  { key: "video", label: "Video call" },
+  { key: "other", label: "Other" },
+];
+const INTERACTION_TYPE_LABELS = {
+  in_person: "In-person visit", phone: "Phone call", whatsapp: "WhatsApp / Message",
+  video: "Video call", other: "Other", "": "Legacy / Not specified",
+};
 const optionLabel = (options, key) => options.find((o) => o.key === key)?.label || "";
 const REACTION_EMOJI = (key) => REACTION_OPTIONS.find((o) => o.key === key)?.emoji || "";
 
@@ -1529,7 +1545,8 @@ function buildKeyHistoryBullets(memory, lastVisit) {
 // Timeline. `profile` is the /api/doctors/:name/profile response (or null
 // while loading/on a fetch failure — both render as an empty-but-safe state
 // rather than crashing).
-function DoctorBrief({ profile, loading, objective, onObjectiveChange, onViewFullHistory, onStartVisit }) {
+function DoctorBrief({ profile, loading, objective, onObjectiveChange, onViewFullHistory, onStartVisit, planFields, onPlanFieldChange }) {
+  const [showPlan, setShowPlan] = useState(false);
   if (loading) {
     return <div style={{ fontSize: 12.5, color: "#8A8272", padding: "12px 0" }}>Loading doctor history…</div>;
   }
@@ -1588,9 +1605,35 @@ function DoctorBrief({ profile, loading, objective, onObjectiveChange, onViewFul
         </div>
       )}
 
-      <button type="button" onClick={onViewFullHistory} style={{ background: "none", border: "none", color: "#5B7A93", fontSize: 12.5, fontWeight: 500, padding: 0, marginBottom: 14, cursor: "pointer" }}>
+      <button type="button" onClick={onViewFullHistory} style={{ background: "none", border: "none", color: "#5B7A93", fontSize: 12.5, fontWeight: 500, padding: 0, marginBottom: 14, cursor: "pointer", display: "block" }}>
         View full history
       </button>
+
+      {/* Quality Call planning fields (Manager Performance Management
+          redesign) — optional pre-call planning, collapsed by default so it
+          never gets in the way of the fast, mostly-tap common path. */}
+      <button
+        type="button" onClick={() => setShowPlan((v) => !v)}
+        style={{ background: "none", border: "none", color: "#8A8272", fontSize: 11.5, fontWeight: 500, padding: 0, marginBottom: showPlan ? 10 : 14, cursor: "pointer", display: "block", textDecoration: "underline" }}
+      >
+        {showPlan ? "Hide call plan" : "Plan this call (optional)"}
+      </button>
+      {showPlan && (
+        <div style={{ marginBottom: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+          <Field label="Treatment goal">
+            <input value={planFields.treatmentGoal} onChange={(e) => onPlanFieldChange("treatmentGoal", e.target.value)} placeholder="e.g. Get A1C under 7% for uncontrolled T2DM patients" style={inputStyle} />
+          </Field>
+          <Field label="Key message">
+            <input value={planFields.keyMessage} onChange={(e) => onPlanFieldChange("keyMessage", e.target.value)} placeholder="e.g. EU-GMP quality at 75% of competitor price" style={inputStyle} />
+          </Field>
+          <Field label="Planned objection handling">
+            <input value={planFields.plannedObjectionHandling} onChange={(e) => onPlanFieldChange("plannedObjectionHandling", e.target.value)} placeholder="e.g. Price -> show cost-per-day sheet" style={inputStyle} />
+          </Field>
+          <Field label="Planned close">
+            <input value={planFields.plannedClose} onChange={(e) => onPlanFieldChange("plannedClose", e.target.value)} placeholder="e.g. 3-patient trial" style={inputStyle} />
+          </Field>
+        </div>
+      )}
 
       <button
         type="button" onClick={onStartVisit}
@@ -1611,16 +1654,48 @@ function isLegacyVisit(v) {
   return !v.reaction && !v.commitment && !v.doctorInsight && Boolean(v.notes && v.notes.trim());
 }
 
+// A doctor visit counts as a "Quality Call" once every field named in the
+// manager-configurable Settings.qualityCallRequiredFields is non-empty on it
+// — the definition is never hard-coded (Manager Performance Management
+// redesign, Section 12: "make required fields configurable"). Falls back to
+// a sensible default set if the manager hasn't configured one yet. Only
+// meaningful for in-person doctor visits — pharmacy/remote-contact rows
+// never populate these fields at all, so they're excluded by callers before
+// this ever runs.
+function isQualityCall(v, requiredFields) {
+  const fields = requiredFields && requiredFields.length ? requiredFields : ["reaction", "commitment", "callOutcome"];
+  return fields.every((f) => {
+    const val = v[f];
+    if (Array.isArray(val)) return val.length > 0;
+    return val !== undefined && val !== null && val !== "";
+  });
+}
+
 function StructuredVisitCard({ visit: v }) {
-  const hasAnything = (v.mentionedItems || []).length || v.reaction || v.commitment || v.doctorInsight || v.keyLearning || v.nextAction || v.objectionTag || v.concern;
+  const hasAnything = (v.mentionedItems || []).length || v.reaction || v.commitment || v.doctorInsight || v.keyLearning || v.nextAction || v.objectionTag || v.concern
+    || v.treatmentGoal || v.keyMessage || v.plannedObjectionHandling || v.plannedClose || v.buyingMotive || v.customerComments;
   if (!hasAnything) return <div style={{ fontSize: 12.5, color: "#8A8272" }}>No additional details recorded.</div>;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13 }}>
+      {v.interactionType && v.interactionType !== "in_person" && (
+        <div><strong>Interaction type:</strong> {INTERACTION_TYPE_LABELS[v.interactionType] || v.interactionType}</div>
+      )}
+      {(v.treatmentGoal || v.keyMessage || v.plannedObjectionHandling || v.plannedClose) && (
+        <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 6, padding: 8, marginBottom: 2 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 600, color: "#8A8272", textTransform: "uppercase", marginBottom: 4 }}>Call plan</div>
+          {v.treatmentGoal && <div><strong>Goal:</strong> {v.treatmentGoal}</div>}
+          {v.keyMessage && <div><strong>Key message:</strong> {v.keyMessage}</div>}
+          {v.plannedObjectionHandling && <div><strong>Planned objection handling:</strong> {v.plannedObjectionHandling}</div>}
+          {v.plannedClose && <div><strong>Planned close:</strong> {v.plannedClose}</div>}
+        </div>
+      )}
       {v.mentionedItems?.length > 0 && <div><strong>Discussed:</strong> {v.mentionedItems.map((it) => it.name).join(", ")}</div>}
       {v.doctorNeeds?.length > 0 && <div><strong>Need:</strong> {v.doctorNeeds.map((n) => optionLabel(DOCTOR_NEED_OPTIONS, n)).join(", ")}</div>}
       {v.reaction && <div><strong>Reaction:</strong> {REACTION_EMOJI(v.reaction)} {optionLabel(REACTION_OPTIONS, v.reaction)}</div>}
       {v.concern && <div><strong>Concern:</strong> {optionLabel(CONCERN_OPTIONS, v.concern)}</div>}
       {!v.concern && v.objectionTag && <div><strong>Objection:</strong> {v.objectionTag}</div>}
+      {v.buyingMotive && <div><strong>Buying motive:</strong> {v.buyingMotive}</div>}
+      {v.customerComments && <div><strong>Customer comments:</strong> {v.customerComments}</div>}
       {v.doctorInsight && <div style={{ fontStyle: "italic" }}>"{v.doctorInsight}"</div>}
       {v.commitment && <div><strong>Commitment:</strong> {optionLabel(COMMITMENT_OPTIONS, v.commitment)}{v.patientsToTry ? ` (${v.patientsToTry} patients)` : ""}</div>}
       {v.callOutcome && <div><strong>Call outcome:</strong> {optionLabel(CALL_OUTCOME_OPTIONS, v.callOutcome)}</div>}
@@ -1707,6 +1782,12 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   // doctors only) never sees the other options at all, so they land
   // directly on the one type they can use.
   const [entityType, setEntityType] = useState(supplementStoresOnly ? "supplement_store" : medRepOnly ? "doctor" : "pharmacy"); // pharmacy | doctor | supplement_store
+  // Manager Performance Management redesign — Visit ≠ Contact. Required on
+  // every new visit; only "in_person" counts toward the field-visit KPI.
+  // Defaults to "in_person" so a rep restarting a visit (startNewVisit)
+  // isn't forced to re-pick the common case every time.
+  const [interactionType, setInteractionType] = useState("in_person");
+  const isRemoteContact = interactionType !== "in_person";
   // Supplement stores work exactly like pharmacies throughout this wizard
   // (GPS check-in, orders, offers, discount) — only the doctor path is
   // actually different (no orders, per-item sample tagging instead). So
@@ -1789,6 +1870,17 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   const [callOutcome, setCallOutcome] = useState("");
   const [keyLearning, setKeyLearning] = useState("");
   const [nextAction, setNextAction] = useState("");
+  // Quality-call planning fields (Manager Performance Management redesign) —
+  // treatmentGoal/keyMessage/plannedObjectionHandling/plannedClose are
+  // filled in DoctorBrief's collapsible "Plan this call" section before
+  // Start Visit; buyingMotive/customerComments are filled during the call.
+  // All optional, doctor-only.
+  const [treatmentGoal, setTreatmentGoal] = useState("");
+  const [keyMessage, setKeyMessage] = useState("");
+  const [plannedObjectionHandling, setPlannedObjectionHandling] = useState("");
+  const [plannedClose, setPlannedClose] = useState("");
+  const [buyingMotive, setBuyingMotive] = useState("");
+  const [customerComments, setCustomerComments] = useState("");
   const [doctorProfile, setDoctorProfile] = useState(null);
   const [doctorProfileLoading, setDoctorProfileLoading] = useState(false);
   const [showFullHistory, setShowFullHistory] = useState(false);
@@ -1988,7 +2080,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
     try {
       const visitClient = client;
       const created = await onAddVisit({
-        client, notes, coords, mentionedItems,
+        client, notes, coords, mentionedItems, interactionType,
         competitorName: sawCompetitor ? competitorName : "",
         competitorNotes: sawCompetitor ? competitorNotes : "",
       });
@@ -2069,13 +2161,14 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   const queueOfflineAndFinish = (extra = {}) => {
     const localKey = `local_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     onQueueOffline({
-      client, notes, mentionedItems,
+      client, notes, mentionedItems, interactionType,
       competitorName: sawCompetitor ? competitorName : "",
       competitorNotes: sawCompetitor ? competitorNotes : "",
       // Doctor-visit redesign fields — always their default (""/[]/null) for
       // a pharmacy visit, since only the doctor branch's UI ever sets them.
       objective: todaysObjective, doctorNeeds, reaction, concern, doctorInsight, commitment, patientsToTry,
       callOutcome, keyLearning, nextAction,
+      treatmentGoal, keyMessage, plannedObjectionHandling, plannedClose, buyingMotive, customerComments,
       queuedAt: new Date().toISOString(),
       localKey,
       ...extra,
@@ -2187,11 +2280,12 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
     setSaving(true);
     try {
       const created = await onAddVisit({
-        client, notes, coords, mentionedItems,
+        client, notes, coords, mentionedItems, interactionType,
         competitorName: sawCompetitor ? competitorName : "",
         competitorNotes: sawCompetitor ? competitorNotes : "",
         objective: todaysObjective, doctorNeeds, reaction, concern, doctorInsight, commitment, patientsToTry,
         callOutcome, keyLearning, nextAction,
+        treatmentGoal, keyMessage, plannedObjectionHandling, plannedClose, buyingMotive, customerComments,
       });
       setLastVisit(created);
       loadTodayVisits();
@@ -2216,6 +2310,39 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
     }
   };
 
+  // Remote-contact branch (Manager Performance Management redesign) — a
+  // phone/WhatsApp/video/other contact never enters the full in-person
+  // checkin/postcall flow: no GPS, no products-discussed section, no
+  // quality-call planning fields. Just notes, an optional outcome/commitment
+  // for doctors, and an optional follow-up — one Save, straight to "done".
+  // Reuses the same scheduleFollowUp/scheduleCustomFollowUp/stopFollowUp
+  // functions (with visitOverride) the doctor postcall step already uses.
+  const submitRemoteContact = async () => {
+    setVisitError("");
+    setSaving(true);
+    try {
+      const created = await onAddVisit({
+        client, notes, coords: null, mentionedItems: [], interactionType,
+        callOutcome: isDoctorEntity ? callOutcome : "",
+        commitment: isDoctorEntity ? commitment : "",
+      });
+      setLastVisit(created);
+      loadTodayVisits();
+      if (followUpChoice === "custom") {
+        await scheduleCustomFollowUp(created);
+      } else if (followUpChoice) {
+        await scheduleFollowUp(followUpChoice, created);
+      } else {
+        setFollowUpStatus(null);
+        setStep("done");
+      }
+    } catch (e) {
+      setVisitError(e?.message || "Couldn't save this contact.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const startNewVisit = () => {
     setLastVisit(null);
     setEditingSavedVisit(false);
@@ -2224,6 +2351,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
     // them for edits) — clear them now that a genuinely new visit begins.
     setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
     setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
+    setInteractionType("in_person");
     setFollowUpStatus(null);
     setFollowUpError("");
     setVisitError("");
@@ -2234,6 +2362,8 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
     // Doctor-visit redesign fields.
     setVisitStarted(false); setTodaysObjective(""); setDoctorNeeds([]); setReaction(""); setConcern("");
     setDoctorInsight(""); setCommitment(""); setPatientsToTry(""); setCallOutcome(""); setKeyLearning(""); setNextAction("");
+    setTreatmentGoal(""); setKeyMessage(""); setPlannedObjectionHandling(""); setPlannedClose("");
+    setBuyingMotive(""); setCustomerComments("");
     setFollowUpChoice("");
     stepHistoryRef.current = [];
     setStep("checkin");
@@ -2399,7 +2529,37 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                 ⚠ "{client}" isn't in the system yet. Go to the {entityTabLabel} tab and add it there first (with full details{!isDoctorEntity ? ", including registration number" : ""}), then come back to check in.
               </div>
             )}
-            {!isDoctorEntity && recentVisitsForEntity.length > 0 && (
+
+            {/* Manager Performance Management redesign — Interaction Type is
+                required and shown as soon as a real entity is matched, before
+                anything else. Only "in_person" ever enters the full GPS/
+                products-discussed/quality-call flow below; every other
+                choice drops into the short remote-contact form further down. */}
+            {matchedEntity && !editingSavedVisit && (
+              <Field label="Interaction type">
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
+                  {INTERACTION_TYPE_OPTIONS.map((o) => (
+                    <button
+                      key={o.key}
+                      type="button"
+                      onClick={() => setInteractionType(o.key)}
+                      style={{
+                        padding: "9px 14px", borderRadius: 999, fontSize: 12.5, fontWeight: 500,
+                        border: interactionType === o.key ? "1.5px solid #1F2A24" : "1px solid #E5DFD3",
+                        background: interactionType === o.key ? "#1F2A24" : "#fff", color: interactionType === o.key ? "#FAF7F2" : "#3A362C",
+                      }}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+                {isRemoteContact && (
+                  <div style={{ fontSize: 11.5, color: "#8A8272" }}>Remote contacts don't count toward your in-person visit target, but are still tracked.</div>
+                )}
+              </Field>
+            )}
+
+            {!isDoctorEntity && !isRemoteContact && recentVisitsForEntity.length > 0 && (
               <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, marginBottom: 10 }}>
                 <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", marginBottom: 6 }}>Last time — a quick refresher</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -2418,7 +2578,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               </div>
             )}
 
-            {isDoctorEntity && matchedEntity && !visitStarted && (
+            {!isRemoteContact && isDoctorEntity && matchedEntity && !visitStarted && (
               <DoctorBrief
                 profile={doctorProfile}
                 loading={doctorProfileLoading}
@@ -2426,10 +2586,17 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                 onObjectiveChange={setTodaysObjective}
                 onViewFullHistory={() => setShowFullHistory(true)}
                 onStartVisit={() => { setVisitStarted(true); getLocation(); }}
+                planFields={{ treatmentGoal, keyMessage, plannedObjectionHandling, plannedClose }}
+                onPlanFieldChange={(key, value) => {
+                  if (key === "treatmentGoal") setTreatmentGoal(value);
+                  else if (key === "keyMessage") setKeyMessage(value);
+                  else if (key === "plannedObjectionHandling") setPlannedObjectionHandling(value);
+                  else if (key === "plannedClose") setPlannedClose(value);
+                }}
               />
             )}
 
-            {(!isDoctorEntity || visitStarted) && (
+            {!isRemoteContact && (!isDoctorEntity || visitStarted) && (
               <Field label={isDoctorEntity ? "Additional notes (optional)" : "Visit notes"}>
                 <textarea
                   value={notes}
@@ -2455,7 +2622,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               </Field>
             )}
 
-            {(!isDoctorEntity || visitStarted) && (
+            {!isRemoteContact && (!isDoctorEntity || visitStarted) && (
               <Field label="Competitors">
                 <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#5B5445", marginBottom: sawCompetitor ? 8 : 0 }}>
                   <input type="checkbox" checked={sawCompetitor} onChange={(e) => setSawCompetitor(e.target.checked)} />
@@ -2484,7 +2651,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               </Field>
             )}
 
-            {entityType === "doctor" && visitStarted && (
+            {!isRemoteContact && entityType === "doctor" && visitStarted && (
               <Field label="Products discussed">
                 <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                   <input
@@ -2559,7 +2726,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               </Field>
             )}
 
-            {isDoctorEntity && visitStarted && (
+            {!isRemoteContact && isDoctorEntity && visitStarted && (
               <>
                 <Field label="What did the doctor need?">
                   <ChipPicker options={DOCTOR_NEED_OPTIONS} value={doctorNeeds} onChange={setDoctorNeeds} multi />
@@ -2587,6 +2754,14 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                   />
                 </Field>
                 <div style={{ height: 14 }} />
+                <Field label="Buying motive (optional)">
+                  <input value={buyingMotive} onChange={(e) => setBuyingMotive(e.target.value)} placeholder="e.g. Wants better compliance for elderly patients" style={inputStyle} />
+                </Field>
+                <div style={{ height: 14 }} />
+                <Field label="Customer comments (optional)">
+                  <input value={customerComments} onChange={(e) => setCustomerComments(e.target.value)} placeholder="e.g. Open but cautious" style={inputStyle} />
+                </Field>
+                <div style={{ height: 14 }} />
                 <Field label="Commitment">
                   <ChipPicker options={COMMITMENT_OPTIONS} value={commitment} onChange={(v) => { setCommitment(v); if (v !== "will_try") setPatientsToTry(""); }} />
                 </Field>
@@ -2607,7 +2782,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               </>
             )}
 
-            {(!isDoctorEntity || visitStarted) && (
+            {!isRemoteContact && (!isDoctorEntity || visitStarted) && (
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
                   <button onClick={getLocation} disabled={locating} style={{
@@ -2657,6 +2832,63 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                   }}
                 >
                   {isDoctorEntity ? "Continue to Close Visit" : (saving ? "Saving…" : editingSavedVisit ? "Save changes" : "Save visit & continue")}
+                </button>
+              </>
+            )}
+
+            {isRemoteContact && matchedEntity && !editingSavedVisit && (
+              <>
+                <Field label="Notes">
+                  <textarea
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    placeholder="What was discussed on the call/message…"
+                    rows={3}
+                    style={{ ...inputStyle, marginBottom: 14, resize: "vertical" }}
+                  />
+                </Field>
+                {isDoctorEntity && (
+                  <>
+                    <Field label="Call outcome (optional)">
+                      <ChipPicker options={CALL_OUTCOME_OPTIONS} value={callOutcome} onChange={setCallOutcome} />
+                    </Field>
+                    <div style={{ height: 14 }} />
+                    <Field label="Commitment (optional)">
+                      <ChipPicker options={COMMITMENT_OPTIONS} value={commitment} onChange={setCommitment} />
+                    </Field>
+                    <div style={{ height: 14 }} />
+                  </>
+                )}
+                <Field label="Follow up (optional)">
+                  <ChipPicker
+                    options={[...FOLLOWUP_PRESETS, { key: "custom", label: "Custom" }]}
+                    value={followUpChoice}
+                    onChange={setFollowUpChoice}
+                  />
+                </Field>
+                {followUpChoice === "custom" && (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 10 }}>
+                    <input
+                      type="number" min="1" max="365" value={customFollowUpDays}
+                      onChange={(e) => setCustomFollowUpDays(e.target.value)}
+                      placeholder="e.g. 10"
+                      style={{ ...inputStyle, width: 80, padding: "6px 8px", fontSize: 12.5 }}
+                    />
+                    <span style={{ fontSize: 12.5, color: "#5B5445" }}>days</span>
+                  </div>
+                )}
+                <div style={{ height: 14 }} />
+                {visitError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{visitError}</div>}
+                {followUpError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{followUpError}</div>}
+                <button
+                  disabled={!client || !matchedEntity || saving || followUpSaving}
+                  onClick={submitRemoteContact}
+                  style={{
+                    width: "100%", padding: "13px 16px", borderRadius: 10, border: "none",
+                    background: (client && matchedEntity) ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 14.5, fontWeight: 600,
+                  }}
+                >
+                  {saving || followUpSaving ? "Saving…" : `Save ${INTERACTION_TYPE_LABELS[interactionType].toLowerCase()}`}
                 </button>
               </>
             )}

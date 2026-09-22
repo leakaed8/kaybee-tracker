@@ -11,13 +11,31 @@ const SCHEMAS = {
   // rowToObject's positional fallback — pharmacy visits never populate them,
   // and any doctor visit that predates this change renders under "Legacy
   // note" client-side rather than inventing structured data for it.
+  //
+  // Manager Performance Management redesign appended 9 more optional columns:
+  // interactionType (in_person/phone/whatsapp/video/other, "" = legacy row —
+  // always treated as in_person for KPI math, since that's what every visit
+  // was before this field existed), locationVerified/distanceFromCustomerKm
+  // (computed and frozen once at save time for in-person visits only, never
+  // recomputed later against a customer's possibly-since-edited coordinates),
+  // and 6 optional doctor-only "quality call" planning fields (treatmentGoal/
+  // keyMessage/plannedObjectionHandling/plannedClose are pre-call planning;
+  // buyingMotive/customerComments are during-call) that close the gaps
+  // between the fields already shipped above and the spec's AOO framework.
   Visits: [
     "id", "client", "notes", "coordsLat", "coordsLng", "time", "repName", "itemsMentioned", "objectionTag",
     "objective", "doctorNeeds", "reaction", "concern", "doctorInsight", "commitment",
     "patientsToTry", "callOutcome", "keyLearning", "nextAction",
+    "interactionType", "locationVerified", "distanceFromCustomerKm",
+    "treatmentGoal", "keyMessage", "plannedObjectionHandling", "plannedClose",
+    "buyingMotive", "customerComments",
   ],
   Clients: ["id", "name", "phone", "tier", "area", "assignedRep", "registrationNumber", "address", "coordsLat", "coordsLng", "discountRate", "nameAr", "type"],
-  Doctors: ["id", "name", "hospital", "area", "phone", "specialty", "tier", "registrationNumber", "address", "coordsLat", "coordsLng"],
+  // assignedRep appended (Manager Performance Management redesign) — mirrors
+  // Clients.assignedRep exactly, including the same auto-claim-on-first-visit
+  // behavior, so per-rep doctor coverage/targets mean something. "" = doctor
+  // is unassigned, matching every pre-existing row.
+  Doctors: ["id", "name", "hospital", "area", "phone", "specialty", "tier", "registrationNumber", "address", "coordsLat", "coordsLng", "assignedRep"],
   OutreachLog: ["id", "name", "date", "templateIndex"],
   Orders: ["id", "clientName", "visitId", "repName", "date", "items", "total", "status", "discountRate", "netTotal", "posEntered", "posEnteredAt", "posEnteredBy"],
   Reps: ["id", "name", "passcode", "email", "exportSheetId", "telegramChatId", "telegramLinkCode", "isSupervisor", "supplementStoresOnly", "medRepOnly"],
@@ -156,6 +174,40 @@ const SCHEMAS = {
     "id", "entityType", "entityId", "fieldName", "sourceALabel", "sourceAValue",
     "sourceBLabel", "sourceBValue", "status", "notes", "createdAt",
     "resolution", "resolvedBy", "resolvedAt",
+  ],
+
+  // ---------- Manager Performance Management redesign ----------
+  // One row per rep (upserted by repName, never duplicated). Every numeric
+  // field is manager-set and independent per rep — there is no fallback to a
+  // single global number here (that's what the pre-existing global
+  // Settings.monthlyVisitTarget/monthlyRevenueTarget remain for, used only
+  // as a stopgap in the UI for a rep who has no RepTargets row yet).
+  RepTargets: [
+    "id", "repName", "territory",
+    "fieldDaysPerMonth", "fieldHoursPerDay",
+    "minVisitsPerDay", "targetVisitsPerDay", "stretchVisitsPerDay",
+    "monthlyVisitTargetOverride", // "" = auto-calc as targetVisitsPerDay * fieldDaysPerMonth
+    "doctorVisitTarget", "pharmacyVisitTarget", "followUpTarget",
+    "coverageTargetPct", "qualityCallTargetPct",
+    "revenueTarget", "conversionTargetPct", // both optional, "" = not set
+    "updatedBy", "updatedAt",
+  ],
+  // Generic, append-only audit trail reused across every "record the change"
+  // requirement in the redesign (rep target edits, interaction-type
+  // corrections, customer reassignment, follow-up edits, manager notes) —
+  // mirrors the "status flips, old value never overwritten, resolver/
+  // timestamp recorded" shape RecallFieldConflicts already established,
+  // simplified since there's no two-source conflict to resolve here, just a
+  // plain before/after change to log. Rows are never edited or deleted.
+  AuditLog: [
+    "id", "entityType", "entityId", "field", "oldValue", "newValue",
+    "changedBy", "changedAt", "reason",
+  ],
+  // Manager coaching notes per rep — always appended, never overwritten, so
+  // "Coaching Priority" has a real history rather than one mutable note.
+  ManagerNotes: [
+    "id", "repName", "note", "coachingAction", "reviewDate",
+    "createdBy", "createdAt",
   ],
 };
 

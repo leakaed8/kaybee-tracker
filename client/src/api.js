@@ -58,6 +58,10 @@ export const api = {
   // brief (lastVisit/memory) + full Timeline. Distinct from the batch
   // getDoctorVisitStats above, which is only for DoctorsView's list rows.
   getDoctorProfile: (name) => request(`/doctors/${encodeURIComponent(name)}/profile`),
+  // Pharmacy/supplement-store equivalent (Manager Performance Management
+  // redesign) — same shape as getDoctorProfile, used by ClientsView's
+  // History-toggle upgrade.
+  getClientProfile: (name) => request(`/clients/${encodeURIComponent(name)}/profile`),
   addProduct: (product) => request("/products", { method: "POST", body: JSON.stringify(product) }),
   removeProduct: (id) => request(`/products/${id}`, { method: "DELETE" }),
   addCatalogProduct: (product) => request("/product-catalog", { method: "POST", body: JSON.stringify(product) }),
@@ -149,4 +153,16 @@ export const api = {
   getRecallCompetitorRelationships: () => request("/recall/competitor-relationships"),
   addRecallCompetitorRelationship: (payload) => request("/recall/competitor-relationships", { method: "POST", body: JSON.stringify(payload) }),
   removeRecallCompetitorRelationship: (id) => request(`/recall/competitor-relationships/${id}`, { method: "DELETE" }),
+
+  // ---------- Manager Performance Management redesign ----------
+  correctInteractionType: (visitId, interactionType, reason) =>
+    request(`/visits/${visitId}/interaction-type`, { method: "PATCH", body: JSON.stringify({ interactionType, reason }) }),
+  getAuditLog: (params) => request(`/audit-log${qs(params)}`),
+  getRepTargets: () => request("/rep-targets"),
+  saveRepTarget: (repName, patch) => request(`/rep-targets/${encodeURIComponent(repName)}`, { method: "PUT", body: JSON.stringify(patch) }),
+  assignDoctorRep: (id, assignedRep) => request(`/doctors/${id}`, { method: "PATCH", body: JSON.stringify({ assignedRep }) }),
+  getFollowUps: (params) => request(`/followups${qs(params)}`),
+  updateFollowUp: (id, patch) => request(`/followups/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  getManagerNotes: (repName) => request(`/manager-notes${qs({ repName })}`),
+  addManagerNote: (note) => request("/manager-notes", { method: "POST", body: JSON.stringify(note) }),
 };
