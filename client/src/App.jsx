@@ -156,6 +156,8 @@ export default function App() {
   const [todayOutreachCount, setTodayOutreachCount] = useState(0);
   const [settings, setSettings] = useState({
     slowThreshold: 15, repPhone: "", dailyTarget: 3, monthlyVisitTarget: 60, monthlyRevenueTarget: 10000, templates: [],
+    qualityCallRequiredFields: ["reaction", "commitment", "callOutcome"],
+    tierVisitFrequency: { A: { perMonth: 2 }, B: { perMonth: 1 }, C: { perMonth: 0.4 } },
   });
   const [loaded, setLoaded] = useState(false);
   const [syncStatus, setSyncStatus] = useState("");
@@ -662,6 +664,10 @@ export default function App() {
                 monthlyRevenueTarget={settings.monthlyRevenueTarget}
                 setMonthlyRevenueTarget={(v) => updateSettingsField({ monthlyRevenueTarget: v })}
                 isSupervisor={isSupervisor}
+                role={role}
+                qualityCallRequiredFields={settings.qualityCallRequiredFields}
+                tierVisitFrequency={settings.tierVisitFrequency}
+                setTierVisitFrequency={(v) => updateSettingsField({ tierVisitFrequency: v })}
               />
             )}
             {tab === "outreach" && role === "manager" && (
@@ -5709,6 +5715,18 @@ function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemov
   const [viewMode, setViewMode] = useState("list"); // list | map
   const [routeDate, setRouteDate] = useState(() => new Date().toISOString().slice(0, 10));
   const canComment = role === "manager" || isSupervisor;
+  // Manager-only interaction-type correction (Manager Performance Management
+  // redesign) — the only sanctioned way to fix a submitted visit's type,
+  // always with a reason, always audited. correctingId/correctType/
+  // correctReason drive the inline correction form; auditForId/auditEntries
+  // drive the "view history" popover.
+  const [correctingId, setCorrectingId] = useState(null);
+  const [correctType, setCorrectType] = useState("in_person");
+  const [correctReason, setCorrectReason] = useState("");
+  const [correctSaving, setCorrectSaving] = useState(false);
+  const [correctError, setCorrectError] = useState("");
+  const [auditForId, setAuditForId] = useState(null);
+  const [auditEntries, setAuditEntries] = useState([]);
 
   // Both self-fetched here, scoped to the selected rep, instead of riding
   // along in every 30s bootstrap poll for every open session — this view is
@@ -5754,8 +5772,38 @@ function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemov
       kind: "visit", id: v.id, repName: v.repName, time: v.time, coords: v.coords || null, label: v.client,
       mismatchKm: mismatchKm !== null && mismatchKm > LOCATION_MISMATCH_KM ? mismatchKm : null,
       comments: v.comments || [],
+      interactionType: v.interactionType || "",
+      locationVerified: v.locationVerified,
     };
   });
+
+  const startCorrecting = (e) => {
+    setCorrectingId(e.id);
+    setCorrectType(e.interactionType || "in_person");
+    setCorrectReason("");
+    setCorrectError("");
+  };
+  const submitCorrection = async (visitId) => {
+    if (!correctReason.trim()) { setCorrectError("A reason is required."); return; }
+    setCorrectSaving(true);
+    setCorrectError("");
+    try {
+      await api.correctInteractionType(visitId, correctType, correctReason.trim());
+      setCorrectingId(null);
+      loadEvents();
+    } catch (e) {
+      setCorrectError(e?.message || "Couldn't save that correction.");
+    } finally {
+      setCorrectSaving(false);
+    }
+  };
+  const toggleAudit = (visitId) => {
+    if (auditForId === visitId) { setAuditForId(null); return; }
+    setAuditForId(visitId);
+    api.getAuditLog({ entityType: "visit_interaction_type", entityId: visitId })
+      .then((data) => setAuditEntries(data.entries || []))
+      .catch(() => setAuditEntries([]));
+  };
 
   const punchEvents = (punchLog || [])
     .filter((p) => p.coords)
@@ -5853,11 +5901,21 @@ function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemov
               <div>
                 <div style={{ fontWeight: 600, fontSize: 13.5 }}>
                   {e.label}{e.repName ? ` · ${e.repName}` : ""}
+                  {e.kind === "visit" && e.interactionType && e.interactionType !== "in_person" && (
+                    <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 600, color: "#7A5B2E", background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 10, padding: "2px 8px" }}>
+                      {INTERACTION_TYPE_LABELS[e.interactionType]}
+                    </span>
+                  )}
                 </div>
                 <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
                   {new Date(e.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
                   {e.coords ? ` · ${e.coords.lat}, ${e.coords.lng}` : " · no GPS captured"}
                 </div>
+                {e.kind === "visit" && (!e.interactionType || e.interactionType === "in_person") && (
+                  <div style={{ fontSize: 11, marginTop: 3, color: e.locationVerified ? "#4C7A5E" : "#8A8272" }}>
+                    {e.locationVerified === true ? "✓ Location verified" : e.locationVerified === false ? "⚠ Location not verified" : "Location verification not recorded for this visit"}
+                  </div>
+                )}
                 {e.mismatchKm != null && (
                   <div style={{ fontSize: 11, color: "#B33A3A", fontWeight: 600, marginTop: 3 }}>
                     ⚠ {e.mismatchKm.toFixed(1)}km from {e.label}'s known location
@@ -5874,6 +5932,16 @@ function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemov
                   <button onClick={() => setCommentingId(commentingId === e.id ? null : e.id)} title="Comment on this visit" style={{ background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "5px 9px", color: "#5B5445" }}>
                     <MessageCircle size={13} />
                   </button>
+                )}
+                {e.kind === "visit" && role === "manager" && (
+                  <>
+                    <button onClick={() => startCorrecting(e)} title="Correct interaction type" style={{ fontSize: 11, background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "5px 9px", color: "#5B5445" }}>
+                      Correct type…
+                    </button>
+                    <button onClick={() => toggleAudit(e.id)} title="View change history" style={{ fontSize: 11, background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "5px 9px", color: "#5B5445" }}>
+                      History
+                    </button>
+                  </>
                 )}
                 {e.kind === "visit" && role === "manager" && (
                   confirmId === e.id ? (
@@ -5911,6 +5979,53 @@ function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemov
                 <button disabled={commentSaving} onClick={() => submitComment(e.id)} style={{ fontSize: 12, padding: "8px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontWeight: 500 }}>
                   {commentSaving ? "Saving…" : "Send"}
                 </button>
+              </div>
+            )}
+
+            {e.kind === "visit" && correctingId === e.id && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3" }}>
+                <div style={{ fontSize: 12, color: "#5B5445", marginBottom: 8 }}>
+                  Correcting the interaction type is logged — who changed it, from what, to what, and why. A rep can never silently turn a phone call into an in-person visit; only a manager can do this, with a reason.
+                </div>
+                <select value={correctType} onChange={(ev) => setCorrectType(ev.target.value)} style={{ ...inputStyle, marginBottom: 8 }}>
+                  {INTERACTION_TYPE_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+                </select>
+                <input
+                  value={correctReason}
+                  onChange={(ev) => setCorrectReason(ev.target.value)}
+                  placeholder="Reason (required) — e.g. 'rep mis-tapped, this was actually a phone call'"
+                  style={{ ...inputStyle, marginBottom: 8 }}
+                />
+                {correctError && <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 8 }}>{correctError}</div>}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button disabled={correctSaving} onClick={() => submitCorrection(e.id)} style={{ fontSize: 12, padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontWeight: 500 }}>
+                    {correctSaving ? "Saving…" : "Save correction"}
+                  </button>
+                  <button onClick={() => setCorrectingId(null)} style={{ fontSize: 12, padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff" }}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {e.kind === "visit" && auditForId === e.id && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3" }}>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", marginBottom: 6, textTransform: "uppercase" }}>Interaction-type change history</div>
+                {auditEntries.length === 0 ? (
+                  <div style={{ fontSize: 12, color: "#8A8272" }}>No corrections recorded for this visit.</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {auditEntries.map((a) => (
+                      <div key={a.id} style={{ fontSize: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "6px 10px" }}>
+                        <strong>{INTERACTION_TYPE_LABELS[a.oldValue] || a.oldValue}</strong> → <strong>{INTERACTION_TYPE_LABELS[a.newValue] || a.newValue}</strong>
+                        <div style={{ color: "#8A8272", marginTop: 2 }}>
+                          by {a.changedBy} · {new Date(a.changedAt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                          {a.reason ? ` · "${a.reason}"` : ""}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -7794,6 +7909,180 @@ function StatCard({ label, value, color, icon }) {
 // ---------- Performance View (MedRep targets + manager charts) ----------
 const CHART_COLORS = ["#C17817", "#4C7A5E", "#B33A3A", "#6B7280", "#D9A441", "#8A8272"];
 
+// ---------- Manager Performance Management redesign: shared helpers ----------
+// Mirrors the server's effectiveInteractionType — a legacy visit (no
+// interactionType recorded) always counts as in_person, since that's the
+// only kind of visit the app could log before this field existed.
+function effectiveInteractionType(v) {
+  return v.interactionType || "in_person";
+}
+function isInPersonVisit(v) {
+  return effectiveInteractionType(v) === "in_person";
+}
+function repRoleLabel(rep) {
+  if (!rep) return "Doctors + Pharmacies";
+  if (rep.medRepOnly) return "Doctors";
+  if (rep.supplementStoresOnly) return "Supplement stores";
+  return "Doctors + Pharmacies";
+}
+// Monthly target = daily target × expected field days, UNLESS the manager
+// set an explicit override — never assumes every rep works the same number
+// of field days (Section 5). Falls back to the pre-existing global setting
+// only when this rep has no target profile configured yet at all, so the
+// dashboard is never blank before a manager visits the Targets page.
+function effectiveMonthlyVisitTarget(target, fallbackGlobal) {
+  if (!target) return fallbackGlobal;
+  if (target.monthlyVisitTargetOverride !== null && target.monthlyVisitTargetOverride !== undefined && target.monthlyVisitTargetOverride !== "") {
+    return target.monthlyVisitTargetOverride;
+  }
+  if (target.targetVisitsPerDay != null && target.targetVisitsPerDay !== "" && target.fieldDaysPerMonth != null && target.fieldDaysPerMonth !== "") {
+    return Math.round(target.targetVisitsPerDay * target.fieldDaysPerMonth);
+  }
+  return fallbackGlobal;
+}
+const REP_TARGET_FIELD_GROUPS = [
+  { heading: "Territory & schedule", fields: [
+    { key: "territory", label: "Territory", type: "text" },
+    { key: "fieldDaysPerMonth", label: "Field days / month", type: "number" },
+    { key: "fieldHoursPerDay", label: "Field hours / day", type: "number" },
+  ] },
+  { heading: "In-person visit targets", fields: [
+    { key: "minVisitsPerDay", label: "Minimum / day", type: "number" },
+    { key: "targetVisitsPerDay", label: "Target / day", type: "number" },
+    { key: "stretchVisitsPerDay", label: "Stretch / day", type: "number" },
+    { key: "monthlyVisitTargetOverride", label: "Monthly target (override)", type: "number" },
+  ] },
+  { heading: "Other targets", fields: [
+    { key: "doctorVisitTarget", label: "Doctor visits / month", type: "number" },
+    { key: "pharmacyVisitTarget", label: "Pharmacy visits / month", type: "number" },
+    { key: "followUpTarget", label: "Follow-ups / month", type: "number" },
+    { key: "coverageTargetPct", label: "Coverage target %", type: "number" },
+    { key: "qualityCallTargetPct", label: "Quality-call target %", type: "number" },
+    { key: "revenueTarget", label: "Revenue target $ (optional)", type: "number" },
+    { key: "conversionTargetPct", label: "Conversion target % (optional)", type: "number" },
+  ] },
+];
+
+// Manager-only per-rep target profiles (Sections 4-5). Each rep's numbers
+// are independent — nothing here is shared/derived from another rep, and
+// nothing is hard-coded; every field starts blank until a manager sets it.
+function TargetsView({ repNames, reps }) {
+  const [targets, setTargets] = useState({}); // repName -> target row
+  const [loading, setLoading] = useState(true);
+  const [drafts, setDrafts] = useState({}); // repName -> in-progress edits
+  const [savingRep, setSavingRep] = useState(null);
+  const [savedRep, setSavedRep] = useState(null);
+  const [expandedRep, setExpandedRep] = useState(null);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    api.getRepTargets()
+      .then((data) => {
+        const byName = {};
+        (data.targets || []).forEach((t) => { byName[t.repName] = t; });
+        setTargets(byName);
+      })
+      .catch(() => setTargets({}))
+      .finally(() => setLoading(false));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const draftFor = (repName) => drafts[repName] || targets[repName] || {};
+  const setDraftField = (repName, key, value) => {
+    setDrafts((prev) => ({ ...prev, [repName]: { ...draftFor(repName), [key]: value === "" ? "" : value } }));
+  };
+  const save = async (repName) => {
+    setSavingRep(repName);
+    try {
+      const draft = draftFor(repName);
+      const patch = {};
+      REP_TARGET_FIELD_GROUPS.forEach((g) => g.fields.forEach((f) => {
+        if (draft[f.key] !== undefined) patch[f.key] = draft[f.key];
+      }));
+      await api.saveRepTarget(repName, patch);
+      setDrafts((prev) => { const next = { ...prev }; delete next[repName]; return next; });
+      setSavedRep(repName);
+      setTimeout(() => setSavedRep(null), 1500);
+      load();
+    } finally {
+      setSavingRep(null);
+    }
+  };
+
+  if (loading) return <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading targets…</div>;
+
+  return (
+    <div>
+      <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
+        Every rep gets their own target profile — nothing here defaults to the same number for everyone. Monthly in-person visit target auto-calculates as Target/day × Field days/month unless you set an override.
+      </p>
+      {repNames.length === 0 && <EmptyState text="Add sales reps in Settings first." />}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {repNames.map((name) => {
+          const rep = (reps || []).find((r) => r.name === name);
+          const draft = draftFor(name);
+          const isOpen = expandedRep === name;
+          const calcMonthly = draft.targetVisitsPerDay && draft.fieldDaysPerMonth
+            ? Math.round(Number(draft.targetVisitsPerDay) * Number(draft.fieldDaysPerMonth))
+            : null;
+          return (
+            <div key={name} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, overflow: "hidden" }}>
+              <button
+                onClick={() => setExpandedRep(isOpen ? null : name)}
+                style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: "none", border: "none", cursor: "pointer", textAlign: "left", font: "inherit" }}
+              >
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 600 }}>{isOpen ? "▾" : "▸"} {name}</div>
+                  <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 2 }}>
+                    {repRoleLabel(rep)}{targets[name]?.territory ? ` · ${targets[name].territory}` : ""}
+                    {" · "}
+                    {effectiveMonthlyVisitTarget(targets[name], null) != null
+                      ? `${effectiveMonthlyVisitTarget(targets[name], null)} in-person visits/month target`
+                      : "No target set yet"}
+                  </div>
+                </div>
+              </button>
+              {isOpen && (
+                <div style={{ padding: "0 16px 16px", borderTop: "1px solid #E5DFD3" }}>
+                  {REP_TARGET_FIELD_GROUPS.map((group) => (
+                    <div key={group.heading} style={{ marginTop: 14 }}>
+                      <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", textTransform: "uppercase", marginBottom: 8 }}>{group.heading}</div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 10 }}>
+                        {group.fields.map((f) => (
+                          <Field key={f.key} label={f.label}>
+                            <input
+                              type={f.type}
+                              value={draft[f.key] ?? ""}
+                              onChange={(e) => setDraftField(name, f.key, f.type === "number" ? (e.target.value === "" ? "" : Number(e.target.value)) : e.target.value)}
+                              style={inputStyle}
+                            />
+                          </Field>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  {calcMonthly != null && draft.monthlyVisitTargetOverride === "" && (
+                    <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 10 }}>Auto-calculated monthly target: {calcMonthly} (leave override blank to keep using this)</div>
+                  )}
+                  <div style={{ marginTop: 14 }}>
+                    <button
+                      disabled={savingRep === name}
+                      onClick={() => save(name)}
+                      style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+                    >
+                      {savingRep === name ? "Saving…" : savedRep === name ? "Saved ✓" : "Save targets"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function accountStatusList(clients, doctors, visits) {
   const lastVisitFor = (name) => {
     const matches = visits.filter((v) => v.client.toLowerCase().trim() === name.toLowerCase().trim());
@@ -7809,7 +8098,12 @@ function accountStatusList(clients, doctors, visits) {
   });
 }
 
-function RepPerformanceCard({ title, visits, monthlyVisitTarget, orders = [], monthlyRevenueTarget = 0, clients = [], repNameFilter = null, isSupervisor = false, onMarkPosEntered = null }) {
+function RepPerformanceCard({
+  title, visits, monthlyVisitTarget, orders = [], monthlyRevenueTarget = 0, clients = [], repNameFilter = null, isSupervisor = false, onMarkPosEntered = null,
+  // Manager Performance Management redesign — all optional/additive.
+  doctors = [], repTarget = null, repRole = null, tierVisitFrequency = null, qualityCallRequiredFields = null,
+  followUps = [], newAccountKeys = null, showManagerAttention = false,
+}) {
   const [expandedClient, setExpandedClient] = useState(null);
   const [markingId, setMarkingId] = useState(null);
   const now = new Date();
@@ -7817,14 +8111,42 @@ function RepPerformanceCard({ title, visits, monthlyVisitTarget, orders = [], mo
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const dayOfMonth = now.getDate();
   const monthVisits = visits.filter((v) => new Date(v.time) >= monthStart);
-  const visitsThisMonth = monthVisits.length;
-  const pctOfTarget = Math.min(100, Math.round((visitsThisMonth / Math.max(monthlyVisitTarget, 1)) * 100));
+  // Visit ≠ Contact (Section 2): only in-person interactions count toward
+  // the field-visit KPI/target/pace math. Legacy rows (no interactionType
+  // recorded) count as in_person — they always were.
+  const monthInPersonVisits = monthVisits.filter(isInPersonVisit);
+  const effectiveTarget = repTarget ? (effectiveMonthlyVisitTarget(repTarget, monthlyVisitTarget) || monthlyVisitTarget) : monthlyVisitTarget;
+  const visitsThisMonth = monthInPersonVisits.length;
+  const pctOfTarget = Math.min(100, Math.round((visitsThisMonth / Math.max(effectiveTarget, 1)) * 100));
   const pctOfMonth = Math.round((dayOfMonth / daysInMonth) * 100);
   const onPace = pctOfTarget >= pctOfMonth;
-  const uniqueClients = new Set(monthVisits.map((v) => v.client.toLowerCase().trim())).size;
+  const uniqueClients = new Set(monthInPersonVisits.map((v) => v.client.toLowerCase().trim())).size;
+
+  // ---- Visit Breakdown (Section 10) — the distinction must be visually obvious ----
+  const isDoctorName = (name) => doctors.some((d) => d.name.toLowerCase().trim() === name.toLowerCase().trim());
+  const inPersonDoctorVisits = monthInPersonVisits.filter((v) => isDoctorName(v.client)).length;
+  const inPersonPharmacyVisits = monthInPersonVisits.length - inPersonDoctorVisits;
+  const phoneCalls = monthVisits.filter((v) => effectiveInteractionType(v) === "phone").length;
+  const whatsappCount = monthVisits.filter((v) => effectiveInteractionType(v) === "whatsapp").length;
+  const videoCalls = monthVisits.filter((v) => effectiveInteractionType(v) === "video").length;
+  const otherContacts = monthVisits.filter((v) => effectiveInteractionType(v) === "other").length;
+  const totalInteractions = monthVisits.length;
+  const trueFieldVisits = monthInPersonVisits.length;
+  const remoteContacts = totalInteractions - trueFieldVisits;
+
+  // ---- Quality Call % (Section 8/12) — doctor in-person visits only ----
+  const doctorInPersonVisits = monthInPersonVisits.filter((v) => isDoctorName(v.client));
+  const qualityCallCount = doctorInPersonVisits.filter((v) => isQualityCall(v, qualityCallRequiredFields)).length;
+  const qualityPct = doctorInPersonVisits.length ? Math.round((qualityCallCount / doctorInPersonVisits.length) * 100) : null;
+
+  // ---- Follow-up compliance % (Section 4/7) — this rep's scheduled follow-ups that aren't overdue-pending ----
+  const relevantFollowUps = repNameFilter ? followUps.filter((f) => f.repName === repNameFilter) : followUps;
+  const followUpOnTrack = relevantFollowUps.filter((f) => f.status !== "pending" || new Date(f.dueDate) >= now).length;
+  const followUpPct = relevantFollowUps.length ? Math.round((followUpOnTrack / relevantFollowUps.length) * 100) : null;
+  const overdueFollowUpCount = relevantFollowUps.filter((f) => f.status === "pending" && new Date(f.dueDate) < now).length;
 
   const weeks = {};
-  monthVisits.forEach((v) => {
+  monthInPersonVisits.forEach((v) => {
     const wk = Math.ceil(new Date(v.time).getDate() / 7);
     weeks[wk] = (weeks[wk] || 0) + 1;
   });
@@ -7852,6 +8174,43 @@ function RepPerformanceCard({ title, visits, monthlyVisitTarget, orders = [], mo
     const cadence = TIER_CADENCE[c.tier] || 30;
     return days === null || days > cadence;
   }).length;
+
+  // ---- Territory Coverage (Section 11) — doctors AND pharmacies, plus
+  // customer-priority frequency compliance, all dynamic from real assigned
+  // customers and the manager-configurable tierVisitFrequency setting. ----
+  const relevantDoctors = repNameFilter ? doctors.filter((d) => d.assignedRep === repNameFilter) : doctors;
+  const visitedInPersonNames = new Set(monthInPersonVisits.map((v) => v.client.toLowerCase().trim()));
+  const doctorCoveragePct = relevantDoctors.length
+    ? Math.round((relevantDoctors.filter((d) => visitedInPersonNames.has(d.name.toLowerCase().trim())).length / relevantDoctors.length) * 100)
+    : null;
+  const pharmacyCoveragePct = relevantClients.length
+    ? Math.round((relevantClients.filter((c) => visitedInPersonNames.has(c.name.toLowerCase().trim())).length / relevantClients.length) * 100)
+    : null;
+  const visitCountThisMonthFor = (name) => monthInPersonVisits.filter((v) => v.client.toLowerCase().trim() === name.toLowerCase().trim()).length;
+  const priorityCoverage = ["A", "B", "C"].map((tier) => {
+    const accounts = [...relevantClients, ...relevantDoctors].filter((a) => (a.tier || "B") === tier);
+    const requiredPerMonth = Math.max(1, Math.ceil((tierVisitFrequency?.[tier]?.perMonth) || 1));
+    const compliant = accounts.filter((a) => visitCountThisMonthFor(a.name) >= requiredPerMonth).length;
+    return { tier, total: accounts.length, compliant, pct: accounts.length ? Math.round((compliant / accounts.length) * 100) : null };
+  });
+  const notVisited = [...relevantClients, ...relevantDoctors].filter((a) => !visitedInPersonNames.has(a.name.toLowerCase().trim()));
+
+  // ---- Business Results (Section 15) — derived from real Orders data ----
+  const newAccountsCount = newAccountKeys ? monthOrders.filter((o) => newAccountKeys.has(o.id)).length : null;
+  const reorderCount = newAccountKeys ? monthOrders.length - (newAccountsCount || 0) : null;
+  const lostOpportunityCount = doctorInPersonVisits.filter((v) => v.commitment === "no_commitment").length;
+
+  // ---- 5 separate performance dimensions (Section 8) — never one score
+  // unless the manager explicitly opts in. Thresholds come from this rep's
+  // own target profile where set, otherwise a sensible default so the
+  // dashboard means something before targets are configured. ----
+  const dims = repNameFilter ? {
+    activity: onPace,
+    coverage: (pharmacyCoveragePct ?? 100) >= (repTarget?.coverageTargetPct ?? 70) && (doctorCoveragePct ?? 100) >= (repTarget?.coverageTargetPct ?? 70),
+    quality: qualityPct === null ? null : qualityPct >= (repTarget?.qualityCallTargetPct ?? 70),
+    followup: followUpPct === null ? null : followUpPct >= 80,
+    results: repTarget?.revenueTarget ? revenuePct >= 70 : conversionRate >= 15,
+  } : null;
 
   // Pharmacies-visited drill-down — per-rep cards only ("All reps combined"
   // has no single rep's route to drill into). Built entirely from the
@@ -7889,10 +8248,11 @@ function RepPerformanceCard({ title, visits, monthlyVisitTarget, orders = [], mo
 
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
-      <h3 className="kb-font-display" style={{ fontSize: 16, fontWeight: 600, margin: "0 0 12px" }}>{title}</h3>
+      <h3 className="kb-font-display" style={{ fontSize: 16, fontWeight: 600, margin: "0 0 2px" }}>{title}</h3>
+      {repRole && <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 10 }}>{repRole}{repTarget?.territory ? ` · ${repTarget.territory}` : ""}</div>}
 
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-        <span style={{ fontSize: 13, fontWeight: 600 }}>{visitsThisMonth} / {monthlyVisitTarget} visits this month</span>
+        <span style={{ fontSize: 13, fontWeight: 600 }}>{visitsThisMonth} / {effectiveTarget} in-person visits this month</span>
         <span style={{ fontSize: 12, color: onPace ? "#4C7A5E" : "#B33A3A", fontWeight: 500 }}>{onPace ? "On pace" : "Behind pace"}</span>
       </div>
       <div style={{ height: 8, background: "#F0EBE0", borderRadius: 4, overflow: "hidden", marginBottom: 4 }}>
@@ -7901,21 +8261,96 @@ function RepPerformanceCard({ title, visits, monthlyVisitTarget, orders = [], mo
       <div className="kb-font-mono" style={{ fontSize: 10.5, color: "#8A8272", marginBottom: 14 }}>Day {dayOfMonth} of {daysInMonth} ({pctOfMonth}% of month elapsed)</div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 10, marginBottom: 14 }}>
-        <StatCard label="Visits this month" value={visitsThisMonth} color="#4C7A5E" icon={<MapPin size={16} />} />
+        <StatCard label="In-person visits" value={visitsThisMonth} color="#4C7A5E" icon={<MapPin size={16} />} />
         <StatCard label="Unique contacts seen" value={uniqueClients} color="#C17817" icon={<Users size={16} />} />
         <StatCard label="Avg / week" value={Math.round(visitsThisMonth / Math.max(Math.ceil(dayOfMonth / 7), 1))} color="#6B7280" icon={<Target size={16} />} />
         <StatCard label="Revenue this month" value={`$${revenueThisMonth.toLocaleString()}`} color="#4C7A5E" icon={<TrendingUp size={16} />} />
         <StatCard label="Conversion rate" value={`${conversionRate}%`} color="#C17817" icon={<Target size={16} />} />
-        {coveragePct !== null && <StatCard label="Territory coverage" value={`${coveragePct}%`} color="#D9A441" icon={<MapPin size={16} />} />}
-        <StatCard label="Overdue follow-ups" value={overdueCount} color={overdueCount > 3 ? "#B33A3A" : "#6B7280"} icon={<Clock size={16} />} />
+        {coveragePct !== null && <StatCard label="Pharmacy coverage" value={`${coveragePct}%`} color="#D9A441" icon={<MapPin size={16} />} />}
+        {qualityPct !== null && <StatCard label="Quality calls" value={`${qualityPct}%`} color="#5B7A93" icon={<Check size={16} />} />}
+        <StatCard label="Overdue follow-ups" value={overdueFollowUpCount || overdueCount} color={(overdueFollowUpCount || overdueCount) > 3 ? "#B33A3A" : "#6B7280"} icon={<Clock size={16} />} />
       </div>
       <div className="kb-font-mono" style={{ fontSize: 10.5, color: "#8A8272", marginBottom: 14 }}>
         {revenuePct}% of ${monthlyRevenueTarget.toLocaleString()} revenue target
       </div>
 
+      {/* 5 separate performance dimensions (Section 8) — never one blended
+          score. Only shown for a single rep, not the "All reps combined" card. */}
+      {dims && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+          {[["Activity", dims.activity], ["Coverage", dims.coverage], ["Quality", dims.quality], ["Follow-up", dims.followup], ["Results", dims.results]].map(([label, ok]) => (
+            <span key={label} style={{
+              fontSize: 11.5, fontWeight: 600, borderRadius: 999, padding: "5px 12px",
+              background: ok === null ? "#F0EBE0" : ok ? "#EAF3EC" : "#FBF0F0",
+              color: ok === null ? "#8A8272" : ok ? "#2E5C42" : "#8A3030",
+              border: `1px solid ${ok === null ? "#E5DFD3" : ok ? "#C7DFCE" : "#E5B8B0"}`,
+            }}>
+              {ok === null ? "○" : ok ? "✓" : "⚠"} {label}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Visit Breakdown (Section 10) — the Visit-vs-Contact distinction must
+          be visually obvious. */}
+      <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12, marginBottom: 16 }}>
+        <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", textTransform: "uppercase", marginBottom: 8 }}>Visit breakdown</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 6, fontSize: 12.5, marginBottom: 10 }}>
+          <div>In-person doctor visits: <strong>{inPersonDoctorVisits}</strong></div>
+          <div>In-person pharmacy visits: <strong>{inPersonPharmacyVisits}</strong></div>
+          <div>Phone calls: <strong>{phoneCalls}</strong></div>
+          <div>WhatsApp / messages: <strong>{whatsappCount}</strong></div>
+          <div>Video calls: <strong>{videoCalls}</strong></div>
+          {otherContacts > 0 && <div>Other: <strong>{otherContacts}</strong></div>}
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 16, paddingTop: 10, borderTop: "1px solid #E5DFD3" }}>
+          <div><span style={{ fontSize: 11, color: "#8A8272" }}>TOTAL INTERACTIONS</span><div style={{ fontSize: 18, fontWeight: 700 }}>{totalInteractions}</div></div>
+          <div><span style={{ fontSize: 11, color: "#4C7A5E", fontWeight: 600 }}>TRUE FIELD VISITS</span><div style={{ fontSize: 18, fontWeight: 700, color: "#4C7A5E" }}>{trueFieldVisits}</div></div>
+          <div><span style={{ fontSize: 11, color: "#C17817", fontWeight: 600 }}>REMOTE CONTACTS</span><div style={{ fontSize: 18, fontWeight: 700, color: "#C17817" }}>{remoteContacts}</div></div>
+        </div>
+      </div>
+
+      {/* Territory Coverage (Section 11) */}
+      <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12, marginBottom: 16 }}>
+        <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", textTransform: "uppercase", marginBottom: 8 }}>Territory coverage</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10, marginBottom: 10 }}>
+          {doctorCoveragePct !== null && (
+            <div style={{ fontSize: 12.5 }}>Doctors<br /><strong>{relevantDoctors.filter((d) => visitedInPersonNames.has(d.name.toLowerCase().trim())).length} / {relevantDoctors.length}</strong> ({doctorCoveragePct}%)</div>
+          )}
+          {pharmacyCoveragePct !== null && (
+            <div style={{ fontSize: 12.5 }}>Pharmacies<br /><strong>{relevantClients.filter((c) => visitedInPersonNames.has(c.name.toLowerCase().trim())).length} / {relevantClients.length}</strong> ({pharmacyCoveragePct}%)</div>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: notVisited.length ? 10 : 0 }}>
+          {priorityCoverage.filter((p) => p.total > 0).map((p) => (
+            <div key={p.tier} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "6px 10px" }}>
+              Priority {p.tier}: <strong>{p.compliant} / {p.total}</strong> ({p.pct}%)
+            </div>
+          ))}
+        </div>
+        {notVisited.length > 0 && (
+          <details>
+            <summary style={{ fontSize: 12, color: "#B33A3A", cursor: "pointer" }}>Customers not visited ({notVisited.length})</summary>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+              {notVisited.slice(0, 40).map((a) => (
+                <span key={a.id} style={{ fontSize: 11.5, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 12, padding: "3px 9px" }}>{a.name}</span>
+              ))}
+            </div>
+          </details>
+        )}
+      </div>
+
+      {/* Business Results (Section 15) */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 10, marginBottom: 16 }}>
+        <StatCard label="Orders generated" value={monthOrders.length} color="#4C7A5E" icon={<Target size={16} />} />
+        {newAccountsCount !== null && <StatCard label="New accounts" value={newAccountsCount} color="#D9A441" icon={<Users size={16} />} />}
+        {reorderCount !== null && <StatCard label="Reorders" value={reorderCount} color="#6B7280" icon={<TrendingUp size={16} />} />}
+        <StatCard label="Lost opportunities" value={lostOpportunityCount} color="#B33A3A" icon={<Clock size={16} />} title="Doctor calls that ended with 'no commitment'" />
+      </div>
+
       <div style={{ fontSize: 12, fontWeight: 600, margin: "0 0 8px", color: "#8A8272" }}>By week this month</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {Object.keys(weeks).length === 0 && <EmptyState text="No visits logged yet this month." />}
+        {Object.keys(weeks).length === 0 && <EmptyState text="No in-person visits logged yet this month." />}
         {Object.entries(weeks).sort(([a], [b]) => a - b).map(([wk, count]) => (
           <div key={wk} style={{ display: "flex", justifyContent: "space-between", background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "7px 12px", fontSize: 12.5 }}>
             <span>Week {wk}</span>
@@ -8099,18 +8534,34 @@ function RepActivityToday({ repNames }) {
   );
 }
 
-function PerformanceView({ clients, doctors, repNames, monthlyVisitTarget, setMonthlyVisitTarget, monthlyRevenueTarget, setMonthlyRevenueTarget, isSupervisor }) {
+function PerformanceView({
+  clients, doctors, repNames, monthlyVisitTarget, setMonthlyVisitTarget, monthlyRevenueTarget, setMonthlyRevenueTarget, isSupervisor,
+  role, qualityCallRequiredFields, tierVisitFrequency,
+}) {
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const [subView, setSubView] = useState("overview"); // overview | targets
 
   // Fetched once when this tab is opened (manager/supervisor-only, not
   // polled) instead of the whole visits/orders history riding along in
   // every 30s bootstrap poll for every rep in the field.
   const [visits, setVisits] = useState([]);
   const [orders, setOrders] = useState([]);
+  // Manager Performance Management redesign — additional fetches, same
+  // "load once when this tab opens" pattern as the two above.
+  const [reps, setReps] = useState([]);
+  const [repTargetsByName, setRepTargetsByName] = useState({});
+  const [followUps, setFollowUps] = useState([]);
   useEffect(() => {
     api.getVisits({ all: true }).then((data) => setVisits(data.visits || [])).catch(() => {});
     api.getOrders({ all: true }).then((data) => setOrders(data.orders || [])).catch(() => {});
+    api.getReps().then(setReps).catch(() => setReps([]));
+    api.getRepTargets().then((data) => {
+      const byName = {};
+      (data.targets || []).forEach((t) => { byName[t.repName] = t; });
+      setRepTargetsByName(byName);
+    }).catch(() => setRepTargetsByName({}));
+    api.getFollowUps({}).then((data) => setFollowUps(data.followups || [])).catch(() => setFollowUps([]));
   }, []);
 
   // Orders are already fully loaded above (all:true, for the existing
@@ -8121,6 +8572,19 @@ function PerformanceView({ clients, doctors, repNames, monthlyVisitTarget, setMo
     const patch = await api.markOrderPosEntered(orderId);
     setOrders((prev) => prev.map((o) => (o.id === orderId ? { ...o, ...patch } : o)));
   };
+
+  // "New account" = a client's very first-ever order in the whole system;
+  // every later order from that same client is a "reorder" (Section 15,
+  // assumption 5 — no dedicated tracking exists for this today, so it's
+  // derived honestly from real Orders data rather than a fabricated field).
+  const newAccountKeys = useMemo(() => {
+    const firstOrderIdByClient = new Map();
+    [...orders].sort((a, b) => new Date(a.date) - new Date(b.date)).forEach((o) => {
+      const key = o.clientName.toLowerCase().trim();
+      if (!firstOrderIdByClient.has(key)) firstOrderIdByClient.set(key, o.id);
+    });
+    return new Set(firstOrderIdByClient.values());
+  }, [orders]);
 
   const accountsWithStatus = accountStatusList(clients, doctors, visits);
   const totalOverdue = accountsWithStatus.filter((a) => a.overdue).length;
@@ -8189,11 +8653,57 @@ function PerformanceView({ clients, doctors, repNames, monthlyVisitTarget, setMo
     return row;
   });
 
+  // ---- Team Performance (Section 7) — bucketed against each rep's OWN
+  // target profile, falling back to the global setting only when a rep has
+  // no target profile configured yet. ----
+  const repBuckets = repNames.map((name) => {
+    const repMonthInPerson = visits.filter((v) => v.repName === name && new Date(v.time) >= monthStart && isInPersonVisit(v));
+    const target = effectiveMonthlyVisitTarget(repTargetsByName[name], monthlyVisitTarget) || monthlyVisitTarget;
+    const pct = target ? repMonthInPerson.length / target : 0;
+    return { name, pct };
+  });
+  const repsOnTarget = repBuckets.filter((r) => r.pct >= 0.9).length;
+  const repsNeedAttention = repBuckets.filter((r) => r.pct >= 0.6 && r.pct < 0.9).length;
+  const repsBehind = repBuckets.filter((r) => r.pct < 0.6).length;
+
+  // ---- Manager Attention (Section 13) — real, rule-based alerts only,
+  // never fabricated coaching text. ----
+  const teamOverdueFollowUps = followUps.filter((f) => f.status === "pending" && new Date(f.dueDate) < now).length;
+  const priorityADoctorsNotVisited = doctors.filter((d) => (d.tier || "B") === "A"
+    && !visits.some((v) => new Date(v.time) >= monthStart && isInPersonVisit(v) && v.client.toLowerCase().trim() === d.name.toLowerCase().trim())).length;
+  const teamDoctorInPersonVisits = visits.filter((v) => new Date(v.time) >= monthStart && isInPersonVisit(v) && doctors.some((d) => d.name.toLowerCase().trim() === v.client.toLowerCase().trim()));
+  const teamQualityCallCount = teamDoctorInPersonVisits.filter((v) => isQualityCall(v, qualityCallRequiredFields)).length;
+  const teamQualityPct = teamDoctorInPersonVisits.length ? Math.round((teamQualityCallCount / teamDoctorInPersonVisits.length) * 100) : null;
+  const managerAlerts = [
+    avgCoverage < 70 ? { ok: false, text: `⚠ Team follow-up compliance is ${avgCoverage}% (below 70%)` } : { ok: true, text: `✓ Team follow-up compliance is ${avgCoverage}%` },
+    teamOverdueFollowUps > 0 ? { ok: false, text: `⚠ ${teamOverdueFollowUps} overdue follow-up${teamOverdueFollowUps === 1 ? "" : "s"}` } : { ok: true, text: "✓ No overdue follow-ups" },
+    priorityADoctorsNotVisited > 0 ? { ok: false, text: `⚠ ${priorityADoctorsNotVisited} Priority A doctor${priorityADoctorsNotVisited === 1 ? "" : "s"} not visited this month` } : { ok: true, text: "✓ All Priority A doctors visited this month" },
+    teamQualityPct !== null ? (teamQualityPct >= 70 ? { ok: true, text: `✓ Quality-call completion ${teamQualityPct}%` } : { ok: false, text: `⚠ Quality-call completion is ${teamQualityPct}% (below 70%)` }) : null,
+    repsBehind > 0 ? { ok: false, text: `⚠ ${repsBehind} rep${repsBehind === 1 ? "" : "s"} behind target this month` } : null,
+  ].filter(Boolean);
+
   return (
     <div>
-      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>MedRep performance</h2>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 4px" }}>Performance</h2>
+      <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>Manager view — Activity → Coverage → Quality → Results</p>
 
+      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+        <button onClick={() => setSubView("overview")} style={{ padding: "7px 16px", borderRadius: 16, fontSize: 12.5, fontWeight: 500, border: subView === "overview" ? "1px solid #1F2A24" : "1px solid #E5DFD3", background: subView === "overview" ? "#1F2A24" : "#fff", color: subView === "overview" ? "#FAF7F2" : "#5B5445" }}>
+          Overview
+        </button>
+        {role === "manager" && (
+          <button onClick={() => setSubView("targets")} style={{ padding: "7px 16px", borderRadius: 16, fontSize: 12.5, fontWeight: 500, border: subView === "targets" ? "1px solid #1F2A24" : "1px solid #E5DFD3", background: subView === "targets" ? "#1F2A24" : "#fff", color: subView === "targets" ? "#FAF7F2" : "#5B5445" }}>
+            Targets
+          </button>
+        )}
+      </div>
+
+      {subView === "targets" ? (
+        <TargetsView repNames={repNames} reps={reps} />
+      ) : (
+      <>
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
+        <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", marginBottom: 8 }}>Fallback targets (used only for reps without an individual target profile — set those under the Targets tab)</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
           <Field label="Monthly visit target (per rep)">
             <input type="number" min="1" value={monthlyVisitTarget} onChange={(e) => setMonthlyVisitTarget(Number(e.target.value) || 1)} style={inputStyle} />
@@ -8215,10 +8725,27 @@ function PerformanceView({ clients, doctors, repNames, monthlyVisitTarget, setMo
         </div>
       )}
 
+      {repNames.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>TEAM PERFORMANCE</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+            <StatCard label="Reps on target" value={repsOnTarget} color="#4C7A5E" icon={<Check size={16} />} />
+            <StatCard label="Needs attention" value={repsNeedAttention} color="#D9A441" icon={<Clock size={16} />} />
+            <StatCard label="Behind target" value={repsBehind} color="#B33A3A" icon={<X size={16} />} />
+          </div>
+        </div>
+      )}
+
+      {repNames.length > 0 && (
+        <ManagerAttentionPanel alerts={managerAlerts} repNames={repNames} />
+      )}
+
       <RepActivityToday repNames={repNames} />
 
       <RepPerformanceCard title="All reps combined" visits={visits} monthlyVisitTarget={monthlyVisitTarget}
-        orders={orders} monthlyRevenueTarget={revenueTargetTotal} clients={clients} />
+        orders={orders} monthlyRevenueTarget={revenueTargetTotal} clients={clients} doctors={doctors}
+        tierVisitFrequency={tierVisitFrequency} qualityCallRequiredFields={qualityCallRequiredFields}
+        followUps={followUps} newAccountKeys={newAccountKeys} />
 
       {repNames.map((name) => (
         <RepPerformanceCard
@@ -8229,9 +8756,16 @@ function PerformanceView({ clients, doctors, repNames, monthlyVisitTarget, setMo
           orders={orders.filter((o) => o.repName === name)}
           monthlyRevenueTarget={monthlyRevenueTarget}
           clients={clients}
+          doctors={doctors}
           repNameFilter={name}
           isSupervisor={isSupervisor}
           onMarkPosEntered={markPosEntered}
+          repTarget={repTargetsByName[name] || null}
+          repRole={repRoleLabel(reps.find((r) => r.name === name))}
+          tierVisitFrequency={tierVisitFrequency}
+          qualityCallRequiredFields={qualityCallRequiredFields}
+          followUps={followUps}
+          newAccountKeys={newAccountKeys}
         />
       ))}
 
@@ -8240,7 +8774,8 @@ function PerformanceView({ clients, doctors, repNames, monthlyVisitTarget, setMo
       {repNames.length > 0 && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))", gap: 16, marginTop: 8 }}>
           <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16 }}>
-            <h4 className="kb-font-display" style={{ fontSize: 14, fontWeight: 600, margin: "0 0 12px" }}>Revenue trend (6 months)</h4>
+            <h4 className="kb-font-display" style={{ fontSize: 14, fontWeight: 600, margin: "0 0 4px" }}>PERFORMANCE TREND</h4>
+            <div style={{ fontSize: 11, color: "#8A8272", marginBottom: 8 }}>Revenue, 6 months — never deletes historical months when targets change</div>
             <ResponsiveContainer width="100%" height={220}>
               <LineChart data={revenueTrend}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#E5DFD3" />
@@ -8300,6 +8835,91 @@ function PerformanceView({ clients, doctors, repNames, monthlyVisitTarget, setMo
               </ResponsiveContainer>
             )}
           </div>
+        </div>
+      )}
+      </>
+      )}
+    </div>
+  );
+}
+
+// One rep at a time, always requiring a picked rep before showing anything —
+// a coaching note is tied to a specific rep (matches the ManagerNotes
+// schema), so the form asks for one rather than trying to be team-wide.
+// Alerts above it stay genuinely team-wide since they're read-only.
+function ManagerAttentionPanel({ alerts, repNames }) {
+  const [noteRep, setNoteRep] = useState(repNames[0] || "");
+  const [note, setNote] = useState("");
+  const [coachingAction, setCoachingAction] = useState("");
+  const [reviewDate, setReviewDate] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [priorNotes, setPriorNotes] = useState([]);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!noteRep) { setPriorNotes([]); return; }
+    api.getManagerNotes(noteRep).then((data) => setPriorNotes(data.notes || [])).catch(() => setPriorNotes([]));
+  }, [noteRep]);
+
+  const submit = async () => {
+    if (!note.trim()) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api.addManagerNote({ repName: noteRep, note: note.trim(), coachingAction: coachingAction.trim(), reviewDate });
+      setNote(""); setCoachingAction(""); setReviewDate("");
+      api.getManagerNotes(noteRep).then((data) => setPriorNotes(data.notes || [])).catch(() => {});
+    } catch (e) {
+      setError(e?.message || "Couldn't save that note.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>MANAGER ATTENTION</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
+        {alerts.map((a, i) => (
+          <div key={i} style={{ fontSize: 12.5, color: a.ok ? "#2E5C42" : "#8A3030" }}>{a.text}</div>
+        ))}
+      </div>
+
+      <div style={{ fontSize: 12.5, fontWeight: 600, color: "#8A8272", marginBottom: 8 }}>COACHING PRIORITY</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 10, marginBottom: 8 }}>
+        <Field label="Rep">
+          <select value={noteRep} onChange={(e) => setNoteRep(e.target.value)} style={inputStyle}>
+            {repNames.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </Field>
+        <Field label="Review date">
+          <input type="date" value={reviewDate} onChange={(e) => setReviewDate(e.target.value)} style={inputStyle} />
+        </Field>
+      </div>
+      <Field label="Manager note">
+        <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} placeholder="e.g. Improve pharmacy coverage and follow-up discipline." style={{ ...inputStyle, resize: "vertical", marginBottom: 8 }} />
+      </Field>
+      <Field label="Coaching action">
+        <input value={coachingAction} onChange={(e) => setCoachingAction(e.target.value)} placeholder="e.g. Ride-along next Tuesday to review pharmacy route" style={{ ...inputStyle, marginBottom: 8 }} />
+      </Field>
+      {error && <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
+      <button disabled={saving || !note.trim()} onClick={submit} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+        {saving ? "Saving…" : "Save note"}
+      </button>
+
+      {priorNotes.length > 0 && (
+        <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #E5DFD3", display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", textTransform: "uppercase" }}>Prior notes for {noteRep}</div>
+          {priorNotes.map((n) => (
+            <div key={n.id} style={{ fontSize: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 10px" }}>
+              <div>{n.note}</div>
+              {n.coachingAction && <div style={{ color: "#5B5445", marginTop: 2 }}><strong>Action:</strong> {n.coachingAction}</div>}
+              <div style={{ color: "#8A8272", marginTop: 2 }}>
+                {n.createdBy} · {new Date(n.createdAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}
+                {n.reviewDate ? ` · review by ${n.reviewDate}` : ""}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
