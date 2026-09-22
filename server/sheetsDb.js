@@ -4,7 +4,18 @@ const SHEET_ID = process.env.SHEET_ID;
 
 const SCHEMAS = {
   Products: ["id", "name", "category", "expiry", "qty", "sold90", "description", "price", "form", "packSize", "unitsPerDay", "ingredients", "updatedBy", "updatedAt", "sku"],
-  Visits: ["id", "client", "notes", "coordsLat", "coordsLng", "time", "repName", "itemsMentioned", "objectionTag"],
+  // Doctor-visit redesign (Doctor Memory / Call Coaching / Follow-up system)
+  // appended 10 optional columns: objective/doctorNeeds/reaction/concern/
+  // doctorInsight/commitment/patientsToTry/callOutcome/keyLearning/nextAction.
+  // Every pre-existing row (doctor or pharmacy) reads these back as "" via
+  // rowToObject's positional fallback — pharmacy visits never populate them,
+  // and any doctor visit that predates this change renders under "Legacy
+  // note" client-side rather than inventing structured data for it.
+  Visits: [
+    "id", "client", "notes", "coordsLat", "coordsLng", "time", "repName", "itemsMentioned", "objectionTag",
+    "objective", "doctorNeeds", "reaction", "concern", "doctorInsight", "commitment",
+    "patientsToTry", "callOutcome", "keyLearning", "nextAction",
+  ],
   Clients: ["id", "name", "phone", "tier", "area", "assignedRep", "registrationNumber", "address", "coordsLat", "coordsLng", "discountRate", "nameAr", "type"],
   Doctors: ["id", "name", "hospital", "area", "phone", "specialty", "tier", "registrationNumber", "address", "coordsLat", "coordsLng"],
   OutreachLog: ["id", "name", "date", "templateIndex"],

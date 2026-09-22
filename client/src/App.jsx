@@ -832,6 +832,69 @@ const FOLLOWUP_PRESETS = [
   { key: "1m", label: "In 1 month" },
 ];
 
+// ---------- Doctor-visit redesign: option lists ----------
+// Mirrors the server's allow-lists (server/index.js) key-for-key — a
+// mismatch there just means a code silently gets dropped server-side, never
+// a rejected save. COMMITMENT_OPTIONS is reused verbatim in three places
+// (during-call Section E, the post-call commitment confirm, and here) so
+// there's exactly one source of truth for that list.
+const TODAYS_OBJECTIVE_OPTIONS = [
+  { key: "introduce_product", label: "Introduce a product" },
+  { key: "identify_needs", label: "Identify needs" },
+  { key: "address_price_objection", label: "Address price objection" },
+  { key: "secure_trial", label: "Secure patient trial" },
+  { key: "follow_up_commitment", label: "Follow up on previous commitment" },
+  { key: "other", label: "Other" },
+];
+const DOCTOR_NEED_OPTIONS = [
+  { key: "patient_compliance", label: "Patient compliance" },
+  { key: "efficacy", label: "Efficacy" },
+  { key: "tolerability", label: "Tolerability" },
+  { key: "convenience", label: "Convenience" },
+  { key: "price", label: "Price" },
+  { key: "availability", label: "Availability" },
+  { key: "patient_acceptance", label: "Patient acceptance" },
+  { key: "other", label: "Other" },
+];
+const REACTION_OPTIONS = [
+  { key: "interested", label: "Interested", emoji: "🟢" },
+  { key: "neutral", label: "Neutral", emoji: "🟡" },
+  { key: "concerned", label: "Concerned", emoji: "🔴" },
+  { key: "no_discussion", label: "No meaningful discussion", emoji: "⚪" },
+];
+const CONCERN_OPTIONS = [
+  { key: "price", label: "Price" },
+  { key: "evidence", label: "Evidence" },
+  { key: "competitor", label: "Competitor" },
+  { key: "availability", label: "Availability" },
+  { key: "patient_acceptance", label: "Patient acceptance" },
+  { key: "safety", label: "Safety / tolerability" },
+  { key: "other", label: "Other" },
+];
+const COMMITMENT_OPTIONS = [
+  { key: "will_try", label: "Will try with appropriate patients" },
+  { key: "will_consider", label: "Will consider prescribing" },
+  { key: "will_review", label: "Will review information" },
+  { key: "requested_follow_up", label: "Requested follow-up" },
+  { key: "no_commitment", label: "No commitment" },
+  { key: "other", label: "Other" },
+];
+const CALL_OUTCOME_OPTIONS = [
+  { key: "positive", label: "Positive", emoji: "🟢" },
+  { key: "neutral", label: "Neutral", emoji: "🟡" },
+  { key: "difficult", label: "Difficult", emoji: "🔴" },
+];
+const NEXT_ACTION_OPTIONS = [
+  { key: "follow_up", label: "Follow up with doctor" },
+  { key: "send_info", label: "Send information" },
+  { key: "resolve_objection", label: "Resolve objection" },
+  { key: "check_pharmacy_stock", label: "Check pharmacy stock" },
+  { key: "discuss_another_product", label: "Discuss another product" },
+  { key: "no_followup_needed", label: "No follow-up needed" },
+];
+const optionLabel = (options, key) => options.find((o) => o.key === key)?.label || "";
+const REACTION_EMOJI = (key) => REACTION_OPTIONS.find((o) => o.key === key)?.emoji || "";
+
 function ExpiryView({ role, sorted, slowThreshold, repPhone, onRemove }) {
   const [activeZone, setActiveZone] = useState("red");
 
@@ -1345,33 +1408,12 @@ const DURING_CALL_REMINDERS = [
   "Close (ABC - Always Be Closing): Negotiate a specific patient trial, leave samples, and lock in the exact follow-up date.",
 ];
 
-const POST_CALL_CHECKLIST_SECTIONS = [
-  {
-    heading: "1. Record Call Mechanics",
-    items: [
-      { text: "Action: What specific core message, data, or materials did I present?" },
-      { text: "Reaction: How did the physician respond? What buying signals (e.g., \"How is the delivery?\", \"Who else uses it?\") or warning signs did they give?" },
-      { text: "Commitment Secured: How many patient trials did the doctor agree to initiate this week?" },
-      { text: "Follow-Up Date: Is the next visit logged in the calendar (e.g., in 14 days)?" },
-    ],
-  },
-  {
-    heading: "2. Self-Reflection & Personal Coaching",
-    items: [
-      { text: "What did I do well on this call?" },
-      { text: "What would I do differently on the next visit?" },
-      { text: "What new insight did I learn about this doctor's clinic or prescribing habits?" },
-    ],
-  },
-  {
-    heading: "3. Territory & Pharmacy Pull-Through",
-    items: [
-      { text: "CRM Update: Update the doctor's profile notes immediately." },
-      { text: "Next SMARTI Objective: Set the incremental goal for the next call (e.g., move from 3 to 5 patients)." },
-      { text: "Pharmacy Visit: Visit the pharmacy next door/nearby to verify stock availability and ensure prescription pull-through." },
-    ],
-  },
-];
+// The old "Post-Call Pocket Checklist" (self-reflection prompts, CRM-update
+// reminder, next-SMARTI reminder) was removed per the doctor-visit redesign
+// — replaced by the short, structured "postcall" Close Visit step, which
+// captures the same information (call outcome, key learning, commitment,
+// next action, follow-up) as real saved data instead of an unsaved
+// read-it-and-forget-it checklist.
 
 function ChecklistItem({ item, checked, onToggle }) {
   return (
@@ -1431,15 +1473,236 @@ function FieldChecklistModal({ icon, title, subtitle, sections, readOnlySection,
   );
 }
 
+// ---------- Doctor-visit redesign: shared picker + memory/timeline components ----------
+// Generic single/multi-select tap-target picker used by every structured
+// field below (Today's Objective, doctor need(s), reaction, concern,
+// commitment, call outcome, next action) — one component instead of seven
+// near-identical hand-rolled chip rows.
+function ChipPicker({ options, value, onChange, multi = false }) {
+  const isSelected = (key) => (multi ? value.includes(key) : value === key);
+  const toggle = (key) => {
+    if (multi) onChange(value.includes(key) ? value.filter((k) => k !== key) : [...value, key]);
+    else onChange(value === key ? "" : key);
+  };
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+      {options.map((o) => {
+        const selected = isSelected(o.key);
+        return (
+          <button
+            key={o.key}
+            type="button"
+            onClick={() => toggle(o.key)}
+            style={{
+              padding: "10px 14px", borderRadius: 999, fontSize: 13, fontWeight: 500,
+              border: selected ? "1.5px solid #1F2A24" : "1px solid #E5DFD3",
+              background: selected ? "#1F2A24" : "#fff", color: selected ? "#FAF7F2" : "#3A362C",
+            }}
+          >
+            {o.emoji ? `${o.emoji} ` : ""}{o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Fixed priority order (commitment > quoted insight > objection > competitor
+// > product) rather than "most recent N facts" — this is deliberately what a
+// rep needs to remember before walking in: what did we promise, what did
+// they say, what's blocking, who's the threat, what are we selling.
+function buildKeyHistoryBullets(memory, lastVisit) {
+  if (!memory) return [];
+  const candidates = [
+    lastVisit?.commitment && `Committed to: ${optionLabel(COMMITMENT_OPTIONS, lastVisit.commitment)}`,
+    lastVisit?.insight && `Said: "${lastVisit.insight}"`,
+    memory.objections?.[0] && `Concern raised: ${memory.objections[0].label}`,
+    memory.competitors?.[0] && `Mentioned competitor: ${memory.competitors[0].competitorName}`,
+    memory.interests?.[0] && `Discussed: ${memory.interests[0]}`,
+  ].filter(Boolean);
+  return candidates.slice(0, 3);
+}
+
+// The Pre-Call brief — replaces a raw "last 3 visits" dump for doctors with
+// a 10-second summary: last conversation, this visit's objective (optional,
+// never blocking), 2-3 key-history bullets, and a link to the full
+// Timeline. `profile` is the /api/doctors/:name/profile response (or null
+// while loading/on a fetch failure — both render as an empty-but-safe state
+// rather than crashing).
+function DoctorBrief({ profile, loading, objective, onObjectiveChange, onViewFullHistory, onStartVisit }) {
+  if (loading) {
+    return <div style={{ fontSize: 12.5, color: "#8A8272", padding: "12px 0" }}>Loading doctor history…</div>;
+  }
+  const lastVisit = profile?.lastVisit || null;
+  const memory = profile?.memory || null;
+  const keyHistory = buildKeyHistoryBullets(memory, lastVisit);
+
+  return (
+    <div style={{ border: "1px solid #E5DFD3", borderRadius: 10, padding: 14, marginBottom: 14, background: "#FBFAF6" }}>
+      <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.3 }}>
+        Last conversation
+      </div>
+      {lastVisit ? (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>
+            {/* fmtDate (helpers.js) expects a plain "YYYY-MM-DD" date-only
+                string, not a full ISO timestamp — lastVisit.date is a real
+                timestamp, so it's formatted directly here instead. */}
+            {new Date(lastVisit.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })} ({daysSince(lastVisit.date)}d ago)
+          </div>
+          {lastVisit.lastProductDiscussed && (
+            <div style={{ fontSize: 13, marginBottom: 4 }}><strong>Discussed:</strong> {lastVisit.lastProductDiscussed}</div>
+          )}
+          {lastVisit.reaction && (
+            <div style={{ fontSize: 13, marginBottom: 4 }}>{REACTION_EMOJI(lastVisit.reaction)} {optionLabel(REACTION_OPTIONS, lastVisit.reaction)}</div>
+          )}
+          {lastVisit.insight && (
+            <div style={{ fontSize: 13, fontStyle: "italic", color: "#5B5445", marginBottom: 4 }}>"{lastVisit.insight}"</div>
+          )}
+          {lastVisit.commitment && (
+            <div style={{ fontSize: 13, marginBottom: 4 }}><strong>Committed:</strong> {optionLabel(COMMITMENT_OPTIONS, lastVisit.commitment)}</div>
+          )}
+          {lastVisit.nextAction && (
+            <div style={{ fontSize: 13 }}><strong>Next step:</strong> {optionLabel(NEXT_ACTION_OPTIONS, lastVisit.nextAction)}</div>
+          )}
+        </div>
+      ) : (
+        <div style={{ fontSize: 13, color: "#8A8272", marginBottom: 14 }}>No previous visits yet — this will be your first.</div>
+      )}
+
+      <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.3 }}>
+        Today's objective
+      </div>
+      <div style={{ marginBottom: 14 }}>
+        <ChipPicker options={TODAYS_OBJECTIVE_OPTIONS} value={objective} onChange={onObjectiveChange} />
+      </div>
+
+      {keyHistory.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.3 }}>
+            Key history
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+            {keyHistory.map((b, i) => <li key={i} style={{ marginBottom: 2 }}>{b}</li>)}
+          </ul>
+        </div>
+      )}
+
+      <button type="button" onClick={onViewFullHistory} style={{ background: "none", border: "none", color: "#5B7A93", fontSize: 12.5, fontWeight: 500, padding: 0, marginBottom: 14, cursor: "pointer" }}>
+        View full history
+      </button>
+
+      <button
+        type="button" onClick={onStartVisit}
+        style={{ width: "100%", padding: "13px 16px", borderRadius: 10, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 14.5, fontWeight: 600 }}
+      >
+        Start visit
+      </button>
+    </div>
+  );
+}
+
+// A visit predating this redesign has notes but none of the new structured
+// fields — render it under "Legacy note" rather than a StructuredVisitCard
+// that would otherwise look suspiciously empty. A visit with genuinely
+// nothing at all (rare — a bare check-in) falls through to
+// StructuredVisitCard's own "no additional details recorded" message.
+function isLegacyVisit(v) {
+  return !v.reaction && !v.commitment && !v.doctorInsight && Boolean(v.notes && v.notes.trim());
+}
+
+function StructuredVisitCard({ visit: v }) {
+  const hasAnything = (v.mentionedItems || []).length || v.reaction || v.commitment || v.doctorInsight || v.keyLearning || v.nextAction || v.objectionTag || v.concern;
+  if (!hasAnything) return <div style={{ fontSize: 12.5, color: "#8A8272" }}>No additional details recorded.</div>;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13 }}>
+      {v.mentionedItems?.length > 0 && <div><strong>Discussed:</strong> {v.mentionedItems.map((it) => it.name).join(", ")}</div>}
+      {v.doctorNeeds?.length > 0 && <div><strong>Need:</strong> {v.doctorNeeds.map((n) => optionLabel(DOCTOR_NEED_OPTIONS, n)).join(", ")}</div>}
+      {v.reaction && <div><strong>Reaction:</strong> {REACTION_EMOJI(v.reaction)} {optionLabel(REACTION_OPTIONS, v.reaction)}</div>}
+      {v.concern && <div><strong>Concern:</strong> {optionLabel(CONCERN_OPTIONS, v.concern)}</div>}
+      {!v.concern && v.objectionTag && <div><strong>Objection:</strong> {v.objectionTag}</div>}
+      {v.doctorInsight && <div style={{ fontStyle: "italic" }}>"{v.doctorInsight}"</div>}
+      {v.commitment && <div><strong>Commitment:</strong> {optionLabel(COMMITMENT_OPTIONS, v.commitment)}{v.patientsToTry ? ` (${v.patientsToTry} patients)` : ""}</div>}
+      {v.callOutcome && <div><strong>Call outcome:</strong> {optionLabel(CALL_OUTCOME_OPTIONS, v.callOutcome)}</div>}
+      {v.keyLearning && v.keyLearning !== v.doctorInsight && <div><strong>Learned:</strong> {v.keyLearning}</div>}
+      {v.nextAction && <div><strong>Next:</strong> {optionLabel(NEXT_ACTION_OPTIONS, v.nextAction)}</div>}
+      {v.notes && <div style={{ color: "#8A8272" }}>{v.notes}</div>}
+    </div>
+  );
+}
+
+// Pure/presentational — takes a pre-sorted `visits` array (both call sites,
+// the Check-In "View Full History" modal and DoctorsView's History toggle,
+// already get newest-first data straight from the profile endpoint).
+function DoctorTimeline({ visits }) {
+  const [expandedId, setExpandedId] = useState(null);
+  if (!visits || visits.length === 0) return <EmptyState text="No visits recorded yet." />;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {visits.map((v) => {
+        const legacy = isLegacyVisit(v);
+        const expanded = expandedId === v.id;
+        return (
+          <div key={v.id} style={{ border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
+            <button type="button" onClick={() => setExpandedId(expanded ? null : v.id)} style={{ width: "100%", textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 12.5, fontWeight: 600 }}>
+                  {/* v.time is a full ISO timestamp, not the plain
+                      date-only string fmtDate (helpers.js) expects. */}
+                  {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })} {v.reaction ? REACTION_EMOJI(v.reaction) : ""}
+                </span>
+                <span style={{ fontSize: 11, color: "#8A8272" }}>{expanded ? "▲" : "▼"}</span>
+              </div>
+              <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 2 }}>
+                {v.repName}{v.mentionedItems?.length ? ` · ${v.mentionedItems.map((it) => it.name).join(", ")}` : ""}
+              </div>
+            </button>
+            {expanded && (
+              <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #E5DFD3" }}>
+                {legacy ? (
+                  <div>
+                    <span style={{ fontSize: 10.5, fontWeight: 600, color: "#8A8272", textTransform: "uppercase" }}>Legacy note</span>
+                    <div style={{ fontSize: 13, marginTop: 4 }}>{v.notes}</div>
+                    {v.mentionedItems?.length > 0 && <div style={{ fontSize: 12.5, color: "#8A8272", marginTop: 4 }}>Discussed: {v.mentionedItems.map((it) => it.name).join(", ")}</div>}
+                    {v.objectionTag && <div style={{ fontSize: 12.5, color: "#B33A3A", marginTop: 4 }}>{v.objectionTag}</div>}
+                  </div>
+                ) : (
+                  <StructuredVisitCard visit={v} />
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// A simple full-screen-ish overlay for "View Full History" — same visual
+// weight as FieldChecklistModal above, just simpler (no checkbox state).
+function DoctorHistoryModal({ visits, onClose }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(31,42,36,0.55)", zIndex: 50, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div style={{ background: "#FAF7F2", borderRadius: "14px 14px 0 0", padding: 18, width: "100%", maxWidth: 480, maxHeight: "85vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>Full history</h3>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#8A8272" }}><X size={18} /></button>
+        </div>
+        <DoctorTimeline visits={visits} />
+      </div>
+    </div>
+  );
+}
+
 // ---------- Check-In View (rep) ----------
 function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, supplementStoresOnly, medRepOnly, onAddVisit, onUpdateVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, onQueueOrderOffline, pendingOrderCount, onAttachPendingOrder, competitors, myLastPunch }) {
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
-  // Doctor-visit self-coaching tools — pure client-side reminders, nothing
-  // saved. Pre-Call opens on demand before entering the clinic; Post-Call
-  // pops up automatically right after a doctor visit is saved.
+  // Doctor-visit self-coaching tool — pure client-side reminders, nothing
+  // saved. Opens on demand before entering the clinic (de-emphasized link
+  // next to the Doctor Brief). The old auto-opening Post-Call Pocket
+  // Checklist was removed in favor of the short "postcall" Close Visit step.
   const [showPreCallChecklist, setShowPreCallChecklist] = useState(false);
-  const [showPostCallChecklist, setShowPostCallChecklist] = useState(false);
   // A rep restricted to supplement stores only (or a med rep restricted to
   // doctors only) never sees the other options at all, so they land
   // directly on the one type they can use.
@@ -1478,15 +1741,20 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   // back flips into edit mode (see editingSavedVisit) rather than
   // re-showing a blank form, and Save turns into an update via
   // onUpdateVisit, never a second, duplicate visit.
+  // Doctors: nothing is saved until the new "postcall" step's Save Visit
+  // button, so Back-to-checkin is always just re-showing already-held state
+  // — never a PATCH of an already-synced visit. Pharmacy's original
+  // expression (only allowed back onto "checkin" for a real, already-synced
+  // visit) is preserved byte-for-byte on that branch.
   const canGoBack = stepHistoryRef.current.length > 0 && (
     stepHistoryRef.current[stepHistoryRef.current.length - 1] !== "checkin" ||
-    Boolean(lastVisit && lastVisit.id && !lastVisit.pending)
+    (isDoctorEntity ? true : Boolean(lastVisit && lastVisit.id && !lastVisit.pending))
   );
   const [editingSavedVisit, setEditingSavedVisit] = useState(false);
   const goBack = () => {
     if (!canGoBack) return;
     const prev = stepHistoryRef.current.pop();
-    if (prev === "checkin") setEditingSavedVisit(true);
+    if (prev === "checkin" && !isDoctorEntity) setEditingSavedVisit(true);
     setStep(prev);
   };
   const [followUpStatus, setFollowUpStatus] = useState(null); // null | "set" | "stopped"
@@ -1506,6 +1774,29 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   const [sawCompetitor, setSawCompetitor] = useState(false);
   const [competitorName, setCompetitorName] = useState("");
   const [competitorNotes, setCompetitorNotes] = useState("");
+  // Doctor-visit redesign — all doctor-only, pharmacy code paths never read
+  // these. `visitStarted` gates the during-call sections (B) within the
+  // same "checkin" step, so Pre-Call and During-Call don't need separate
+  // step-machine entries.
+  const [visitStarted, setVisitStarted] = useState(false);
+  const [todaysObjective, setTodaysObjective] = useState("");
+  const [doctorNeeds, setDoctorNeeds] = useState([]);
+  const [reaction, setReaction] = useState("");
+  const [concern, setConcern] = useState("");
+  const [doctorInsight, setDoctorInsight] = useState("");
+  const [commitment, setCommitment] = useState("");
+  const [patientsToTry, setPatientsToTry] = useState("");
+  const [callOutcome, setCallOutcome] = useState("");
+  const [keyLearning, setKeyLearning] = useState("");
+  const [nextAction, setNextAction] = useState("");
+  const [doctorProfile, setDoctorProfile] = useState(null);
+  const [doctorProfileLoading, setDoctorProfileLoading] = useState(false);
+  const [showFullHistory, setShowFullHistory] = useState(false);
+  // Which follow-up timing chip is picked in the "postcall" step — "" means
+  // none picked yet (Save Visit still works, just with no follow-up
+  // scheduled), a FOLLOWUP_PRESETS key, or "custom" (reveals the existing
+  // day-count input reused from the old followup step).
+  const [followUpChoice, setFollowUpChoice] = useState("");
   // Own-scoped, on-demand replacements for what used to come out of the
   // global visits/orders bootstrap arrays — fetched here, refetched after
   // whatever action would change them, instead of held in App() state.
@@ -1611,11 +1902,31 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   // history held in state — the server already sorts newest-first.
   const [recentVisitsForEntity, setRecentVisitsForEntity] = useState([]);
   useEffect(() => {
-    if (!matchedEntity) { setRecentVisitsForEntity([]); return; }
+    if (isDoctorEntity || !matchedEntity) { setRecentVisitsForEntity([]); return; }
     api.getVisits({ client: matchedEntity.name, limit: 3 })
       .then((data) => setRecentVisitsForEntity(data.visits || []))
       .catch(() => setRecentVisitsForEntity([]));
-  }, [matchedEntity?.name]);
+  }, [matchedEntity?.name, isDoctorEntity]);
+
+  // Doctor-visit redesign: the richer Pre-Call brief replaces the plain
+  // "last 3 visits" list above for doctors only — one combined read
+  // (lastVisit + memory + timeline) instead of a raw visits fetch.
+  useEffect(() => {
+    if (!isDoctorEntity || !matchedEntity) { setDoctorProfile(null); return; }
+    setDoctorProfileLoading(true);
+    api.getDoctorProfile(matchedEntity.name)
+      .then(setDoctorProfile)
+      .catch(() => setDoctorProfile(null))
+      .finally(() => setDoctorProfileLoading(false));
+  }, [matchedEntity?.name, isDoctorEntity]);
+
+  // Pre-fills the "postcall" step's "What did I learn?" field from the
+  // during-call doctor-insight quote, the first time that step is reached
+  // — still fully editable, and never overwrites something the rep already
+  // typed there. Avoids asking the same question twice under two labels.
+  useEffect(() => {
+    if (step === "postcall" && !keyLearning && doctorInsight) setKeyLearning(doctorInsight);
+  }, [step]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cross-checks the GPS just captured against the pharmacy/doctor's own
   // saved location, if it has one — this is how you'd know a rep's check-in
@@ -1698,11 +2009,13 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
       // per-item above (in "Items mentioned") — so they skip straight to
       // scheduling a follow-up. Pharmacies still go on to the order question
       // first, then their own follow-up step later.
+      // This whole function is effectively pharmacy-only now — the doctor
+      // branch's "Continue to Close Visit" button goes straight to the new
+      // "postcall" step instead of calling submit() at all (see the Save
+      // button in the "checkin" step below). The isDoctorEntity check here
+      // is dead code on the doctor path but is left in place rather than
+      // restructured, since it's still exactly correct if ever reached.
       goToStep(!isDoctorEntity ? "orderPrompt" : "followup");
-      // "Immediately after leaving a physician's clinic" — the moment the
-      // visit is saved, not tied to any later step, since the rep may not
-      // walk through the whole followup flow.
-      if (isDoctorEntity) setShowPostCallChecklist(true);
     } catch (e) {
       // No reception at all (not a rejection from the server, which would
       // still fail the same way on retry) — queue it locally instead of
@@ -1759,6 +2072,10 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
       client, notes, mentionedItems,
       competitorName: sawCompetitor ? competitorName : "",
       competitorNotes: sawCompetitor ? competitorNotes : "",
+      // Doctor-visit redesign fields — always their default (""/[]/null) for
+      // a pharmacy visit, since only the doctor branch's UI ever sets them.
+      objective: todaysObjective, doctorNeeds, reaction, concern, doctorInsight, commitment, patientsToTry,
+      callOutcome, keyLearning, nextAction,
       queuedAt: new Date().toISOString(),
       localKey,
       ...extra,
@@ -1766,24 +2083,35 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
     setLastVisit({ client, pending: true, localKey });
     setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
     setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
+    setVisitStarted(false); setTodaysObjective(""); setDoctorNeeds([]); setReaction(""); setConcern("");
+    setDoctorInsight(""); setCommitment(""); setPatientsToTry(""); setCallOutcome(""); setKeyLearning(""); setNextAction("");
     setVisitError(""); setLocError("");
     setFollowUpStatus(null);
     // Pharmacies/supplement stores still get offered the order question —
     // that's the one later step that itself supports queuing offline (via
-    // onAttachPendingOrder). Doctors have nothing left to offer offline.
+    // onAttachPendingOrder). Doctors have nothing left to offer offline —
+    // no synced visitId yet to attach a follow-up to, same limitation as
+    // before this redesign.
     goToStep(!isDoctorEntity ? "orderPrompt" : "done");
   };
   const saveOffline = () => queueOfflineAndFinish();
 
-  const scheduleFollowUp = async (presetKey) => {
+  // `visitOverride` lets a caller pass the visit object it JUST created,
+  // rather than relying on the `lastVisit` closure — needed because
+  // `setLastVisit` isn't visible in the same tick it's called (see
+  // saveVisitAndFollowUp below, doctor-only). Every pre-existing call site
+  // passes nothing, so `targetVisit` falls back to `lastVisit` exactly as
+  // before — pharmacy's `followup` step is unaffected.
+  const scheduleFollowUp = async (presetKey, visitOverride) => {
+    const targetVisit = visitOverride || lastVisit;
     setFollowUpSaving(true);
     setFollowUpError("");
     try {
       await api.scheduleFollowUp({
-        entityName: lastVisit.client,
+        entityName: targetVisit.client,
         entityType,
         presetKey,
-        visitId: lastVisit.id,
+        visitId: targetVisit.id,
         smartiObjective: isDoctorEntity ? smartiObjective.trim() : "",
       });
       setFollowUpStatus("set");
@@ -1795,7 +2123,8 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
     }
   };
 
-  const scheduleCustomFollowUp = async () => {
+  const scheduleCustomFollowUp = async (visitOverride) => {
+    const targetVisit = visitOverride || lastVisit;
     const days = Number(customFollowUpDays);
     if (!Number.isInteger(days) || days < 1 || days > 365) {
       setFollowUpError("Enter a whole number of days, between 1 and 365.");
@@ -1805,10 +2134,10 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
     setFollowUpError("");
     try {
       await api.scheduleFollowUp({
-        entityName: lastVisit.client,
+        entityName: targetVisit.client,
         entityType,
         days,
-        visitId: lastVisit.id,
+        visitId: targetVisit.id,
         smartiObjective: isDoctorEntity ? smartiObjective.trim() : "",
       });
       setFollowUpStatus("set");
@@ -1823,15 +2152,16 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   // Persisted (unlike the old silent "skip"), with an optional reason, so
   // the manager/rep can later see why a pharmacy or doctor dropped off —
   // and so it counts toward visit-frequency history instead of vanishing.
-  const stopFollowUp = async () => {
+  const stopFollowUp = async (visitOverride) => {
+    const targetVisit = visitOverride || lastVisit;
     setFollowUpSaving(true);
     setFollowUpError("");
     try {
       await api.stopFollowUp({
-        entityName: lastVisit.client,
+        entityName: targetVisit.client,
         entityType,
         reason: stopFollowUpReason.trim(),
-        visitId: lastVisit.id,
+        visitId: targetVisit.id,
       });
       setFollowUpStatus("stopped");
       setStep("done");
@@ -1839,6 +2169,50 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
       setFollowUpError(e?.message || "Couldn't save that.");
     } finally {
       setFollowUpSaving(false);
+    }
+  };
+
+  // Doctor-only — the "postcall" step's single Save Visit button. Feels
+  // atomic to the rep (one button, one action) but is two sequential calls
+  // under the hood, exactly like the rest of this app's architecture: the
+  // visit is created first (carrying every pre-call/during-call/post-call
+  // field collected above), then — unless "stop visiting" was confirmed or
+  // no follow-up timing was picked — the follow-up is scheduled against the
+  // visit that just came back, via the visitOverride parameter added to
+  // scheduleFollowUp/scheduleCustomFollowUp/stopFollowUp above (the
+  // `lastVisit` closure wouldn't reflect the just-created visit in this
+  // same tick otherwise).
+  const saveVisitAndFollowUp = async () => {
+    setVisitError("");
+    setSaving(true);
+    try {
+      const created = await onAddVisit({
+        client, notes, coords, mentionedItems,
+        competitorName: sawCompetitor ? competitorName : "",
+        competitorNotes: sawCompetitor ? competitorNotes : "",
+        objective: todaysObjective, doctorNeeds, reaction, concern, doctorInsight, commitment, patientsToTry,
+        callOutcome, keyLearning, nextAction,
+      });
+      setLastVisit(created);
+      loadTodayVisits();
+      if (showStopFollowUp) {
+        await stopFollowUp(created);
+      } else if (followUpChoice === "custom") {
+        await scheduleCustomFollowUp(created);
+      } else if (followUpChoice) {
+        await scheduleFollowUp(followUpChoice, created);
+      } else {
+        setFollowUpStatus(null);
+        setStep("done");
+      }
+    } catch (e) {
+      if (isNetworkError(e)) {
+        queueOfflineAndFinish({ coords });
+      } else {
+        setVisitError(e?.message || "Couldn't save the visit.");
+      }
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -1856,17 +2230,24 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
     setCustomFollowUpDays("");
     setShowStopFollowUp(false);
     setStopFollowUpReason("");
+    setSmartiObjective("");
+    // Doctor-visit redesign fields.
+    setVisitStarted(false); setTodaysObjective(""); setDoctorNeeds([]); setReaction(""); setConcern("");
+    setDoctorInsight(""); setCommitment(""); setPatientsToTry(""); setCallOutcome(""); setKeyLearning(""); setNextAction("");
+    setFollowUpChoice("");
     stepHistoryRef.current = [];
     setStep("checkin");
   };
 
   // Pharmacies and supplement stores place orders, so they get
-  // order -> sample -> follow-up. Doctors don't buy stock, and
-  // sample-giving is captured per-item right in step 1, so they go
-  // straight from logging the visit to follow-up.
+  // order -> sample -> follow-up (byte-identical to before this redesign).
+  // Doctors: pre-call + during-call both live inside "checkin" (gated by
+  // visitStarted), then a single "postcall" step (Close Visit + Save Visit)
+  // replaces the old bare "followup" step — nothing is saved until Save
+  // Visit there, so there's no separate post-save follow-up step to show.
   const STEP_KEYS = !isDoctorEntity
     ? ["checkin", "orderPrompt", "order", "sample", "followup"]
-    : ["checkin", "followup"];
+    : ["checkin", "postcall"];
   const STEP_INFO = !isDoctorEntity ? {
     checkin: { n: 1, title: "Log the visit" },
     orderPrompt: { n: 2, title: "Did they place an order?" },
@@ -1875,7 +2256,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
     followup: { n: 5, title: "Schedule a follow-up" },
   } : {
     checkin: { n: 1, title: "Log the visit" },
-    followup: { n: 2, title: "Schedule a follow-up" },
+    postcall: { n: 2, title: "Close the visit" },
   };
 
   return (
@@ -1980,12 +2361,16 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
           )}
 
           {isDoctorEntity && (
+            // De-emphasized: the Doctor Brief below is now the default
+            // pre-call experience. This stays available as an optional
+            // deeper resource (customer profiling matrix, SMARTI coaching
+            // script, value-prop pitch) rather than being removed.
             <button
               type="button"
               onClick={() => setShowPreCallChecklist(true)}
-              style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, width: "100%", padding: "10px 14px", borderRadius: 8, border: "1px solid #4C7A5E", background: "#fff", color: "#4C7A5E", fontSize: 12.5, fontWeight: 600, marginBottom: 16 }}
+              style={{ display: "block", background: "none", border: "none", color: "#8A8272", fontSize: 11.5, padding: "0 0 12px", textDecoration: "underline", cursor: "pointer" }}
             >
-              📋 Quick Pre-Call reminder
+              📋 Full coaching checklist
             </button>
           )}
 
@@ -2014,7 +2399,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                 ⚠ "{client}" isn't in the system yet. Go to the {entityTabLabel} tab and add it there first (with full details{!isDoctorEntity ? ", including registration number" : ""}), then come back to check in.
               </div>
             )}
-            {recentVisitsForEntity.length > 0 && (
+            {!isDoctorEntity && recentVisitsForEntity.length > 0 && (
               <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, marginBottom: 10 }}>
                 <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", marginBottom: 6 }}>Last time — a quick refresher</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -2032,33 +2417,49 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                 </div>
               </div>
             )}
-            <Field label="Visit notes">
-              <textarea
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                placeholder="What was discussed, orders taken, objections…"
-                rows={3}
-                style={{ ...inputStyle, marginBottom: 8, resize: "vertical" }}
-              />
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
-                {NOTE_TEMPLATES.map((t) => (
-                  <button
-                    type="button"
-                    key={t}
-                    onClick={() => appendTemplate(t)}
-                    style={{ fontSize: 11, padding: "4px 9px", borderRadius: 12, border: "1px solid #E5DFD3", background: "#FAF7F2", color: "#5B5445" }}
-                  >
-                    + {t}
-                  </button>
-                ))}
-              </div>
-            </Field>
 
-            {!isDoctorEntity && (
+            {isDoctorEntity && matchedEntity && !visitStarted && (
+              <DoctorBrief
+                profile={doctorProfile}
+                loading={doctorProfileLoading}
+                objective={todaysObjective}
+                onObjectiveChange={setTodaysObjective}
+                onViewFullHistory={() => setShowFullHistory(true)}
+                onStartVisit={() => { setVisitStarted(true); getLocation(); }}
+              />
+            )}
+
+            {(!isDoctorEntity || visitStarted) && (
+              <Field label={isDoctorEntity ? "Additional notes (optional)" : "Visit notes"}>
+                <textarea
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder={isDoctorEntity ? "Anything else worth remembering…" : "What was discussed, orders taken, objections…"}
+                  rows={isDoctorEntity ? 2 : 3}
+                  style={{ ...inputStyle, marginBottom: 8, resize: "vertical" }}
+                />
+                {!isDoctorEntity && (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                    {NOTE_TEMPLATES.map((t) => (
+                      <button
+                        type="button"
+                        key={t}
+                        onClick={() => appendTemplate(t)}
+                        style={{ fontSize: 11, padding: "4px 9px", borderRadius: 12, border: "1px solid #E5DFD3", background: "#FAF7F2", color: "#5B5445" }}
+                      >
+                        + {t}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </Field>
+            )}
+
+            {(!isDoctorEntity || visitStarted) && (
               <Field label="Competitors">
                 <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#5B5445", marginBottom: sawCompetitor ? 8 : 0 }}>
                   <input type="checkbox" checked={sawCompetitor} onChange={(e) => setSawCompetitor(e.target.checked)} />
-                  Any competitor brands on the shelf here?
+                  {isDoctorEntity ? "Did a competitor come up in the conversation?" : "Any competitor brands on the shelf here?"}
                 </label>
                 {sawCompetitor && (
                   <>
@@ -2083,8 +2484,8 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               </Field>
             )}
 
-            {entityType === "doctor" && (
-              <Field label="Items mentioned during visit">
+            {entityType === "doctor" && visitStarted && (
+              <Field label="Products discussed">
                 <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                   <input
                     value={itemQuery}
@@ -2158,57 +2559,229 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               </Field>
             )}
 
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-              <button onClick={getLocation} disabled={locating} style={{
-                display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
-                border: "1px solid #E5DFD3", background: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
-              }}>
-                {locating ? <Loader2 size={14} className="spin" /> : <MapPin size={14} />}
-                {locating ? "Locating…" : coords ? "Update location" : isSupervisor ? "Capture GPS location (optional)" : "Capture GPS location (required)"}
-              </button>
-              {coords && <span className="kb-font-mono" style={{ fontSize: 11.5, color: "#4C7A5E" }}><Check size={12} style={{ verticalAlign: -1 }} /> {coords.lat}, {coords.lng}</span>}
-            </div>
-            {locationMismatch && (
-              <div style={{ background: "#FBF0F0", border: "1px solid #E5B8B0", color: "#7A3B3B", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 12, fontWeight: 500 }}>
-                ⚠ You're {locationMismatchKm.toFixed(1)}km from {client}'s known location. Double-check you're at the right place before saving.
-              </div>
+            {isDoctorEntity && visitStarted && (
+              <>
+                <Field label="What did the doctor need?">
+                  <ChipPicker options={DOCTOR_NEED_OPTIONS} value={doctorNeeds} onChange={setDoctorNeeds} multi />
+                </Field>
+                <div style={{ height: 14 }} />
+                <Field label="Doctor reaction">
+                  <ChipPicker options={REACTION_OPTIONS} value={reaction} onChange={(v) => { setReaction(v); if (v !== "concerned") setConcern(""); }} />
+                </Field>
+                {reaction === "concerned" && (
+                  <>
+                    <div style={{ height: 10 }} />
+                    <Field label="Concern">
+                      <ChipPicker options={CONCERN_OPTIONS} value={concern} onChange={setConcern} />
+                    </Field>
+                  </>
+                )}
+                <div style={{ height: 14 }} />
+                <Field label="Doctor's words / important insight (optional)">
+                  <textarea
+                    value={doctorInsight}
+                    onChange={(e) => setDoctorInsight(e.target.value)}
+                    placeholder={'e.g. "He said several patients ask for B12 but dislike swallowing tablets."'}
+                    rows={2}
+                    style={{ ...inputStyle, resize: "vertical" }}
+                  />
+                </Field>
+                <div style={{ height: 14 }} />
+                <Field label="Commitment">
+                  <ChipPicker options={COMMITMENT_OPTIONS} value={commitment} onChange={(v) => { setCommitment(v); if (v !== "will_try") setPatientsToTry(""); }} />
+                </Field>
+                {commitment === "will_try" && (
+                  <>
+                    <div style={{ height: 10 }} />
+                    <Field label="Patients to try (optional)">
+                      <input
+                        type="number" min="0" value={patientsToTry}
+                        onChange={(e) => setPatientsToTry(e.target.value)}
+                        placeholder="e.g. 3"
+                        style={{ ...inputStyle, width: 100 }}
+                      />
+                    </Field>
+                  </>
+                )}
+                <div style={{ height: 14 }} />
+              </>
             )}
-            {locError && (
-              <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 8, padding: 10, marginBottom: 12 }}>
-                <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 6 }}>{locError}</div>
-                <div style={{ fontSize: 12, color: "#7A5B2E", marginBottom: 8 }}>
-                  No GPS available right now (indoors, dead zone)? You can save this offline — it'll sync automatically once you have a signal.
-                </div>
-                <button
-                  type="button"
-                  disabled={!client || !matchedEntity}
-                  onClick={saveOffline}
-                  style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: client && matchedEntity ? "#C17817" : "#D8D2C4", color: "#fff", fontSize: 12.5, fontWeight: 500 }}
-                >
-                  Save offline, sync later
-                </button>
-              </div>
-            )}
-            {visitError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{visitError}</div>}
-            {/* GPS is required for everyone except the Head of Sales (isSupervisor)
-                — a temporary exception while Rabih's phone location permissions
-                get sorted out. Remove the isSupervisor carve-out below (both here
-                and server-side in POST /api/visits) once that's fixed. */}
-            {!editingSavedVisit && !coords && !isSupervisor && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>Capture your GPS location before saving — this is how a visit gets confirmed as real.</div>}
-            {!editingSavedVisit && !coords && isSupervisor && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>Location isn't required for your account right now — you can save without it.</div>}
 
-            <button
-              disabled={editingSavedVisit ? saving : (!client || (!coords && !isSupervisor) || !matchedEntity || saving)}
-              onClick={editingSavedVisit ? submitEdit : submit}
-              style={{
-                padding: "9px 18px", borderRadius: 8, border: "none",
-                background: (editingSavedVisit ? !saving : (client && (coords || isSupervisor) && matchedEntity && !saving)) ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500,
-              }}
-            >
-              {saving ? "Saving…" : editingSavedVisit ? "Save changes" : "Save visit & continue"}
-            </button>
+            {(!isDoctorEntity || visitStarted) && (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                  <button onClick={getLocation} disabled={locating} style={{
+                    display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
+                    border: "1px solid #E5DFD3", background: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
+                  }}>
+                    {locating ? <Loader2 size={14} className="spin" /> : <MapPin size={14} />}
+                    {locating ? "Locating…" : coords ? "Update location" : isSupervisor ? "Capture GPS location (optional)" : "Capture GPS location (required)"}
+                  </button>
+                  {coords && <span className="kb-font-mono" style={{ fontSize: 11.5, color: "#4C7A5E" }}><Check size={12} style={{ verticalAlign: -1 }} /> {coords.lat}, {coords.lng}</span>}
+                </div>
+                {locationMismatch && (
+                  <div style={{ background: "#FBF0F0", border: "1px solid #E5B8B0", color: "#7A3B3B", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 12, fontWeight: 500 }}>
+                    ⚠ You're {locationMismatchKm.toFixed(1)}km from {client}'s known location. Double-check you're at the right place before saving.
+                  </div>
+                )}
+                {locError && (
+                  <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 8, padding: 10, marginBottom: 12 }}>
+                    <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 6 }}>{locError}</div>
+                    <div style={{ fontSize: 12, color: "#7A5B2E", marginBottom: 8 }}>
+                      No GPS available right now (indoors, dead zone)? You can save this offline — it'll sync automatically once you have a signal.
+                    </div>
+                    <button
+                      type="button"
+                      disabled={!client || !matchedEntity}
+                      onClick={saveOffline}
+                      style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: client && matchedEntity ? "#C17817" : "#D8D2C4", color: "#fff", fontSize: 12.5, fontWeight: 500 }}
+                    >
+                      Save offline, sync later
+                    </button>
+                  </div>
+                )}
+                {visitError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{visitError}</div>}
+                {/* GPS is required for everyone except the Head of Sales (isSupervisor)
+                    — a temporary exception while Rabih's phone location permissions
+                    get sorted out. Remove the isSupervisor carve-out below (both here
+                    and server-side in POST /api/visits) once that's fixed. */}
+                {!editingSavedVisit && !coords && !isSupervisor && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>{isDoctorEntity ? "Capture your GPS location before closing the visit" : "Capture your GPS location before saving"} — this is how a visit gets confirmed as real.</div>}
+                {!editingSavedVisit && !coords && isSupervisor && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>Location isn't required for your account right now — you can save without it.</div>}
+
+                <button
+                  disabled={isDoctorEntity ? (!client || !matchedEntity) : (editingSavedVisit ? saving : (!client || (!coords && !isSupervisor) || !matchedEntity || saving))}
+                  onClick={isDoctorEntity ? () => goToStep("postcall") : (editingSavedVisit ? submitEdit : submit)}
+                  style={{
+                    padding: "9px 18px", borderRadius: 8, border: "none",
+                    background: (isDoctorEntity ? (client && matchedEntity) : (editingSavedVisit ? !saving : (client && (coords || isSupervisor) && matchedEntity && !saving))) ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500,
+                  }}
+                >
+                  {isDoctorEntity ? "Continue to Close Visit" : (saving ? "Saving…" : editingSavedVisit ? "Save changes" : "Save visit & continue")}
+                </button>
+              </>
+            )}
           </div>
         </>
+      )}
+
+      {step === "postcall" && (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+          {canGoBack && <BackStepButton onClick={goBack} />}
+          <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 14 }}>Close the visit</div>
+
+          <Field label="How did the call go?">
+            <ChipPicker options={CALL_OUTCOME_OPTIONS} value={callOutcome} onChange={setCallOutcome} />
+          </Field>
+          <div style={{ height: 14 }} />
+
+          <Field label="What did I learn? (one sentence)">
+            <textarea
+              value={keyLearning}
+              onChange={(e) => setKeyLearning(e.target.value)}
+              placeholder="e.g. Doctor is interested in sublingual B12 mainly for patients who dislike swallowing tablets."
+              rows={2}
+              style={{ ...inputStyle, resize: "vertical" }}
+            />
+          </Field>
+          <div style={{ height: 14 }} />
+
+          <Field label="What did the doctor commit to?">
+            <ChipPicker options={COMMITMENT_OPTIONS} value={commitment} onChange={(v) => { setCommitment(v); if (v !== "will_try") setPatientsToTry(""); }} />
+          </Field>
+          <div style={{ height: 14 }} />
+
+          <Field label="Next action">
+            <ChipPicker options={NEXT_ACTION_OPTIONS} value={nextAction} onChange={setNextAction} />
+          </Field>
+          <div style={{ height: 14 }} />
+
+          {isDoctorEntity && (
+            <>
+              <Field label="Next SMARTI Objective (included in your Telegram reminder for this follow-up)">
+                <textarea
+                  value={smartiObjective}
+                  onChange={(e) => setSmartiObjective(e.target.value)}
+                  placeholder={
+                    commitment || nextAction
+                      ? `e.g. ${nextAction ? `${optionLabel(NEXT_ACTION_OPTIONS, nextAction)} — ` : ""}${commitment ? `follow up on "${optionLabel(COMMITMENT_OPTIONS, commitment)}"` : ""}`
+                      : `e.g. Move Dr. ${client.replace(/^Dr\.?\s*/i, "")} from 3 to 5 patients on SITAVITAE PLUS`
+                  }
+                  rows={2}
+                  style={{ ...inputStyle, resize: "vertical", marginBottom: 14 }}
+                />
+              </Field>
+            </>
+          )}
+
+          <Field label="Follow up">
+            <ChipPicker
+              options={[...FOLLOWUP_PRESETS, { key: "custom", label: "Custom" }]}
+              value={followUpChoice}
+              onChange={setFollowUpChoice}
+            />
+          </Field>
+          {followUpChoice === "custom" && (
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 10 }}>
+              <input
+                type="number" min="1" max="365" value={customFollowUpDays}
+                onChange={(e) => setCustomFollowUpDays(e.target.value)}
+                placeholder="e.g. 10"
+                style={{ ...inputStyle, width: 80, padding: "6px 8px", fontSize: 12.5 }}
+              />
+              <span style={{ fontSize: 12.5, color: "#5B5445" }}>days</span>
+            </div>
+          )}
+          <div style={{ height: 14 }} />
+
+          {!showStopFollowUp ? (
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => setShowStopFollowUp(true)}
+              style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#B33A3A", fontSize: 12.5, marginBottom: 14 }}
+            >
+              🚫 Stop visiting this doctor
+            </button>
+          ) : (
+            <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, marginBottom: 14 }}>
+              <div style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 6 }}>
+                Why are you stopping? (optional, but helps later — e.g. "no budget", "switched supplier", "closed down")
+              </div>
+              <textarea
+                value={stopFollowUpReason}
+                onChange={(e) => setStopFollowUpReason(e.target.value)}
+                rows={2}
+                style={{ ...inputStyle, width: "100%", resize: "vertical", marginBottom: 8 }}
+              />
+              <button
+                type="button"
+                onClick={() => { setShowStopFollowUp(false); setStopFollowUpReason(""); }}
+                style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
+          {(!coords && !isSupervisor) && (
+            <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>
+              Still finishing your GPS location — this is how a visit gets confirmed as real. If it doesn't come through, go back and try "Get location" again.
+            </div>
+          )}
+          {visitError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{visitError}</div>}
+          {followUpError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{followUpError}</div>}
+
+          <button
+            disabled={saving || followUpSaving || (!coords && !isSupervisor)}
+            onClick={saveVisitAndFollowUp}
+            style={{
+              width: "100%", padding: "13px 16px", borderRadius: 10, border: "none",
+              background: (!coords && !isSupervisor) ? "#D8D2C4" : "#1F2A24", color: "#FAF7F2", fontSize: 14.5, fontWeight: 600,
+            }}
+          >
+            {saving || followUpSaving ? "Saving…" : showStopFollowUp ? "Save visit & stop visiting" : "Save visit"}
+          </button>
+        </div>
       )}
 
       {step === "orderPrompt" && lastVisit && (
@@ -2377,6 +2950,18 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               ? "Marked as stopped — no more reminders for this one."
               : "No follow-up scheduled for this visit."}
           </div>
+          {isDoctorEntity && nextAction === "check_pharmacy_stock" && !medRepOnly && (
+            // The one next-action with a natural next step in this app —
+            // rather than a mid-postcall button that could abandon an
+            // unsaved visit, this only appears once the visit is already
+            // safely saved, and just switches entity type (never loses data).
+            <button
+              onClick={() => { startNewVisit(); setEntityType("pharmacy"); }}
+              style={{ padding: "9px 18px", borderRadius: 8, border: "1px solid #1F2A24", background: "#fff", color: "#1F2A24", fontSize: 13, fontWeight: 500, marginBottom: 8, marginRight: 8 }}
+            >
+              Check pharmacy stock →
+            </button>
+          )}
           <button onClick={startNewVisit} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
             Log another visit
           </button>
@@ -2546,15 +3131,8 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
           closeLabel="Ready — start the visit"
         />
       )}
-      {showPostCallChecklist && (
-        <FieldChecklistModal
-          icon="✅"
-          title="Post-Call Pocket Checklist"
-          subtitle="Immediately after leaving the clinic"
-          sections={POST_CALL_CHECKLIST_SECTIONS}
-          onClose={() => setShowPostCallChecklist(false)}
-          closeLabel="Done"
-        />
+      {showFullHistory && (
+        <DoctorHistoryModal visits={doctorProfile?.timeline || []} onClose={() => setShowFullHistory(false)} />
       )}
     </div>
   );
@@ -5954,7 +6532,7 @@ const DOCTOR_FILLABLE_FIELDS = [
 function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteInfo }) {
   const [completingId, setCompletingId] = useState(null);
   const [historyId, setHistoryId] = useState(null);
-  const [historyRows, setHistoryRows] = useState([]);
+  const [historyProfile, setHistoryProfile] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [name, setName] = useState("");
@@ -5971,12 +6549,16 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
   const [locError, setLocError] = useState("");
   const [statsByName, setStatsByName] = useState({});
 
+  // Doctor-visit redesign: the History toggle now shows the full structured
+  // Timeline (DoctorTimeline) via the same /api/doctors/:name/profile
+  // endpoint the Check-In Pre-Call brief uses, instead of a hand-rolled
+  // 5-raw-visit dump.
   useEffect(() => {
-    if (!historyId) { setHistoryRows([]); return; }
+    if (!historyId) { setHistoryProfile(null); return; }
     const d = doctors.find((doc) => doc.id === historyId);
     if (!d) return;
-    api.getVisits({ client: d.name, limit: 5 }).then((data) => setHistoryRows(data.visits || [])).catch(() => setHistoryRows([]));
-  }, [historyId]);
+    api.getDoctorProfile(d.name).then(setHistoryProfile).catch(() => setHistoryProfile(null));
+  }, [historyId, doctors]);
 
   // Same navigator.geolocation pattern used for Punch In / Check-In / Add
   // Pharmacy — a GPS fix taken on-site beats geocoding a typed address.
@@ -6167,23 +6749,8 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
               <button onClick={() => onRemove(d.id)} style={{ background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
             </div>
             {historyId === d.id && (
-              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-                {historyRows.map((v) => (
-                  <div key={v.id} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 10px", fontSize: 12 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", color: "#8A8272", fontSize: 11 }}>
-                      <span>{v.repName || "unknown rep"}</span>
-                      <span className="kb-font-mono">{new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</span>
-                    </div>
-                    {v.notes && <div style={{ marginTop: 3 }}>{v.notes}</div>}
-                    {v.mentionedItems && v.mentionedItems.length > 0 && (
-                      <div style={{ marginTop: 3, color: "#5B5445" }}>
-                        <strong style={{ fontWeight: 600 }}>Discussed: </strong>{v.mentionedItems.map((it) => it.name).join(", ")}
-                      </div>
-                    )}
-                    {v.objectionTag && <div style={{ marginTop: 3, color: "#B33A3A" }}>{v.objectionTag}</div>}
-                  </div>
-                ))}
-                {historyRows.length === 0 && <EmptyState text="No visits logged yet." />}
+              <div style={{ marginTop: 8 }}>
+                {historyProfile ? <DoctorTimeline visits={historyProfile.timeline} /> : <EmptyState text="Loading…" />}
               </div>
             )}
             {role === "rep" && completingId === d.id && (

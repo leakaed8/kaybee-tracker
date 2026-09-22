@@ -206,6 +206,63 @@ function classifyObjection(notes) {
   return hit ? hit.tag : "";
 }
 
+// ---------- Doctor-visit redesign: structured field allow-lists ----------
+// Mirrors the option lists the client offers a rep — an unrecognized code
+// (a stale client build, a hand-crafted request) is silently dropped to ""
+// rather than rejecting the save, same tone as everywhere else in this file
+// that a field is "never forced."
+const DOCTOR_VISIT_OBJECTIVE_CODES = new Set([
+  "introduce_product", "identify_needs", "address_price_objection", "secure_trial", "follow_up_commitment", "other",
+]);
+const DOCTOR_NEED_CODES = new Set([
+  "patient_compliance", "efficacy", "tolerability", "convenience", "price", "availability", "patient_acceptance", "other",
+]);
+const DOCTOR_REACTION_CODES = new Set(["interested", "neutral", "concerned", "no_discussion"]);
+const DOCTOR_CONCERN_CODES = new Set([
+  "price", "evidence", "competitor", "availability", "patient_acceptance", "safety", "other",
+]);
+const DOCTOR_COMMITMENT_CODES = new Set([
+  "will_try", "will_consider", "will_review", "requested_follow_up", "no_commitment", "other",
+]);
+const DOCTOR_CALL_OUTCOME_CODES = new Set(["positive", "neutral", "difficult"]);
+const DOCTOR_NEXT_ACTION_CODES = new Set([
+  "follow_up", "send_info", "resolve_objection", "check_pharmacy_stock", "discuss_another_product", "no_followup_needed",
+]);
+const TODAYS_OBJECTIVE_LABELS = {
+  introduce_product: "Introduce a product", identify_needs: "Identify needs",
+  address_price_objection: "Address price objection", secure_trial: "Secure patient trial",
+  follow_up_commitment: "Follow up on previous commitment", other: "Other",
+};
+const DOCTOR_COMMITMENT_LABELS = {
+  will_try: "Will try with appropriate patients", will_consider: "Will consider prescribing",
+  will_review: "Will review information", requested_follow_up: "Requested follow-up",
+  no_commitment: "No commitment", other: "Other",
+};
+const DOCTOR_NEXT_ACTION_LABELS = {
+  follow_up: "Follow up with doctor", send_info: "Send information", resolve_objection: "Resolve objection",
+  check_pharmacy_stock: "Check pharmacy stock", discuss_another_product: "Discuss another product",
+  no_followup_needed: "No follow-up needed",
+};
+
+// Extracts the doctor-visit structured fields from a request body, coercing
+// every enum-like field against its allow-list and never throwing — used by
+// both POST /api/visits and PATCH /api/visits/:id so the two routes can't
+// drift on what's accepted.
+function sanitizeDoctorVisitFields(body) {
+  const objective = DOCTOR_VISIT_OBJECTIVE_CODES.has(body.objective) ? body.objective : "";
+  const doctorNeeds = Array.isArray(body.doctorNeeds) ? body.doctorNeeds.filter((n) => DOCTOR_NEED_CODES.has(n)) : [];
+  const reaction = DOCTOR_REACTION_CODES.has(body.reaction) ? body.reaction : "";
+  const concern = reaction === "concerned" && DOCTOR_CONCERN_CODES.has(body.concern) ? body.concern : "";
+  const doctorInsight = typeof body.doctorInsight === "string" ? body.doctorInsight.trim() : "";
+  const commitment = DOCTOR_COMMITMENT_CODES.has(body.commitment) ? body.commitment : "";
+  const patientsToTryNum = Number(body.patientsToTry);
+  const patientsToTry = commitment === "will_try" && Number.isInteger(patientsToTryNum) && patientsToTryNum >= 0 ? patientsToTryNum : "";
+  const callOutcome = DOCTOR_CALL_OUTCOME_CODES.has(body.callOutcome) ? body.callOutcome : "";
+  const keyLearning = typeof body.keyLearning === "string" ? body.keyLearning.trim() : "";
+  const nextAction = DOCTOR_NEXT_ACTION_CODES.has(body.nextAction) ? body.nextAction : "";
+  return { objective, doctorNeeds, reaction, concern, doctorInsight, commitment, patientsToTry, callOutcome, keyLearning, nextAction };
+}
+
 function parseProduct(p) {
   return { ...p, qty: Number(p.qty) || 0, sold90: Number(p.sold90) || 0, price: Number(p.price) || 0 };
 }
@@ -468,9 +525,19 @@ function parseVisit(v) {
   if (v.itemsMentioned) {
     try { mentionedItems = JSON.parse(v.itemsMentioned); } catch { mentionedItems = []; }
   }
+  let doctorNeeds = [];
+  if (v.doctorNeeds) {
+    try { doctorNeeds = JSON.parse(v.doctorNeeds); } catch { doctorNeeds = []; }
+  }
   return {
     id: v.id, client: v.client, notes: v.notes, coords, time: v.time, repName: v.repName || "",
     mentionedItems, objectionTag: v.objectionTag || "",
+    // Doctor-visit redesign fields — always "" / [] / null on a pharmacy
+    // visit or any visit that predates this change.
+    objective: v.objective || "", doctorNeeds, reaction: v.reaction || "", concern: v.concern || "",
+    doctorInsight: v.doctorInsight || "", commitment: v.commitment || "",
+    patientsToTry: v.patientsToTry !== "" && v.patientsToTry != null && !Number.isNaN(Number(v.patientsToTry)) ? Number(v.patientsToTry) : null,
+    callOutcome: v.callOutcome || "", keyLearning: v.keyLearning || "", nextAction: v.nextAction || "",
   };
 }
 // Same formula as haversineKm in client/src/helpers.js — used here to check
@@ -516,6 +583,11 @@ function visitToRow(v) {
     repName: v.repName || "",
     itemsMentioned: v.mentionedItems && v.mentionedItems.length ? JSON.stringify(v.mentionedItems) : "",
     objectionTag: v.objectionTag || "",
+    objective: v.objective || "",
+    doctorNeeds: v.doctorNeeds && v.doctorNeeds.length ? JSON.stringify(v.doctorNeeds) : "",
+    reaction: v.reaction || "", concern: v.concern || "", doctorInsight: v.doctorInsight || "",
+    commitment: v.commitment || "", patientsToTry: v.patientsToTry ?? "",
+    callOutcome: v.callOutcome || "", keyLearning: v.keyLearning || "", nextAction: v.nextAction || "",
   };
 }
 
@@ -1322,6 +1394,7 @@ app.post("/api/visits", async (req, res) => {
       repName: req.repName || "",
       mentionedItems: Array.isArray(mentionedItems) ? mentionedItems : [],
       objectionTag: classifyObjection(notes),
+      ...sanitizeDoctorVisitFields(req.body),
     };
     const row = visitToRow(visit);
     await db.appendRow("Visits", row);
@@ -1436,6 +1509,20 @@ app.patch("/api/visits/:id", async (req, res) => {
     }
     if (Array.isArray(mentionedItems)) {
       patch.itemsMentioned = mentionedItems.length ? JSON.stringify(mentionedItems) : "";
+    }
+    // Doctor-visit redesign fields — only ever sent by the doctor branch of
+    // Check-In's Back/edit flow, but harmless (and unused) if a pharmacy
+    // edit ever included them. Same allow-list sanitizer as POST /api/visits.
+    const hasDoctorVisitFields = ["objective", "doctorNeeds", "reaction", "concern", "doctorInsight", "commitment", "patientsToTry", "callOutcome", "keyLearning", "nextAction"]
+      .some((k) => req.body[k] !== undefined);
+    if (hasDoctorVisitFields) {
+      const sanitized = sanitizeDoctorVisitFields(req.body);
+      patch.objective = sanitized.objective;
+      patch.doctorNeeds = sanitized.doctorNeeds.length ? JSON.stringify(sanitized.doctorNeeds) : "";
+      patch.reaction = sanitized.reaction; patch.concern = sanitized.concern;
+      patch.doctorInsight = sanitized.doctorInsight; patch.commitment = sanitized.commitment;
+      patch.patientsToTry = sanitized.patientsToTry;
+      patch.callOutcome = sanitized.callOutcome; patch.keyLearning = sanitized.keyLearning; patch.nextAction = sanitized.nextAction;
     }
     if (Object.keys(patch).length > 0) {
       await db.updateRowById("Visits", req.params.id, patch);
@@ -3005,6 +3092,118 @@ app.post("/api/doctors/visit-stats", async (req, res) => {
       stats[key].pendingSamples.push({ productName: s.productName });
     });
     res.json({ stats });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Doctor Memory / Timeline (doctor-visit redesign) ----------
+// Builds the "Last Conversation" card shown before a visit starts. Falls
+// back to nulls/blanks for a doctor with no visits, or whose only visits
+// predate the structured fields — the client renders those as "Legacy
+// note"/"No previous visits yet" rather than inventing anything.
+function buildLastVisitCard(v, nextFollowUp) {
+  if (!v) return null;
+  return {
+    date: v.time,
+    lastProductDiscussed: v.mentionedItems[0]?.name || null,
+    reaction: v.reaction || "",
+    insight: v.doctorInsight || v.keyLearning || "",
+    commitment: v.commitment || "",
+    nextAction: v.nextAction || "",
+    nextFollowUpDate: nextFollowUp?.dueDate || null,
+  };
+}
+
+// Aggregates a doctor's "memory" purely from structured visit/follow-up/
+// competitor-sighting history — never persisted, always recomputed, so
+// there's nothing for a rep to manually keep in sync.
+function buildDoctorMemory(visits, sightings, nextFollowUp) {
+  const interestMap = new Map(); // product name -> most recent mention time
+  visits.forEach((v) => v.mentionedItems.forEach((it) => {
+    if (!it?.name) return;
+    if (!interestMap.has(it.name) || new Date(v.time) > new Date(interestMap.get(it.name))) interestMap.set(it.name, v.time);
+  }));
+  const interests = [...interestMap.entries()].sort((a, b) => new Date(b[1]) - new Date(a[1])).map(([name]) => name);
+
+  const needMap = new Map();
+  visits.forEach((v) => v.doctorNeeds.forEach((n) => {
+    if (!needMap.has(n) || new Date(v.time) > new Date(needMap.get(n))) needMap.set(n, v.time);
+  }));
+  const needs = [...needMap.entries()].sort((a, b) => new Date(b[1]) - new Date(a[1])).map(([n]) => n);
+
+  // Two separate vocabularies kept as separately-labeled entries rather than
+  // merged into one code: the legacy free-text-derived objectionTag, and the
+  // new structured `concern` (only meaningful when reaction === "concerned").
+  const objections = [];
+  visits.forEach((v) => {
+    if (v.objectionTag) objections.push({ label: v.objectionTag, date: v.time, source: "notes" });
+    if (v.reaction === "concerned" && v.concern) objections.push({ label: v.concern, date: v.time, source: "structured" });
+  });
+  objections.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  const compMap = new Map();
+  sightings.forEach((s) => {
+    if (!s.competitorName) return;
+    const existing = compMap.get(s.competitorName);
+    if (!existing || new Date(s.date) > new Date(existing.date)) compMap.set(s.competitorName, s);
+  });
+  const competitors = [...compMap.values()].sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  const insightTexts = [];
+  visits.forEach((v) => { if (v.doctorInsight) insightTexts.push({ text: v.doctorInsight, date: v.time }); });
+  visits.forEach((v) => { if (v.keyLearning && v.keyLearning !== v.doctorInsight) insightTexts.push({ text: v.keyLearning, date: v.time }); });
+  const insights = insightTexts
+    .sort((a, b) => new Date(b.date) - new Date(a.date))
+    .filter((v, i, arr) => arr.findIndex((x) => x.text === v.text) === i)
+    .slice(0, 5);
+
+  // Prefer the rep's own free-text SMARTI goal on the active follow-up
+  // (richer, rep-authored); fall back to the last visit's categorical
+  // pre-call objective if no SMARTI text was ever set.
+  const currentObjective = (nextFollowUp?.smartiObjective || "").trim()
+    || (visits[0]?.objective ? TODAYS_OBJECTIVE_LABELS[visits[0].objective] || "" : "");
+
+  return {
+    interests, needs, objections, competitors, insights, currentObjective,
+    nextFollowUp: nextFollowUp ? { dueDate: nextFollowUp.dueDate, status: nextFollowUp.status, smartiObjective: nextFollowUp.smartiObjective || "" } : null,
+  };
+}
+
+// One combined read for the doctor Pre-Call brief + full Timeline — same
+// "one request, aggregate in memory" shape as /api/recall/categories and
+// /api/doctors/visit-stats above, rather than one Sheets call per section.
+app.get("/api/doctors/:name/profile", async (req, res) => {
+  try {
+    const name = String(req.params.name || "").toLowerCase().trim();
+    if (!name) return res.status(400).json({ error: "Doctor name is required." });
+    const doctors = await db.getAllRows("Doctors");
+    const doctor = doctors.find((d) => d.name.toLowerCase().trim() === name);
+    if (!doctor) return res.status(404).json({ error: "Doctor not found." });
+
+    const [visitRows, followUpRows, sightingRows] = await Promise.all([
+      db.getAllRows("Visits"), db.getAllRows("FollowUps"), db.getAllRows("CompetitorSightings"),
+    ]);
+    const visits = visitRows
+      .map(parseVisit)
+      .filter((v) => v.client.toLowerCase().trim() === name)
+      .sort((a, b) => new Date(b.time) - new Date(a.time))
+      .slice(0, 30);
+    const sightings = sightingRows
+      .filter((s) => String(s.client || "").toLowerCase().trim() === name)
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+    const nextFollowUp = followUpRows
+      .filter((f) => String(f.entityName || "").toLowerCase().trim() === name && f.entityType === "doctor"
+        && (f.status === "pending" || f.status === "reminded"))
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0] || null;
+
+    res.json({
+      doctor: { id: doctor.id, name: doctor.name, tier: doctor.tier || "" },
+      lastVisit: buildLastVisitCard(visits[0], nextFollowUp),
+      memory: buildDoctorMemory(visits, sightings, nextFollowUp),
+      timeline: visits,
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

@@ -54,6 +54,10 @@ export const api = {
   getClientVisitStats: (names) => request("/clients/visit-stats", { method: "POST", body: JSON.stringify({ names }) }),
   getVisitCadence: () => request("/visit-cadence"),
   getDoctorVisitStats: (names) => request("/doctors/visit-stats", { method: "POST", body: JSON.stringify({ names }) }),
+  // Doctor-visit redesign: one combined read for a single doctor's Pre-Call
+  // brief (lastVisit/memory) + full Timeline. Distinct from the batch
+  // getDoctorVisitStats above, which is only for DoctorsView's list rows.
+  getDoctorProfile: (name) => request(`/doctors/${encodeURIComponent(name)}/profile`),
   addProduct: (product) => request("/products", { method: "POST", body: JSON.stringify(product) }),
   removeProduct: (id) => request(`/products/${id}`, { method: "DELETE" }),
   addCatalogProduct: (product) => request("/product-catalog", { method: "POST", body: JSON.stringify(product) }),
