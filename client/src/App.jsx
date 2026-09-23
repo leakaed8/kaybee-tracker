@@ -532,7 +532,7 @@ export default function App() {
         {(role === "manager" || role === "rep") && <TabBtn active={tab === "cadence"} onClick={() => setTab("cadence")} icon={<History size={15} />} label="Visit Cadence" />}
         <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />
         <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />
-        <TabBtn active={tab === "recall"} onClick={() => setTab("recall")} icon={<Brain size={15} />} label="Recall" />
+        <TabBtn active={tab === "recall"} onClick={() => setTab("recall")} icon={<Brain size={15} />} label="Product Expert" />
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
       </nav>
 
@@ -629,10 +629,10 @@ export default function App() {
             )}
             {tab === "knowledge" && <KnowledgeView />}
             {tab === "training" && (
-              <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} products={products} />
+              <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
             )}
             {tab === "recall" && (
-              <RecallView role={role} repName={repName} repNames={repNames} />
+              <RecallView role={role} repName={repName} repNames={repNames} products={products} />
             )}
             {tab === "route" && role === "rep" && !isSupervisor && <RouteView clients={clients} doctors={doctors} />}
             {tab === "dashboard" && role === "manager" && (
@@ -7304,14 +7304,15 @@ function KnowledgeView() {
   );
 }
 
-// ---------- Training tab (curriculum reader + video/quiz tracker + studies) ----------
-// Three sub-tabs share one nav tab: the pre-existing static curriculum
-// reader (sales methodology, no tracking), the video+quiz tracker
-// (Cloudflare R2 videos, per-employee completion), and a manager-curated
-// list of study links reps can cite with doctors/pharmacists. The
-// curriculum stays hidden from supervisors exactly as before; Videos and
-// Studies are for every role, since neither is rep-only content.
-function TrainingTabView({ role, repName, isSupervisor, repNames, products }) {
+// ---------- Training tab (curriculum reader + video/quiz tracker) ----------
+// Two sub-tabs share one nav tab: the pre-existing static curriculum reader
+// (sales methodology, no tracking) and the video+quiz tracker (Cloudflare
+// R2 videos, per-employee completion). The curriculum stays hidden from
+// supervisors exactly as before. Studies moved out to Product Expert (the
+// former Recall tab) — Training is sales-skills content only now;
+// TrainingStudiesView itself is unchanged, just rendered from RecallView.jsx
+// instead of here.
+function TrainingTabView({ role, repName, isSupervisor, repNames }) {
   const [subTab, setSubTab] = useState(isSupervisor ? "videos" : "curriculum");
   const pillStyle = (active) => ({
     padding: "6px 14px", borderRadius: 16, fontSize: 12.5, fontWeight: 500,
@@ -7329,14 +7330,11 @@ function TrainingTabView({ role, repName, isSupervisor, repNames, products }) {
           <button onClick={() => setSubTab("callscript")} style={pillStyle(subTab === "callscript")}>Call Script</button>
         )}
         <button onClick={() => setSubTab("videos")} style={pillStyle(subTab === "videos")}>Videos</button>
-        <button onClick={() => setSubTab("studies")} style={pillStyle(subTab === "studies")}>Studies</button>
       </div>
       {subTab === "curriculum" && !isSupervisor ? (
         <TrainingCurriculumView />
       ) : subTab === "callscript" && !isSupervisor ? (
         <TrainingCallScriptView />
-      ) : subTab === "studies" ? (
-        <TrainingStudiesView role={role} products={products} />
       ) : (
         <TrainingVideosView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
       )}

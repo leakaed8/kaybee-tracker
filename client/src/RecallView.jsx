@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { api } from "./api.js";
 import { computeMetrics, fmtMoney, fmtDays } from "./competitorCalc.js";
+import { TrainingStudiesView } from "./TrainingView.jsx";
 
 // Kept local (not imported from App.jsx) to avoid a circular import between
 // the two files — same look as the rest of the app either way.
@@ -38,7 +39,43 @@ function MissingInfoBadge({ researchStatus, missingFields }) {
 // real content — once RecallIngredients/RecallClinicalEvidence/etc. are
 // populated (a separate, deliberate step), these same sections start
 // showing the real thing with no UI changes needed.
-export function RecallView({ role, repName, repNames }) {
+// Product Expert (renamed from "Recall" — the tab key stays "recall"
+// internally, same rename-the-label-only technique already used for
+// Check-In -> "Log Contact") groups four sub-tabs: Products is exactly the
+// category/ingredient/competitor browser this file always had, unchanged;
+// Studies is TrainingStudiesView re-routed here from the old Training tab
+// (same component, same data, no rewrite); Certifications and Rep Q&A are
+// new features (see CertificationsView.jsx / RepQAView.jsx).
+export function RecallView({ role, repName, repNames, products }) {
+  const [subTab, setSubTab] = useState("products");
+  const pillStyle = (active) => ({
+    padding: "6px 14px", borderRadius: 16, fontSize: 12.5, fontWeight: 500,
+    border: active ? "1px solid #1F2A24" : "1px solid #E5DFD3",
+    background: active ? "#1F2A24" : "#fff", color: active ? "#FAF7F2" : "#5B5445",
+  });
+
+  return (
+    <div>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 4px" }}>Product Expert</h2>
+      <p style={{ fontSize: 13, color: "#8A8272", margin: "0 0 18px", fontStyle: "italic" }}>
+        Know the product. Know the evidence. Know how to answer.
+      </p>
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+        <button onClick={() => setSubTab("products")} style={pillStyle(subTab === "products")}>Products</button>
+        <button onClick={() => setSubTab("studies")} style={pillStyle(subTab === "studies")}>Studies</button>
+      </div>
+
+      {subTab === "products" && <RecallProductsPanel role={role} repNames={repNames} />}
+      {subTab === "studies" && <TrainingStudiesView role={role} products={products} />}
+    </div>
+  );
+}
+
+// Exactly what RecallView rendered before this reorganization — the
+// category list -> category detail -> assignments flow — unchanged, just
+// wrapped under the new "Products" pill instead of being the whole tab.
+function RecallProductsPanel({ role, repNames }) {
   const [categories, setCategories] = useState([]);
   const [myAssignedCategoryIds, setMyAssignedCategoryIds] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -61,11 +98,6 @@ export function RecallView({ role, repName, repNames }) {
 
   return (
     <div>
-      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 4px" }}>Recall</h2>
-      <p style={{ fontSize: 13, color: "#8A8272", margin: "0 0 18px", fontStyle: "italic" }}>
-        Learn the science before the call.
-      </p>
-
       {loading && <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>}
       {error && <div style={{ fontSize: 12.5, color: "#B33A3A", marginBottom: 12 }}>{error}</div>}
 
