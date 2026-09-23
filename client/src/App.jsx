@@ -516,7 +516,10 @@ export default function App() {
         {role === "manager" && <TabBtn active={tab === "outreach"} onClick={() => setTab("outreach")} icon={<MessageCircle size={15} />} label="Outreach" />}
         {role === "manager" && <TabBtn active={tab === "broadcast"} onClick={() => setTab("broadcast")} icon={<Megaphone size={15} />} label="Broadcast" />}
         {role === "rep" && <TabBtn active={tab === "checkin"} onClick={() => setTab("checkin")} icon={<MapPin size={15} />} label="Log Contact" />}
-        {role === "rep" && !isSupervisor && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
+        {/* Route tab hidden for now (temporary — flip this back to
+            role === "rep" && !isSupervisor to re-enable). RouteView and its
+            render block below are untouched, so this is a one-line revert. */}
+        {false && role === "rep" && !isSupervisor && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
         <TabBtn active={tab === "stock"} onClick={() => setTab("stock")} icon={<Boxes size={15} />} label="Stock" />
         <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />
         {!supplementStoresOnly && !medRepOnly && <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />}
