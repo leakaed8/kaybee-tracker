@@ -8098,6 +8098,11 @@ function RepPerformanceCard({
 }) {
   const [expandedClient, setExpandedClient] = useState(null);
   const [markingId, setMarkingId] = useState(null);
+  // Minimized by default — a rep card only shows the at-a-glance summary
+  // (progress bar + 5 dimensions) until a manager asks for more, instead of
+  // dumping Visit Breakdown/Territory Coverage/Business Results/By-week/
+  // Pharmacies-visited open for every rep at once.
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
@@ -8252,6 +8257,35 @@ function RepPerformanceCard({
       </div>
       <div className="kb-font-mono" style={{ fontSize: 10.5, color: "#8A8272", marginBottom: 14 }}>Day {dayOfMonth} of {daysInMonth} ({pctOfMonth}% of month elapsed)</div>
 
+      {/* 5 separate performance dimensions (Section 8) — never one blended
+          score. Only shown for a single rep, not the "All reps combined" card.
+          This plus the progress bar above is the whole at-a-glance summary;
+          everything else is behind the toggle below. */}
+      {dims && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+          {[["Activity", dims.activity], ["Coverage", dims.coverage], ["Quality", dims.quality], ["Follow-up", dims.followup], ["Results", dims.results]].map(([label, ok]) => (
+            <span key={label} style={{
+              fontSize: 11.5, fontWeight: 600, borderRadius: 999, padding: "5px 12px",
+              background: ok === null ? "#F0EBE0" : ok ? "#EAF3EC" : "#FBF0F0",
+              color: ok === null ? "#8A8272" : ok ? "#2E5C42" : "#8A3030",
+              border: `1px solid ${ok === null ? "#E5DFD3" : ok ? "#C7DFCE" : "#E5B8B0"}`,
+            }}>
+              {ok === null ? "○" : ok ? "✓" : "⚠"} {label}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <button
+        type="button"
+        onClick={() => setDetailsOpen((v) => !v)}
+        style={{ background: "none", border: "none", color: "#5B7A93", fontSize: 12, fontWeight: 500, padding: 0, marginBottom: detailsOpen ? 14 : 0, cursor: "pointer" }}
+      >
+        {detailsOpen ? "▾ Hide details" : "▸ Show details"}
+      </button>
+
+      {detailsOpen && (
+      <>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 10, marginBottom: 14 }}>
         <StatCard label="In-person visits" value={visitsThisMonth} color="#4C7A5E" icon={<MapPin size={16} />} />
         <StatCard label="Unique contacts seen" value={uniqueClients} color="#C17817" icon={<Users size={16} />} />
@@ -8265,23 +8299,6 @@ function RepPerformanceCard({
       <div className="kb-font-mono" style={{ fontSize: 10.5, color: "#8A8272", marginBottom: 14 }}>
         {revenuePct}% of ${monthlyRevenueTarget.toLocaleString()} revenue target
       </div>
-
-      {/* 5 separate performance dimensions (Section 8) — never one blended
-          score. Only shown for a single rep, not the "All reps combined" card. */}
-      {dims && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
-          {[["Activity", dims.activity], ["Coverage", dims.coverage], ["Quality", dims.quality], ["Follow-up", dims.followup], ["Results", dims.results]].map(([label, ok]) => (
-            <span key={label} style={{
-              fontSize: 11.5, fontWeight: 600, borderRadius: 999, padding: "5px 12px",
-              background: ok === null ? "#F0EBE0" : ok ? "#EAF3EC" : "#FBF0F0",
-              color: ok === null ? "#8A8272" : ok ? "#2E5C42" : "#8A3030",
-              border: `1px solid ${ok === null ? "#E5DFD3" : ok ? "#C7DFCE" : "#E5B8B0"}`,
-            }}>
-              {ok === null ? "○" : ok ? "✓" : "⚠"} {label}
-            </span>
-          ))}
-        </div>
-      )}
 
       {/* Visit Breakdown (Section 10) — the Visit-vs-Contact distinction must
           be visually obvious. */}
@@ -8419,6 +8436,8 @@ function RepPerformanceCard({
             })}
           </div>
         </>
+      )}
+      </>
       )}
     </div>
   );
