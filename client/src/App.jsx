@@ -5,14 +5,14 @@ import autoTable from "jspdf-autotable";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {
-  LineChart, Line, BarChart, Bar, RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
+  LineChart, Line, BarChart, Bar, ComposedChart, RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend,
 } from "recharts";
 import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
   TrendingDown, TrendingUp, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
   Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar as RadarIcon, Search, BookOpen,
-  GraduationCap, Boxes, History, Brain, ClipboardList, CheckCircle2, ChevronDown, Phone,
+  GraduationCap, Boxes, History, Brain, ClipboardList, CheckCircle2, ChevronDown, Phone, Bell,
 } from "lucide-react";
 import { api } from "./api.js";
 import { TrainingVideosView, TrainingStudiesView } from "./TrainingView.jsx";
@@ -631,7 +631,9 @@ export default function App() {
               <RecallView role={role} repName={repName} repNames={repNames} />
             )}
             {tab === "route" && role === "rep" && !isSupervisor && <RouteView clients={clients} doctors={doctors} />}
-            {tab === "dashboard" && role === "manager" && <DashboardView zoned={zoned} />}
+            {tab === "dashboard" && role === "manager" && (
+              <DashboardView zoned={zoned} clients={clients} doctors={doctors} repNames={repNames} settings={settings} onNavigate={setTab} />
+            )}
             {tab === "orders" && (role === "manager" || isSupervisor) && (
               <OrdersTabView
                 role={role}
@@ -7842,50 +7844,436 @@ function RouteView({ clients, doctors }) {
   );
 }
 
-function DashboardView({ zoned }) {
-  const urgent = zoned.filter((p) => p.zone.key === "red");
-  const slow = zoned.filter((p) => p.slowMover);
-  const watch = zoned.filter((p) => p.zone.key === "yellow");
-  const atRisk = zoned.filter((p) => p.atRisk);
+// ---------- Manager Dashboard (business-overview redesign) ----------
+// Scoped entirely to this file section — DASH_* names are deliberately
+// distinct from the existing StatCard/CHART_COLORS etc. used by every other
+// tab, so nothing here is reachable from (or changes the behavior of) any
+// other view. Palette follows the reference design the business owner
+// supplied; every number below is computed from real Visits/Orders/
+// FollowUps/Clients/Doctors data fetched by this component — nothing is
+// hard-coded or fabricated. Where a metric has no reliable real signal
+// (e.g. no rep-name field on a manager session), it's simply left out
+// rather than invented.
+const DASH = {
+  bg: "#F7F4EC", card: "#FFFDFC", border: "#E5DFD2",
+  text: "#17251F", sub: "#817D72",
+  burgundy: "#8F2435", green: "#356F5A", gold: "#C58B25",
+};
 
-  // Fetched once when this tab is opened (manager-only, not polled) instead
-  // of the whole visits history riding along in every 30s bootstrap poll —
-  // the recent-8 list plus a true total count, not the full table.
-  const [recentVisits, setRecentVisits] = useState([]);
-  const [totalVisits, setTotalVisits] = useState(0);
+function DashDelta({ pct, suffix = "vs last month" }) {
+  if (pct === null || pct === undefined || !Number.isFinite(pct)) return null;
+  const positive = pct >= 0;
+  return (
+    <div style={{ fontSize: 11.5, fontWeight: 600, color: positive ? DASH.green : DASH.burgundy, marginTop: 2 }}>
+      {positive ? "↑" : "↓"} {Math.abs(pct)}% {suffix}
+    </div>
+  );
+}
+
+// Compact KPI tile used inside every Dashboard section — deliberately
+// smaller/plainer than the existing app-wide StatCard so a section can hold
+// 3-4 of these without feeling like a wall of boxes.
+function DashKpi({ value, label, delta, deltaSuffix }) {
+  return (
+    <div style={{ background: DASH.card, border: `1px solid ${DASH.border}`, borderRadius: 10, padding: "12px 14px" }}>
+      <div className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, color: DASH.text }}>{value}</div>
+      <div style={{ fontSize: 11.5, color: DASH.sub, marginTop: 2 }}>{label}</div>
+      <DashDelta pct={delta} suffix={deltaSuffix} />
+    </div>
+  );
+}
+
+function DashProgressBar({ pct, color = DASH.green }) {
+  const clamped = Math.max(0, Math.min(100, pct || 0));
+  return (
+    <div style={{ height: 6, background: "#EFEAE0", borderRadius: 3, overflow: "hidden" }}>
+      <div style={{ height: "100%", width: `${clamped}%`, background: color, transition: "width .3s" }} />
+    </div>
+  );
+}
+
+const DASH_STATUS_STYLES = {
+  OPEN: { bg: "#FBEDEC", color: "#8F2435" },
+  "IN PROGRESS": { bg: "#FBF3E4", color: "#8A6417" },
+  COMPLETED: { bg: "#EAF1EC", color: "#356F5A" },
+};
+function DashStatusPill({ status }) {
+  const s = DASH_STATUS_STYLES[status] || DASH_STATUS_STYLES.OPEN;
+  return (
+    <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: 0.3, background: s.bg, color: s.color, borderRadius: 999, padding: "3px 10px", whiteSpace: "nowrap" }}>
+      {status}
+    </span>
+  );
+}
+
+// Section shell — icon badge + serif heading + subtitle + optional "View
+// details" jump to an existing tab (via onNavigate, i.e. the same setTab
+// the app's own nav already uses — no new navigation concept introduced).
+function DashSection({ icon, title, subtitle, onViewDetails, children }) {
+  return (
+    <div style={{ background: DASH.card, border: `1px solid ${DASH.border}`, borderRadius: 14, padding: 20, boxShadow: "0 1px 2px rgba(23,37,31,0.03)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16, gap: 10 }}>
+        <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+          <div style={{ width: 34, height: 34, borderRadius: 10, background: DASH.burgundy, color: "#FFFDFC", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            {icon}
+          </div>
+          <div>
+            <div className="kb-font-display" style={{ fontSize: 16, fontWeight: 600, color: DASH.text }}>{title}</div>
+            <div style={{ fontSize: 12, color: DASH.sub, marginTop: 1 }}>{subtitle}</div>
+          </div>
+        </div>
+        {onViewDetails && (
+          <button type="button" onClick={onViewDetails} style={{ background: "none", border: "none", color: DASH.burgundy, fontSize: 12, fontWeight: 600, padding: 0, whiteSpace: "nowrap", cursor: "pointer" }}>
+            View details →
+          </button>
+        )}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate }) {
+  const [visits, setVisits] = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [followUps, setFollowUps] = useState([]);
+  const [repTargetsByName, setRepTargetsByName] = useState({});
+  const [loading, setLoading] = useState(true);
+
+  // Same "fetch once when this tab opens" pattern already used by
+  // PerformanceView/LocationsView elsewhere in this app — purely additive
+  // reads, nothing here writes anything.
   useEffect(() => {
-    api.getVisits({ limit: 8 }).then((data) => {
-      setRecentVisits(data.visits || []);
-      setTotalVisits(data.total || 0);
-    }).catch(() => {});
+    Promise.all([
+      api.getVisits({ all: true }).catch(() => ({ visits: [] })),
+      api.getOrders({ all: true }).catch(() => ({ orders: [] })),
+      api.getFollowUps({}).catch(() => ({ followups: [] })),
+      api.getRepTargets().catch(() => ({ targets: [] })),
+    ]).then(([visitsData, ordersData, followUpsData, targetsData]) => {
+      setVisits(visitsData.visits || []);
+      setOrders(ordersData.orders || []);
+      setFollowUps(followUpsData.followups || []);
+      const byName = {};
+      (targetsData.targets || []).forEach((t) => { byName[t.repName] = t; });
+      setRepTargetsByName(byName);
+    }).finally(() => setLoading(false));
   }, []);
 
-  return (
-    <div>
-      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Team overview</h2>
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const monthLabel = now.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10, marginBottom: 24 }}>
-        <StatCard label="Urgent expiry" value={urgent.length} color="#B33A3A" icon={<AlertTriangle size={16} />} />
-        <StatCard label="Plan-ahead window" value={watch.length} color="#D9A441" icon={<Clock size={16} />} />
-        <StatCard label="At risk of not selling through" value={atRisk.length} color="#C17817" icon={<AlertTriangle size={16} />} />
-        <StatCard label="Slow movers" value={slow.length} color="#6B7280" icon={<TrendingDown size={16} />} />
-        <StatCard label="Visits logged" value={totalVisits} color="#4C7A5E" icon={<MapPin size={16} />} />
+  const monthVisits = visits.filter((v) => new Date(v.time) >= monthStart);
+  const lastMonthVisits = visits.filter((v) => new Date(v.time) >= lastMonthStart && new Date(v.time) < monthStart);
+  const monthOrders = orders.filter((o) => new Date(o.date) >= monthStart);
+  const lastMonthOrders = orders.filter((o) => new Date(o.date) >= lastMonthStart && new Date(o.date) < monthStart);
+  const pctChange = (curr, prev) => (prev > 0 ? Math.round(((curr - prev) / prev) * 100) : null);
+
+  // ---- Section 1: Sales Performance (real Orders data) ----
+  const revenueThisMonth = monthOrders.reduce((s, o) => s + Number(o.netTotal ?? o.total ?? 0), 0);
+  const revenueLastMonth = lastMonthOrders.reduce((s, o) => s + Number(o.netTotal ?? o.total ?? 0), 0);
+  const revenueTarget = repNames.reduce((sum, name) => {
+    const t = repTargetsByName[name];
+    const target = t?.revenueTarget != null && t.revenueTarget !== "" ? Number(t.revenueTarget) : Number(settings?.monthlyRevenueTarget || 0);
+    return sum + target;
+  }, 0);
+  const targetAchievedPct = revenueTarget > 0 ? Math.round((revenueThisMonth / revenueTarget) * 100) : null;
+  const ordersCount = monthOrders.length;
+  const avgOrderValue = ordersCount ? Math.round(revenueThisMonth / ordersCount) : 0;
+
+  // ---- Section 2: Field Activity (Visit ≠ Contact, same distinction as Performance) ----
+  const inPersonVisits = monthVisits.filter(isInPersonVisit).length;
+  const remoteContacts = monthVisits.length - inPersonVisits;
+  const lastMonthInPerson = lastMonthVisits.filter(isInPersonVisit).length;
+  const uniqueCustomersThisMonth = new Set(monthVisits.map((v) => v.client.toLowerCase().trim())).size;
+  const lastMonthUnique = new Set(lastMonthVisits.map((v) => v.client.toLowerCase().trim())).size;
+  const allAccounts = [...clients, ...doctors];
+  const visitedInPersonNamesThisMonth = new Set(monthVisits.filter(isInPersonVisit).map((v) => v.client.toLowerCase().trim()));
+  const territoryCoveragePct = allAccounts.length
+    ? Math.round((allAccounts.filter((a) => visitedInPersonNamesThisMonth.has(a.name.toLowerCase().trim())).length / allAccounts.length) * 100)
+    : null;
+
+  // ---- Section 3: Customer Health ----
+  // accountStatusList/TIER_CADENCE are the exact same helpers ClientsView/
+  // DoctorsView/PerformanceView already use for "overdue" — reused here
+  // rather than reinventing a second definition of "active."
+  const accountsWithStatus = accountStatusList(clients, doctors, visits);
+  const activeCustomersCount = accountsWithStatus.filter((a) => !a.overdue).length;
+  const inactiveCustomersCount = accountsWithStatus.filter((a) => a.overdue).length;
+  // "New customers" = accounts whose first-ever order fell in this calendar
+  // month — the only reliably-timestamped "became a real customer" signal
+  // that exists in the data today (Clients/Doctors have no createdAt field).
+  const firstOrderDateByClient = new Map();
+  [...orders].sort((a, b) => new Date(a.date) - new Date(b.date)).forEach((o) => {
+    const key = o.clientName.toLowerCase().trim();
+    if (!firstOrderDateByClient.has(key)) firstOrderDateByClient.set(key, o.date);
+  });
+  const newCustomersThisMonth = [...firstOrderDateByClient.values()].filter((d) => new Date(d) >= monthStart).length;
+  const tierFreq = settings?.tierVisitFrequency || { A: { perMonth: 2 }, B: { perMonth: 1 }, C: { perMonth: 0.4 } };
+  const visitCountThisMonthByName = (name) => monthVisits.filter((v) => isInPersonVisit(v) && v.client.toLowerCase().trim() === name.toLowerCase().trim()).length;
+  const priorityCompliantCount = allAccounts.filter((a) => visitCountThisMonthByName(a.name) >= Math.max(1, Math.ceil(tierFreq[a.tier || "B"]?.perMonth || 1))).length;
+  const priorityCoveragePct = allAccounts.length ? Math.round((priorityCompliantCount / allAccounts.length) * 100) : null;
+
+  // ---- Section 4: Product Performance (zoned = same expiry/slow-mover data StockView/ExpiryView already compute) ----
+  const urgentExpiry = zoned.filter((p) => p.zone.key === "red");
+  const slowMovers = zoned.filter((p) => p.slowMover);
+  const productRevenueFor = (rangeOrders) => {
+    const map = {};
+    rangeOrders.forEach((o) => (o.items || []).forEach((it) => {
+      if (it.isFree) return;
+      map[it.name] = (map[it.name] || 0) + Number(it.qty || 0) * Number(it.unitPrice || 0);
+    }));
+    return map;
+  };
+  const thisMonthProductRevenue = productRevenueFor(monthOrders);
+  const lastMonthProductRevenue = productRevenueFor(lastMonthOrders);
+  const topProducts = Object.entries(thisMonthProductRevenue).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const decliningProducts = Object.entries(thisMonthProductRevenue)
+    .filter(([name, rev]) => lastMonthProductRevenue[name] && rev < lastMonthProductRevenue[name])
+    .map(([name, rev]) => ({ name, pctChange: pctChange(rev, lastMonthProductRevenue[name]) }));
+  const avgDecliningPct = decliningProducts.length
+    ? Math.round(decliningProducts.reduce((s, p) => s + p.pctChange, 0) / decliningProducts.length)
+    : 0;
+
+  // ---- Section 5: Opportunities & Follow-ups ----
+  const openFollowUpsCount = followUps.filter((f) => f.status === "pending").length;
+  const overdueFollowUpsCount = followUps.filter((f) => f.status === "pending" && new Date(f.dueDate) < now).length;
+  // "Open objection" = a customer whose MOST RECENT visit left a concerned
+  // reaction with nothing more recent to supersede it — the same "latest
+  // state wins" logic the Doctor Memory feature already uses elsewhere.
+  const latestVisitByClient = new Map();
+  visits.forEach((v) => {
+    const key = v.client.toLowerCase().trim();
+    if (!latestVisitByClient.has(key) || new Date(v.time) > new Date(latestVisitByClient.get(key).time)) latestVisitByClient.set(key, v);
+  });
+  const openObjectionsCount = [...latestVisitByClient.values()].filter((v) => v.reaction === "concerned").length;
+  // "Reorder opportunity" = a client with a past order whose most recent
+  // order is more than REORDER_DUE_DAYS old — a fixed, documented threshold
+  // (same style as TIER_CADENCE's fixed day windows), not a prediction.
+  const REORDER_DUE_DAYS = 30;
+  const lastOrderDateByClient = new Map();
+  orders.forEach((o) => {
+    const key = o.clientName.toLowerCase().trim();
+    if (!lastOrderDateByClient.has(key) || new Date(o.date) > new Date(lastOrderDateByClient.get(key))) lastOrderDateByClient.set(key, o.date);
+  });
+  const reorderOpportunitiesCount = [...lastOrderDateByClient.values()].filter((d) => (now - new Date(d)) / 86400000 > REORDER_DUE_DAYS).length;
+
+  // ---- Section 6: Recent Important Activity (replaces the old raw "recent visits" list) ----
+  const RECENT_ACTIVITY_WINDOW_DAYS = 21;
+  const recentCutoff = new Date(now.getTime() - RECENT_ACTIVITY_WINDOW_DAYS * 86400000);
+  const newAccountOrderIds = new Set(orders.filter((o) => firstOrderDateByClient.get(o.clientName.toLowerCase().trim()) === o.date).map((o) => o.id));
+  const activityEvents = [];
+  visits.filter((v) => new Date(v.time) >= recentCutoff).forEach((v) => {
+    if (v.reaction === "concerned") {
+      activityEvents.push({ name: v.client, desc: `Objection: ${optionLabel(CONCERN_OPTIONS, v.concern) || v.objectionTag || "Concern raised"}`, date: v.time, status: "OPEN", icon: doctors.some((d) => d.name === v.client) ? "doctor" : "pharmacy" });
+    } else if (v.commitment === "will_try" || v.commitment === "will_consider") {
+      activityEvents.push({ name: v.client, desc: v.commitment === "will_try" ? "Will try with patients" : "Interested in new product", date: v.time, status: "IN PROGRESS", icon: "doctor" });
+    }
+  });
+  monthOrders.concat(lastMonthOrders).filter((o) => new Date(o.date) >= recentCutoff).forEach((o) => {
+    activityEvents.push({
+      name: o.clientName,
+      desc: newAccountOrderIds.has(o.id) ? "New customer — first order" : "Placed reorder",
+      date: o.date, status: "COMPLETED", icon: "pharmacy",
+    });
+  });
+  followUps.filter((f) => f.status === "pending" && new Date(f.dueDate) < now && new Date(f.dueDate) >= recentCutoff).forEach((f) => {
+    activityEvents.push({ name: f.entityName, desc: "Follow-up overdue", date: f.dueDate, status: "OPEN", icon: f.entityType === "doctor" ? "doctor" : "pharmacy" });
+  });
+  activityEvents.sort((a, b) => new Date(b.date) - new Date(a.date));
+  const recentActivity = activityEvents.slice(0, 8);
+
+  // ---- Section 7: Business Trend (last 3 months, real data) ----
+  const TREND_MONTHS = 3;
+  const trendData = Array.from({ length: TREND_MONTHS }, (_, i) => {
+    const d = new Date(now.getFullYear(), now.getMonth() - (TREND_MONTHS - 1 - i), 1);
+    const nextD = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+    const monthOrdersRange = orders.filter((o) => new Date(o.date) >= d && new Date(o.date) < nextD);
+    const monthVisitsRange = visits.filter((v) => new Date(v.time) >= d && new Date(v.time) < nextD);
+    return {
+      month: d.toLocaleDateString("en-GB", { month: "short" }),
+      Revenue: Math.round(monthOrdersRange.reduce((s, o) => s + Number(o.netTotal ?? o.total ?? 0), 0)),
+      Orders: monthOrdersRange.length,
+      "In-person visits": monthVisitsRange.filter(isInPersonVisit).length,
+    };
+  });
+
+  if (loading) {
+    return <div style={{ fontSize: 12.5, color: DASH.sub }}>Loading business overview…</div>;
+  }
+
+  return (
+    <div style={{ background: DASH.bg, margin: "-24px", padding: 24, borderRadius: 0 }}>
+      {/* Dashboard-local page header — the shared app header/nav above this
+          is completely untouched; this is just styled content inside the
+          Dashboard tab itself. No manager-name field exists anywhere in the
+          data model (session carries no name for role="manager"), so the
+          greeting stays generic rather than inventing one. */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
+        <div>
+          <div className="kb-font-display" style={{ fontSize: 22, fontWeight: 600, color: DASH.text }}>Good morning</div>
+          <div style={{ fontSize: 12.5, color: DASH.sub, marginTop: 2 }}>Here's your business overview</div>
+        </div>
+        <div style={{ fontSize: 12.5, color: DASH.sub, background: DASH.card, border: `1px solid ${DASH.border}`, borderRadius: 8, padding: "8px 14px" }}>
+          {monthLabel}
+        </div>
       </div>
 
-      <h3 style={{ fontSize: 14, fontWeight: 600, margin: "0 0 10px", color: "#8A8272" }}>Recent rep visits</h3>
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {recentVisits.map((v) => (
-          <div key={v.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div>
-              <div style={{ fontWeight: 600, fontSize: 13.5 }}>{v.client}</div>
-              {v.notes && <div style={{ fontSize: 12, color: "#8A8272", marginTop: 2 }}>{v.notes}</div>}
-            </div>
-            <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", whiteSpace: "nowrap" }}>
-              {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}
-            </span>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(360px,1fr))", gap: 16 }}>
+
+        <DashSection icon={<TrendingUp size={17} />} title="Sales Performance" subtitle="Revenue, orders and growth" onViewDetails={() => onNavigate("orders")}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(110px,1fr))", gap: 10 }}>
+            <DashKpi value={`$${revenueThisMonth.toLocaleString()}`} label="Revenue this month" delta={pctChange(revenueThisMonth, revenueLastMonth)} />
+            {revenueTarget > 0 && <DashKpi value={`$${revenueTarget.toLocaleString()}`} label="Target" />}
+            {targetAchievedPct !== null && (
+              <div style={{ background: DASH.card, border: `1px solid ${DASH.border}`, borderRadius: 10, padding: "12px 14px" }}>
+                <div className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, color: DASH.green }}>{targetAchievedPct}%</div>
+                <div style={{ fontSize: 11.5, color: DASH.sub, margin: "2px 0 6px" }}>Target achieved</div>
+                <DashProgressBar pct={targetAchievedPct} />
+              </div>
+            )}
+            <DashKpi value={ordersCount} label="Orders" delta={pctChange(ordersCount, lastMonthOrders.length)} />
+            <DashKpi value={`$${avgOrderValue.toLocaleString()}`} label="Avg. order value" />
           </div>
-        ))}
-        {recentVisits.length === 0 && <EmptyState text="No visits logged by reps yet." />}
+        </DashSection>
+
+        <DashSection icon={<MapPin size={17} />} title="Field Activity" subtitle="Visits, contacts and coverage" onViewDetails={() => onNavigate("performance")}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(110px,1fr))", gap: 10 }}>
+            <DashKpi value={inPersonVisits} label="In-person visits" delta={pctChange(inPersonVisits, lastMonthInPerson)} />
+            <DashKpi value={remoteContacts} label="Remote contacts" delta={pctChange(remoteContacts, lastMonthVisits.length - lastMonthInPerson)} />
+            <DashKpi value={uniqueCustomersThisMonth} label="Unique customers" delta={pctChange(uniqueCustomersThisMonth, lastMonthUnique)} />
+            {territoryCoveragePct !== null && (
+              <div style={{ background: DASH.card, border: `1px solid ${DASH.border}`, borderRadius: 10, padding: "12px 14px" }}>
+                <div className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, color: DASH.text }}>{territoryCoveragePct}%</div>
+                <div style={{ fontSize: 11.5, color: DASH.sub, margin: "2px 0 6px" }}>Territory coverage</div>
+                <DashProgressBar pct={territoryCoveragePct} />
+              </div>
+            )}
+          </div>
+        </DashSection>
+
+        <DashSection icon={<Users size={17} />} title="Customer Health" subtitle="Customer base and engagement" onViewDetails={() => onNavigate("clients")}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(110px,1fr))", gap: 10 }}>
+            <DashKpi value={activeCustomersCount} label="Active customers" />
+            <DashKpi value={newCustomersThisMonth} label="New customers" />
+            <DashKpi value={inactiveCustomersCount} label="Inactive / lost" />
+            {priorityCoveragePct !== null && (
+              <div style={{ background: DASH.card, border: `1px solid ${DASH.border}`, borderRadius: 10, padding: "12px 14px" }}>
+                <div className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, color: DASH.gold }}>{priorityCoveragePct}%</div>
+                <div style={{ fontSize: 11.5, color: DASH.sub, margin: "2px 0 6px" }}>Priority customer coverage</div>
+                <DashProgressBar pct={priorityCoveragePct} color={DASH.gold} />
+              </div>
+            )}
+          </div>
+        </DashSection>
+
+        <DashSection icon={<Boxes size={17} />} title="Product Performance" subtitle="Top products, slow movers and expiry risk" onViewDetails={() => onNavigate("stock")}>
+          <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 14 }}>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: DASH.sub, textTransform: "uppercase", marginBottom: 8 }}>Top products</div>
+              {topProducts.length === 0 ? (
+                <div style={{ fontSize: 12, color: DASH.sub }}>No orders yet this month.</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {topProducts.map(([name, rev], i) => (
+                    <div key={name} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
+                      <span>{i + 1}. {name}</span>
+                      <span className="kb-font-mono" style={{ color: DASH.sub }}>${Math.round(rev).toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: DASH.sub, textTransform: "uppercase" }}>Declining</div>
+                <div className="kb-font-display" style={{ fontSize: 18, fontWeight: 600, color: DASH.burgundy }}>{decliningProducts.length}</div>
+                {decliningProducts.length > 0 && <div style={{ fontSize: 11, color: DASH.burgundy }}>{avgDecliningPct}% avg decrease</div>}
+              </div>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: DASH.sub, textTransform: "uppercase" }}>Slow movers</div>
+                <div className="kb-font-display" style={{ fontSize: 18, fontWeight: 600, color: DASH.text }}>{slowMovers.length}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: DASH.sub, textTransform: "uppercase" }}>Expiry risk</div>
+                <button type="button" onClick={() => onNavigate("expiry")} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+                  <span className="kb-font-display" style={{ fontSize: 18, fontWeight: 600, color: DASH.burgundy }}>{urgentExpiry.length}</span>
+                  <span style={{ fontSize: 11, color: DASH.burgundy, fontWeight: 600 }}>View stock →</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </DashSection>
+
+        <DashSection icon={<ClipboardList size={17} />} title="Opportunities & Follow-ups" subtitle="Turn opportunities into business" onViewDetails={() => onNavigate("performance")}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(110px,1fr))", gap: 10 }}>
+            <DashKpi value={openFollowUpsCount} label="Open follow-ups" />
+            <DashKpi value={overdueFollowUpsCount} label="Overdue follow-ups" />
+            <DashKpi value={openObjectionsCount} label="Open objections" />
+            <DashKpi value={reorderOpportunitiesCount} label="Reorder opportunities" />
+          </div>
+        </DashSection>
+
+        <DashSection icon={<Bell size={17} />} title="Recent Important Activity" subtitle="Key events from the field">
+          {recentActivity.length === 0 ? (
+            <EmptyState text="No notable events in the last few weeks." />
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {recentActivity.map((e, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: i < recentActivity.length - 1 ? `1px solid ${DASH.border}` : "none" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: DASH.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.name}</div>
+                    <div style={{ fontSize: 11.5, color: DASH.sub }}>{e.desc}</div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                    <span className="kb-font-mono" style={{ fontSize: 11, color: DASH.sub }}>{new Date(e.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}</span>
+                    <DashStatusPill status={e.status} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </DashSection>
+
+        <DashSection icon={<TrendingUp size={17} />} title="Business Trend" subtitle="Last 3 months comparison">
+          <ResponsiveContainer width="100%" height={220}>
+            <ComposedChart data={trendData}>
+              <CartesianGrid strokeDasharray="3 3" stroke={DASH.border} vertical={false} />
+              <XAxis dataKey="month" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
+              <YAxis yAxisId="left" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} width={40} />
+              <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} width={30} />
+              <Tooltip />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Bar yAxisId="left" dataKey="Revenue" fill={DASH.green} radius={[4, 4, 0, 0]} barSize={28} />
+              <Line yAxisId="right" type="monotone" dataKey="Orders" stroke={DASH.gold} strokeWidth={2} dot={{ r: 3 }} />
+              <Line yAxisId="right" type="monotone" dataKey="In-person visits" stroke={DASH.burgundy} strokeWidth={2} dot={{ r: 3 }} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </DashSection>
+
+        <DashSection icon={<LayoutDashboard size={17} />} title="Quick Links" subtitle="Go to key sections">
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 8 }}>
+            {[
+              { label: "View Performance", tab: "performance" },
+              { label: "View Pharmacies", tab: "clients" },
+              { label: "View Doctors", tab: "doctors" },
+              { label: "View Orders", tab: "orders" },
+              { label: "View Stock", tab: "stock" },
+              { label: "View Expiry", tab: "expiry" },
+            ].map((l) => (
+              <button
+                key={l.tab}
+                type="button"
+                onClick={() => onNavigate(l.tab)}
+                style={{ background: DASH.bg, border: `1px solid ${DASH.border}`, borderRadius: 10, padding: "12px 10px", fontSize: 12.5, fontWeight: 600, color: DASH.text, cursor: "pointer", textAlign: "center" }}
+              >
+                {l.label}
+              </button>
+            ))}
+          </div>
+        </DashSection>
+
       </div>
     </div>
   );
