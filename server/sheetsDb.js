@@ -234,6 +234,7 @@ const SCHEMAS = {
     "askedBy", "askedAt", "status",
     "answer", "answerDocumentKey", "answerDocumentName",
     "answeredBy", "answeredAt",
+    "answerDocumentMimeType", // appended: the in-app viewer needs this to know whether to render the attachment as a PDF (canvas) or an image
   ],
 };
 

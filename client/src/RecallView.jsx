@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback } from "react";
 import { api } from "./api.js";
 import { computeMetrics, fmtMoney, fmtDays } from "./competitorCalc.js";
 import { TrainingStudiesView } from "./TrainingView.jsx";
+import { CertificationsView } from "./CertificationsView.jsx";
+import { RepQAView } from "./RepQAView.jsx";
 
 // Kept local (not imported from App.jsx) to avoid a circular import between
 // the two files — same look as the rest of the app either way.
@@ -64,10 +66,14 @@ export function RecallView({ role, repName, repNames, products }) {
       <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
         <button onClick={() => setSubTab("products")} style={pillStyle(subTab === "products")}>Products</button>
         <button onClick={() => setSubTab("studies")} style={pillStyle(subTab === "studies")}>Studies</button>
+        <button onClick={() => setSubTab("certifications")} style={pillStyle(subTab === "certifications")}>Certifications</button>
+        <button onClick={() => setSubTab("qa")} style={pillStyle(subTab === "qa")}>Rep Q&A</button>
       </div>
 
       {subTab === "products" && <RecallProductsPanel role={role} repNames={repNames} />}
       {subTab === "studies" && <TrainingStudiesView role={role} products={products} />}
+      {subTab === "certifications" && <CertificationsView role={role} products={products} />}
+      {subTab === "qa" && <RepQAView role={role} repName={repName} products={products} />}
     </div>
   );
 }

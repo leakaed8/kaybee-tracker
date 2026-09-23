@@ -617,7 +617,7 @@ function parseRepQuestion(q) {
   return {
     id: q.id, question: q.question, productName: q.productName || "", brand: q.brand || "", category: q.category || "",
     askedBy: q.askedBy, askedAt: q.askedAt, status: q.status,
-    answer: q.answer || "", answerDocumentName: q.answerDocumentName || "",
+    answer: q.answer || "", answerDocumentName: q.answerDocumentName || "", answerDocumentMimeType: q.answerDocumentMimeType || "",
     answeredBy: q.answeredBy || "", answeredAt: q.answeredAt || "",
   };
 }
@@ -2829,6 +2829,7 @@ app.patch("/api/admin/rep-questions/:id/answer", requireManager, uploadDocument.
       await uploadObjectToR2(req.file.buffer, documentKey, req.file.mimetype);
       patch.answerDocumentKey = documentKey;
       patch.answerDocumentName = req.file.originalname;
+      patch.answerDocumentMimeType = req.file.mimetype;
     }
     await db.updateRowById("RepQuestions", q.id, patch);
     res.json(parseRepQuestion({ ...q, ...patch }));
