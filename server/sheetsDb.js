@@ -209,6 +209,32 @@ const SCHEMAS = {
     "id", "repName", "note", "coachingAction", "reviewDate",
     "createdBy", "createdAt",
   ],
+
+  // ---------- Product Expert: Certifications + Rep Q&A ----------
+  // One row per certification document. brand/level/certificationType are
+  // plain strings validated client-side against a fixed option list (not a
+  // separate lookup table — the list is small and hardcoded, same pattern as
+  // e.g. CALL_OUTCOME_OPTIONS). documentKey is the R2 object key and is
+  // stripped from every response reps can see (see parseCertification in
+  // index.js) — a rep only ever gets a short-TTL presigned view-url, never
+  // the raw key, so there is no rep-facing download path at the data layer.
+  Certifications: [
+    "id", "brand", "level", "certificationType",
+    "productId", "productName",
+    "documentKey", "documentName", "documentMimeType",
+    "title", "description", "issueDate", "expiryDate",
+    "createdBy", "createdAt",
+  ],
+  // Rep-submitted product/evidence questions. status starts "pending" and
+  // flips to "published" once a manager answers — published rows are what
+  // populate the searchable "Answered Questions" list. answerDocumentKey
+  // follows the same never-exposed-raw pattern as Certifications.documentKey.
+  RepQuestions: [
+    "id", "question", "productName", "brand", "category",
+    "askedBy", "askedAt", "status",
+    "answer", "answerDocumentKey", "answerDocumentName",
+    "answeredBy", "answeredAt",
+  ],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];

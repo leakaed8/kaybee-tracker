@@ -8,9 +8,13 @@ async function request(path, options) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   let res;
+  // A FormData body (Certifications/Rep Q&A document upload) must NOT get a
+  // manual Content-Type — the browser sets its own with the multipart
+  // boundary, and overriding it here would break multer's parsing.
+  const isFormData = options?.body instanceof FormData;
   try {
     res = await fetch(`/api${path}`, {
-      headers: { "Content-Type": "application/json" },
+      headers: isFormData ? {} : { "Content-Type": "application/json" },
       signal: controller.signal,
       ...options,
     });
@@ -36,6 +40,17 @@ function qs(params) {
   const clean = Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== null && v !== "");
   if (clean.length === 0) return "";
   return `?${new URLSearchParams(clean).toString()}`;
+}
+
+// Certifications/Rep Q&A uploads: fields plus an optional `file` (a File
+// object from an <input type="file">) go into one multipart FormData body.
+function toFormData(fields) {
+  const fd = new FormData();
+  for (const [key, value] of Object.entries(fields || {})) {
+    if (value === undefined || value === null) continue;
+    fd.append(key, value);
+  }
+  return fd;
 }
 
 export const api = {
@@ -165,4 +180,15 @@ export const api = {
   updateFollowUp: (id, patch) => request(`/followups/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   getManagerNotes: (repName) => request(`/manager-notes${qs({ repName })}`),
   addManagerNote: (note) => request("/manager-notes", { method: "POST", body: JSON.stringify(note) }),
+
+  // ---------- Product Expert: Certifications + Rep Q&A ----------
+  getCertifications: () => request("/certifications"),
+  addCertification: (fields) => request("/admin/certifications", { method: "POST", body: toFormData(fields) }),
+  updateCertification: (id, fields) => request(`/admin/certifications/${id}`, { method: "PATCH", body: toFormData(fields) }),
+  removeCertification: (id) => request(`/admin/certifications/${id}`, { method: "DELETE" }),
+  getCertificationViewUrl: (id) => request(`/certifications/${id}/view-url`),
+  getRepQuestions: () => request("/rep-questions"),
+  addRepQuestion: (payload) => request("/rep-questions", { method: "POST", body: JSON.stringify(payload) }),
+  answerRepQuestion: (id, fields) => request(`/admin/rep-questions/${id}/answer`, { method: "PATCH", body: toFormData(fields) }),
+  getRepQuestionAnswerViewUrl: (id) => request(`/rep-questions/${id}/answer-document/view-url`),
 };

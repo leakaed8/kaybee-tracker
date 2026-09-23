@@ -2,8 +2,9 @@ const path = require("path");
 const crypto = require("crypto");
 const express = require("express");
 const webpush = require("web-push");
-const { S3Client, HeadObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, HeadObjectCommand, GetObjectCommand, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+const multer = require("multer");
 const db = require("./sheetsDb");
 const telegram = require("./telegram");
 const { importedInventory, defaultTemplates } = require("./seedData");
@@ -558,6 +559,67 @@ async function createTrainingPlaybackUrl(video) {
   const command = new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: video.r2ObjectKey });
   const url = await getSignedUrl(client, command, { expiresIn: TRAINING_PLAYBACK_TOKEN_TTL_SECONDS });
   return { url, expiresAt: Date.now() + TRAINING_PLAYBACK_TOKEN_TTL_SECONDS * 1000 };
+}
+
+// --- Product Expert: Certifications + Rep Q&A document storage -----------
+// Unlike Training Videos (which requires a manager to paste an already-
+// uploaded R2 key), Certifications and Rep Q&A answer attachments are
+// uploaded directly from the app, so this is the first genuinely new
+// write-path into R2 in this codebase. Kept deliberately small: one memory-
+// buffered multer instance (files never touch disk) feeding one generic
+// PutObjectCommand helper, reused by both features rather than duplicated.
+const uploadDocument = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === "application/pdf" || file.mimetype.startsWith("image/")) return cb(null, true);
+    cb(new Error("Only PDF or image files are allowed."));
+  },
+});
+
+async function uploadObjectToR2(buffer, key, contentType) {
+  if (!R2_BUCKET_NAME) throw new Error("R2 isn't configured — set R2_BUCKET_NAME.");
+  const client = getR2Client();
+  await client.send(new PutObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key, Body: buffer, ContentType: contentType }));
+}
+
+// Short-TTL, inline-disposition presigned URL — the ONLY way a document's
+// bytes are ever reachable. ResponseContentDisposition: "inline" stops the
+// browser from auto-downloading it (vs. Training's video playback URL,
+// which needs no such header since a <video> tag never triggers a save).
+// 15 minutes is enough to open and read one document in the in-app viewer;
+// reopening it fetches a fresh URL rather than reusing a long-lived one.
+const DOCUMENT_VIEW_TOKEN_TTL_SECONDS = 15 * 60;
+async function createDocumentViewUrl(key) {
+  if (!R2_BUCKET_NAME) throw new Error("R2 isn't configured — set R2_BUCKET_NAME.");
+  const client = getR2Client();
+  const command = new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key, ResponseContentDisposition: "inline" });
+  const url = await getSignedUrl(client, command, { expiresIn: DOCUMENT_VIEW_TOKEN_TTL_SECONDS });
+  return { url, expiresAt: Date.now() + DOCUMENT_VIEW_TOKEN_TTL_SECONDS * 1000 };
+}
+
+function sanitizeFilename(name) {
+  return String(name || "file").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 150);
+}
+
+function parseCertification(c) {
+  return {
+    id: c.id, brand: c.brand, level: c.level, certificationType: c.certificationType,
+    productId: c.productId || "", productName: c.productName || "",
+    documentName: c.documentName || "", documentMimeType: c.documentMimeType || "",
+    title: c.title, description: c.description || "",
+    issueDate: c.issueDate || "", expiryDate: c.expiryDate || "",
+    createdBy: c.createdBy, createdAt: c.createdAt,
+  };
+}
+
+function parseRepQuestion(q) {
+  return {
+    id: q.id, question: q.question, productName: q.productName || "", brand: q.brand || "", category: q.category || "",
+    askedBy: q.askedBy, askedAt: q.askedAt, status: q.status,
+    answer: q.answer || "", answerDocumentName: q.answerDocumentName || "",
+    answeredBy: q.answeredBy || "", answeredAt: q.answeredAt || "",
+  };
 }
 
 function validateTrainingQuiz(quiz) {
@@ -2576,6 +2638,213 @@ app.patch("/api/training-studies/:id/nutrient", async (req, res) => {
     const ok = await db.updateRowById("TrainingStudies", req.params.id, { nutrient: String(nutrient).trim() });
     if (!ok) return res.status(404).json({ error: "Study not found" });
     res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// --- Product Expert: Certifications ----------------------------------------
+// Manager-uploaded brand/product certification documents. Reps are strictly
+// view-only: this list response never includes documentKey (see
+// parseCertification), and the only way to see the actual file is the
+// short-TTL view-url route below — there is no download route at all.
+const CERT_BRANDS = ["Alfa", "Mason"];
+const CERT_LEVELS = ["brand", "product"];
+
+app.get("/api/certifications", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("Certifications");
+    const certifications = rows.map(parseCertification).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    res.json({ certifications });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/admin/certifications", requireManager, uploadDocument.single("file"), async (req, res) => {
+  try {
+    const { brand, level, certificationType, productId, productName, title, description, issueDate, expiryDate } = req.body;
+    if (!CERT_BRANDS.includes(brand)) return res.status(400).json({ error: `brand must be one of: ${CERT_BRANDS.join(", ")}` });
+    if (!CERT_LEVELS.includes(level)) return res.status(400).json({ error: `level must be one of: ${CERT_LEVELS.join(", ")}` });
+    if (!certificationType || !String(certificationType).trim()) return res.status(400).json({ error: "certificationType is required" });
+    if (!title || !String(title).trim()) return res.status(400).json({ error: "title is required" });
+    if (level === "product" && (!productName || !String(productName).trim())) {
+      return res.status(400).json({ error: "productName is required for a product-level certification" });
+    }
+    if (!req.file) return res.status(400).json({ error: "A document file is required." });
+
+    const id = `cert${crypto.randomUUID()}`;
+    const documentKey = `certifications/${brand}/${id}-${sanitizeFilename(req.file.originalname)}`;
+    await uploadObjectToR2(req.file.buffer, documentKey, req.file.mimetype);
+
+    const cert = {
+      id, brand, level, certificationType: String(certificationType).trim(),
+      productId: level === "product" ? (productId || "") : "",
+      productName: level === "product" ? String(productName).trim() : "",
+      documentKey, documentName: req.file.originalname, documentMimeType: req.file.mimetype,
+      title: String(title).trim(), description: description ? String(description).trim() : "",
+      issueDate: issueDate || "", expiryDate: expiryDate || "",
+      createdBy: req.repName || "Manager", createdAt: new Date().toISOString(),
+    };
+    await db.appendRow("Certifications", cert);
+    res.json(parseCertification(cert));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/admin/certifications/:id", requireManager, uploadDocument.single("file"), async (req, res) => {
+  try {
+    const rows = await db.getAllRows("Certifications");
+    const cert = rows.find((c) => c.id === req.params.id);
+    if (!cert) return res.status(404).json({ error: "Certification not found" });
+
+    const { brand, level, certificationType, productId, productName, title, description, issueDate, expiryDate } = req.body;
+    const patch = {};
+    if (brand !== undefined) {
+      if (!CERT_BRANDS.includes(brand)) return res.status(400).json({ error: `brand must be one of: ${CERT_BRANDS.join(", ")}` });
+      patch.brand = brand;
+    }
+    if (level !== undefined) {
+      if (!CERT_LEVELS.includes(level)) return res.status(400).json({ error: `level must be one of: ${CERT_LEVELS.join(", ")}` });
+      patch.level = level;
+    }
+    if (certificationType !== undefined) {
+      if (!String(certificationType).trim()) return res.status(400).json({ error: "certificationType can't be empty" });
+      patch.certificationType = String(certificationType).trim();
+    }
+    if (productId !== undefined) patch.productId = productId;
+    if (productName !== undefined) patch.productName = String(productName).trim();
+    if (title !== undefined) {
+      if (!String(title).trim()) return res.status(400).json({ error: "title can't be empty" });
+      patch.title = String(title).trim();
+    }
+    if (description !== undefined) patch.description = String(description).trim();
+    if (issueDate !== undefined) patch.issueDate = issueDate;
+    if (expiryDate !== undefined) patch.expiryDate = expiryDate;
+    if (req.file) {
+      const documentKey = `certifications/${patch.brand || cert.brand}/${cert.id}-${sanitizeFilename(req.file.originalname)}`;
+      await uploadObjectToR2(req.file.buffer, documentKey, req.file.mimetype);
+      patch.documentKey = documentKey;
+      patch.documentName = req.file.originalname;
+      patch.documentMimeType = req.file.mimetype;
+    }
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
+
+    await db.updateRowById("Certifications", cert.id, patch);
+    res.json(parseCertification({ ...cert, ...patch }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/admin/certifications/:id", requireManager, async (req, res) => {
+  try {
+    const ok = await db.deleteRowById("Certifications", req.params.id);
+    if (!ok) return res.status(404).json({ error: "Certification not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/certifications/:id/view-url", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("Certifications");
+    const cert = rows.find((c) => c.id === req.params.id);
+    if (!cert) return res.status(404).json({ error: "Certification not found" });
+    const { url, expiresAt } = await createDocumentViewUrl(cert.documentKey);
+    res.json({ url, expiresAt });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// --- Product Expert: Rep Q&A ------------------------------------------------
+// Reps ask product/evidence questions; a manager answers (optionally
+// attaching a document, reusing the same upload/view-url plumbing as
+// Certifications rather than a second implementation). Published answers
+// are what the "Answered Questions" search is for — it exists specifically
+// to cut down on the same question being asked twice.
+app.get("/api/rep-questions", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("RepQuestions");
+    let questions = rows.map(parseRepQuestion);
+    if (!(req.role === "manager" || req.isSupervisor)) {
+      questions = questions.filter((q) => q.status === "published" || q.askedBy === req.repName);
+    }
+    questions.sort((a, b) => new Date(b.askedAt) - new Date(a.askedAt));
+    res.json({ questions });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/rep-questions", async (req, res) => {
+  try {
+    if (!req.repName) return res.status(403).json({ error: "Employees only." });
+    const { question, productName, brand, category } = req.body;
+    if (!question || !String(question).trim()) return res.status(400).json({ error: "question is required" });
+
+    const q = {
+      id: `rq${crypto.randomUUID()}`,
+      question: String(question).trim(),
+      productName: productName ? String(productName).trim() : "",
+      brand: brand ? String(brand).trim() : "",
+      category: category ? String(category).trim() : "",
+      askedBy: req.repName, askedAt: new Date().toISOString(), status: "pending",
+      answer: "", answerDocumentKey: "", answerDocumentName: "", answeredBy: "", answeredAt: "",
+    };
+    await db.appendRow("RepQuestions", q);
+    res.json(parseRepQuestion(q));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/admin/rep-questions/:id/answer", requireManager, uploadDocument.single("file"), async (req, res) => {
+  try {
+    const rows = await db.getAllRows("RepQuestions");
+    const q = rows.find((r) => r.id === req.params.id);
+    if (!q) return res.status(404).json({ error: "Question not found" });
+    const { answer } = req.body;
+    if (!answer || !String(answer).trim()) return res.status(400).json({ error: "answer is required" });
+
+    const patch = {
+      answer: String(answer).trim(),
+      answeredBy: req.repName || "Manager",
+      answeredAt: new Date().toISOString(),
+      status: "published",
+    };
+    if (req.file) {
+      const documentKey = `rep-qa/${q.id}-${sanitizeFilename(req.file.originalname)}`;
+      await uploadObjectToR2(req.file.buffer, documentKey, req.file.mimetype);
+      patch.answerDocumentKey = documentKey;
+      patch.answerDocumentName = req.file.originalname;
+    }
+    await db.updateRowById("RepQuestions", q.id, patch);
+    res.json(parseRepQuestion({ ...q, ...patch }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/rep-questions/:id/answer-document/view-url", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("RepQuestions");
+    const q = rows.find((r) => r.id === req.params.id);
+    if (!q || !q.answerDocumentKey) return res.status(404).json({ error: "No attached document found" });
+    const { url, expiresAt } = await createDocumentViewUrl(q.answerDocumentKey);
+    res.json({ url, expiresAt });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
@@ -9594,5 +9863,16 @@ if (SELF_PING_URL) {
     fetch(`${SELF_PING_URL}/api/health`).catch(() => {});
   }, 10 * 60 * 1000);
 }
+
+// Multer (Certifications/Rep Q&A document upload) throws its errors into
+// Express's error-handling chain rather than returning them normally, so
+// without this they'd surface as an unhandled HTML 500 instead of the JSON
+// error shape every other route in this app returns.
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError || /Only PDF or image files/.test(err?.message || "")) {
+    return res.status(400).json({ error: err.message });
+  }
+  next(err);
+});
 
 app.listen(PORT, () => console.log(`KayBee Tracker server listening on port ${PORT}`));
