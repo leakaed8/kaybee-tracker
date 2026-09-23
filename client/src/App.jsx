@@ -1012,7 +1012,7 @@ function ProductRow({ product, repPhone, onRemove }) {
         <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${pct}%`, background: product.zone.color, borderRadius: 4, transition: "width .3s" }} />
       </div>
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: (product.ytdMonthsReported || 0) > 0 ? 4 : 0 }}>
         <div className="kb-font-mono" style={{ fontSize: 11.5, color: "#8A8272", display: "flex", gap: 14 }}>
           <span><Clock size={11} style={{ verticalAlign: -1 }} /> {dLeft >= 0 ? `${dLeft}d left` : `expired ${Math.abs(dLeft)}d ago`}</span>
           <span title={hasRealMovement ? "Based on uploaded monthly sales history" : "Based on last 90 days only — upload Stock Movement history for a real figure"}>
@@ -1028,6 +1028,18 @@ function ProductRow({ product, repPhone, onRemove }) {
           </a>
         )}
       </div>
+
+      {/* Year-to-date movement — the raw sum + qty-on-hand behind the
+          turnover%/badges above, so a manager can see for themselves
+          whether the pace is enough to clear the stock rather than just
+          trusting a derived percentage. Only shown once at least one month
+          of THIS year's Stock Movement has actually been uploaded for this
+          product — otherwise there's nothing real to show yet. */}
+      {(product.ytdMonthsReported || 0) > 0 && (
+        <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>
+          📅 {product.ytdSold.toLocaleString()} sold YTD ({product.ytdMonthsReported} mo. reported) · avg {Math.round(product.avgMonthlyMovement).toLocaleString()}/mo this year · {product.qty.toLocaleString()} on hand
+        </div>
+      )}
 
       {showConfirm && (
         <div style={{ marginTop: 10, padding: 10, background: "#FBF3F0", borderRadius: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>

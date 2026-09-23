@@ -373,6 +373,17 @@ function avgMonthlyMovementFor(name, movementIndex) {
   return null;
 }
 
+// Raw year-to-date figures (not an average, not blended with prior years) —
+// "how many units have actually sold since Jan 1 of this year, and how many
+// months of this year have been uploaded so far." Surfaced separately from
+// avgMonthlyMovementFor so a manager can see the real sum behind the
+// slow-mover/at-risk verdict, not just a derived percentage.
+function ytdMovementFor(name, movementIndex) {
+  const entry = movementIndex.get(String(name || "").trim().toLowerCase());
+  if (!entry) return { ytdSold: 0, ytdMonthsReported: 0 };
+  return { ytdSold: entry.thisYearTotal, ytdMonthsReported: entry.thisYearCount };
+}
+
 function parseOrder(o) {
   const total = Number(o.total) || 0;
   return {
@@ -880,7 +891,11 @@ async function buildReferenceBootstrapPayload() {
   const { Products: products, Clients: clients, Doctors: doctors, ProductCatalog: productCatalog } = batch;
   const movementIndex = buildMovementIndex(stockMovement);
   return {
-    products: products.map((p) => ({ ...parseProduct(p), avgMonthlyMovement: avgMonthlyMovementFor(p.name, movementIndex) })),
+    products: products.map((p) => ({
+      ...parseProduct(p),
+      avgMonthlyMovement: avgMonthlyMovementFor(p.name, movementIndex),
+      ...ytdMovementFor(p.name, movementIndex),
+    })),
     clients,
     doctors,
     productCatalog,
