@@ -332,28 +332,45 @@ function parseProduct(p) {
   return { ...p, qty: Number(p.qty) || 0, sold90: Number(p.sold90) || 0, price: Number(p.price) || 0 };
 }
 
-// Maps a normalized product name to its real average monthly movement,
-// computed from however many months of StockMovement data have been
-// uploaded so far (missing years just mean fewer months in the average,
-// not zero — a product with only 2023+2025 data still gets a real average
-// across those 24 months, it just doesn't include 2022/2024).
+// Maps a normalized product name to both its lifetime movement total (every
+// year ever uploaded) and its current-calendar-year-only total, so
+// avgMonthlyMovementFor below can prefer the current year's own pace over a
+// multi-year blend. Missing years just mean fewer months in the lifetime
+// average, not zero — a product with only 2023+2025 data still gets a real
+// average across those 24 months, it just doesn't include 2022/2024.
 function buildMovementIndex(rows) {
+  const currentYear = new Date().getFullYear();
   const index = new Map();
   rows.forEach((r) => {
     const key = String(r.productName || "").trim().toLowerCase();
     if (!key) return;
-    const entry = index.get(key) || { total: 0, count: 0 };
-    entry.total += Number(r.qty) || 0;
+    const entry = index.get(key) || { total: 0, count: 0, thisYearTotal: 0, thisYearCount: 0 };
+    const qty = Number(r.qty) || 0;
+    entry.total += qty;
     entry.count += 1;
+    if (Number(r.year) === currentYear) {
+      entry.thisYearTotal += qty;
+      entry.thisYearCount += 1;
+    }
     index.set(key, entry);
   });
   return index;
 }
 
+// This year's own uploaded months win whenever any exist for this product —
+// even a single month in, it reflects how the product is actually moving
+// right now, which a multi-year blend can mask (a product that sold well in
+// 2023-2024 but has clearly slowed down in 2026 would otherwise still look
+// "fine" because the older good years pull the average up). Only falls back
+// to the full multi-year lifetime average when nothing has been uploaded
+// for the current year yet, and to null (caller falls back to sold90) when
+// this product has no Stock Movement history at all.
 function avgMonthlyMovementFor(name, movementIndex) {
   const entry = movementIndex.get(String(name || "").trim().toLowerCase());
-  if (!entry || entry.count === 0) return null;
-  return entry.total / entry.count;
+  if (!entry) return null;
+  if (entry.thisYearCount > 0) return entry.thisYearTotal / entry.thisYearCount;
+  if (entry.count > 0) return entry.total / entry.count;
+  return null;
 }
 
 function parseOrder(o) {
@@ -9430,6 +9447,58 @@ async function checkMonthlyVisitsSummary() {
   }
 }
 
+// Weekly manager reminder to re-upload the Stock/Products sheet (qty +
+// expiry) — the app has no way to know inventory changed unless a human
+// tells it, so this is purely a nudge, not an automated check. Guarded by
+// the exact date string (not just "day === Sunday") so it can only ever
+// fire once for a given Sunday even though the interval polls hourly.
+function beirutWeekday(date) {
+  return new Date(date.toLocaleString("en-US", { timeZone: "Asia/Beirut" })).getDay(); // 0 = Sunday
+}
+async function checkInventoryUpdateReminder() {
+  if (!telegram.isConfigured()) return;
+  try {
+    const now = new Date();
+    if (beirutWeekday(now) !== 0) return; // Sunday only
+    const settings = await db.getSettings();
+    if (!settings.managerTelegramChatId) return;
+    const today = beirutDateStr(now);
+    if (settings.lastInventoryReminderDate === today) return;
+    await telegram.sendMessage(
+      settings.managerTelegramChatId,
+      "📦 <b>Weekly reminder</b>\n\nUpdate the Stock sheet (quantities + expiry dates) in Settings so expiry alerts and slow-mover numbers stay accurate."
+    );
+    await db.setSettings({ lastInventoryReminderDate: today });
+  } catch (e) {
+    console.error("checkInventoryUpdateReminder failed", e);
+  }
+}
+
+// Monthly manager reminder (1st of the month) to upload this year's Stock
+// Movement data — separate from runMonthlyVisitsSummary (a rep-performance
+// recap); this one is specifically about keeping the movement-history
+// upload current so slow/fast-mover calculations (avgMonthlyMovementFor)
+// use this year's real pace rather than drifting stale.
+const STOCK_MOVEMENT_REMINDER_DAY = 1;
+async function checkStockMovementReminder() {
+  if (!telegram.isConfigured()) return;
+  try {
+    const now = new Date();
+    if (now.getDate() !== STOCK_MOVEMENT_REMINDER_DAY) return;
+    const settings = await db.getSettings();
+    if (!settings.managerTelegramChatId) return;
+    const thisMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    if (settings.lastStockMovementReminderMonth === thisMonthKey) return;
+    await telegram.sendMessage(
+      settings.managerTelegramChatId,
+      `📈 <b>Monthly reminder</b>\n\nUpload ${now.getFullYear()}'s Stock Movement data in Settings so slow/fast-mover calculations use this year's real numbers instead of last year's.`
+    );
+    await db.setSettings({ lastStockMovementReminderMonth: thisMonthKey });
+  } catch (e) {
+    console.error("checkStockMovementReminder failed", e);
+  }
+}
+
 // A rep who forgets to punch out leaves an open "in" forever, which quietly
 // breaks anything relying on punch state (and just looks like the app is
 // stuck). Once a day, past the cutoff hour, close out anyone still open —
@@ -9486,10 +9555,14 @@ if (telegram.isConfigured()) {
   checkFollowUpReminders();
   checkSampleReminders();
   checkMonthlyVisitsSummary();
+  checkInventoryUpdateReminder();
+  checkStockMovementReminder();
   setInterval(checkMonthlyDigest, MONTHLY_DIGEST_CHECK_INTERVAL_MS);
   setInterval(checkFollowUpReminders, FOLLOWUP_CHECK_INTERVAL_MS);
   setInterval(checkSampleReminders, FOLLOWUP_CHECK_INTERVAL_MS);
   setInterval(checkMonthlyVisitsSummary, MONTHLY_DIGEST_CHECK_INTERVAL_MS);
+  setInterval(checkInventoryUpdateReminder, MONTHLY_DIGEST_CHECK_INTERVAL_MS);
+  setInterval(checkStockMovementReminder, MONTHLY_DIGEST_CHECK_INTERVAL_MS);
   telegram.getMe().then((me) => { telegramBotUsername = me.username; }).catch((e) => console.error("telegram getMe failed", e));
   if (process.env.RENDER_EXTERNAL_URL) {
     telegram.setWebhook(`${process.env.RENDER_EXTERNAL_URL}/api/telegram/webhook`, TELEGRAM_WEBHOOK_SECRET)

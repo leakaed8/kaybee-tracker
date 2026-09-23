@@ -39,8 +39,11 @@ export const zoneFor = (product) => {
 
 // Once real Stock Movement history exists for a product (avgMonthlyMovement,
 // attached server-side in /api/bootstrap by matching product name against
-// uploaded monthly data), it replaces the 90-day-sales proxy everywhere
-// movement matters — turnover%, slow-mover, and at-risk all read from here.
+// uploaded monthly data — preferring this calendar year's own uploaded
+// months over the multi-year average whenever any exist, see
+// avgMonthlyMovementFor server-side), it replaces the 90-day-sales proxy
+// everywhere movement matters — turnover%, slow-mover, and at-risk all read
+// from here.
 export const effectiveSold90 = (product) =>
   product.avgMonthlyMovement != null ? product.avgMonthlyMovement * 3 : Number(product.sold90) || 0;
 
