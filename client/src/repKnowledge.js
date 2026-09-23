@@ -115,7 +115,7 @@ export const DRUG_NUTRIENT_DATA = [
 export const CONDITION_TALKING_POINTS = [
   { condition: "Anxiety", items: ["Valerian", "Ashwagandha", "Ginkgo Biloba", "Mushroom Power EGCG & Matcha", "Magnesium Glycinate"] },
   { condition: "Cholesterol", items: ["Garlic", "Niacin", "Fish Oil", "Flaxseed", "Fibers (psyllium)"] },
-  { condition: "Diabetes", items: ["Chromium", "Ginseng", "L-carnitine", "Berberine", "Fish Oil/Flaxseed", "Garlic"] },
+  { condition: "Diabetes", items: ["Chromium", "Ginseng", "L-carnitine", "Berberine", "Fish Oil/Flaxseed", "Garlic", "Vitamin B12"] },
   { condition: "Hypertension", items: ["Fish Oil", "L-arginine", "CoQ10", "Garlic", "Vitamin D"] },
   { condition: "Migraine/Headaches", items: ["Prevent: Fish oil, Magnesium, CoQ10, Melatonin, Ginkgo Biloba", "Treat: Caffeine, Magnesium"] },
   { condition: "Osteoporosis", items: ["Calcium", "Vitamin D", "Magnesium", "Zn", "Flaxseed", "Soy lecithin"] },
