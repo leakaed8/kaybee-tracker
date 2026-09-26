@@ -169,6 +169,21 @@ export const api = {
   addRecallCompetitorRelationship: (payload) => request("/recall/competitor-relationships", { method: "POST", body: JSON.stringify(payload) }),
   removeRecallCompetitorRelationship: (id) => request(`/recall/competitor-relationships/${id}`, { method: "DELETE" }),
 
+  // ---------- Product Expert: Why Our Products? ----------
+  addRecallFeature: (fields) => request("/recall/features", { method: "POST", body: toFormData(fields) }),
+  updateRecallFeature: (id, fields) => request(`/recall/features/${id}`, { method: "PATCH", body: toFormData(fields) }),
+  removeRecallFeature: (id) => request(`/recall/features/${id}`, { method: "DELETE" }),
+  setRecallFeatureDifferentiator: (id, isKeyDifferentiator) =>
+    request(`/recall/features/${id}/differentiator`, { method: "PATCH", body: JSON.stringify({ isKeyDifferentiator }) }),
+  getRecallFeatureImageUrl: (id) => request(`/recall/features/${id}/image-url`),
+  addRecallBenefit: (payload) => request("/recall/benefits", { method: "POST", body: JSON.stringify(payload) }),
+  updateRecallBenefit: (id, patch) => request(`/recall/benefits/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  removeRecallBenefit: (id) => request(`/recall/benefits/${id}`, { method: "DELETE" }),
+  setRecallBenefitDifferentiator: (id, isKeyDifferentiator) =>
+    request(`/recall/benefits/${id}/differentiator`, { method: "PATCH", body: JSON.stringify({ isKeyDifferentiator }) }),
+  saveRecallCategoryUsp: (categoryId, text) => request(`/recall/categories/${categoryId}/usp`, { method: "PUT", body: JSON.stringify({ text }) }),
+  approveRecallCategoryUsp: (categoryId, text) => request(`/recall/categories/${categoryId}/usp/approve`, { method: "PATCH", body: JSON.stringify({ text }) }),
+
   // ---------- Manager Performance Management redesign ----------
   correctInteractionType: (visitId, interactionType, reason) =>
     request(`/visits/${visitId}/interaction-type`, { method: "PATCH", body: JSON.stringify({ interactionType, reason }) }),

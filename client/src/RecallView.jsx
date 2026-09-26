@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { Settings, Target, Gem, BarChart3, Scale } from "lucide-react";
 import { api } from "./api.js";
 import { computeMetrics, fmtMoney, fmtDays } from "./competitorCalc.js";
 import { TrainingStudiesView } from "./TrainingView.jsx";
@@ -246,6 +247,17 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
 
           <RecallCompetitorsSection competitors={data.competitors} products={data.products} role={role} onSaved={load} />
 
+          <WhyOurProductsSection
+            categoryId={categoryId}
+            products={data.products}
+            competitors={data.competitors}
+            features={data.features || []}
+            benefits={data.benefits || []}
+            usp={data.usp}
+            role={role}
+            onSaved={load}
+          />
+
           <MarketSnapshotSection products={data.products} competitors={data.competitors} />
 
           <RecallSection title="Clinical References">
@@ -380,19 +392,28 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
 // showing every one expanded at once buried the parts a rep actually came
 // for. Click the title to expand; nothing inside changed, just whether
 // it's shown right away.
-function RecallSection({ title, children, defaultOpen = false }) {
+// `accent`, used only by "Why Our Products?", swaps the header to burgundy
+// while it's the open section — matching the reference design's selected
+// item — without touching any other section's look (accent defaults to
+// false everywhere else, so every other accordion header is unchanged).
+function RecallSection({ title, children, defaultOpen = false, accent = false }) {
   const [open, setOpen] = useState(defaultOpen);
+  const isAccented = accent && open;
   return (
-    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14, marginBottom: 12 }}>
+    <div style={{ background: isAccented ? "#B33A3A" : "#fff", border: `1px solid ${isAccented ? "#B33A3A" : "#E5DFD3"}`, borderRadius: 10, padding: 14, marginBottom: 12 }}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer" }}
       >
-        <span style={{ fontSize: 11.5, fontWeight: 700, color: "#8A8272", letterSpacing: 0.4 }}>{title.toUpperCase()}</span>
-        <span style={{ fontSize: 11, color: "#8A8272" }}>{open ? "▾" : "▸"}</span>
+        <span style={{ fontSize: 11.5, fontWeight: 700, color: isAccented ? "#FAF7F2" : "#8A8272", letterSpacing: 0.4 }}>{title.toUpperCase()}</span>
+        <span style={{ fontSize: 11, color: isAccented ? "#FAF7F2" : "#8A8272" }}>{open ? "▾" : "▸"}</span>
       </button>
-      {open && <div style={{ marginTop: 8 }}>{children}</div>}
+      {open && (
+        <div style={isAccented ? { marginTop: 8, background: "#FAF7F2", borderRadius: 8, padding: 12 } : { marginTop: 8 }}>
+          {children}
+        </div>
+      )}
     </div>
   );
 }
@@ -1004,6 +1025,535 @@ function CompetitorExpandedContent({ rel: c, canUnlink, onSaved, onClose }) {
 // Simple factual counts, computed from data already loaded for the Analysis
 // and Competitors sections above — no ranking, no score, no "winner". Just
 // how many of what exists in this category right now.
+// ---------- Why Our Products? (Feature -> Benefit -> Difference -> USP) ----------
+// Teaches a rep the sellable-message logic for a category: what we offer
+// (Features), why it matters (Benefits), what makes us different (a
+// filtered view of whichever Features/Benefits a manager has flagged), and
+// how to say it in one line (the USP, draft until a manager approves it).
+// Competitor Comparison at the end deliberately reuses the SAME
+// products/competitors data every other section on this page already
+// reads — it is not a second competitor-data system.
+const WOP_BURGUNDY = "#B33A3A";
+const WOP_BURGUNDY_TINT = "#FBEEEE";
+const WOP_GREEN = "#4C7A5E";
+const WOP_GOLD = "#C58B25";
+
+function WopIconBadge({ icon: Icon, size = 34 }) {
+  return (
+    <div style={{ width: size, height: size, borderRadius: "50%", background: WOP_BURGUNDY_TINT, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+      <Icon size={Math.round(size * 0.45)} color={WOP_BURGUNDY} />
+    </div>
+  );
+}
+
+function WopSubheader({ icon, title, subtitle }) {
+  return (
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 12 }}>
+      <WopIconBadge icon={icon} />
+      <div>
+        <div style={{ fontWeight: 700, fontSize: 14, color: "#17251F" }}>{title}</div>
+        <div style={{ fontSize: 11.5, color: "#8A8272" }}>{subtitle}</div>
+      </div>
+    </div>
+  );
+}
+
+const wopAddButtonStyle = { fontSize: 12, color: WOP_BURGUNDY, background: "#fff", border: `1px solid ${WOP_BURGUNDY}`, borderRadius: 8, padding: "7px 12px", cursor: "pointer" };
+const wopCardStyle = { background: "#fff", border: "1px solid #E5DFD3", borderRadius: 12, padding: 12 };
+const wopDiffPillStyle = { display: "inline-block", fontSize: 9.5, fontWeight: 700, color: WOP_BURGUNDY, background: WOP_BURGUNDY_TINT, border: `1px solid ${WOP_BURGUNDY}55`, borderRadius: 10, padding: "2px 7px", marginTop: 8, letterSpacing: 0.3 };
+const wopSmallBtnStyle = { fontSize: 10.5, background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "4px 8px", cursor: "pointer", color: "#5B5445" };
+const wopSmallDangerBtnStyle = { ...wopSmallBtnStyle, color: WOP_BURGUNDY, borderColor: "#E5B8B0" };
+
+// Fetches a fresh short-TTL presigned URL on mount — same "never cache/reuse
+// a stale URL" rule as DocumentViewer's image handling, just without the
+// zoom-modal chrome since this is a small inline thumbnail, not a document.
+function WopThumbnail({ fetchUrl }) {
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    fetchUrl().then((d) => { if (!cancelled) setUrl(d.url); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [fetchUrl]);
+  if (!url) return null;
+  return <img src={url} alt="" style={{ width: "100%", height: 84, objectFit: "cover", borderRadius: 8, marginBottom: 8 }} />;
+}
+
+function WopEmptyState({ text }) {
+  return <div style={{ fontSize: 12, color: "#B7AF9E", padding: "10px 0" }}>{text}</div>;
+}
+
+function WhyOurProductsSection({ categoryId, products, competitors, features, benefits, usp, role, onSaved }) {
+  return (
+    <RecallSection title="Why Our Products?" accent>
+      <p style={{ fontSize: 12, color: "#8A8272", margin: "-4px 0 16px", fontStyle: "italic" }}>
+        Understand what we offer, why it matters, and what makes our range different.
+      </p>
+      <WopFeaturesBlock categoryId={categoryId} products={products} features={features} role={role} onSaved={onSaved} />
+      <WopBenefitsBlock categoryId={categoryId} products={products} features={features} benefits={benefits} role={role} onSaved={onSaved} />
+      <WopDifferenceBlock features={features} benefits={benefits} />
+      <WopUspBlock categoryId={categoryId} usp={usp} role={role} onSaved={onSaved} />
+      <WopCompetitorComparisonBlock products={products} competitors={competitors} onSaved={onSaved} />
+    </RecallSection>
+  );
+}
+
+function WopFeaturesBlock({ categoryId, products, features, role, onSaved }) {
+  const canEdit = role === "manager";
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [busyId, setBusyId] = useState("");
+
+  const doDelete = async (id) => {
+    setBusyId(id);
+    try {
+      await api.removeRecallFeature(id);
+      setConfirmDeleteId(null);
+      onSaved();
+    } finally {
+      setBusyId("");
+    }
+  };
+  const toggleDifferentiator = async (f) => {
+    setBusyId(f.id);
+    try {
+      await api.setRecallFeatureDifferentiator(f.id, !f.isKeyDifferentiator);
+      onSaved();
+    } finally {
+      setBusyId("");
+    }
+  };
+
+  return (
+    <div style={{ marginBottom: 22 }}>
+      <WopSubheader icon={Settings} title="Features" subtitle="What do our products offer?" />
+      {features.length === 0 && <WopEmptyState text="No features added yet." />}
+      {features.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 12 }}>
+          {features.map((f) => (
+            editingId === f.id ? (
+              <div key={f.id} style={{ gridColumn: "1 / -1" }}>
+                <FeatureForm categoryId={categoryId} products={products} feature={f} onSaved={() => { setEditingId(null); onSaved(); }} onCancel={() => setEditingId(null)} />
+              </div>
+            ) : (
+              <div key={f.id} style={wopCardStyle}>
+                {f.hasImage && <WopThumbnail fetchUrl={() => api.getRecallFeatureImageUrl(f.id)} />}
+                <WopIconBadge icon={Settings} size={28} />
+                <div style={{ fontWeight: 700, fontSize: 13, marginTop: 8 }}>{f.title}</div>
+                {f.description && <div style={{ fontSize: 12, color: "#5B5445", marginTop: 4 }}>{f.description}</div>}
+                {f.productName && <div style={{ fontSize: 10.5, color: "#8A8272", marginTop: 6 }}>Product: {f.productName}</div>}
+                {f.isKeyDifferentiator && <div style={wopDiffPillStyle}>Key Differentiator</div>}
+                {canEdit && (
+                  <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #F0EBE0", display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {confirmDeleteId === f.id ? (
+                      <>
+                        <span style={{ fontSize: 10.5, color: WOP_BURGUNDY }}>Delete?</span>
+                        <button onClick={() => doDelete(f.id)} disabled={busyId === f.id} style={wopSmallDangerBtnStyle}>{busyId === f.id ? "…" : "Yes"}</button>
+                        <button onClick={() => setConfirmDeleteId(null)} style={wopSmallBtnStyle}>Cancel</button>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={() => setEditingId(f.id)} style={wopSmallBtnStyle}>Edit</button>
+                        <button onClick={() => setConfirmDeleteId(f.id)} style={wopSmallDangerBtnStyle}>Delete</button>
+                        <button onClick={() => toggleDifferentiator(f)} disabled={busyId === f.id} style={wopSmallBtnStyle}>
+                          {f.isKeyDifferentiator ? "Unmark differentiator" : "Mark differentiator"}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          ))}
+        </div>
+      )}
+      {showForm ? (
+        <FeatureForm categoryId={categoryId} products={products} onSaved={() => { setShowForm(false); onSaved(); }} onCancel={() => setShowForm(false)} />
+      ) : (
+        <button onClick={() => setShowForm(true)} style={wopAddButtonStyle}>+ Add Feature</button>
+      )}
+    </div>
+  );
+}
+
+function FeatureForm({ categoryId, products, feature, onSaved, onCancel }) {
+  const [title, setTitle] = useState(feature?.title || "");
+  const [description, setDescription] = useState(feature?.description || "");
+  const [productId, setProductId] = useState(feature?.productId || "");
+  const [image, setImage] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError("");
+    if (!title.trim()) return setError("Feature name is required.");
+    setSaving(true);
+    try {
+      const fields = { title: title.trim(), description: description.trim(), productId, image: image || undefined };
+      if (feature) await api.updateRecallFeature(feature.id, fields);
+      else await api.addRecallFeature({ ...fields, categoryId });
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} style={{ ...editorPanelStyle, marginTop: 0, marginBottom: 12 }}>
+      <div style={editorTitleStyle}>{feature ? "Edit Feature" : "Add Feature"}</div>
+      <EditorField label="Feature Name" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Multiple dosage forms" />
+      <EditorField label="Description" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="e.g. Tablets, sublingual tablets, and capsules." textarea />
+      <div style={{ marginBottom: 8 }}>
+        <label style={{ display: "block", fontSize: 11, color: "#8A8272", marginBottom: 2 }}>Product (optional)</label>
+        <select value={productId} onChange={(e) => setProductId(e.target.value)} style={inputStyle}>
+          <option value="">No specific product</option>
+          {(products || []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+      </div>
+      <div style={{ marginBottom: 8 }}>
+        <label style={{ display: "block", fontSize: 11, color: "#8A8272", marginBottom: 2 }}>Image (optional)</label>
+        <input type="file" accept="image/*" onChange={(e) => setImage(e.target.files[0] || null)} />
+      </div>
+      {error && <div style={{ fontSize: 11.5, color: WOP_BURGUNDY, marginBottom: 6 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="submit" disabled={saving} style={saveButtonStyle}>{saving ? "Saving…" : "Save Feature"}</button>
+        <button type="button" onClick={onCancel} style={cancelButtonStyle}>Cancel</button>
+      </div>
+    </form>
+  );
+}
+
+function WopBenefitsBlock({ categoryId, products, features, benefits, role, onSaved }) {
+  const canEdit = role === "manager";
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [busyId, setBusyId] = useState("");
+  const featureById = new Map(features.map((f) => [f.id, f]));
+
+  const doDelete = async (id) => {
+    setBusyId(id);
+    try {
+      await api.removeRecallBenefit(id);
+      setConfirmDeleteId(null);
+      onSaved();
+    } finally {
+      setBusyId("");
+    }
+  };
+  const toggleDifferentiator = async (b) => {
+    setBusyId(b.id);
+    try {
+      await api.setRecallBenefitDifferentiator(b.id, !b.isKeyDifferentiator);
+      onSaved();
+    } finally {
+      setBusyId("");
+    }
+  };
+
+  return (
+    <div style={{ marginBottom: 22 }}>
+      <WopSubheader icon={Target} title="Benefits" subtitle="Why does it matter to the patient/customer?" />
+      {benefits.length === 0 && <WopEmptyState text="No benefits added yet." />}
+      {benefits.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 12 }}>
+          {benefits.map((b) => (
+            editingId === b.id ? (
+              <div key={b.id} style={{ gridColumn: "1 / -1" }}>
+                <BenefitForm categoryId={categoryId} products={products} features={features} benefit={b} onSaved={() => { setEditingId(null); onSaved(); }} onCancel={() => setEditingId(null)} />
+              </div>
+            ) : (
+              <div key={b.id} style={wopCardStyle}>
+                <WopIconBadge icon={Target} size={28} />
+                <div style={{ fontWeight: 700, fontSize: 13, marginTop: 8 }}>{b.title}</div>
+                {b.description && <div style={{ fontSize: 12, color: "#5B5445", marginTop: 4 }}>{b.description}</div>}
+                {b.featureIds.length > 0 && (
+                  <div style={{ fontSize: 10.5, color: "#8A8272", marginTop: 6 }}>
+                    Related: {b.featureIds.map((id) => featureById.get(id)?.title).filter(Boolean).join(", ") || "—"}
+                  </div>
+                )}
+                {b.productName && <div style={{ fontSize: 10.5, color: "#8A8272", marginTop: 2 }}>Product: {b.productName}</div>}
+                {b.isKeyDifferentiator && <div style={wopDiffPillStyle}>Key Differentiator</div>}
+                {canEdit && (
+                  <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #F0EBE0", display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {confirmDeleteId === b.id ? (
+                      <>
+                        <span style={{ fontSize: 10.5, color: WOP_BURGUNDY }}>Delete?</span>
+                        <button onClick={() => doDelete(b.id)} disabled={busyId === b.id} style={wopSmallDangerBtnStyle}>{busyId === b.id ? "…" : "Yes"}</button>
+                        <button onClick={() => setConfirmDeleteId(null)} style={wopSmallBtnStyle}>Cancel</button>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={() => setEditingId(b.id)} style={wopSmallBtnStyle}>Edit</button>
+                        <button onClick={() => setConfirmDeleteId(b.id)} style={wopSmallDangerBtnStyle}>Delete</button>
+                        <button onClick={() => toggleDifferentiator(b)} disabled={busyId === b.id} style={wopSmallBtnStyle}>
+                          {b.isKeyDifferentiator ? "Unmark differentiator" : "Mark differentiator"}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          ))}
+        </div>
+      )}
+      {showForm ? (
+        <BenefitForm categoryId={categoryId} products={products} features={features} onSaved={() => { setShowForm(false); onSaved(); }} onCancel={() => setShowForm(false)} />
+      ) : (
+        <button onClick={() => setShowForm(true)} style={wopAddButtonStyle}>+ Add Benefit</button>
+      )}
+    </div>
+  );
+}
+
+function BenefitForm({ categoryId, products, features, benefit, onSaved, onCancel }) {
+  const [title, setTitle] = useState(benefit?.title || "");
+  const [description, setDescription] = useState(benefit?.description || "");
+  const [productId, setProductId] = useState(benefit?.productId || "");
+  const [featureIds, setFeatureIds] = useState(benefit?.featureIds || []);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const toggleFeature = (id) => {
+    setFeatureIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+  };
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError("");
+    if (!title.trim()) return setError("Benefit name is required.");
+    setSaving(true);
+    try {
+      const payload = { title: title.trim(), description: description.trim(), productId, featureIds };
+      if (benefit) await api.updateRecallBenefit(benefit.id, payload);
+      else await api.addRecallBenefit({ ...payload, categoryId });
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} style={{ ...editorPanelStyle, marginTop: 0, marginBottom: 12 }}>
+      <div style={editorTitleStyle}>{benefit ? "Edit Benefit" : "Add Benefit"}</div>
+      <EditorField label="Benefit Name" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. More options to match different needs" />
+      <EditorField label="Description" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Why this matters to the patient/customer" textarea />
+      {features.length > 0 && (
+        <div style={{ marginBottom: 8 }}>
+          <label style={{ display: "block", fontSize: 11, color: "#8A8272", marginBottom: 4 }}>Related Feature(s)</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {features.map((f) => (
+              <button
+                type="button"
+                key={f.id}
+                onClick={() => toggleFeature(f.id)}
+                style={{
+                  fontSize: 11, padding: "4px 9px", borderRadius: 12, cursor: "pointer",
+                  border: featureIds.includes(f.id) ? `1px solid ${WOP_BURGUNDY}` : "1px solid #E5DFD3",
+                  background: featureIds.includes(f.id) ? WOP_BURGUNDY_TINT : "#fff",
+                  color: featureIds.includes(f.id) ? WOP_BURGUNDY : "#5B5445",
+                }}
+              >
+                {f.title}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      <div style={{ marginBottom: 8 }}>
+        <label style={{ display: "block", fontSize: 11, color: "#8A8272", marginBottom: 2 }}>Product (optional)</label>
+        <select value={productId} onChange={(e) => setProductId(e.target.value)} style={inputStyle}>
+          <option value="">No specific product</option>
+          {(products || []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+      </div>
+      {error && <div style={{ fontSize: 11.5, color: WOP_BURGUNDY, marginBottom: 6 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="submit" disabled={saving} style={saveButtonStyle}>{saving ? "Saving…" : "Save Benefit"}</button>
+        <button type="button" onClick={onCancel} style={cancelButtonStyle}>Cancel</button>
+      </div>
+    </form>
+  );
+}
+
+// Purely a filtered view of Features/Benefits a manager already flagged —
+// never asks anyone to rewrite anything, just surfaces what's already there.
+function WopDifferenceBlock({ features, benefits }) {
+  const diffFeatures = features.filter((f) => f.isKeyDifferentiator);
+  const diffBenefits = benefits.filter((b) => b.isKeyDifferentiator);
+  const items = [
+    ...diffFeatures.map((f) => ({ ...f, kind: "Feature" })),
+    ...diffBenefits.map((b) => ({ ...b, kind: "Benefit" })),
+  ];
+  return (
+    <div style={{ marginBottom: 22 }}>
+      <WopSubheader icon={Gem} title="Our Difference" subtitle="What makes our range stand out?" />
+      {items.length === 0 ? (
+        <WopEmptyState text="No differentiators marked yet — a manager can mark a Feature or Benefit above as a Key Differentiator." />
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+          {items.map((item) => (
+            <div key={`${item.kind}-${item.id}`} style={wopCardStyle}>
+              <div style={{ fontSize: 9.5, fontWeight: 700, color: WOP_GREEN, letterSpacing: 0.3 }}>{item.kind.toUpperCase()}</div>
+              <div style={{ fontWeight: 700, fontSize: 13, marginTop: 4 }}>{item.title}</div>
+              {item.description && <div style={{ fontSize: 12, color: "#5B5445", marginTop: 4 }}>{item.description}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WopUspBlock({ categoryId, usp, role, onSaved }) {
+  const isManager = role === "manager";
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(usp?.text || "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const startEdit = () => { setText(usp?.text || ""); setEditing(true); };
+
+  const submitSuggestion = async (e) => {
+    e.preventDefault();
+    setError("");
+    if (!text.trim()) return setError("USP text is required.");
+    setSaving(true);
+    try {
+      await api.saveRecallCategoryUsp(categoryId, text.trim());
+      setEditing(false);
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const approve = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      await api.approveRecallCategoryUsp(categoryId, editing ? text.trim() : undefined);
+      setEditing(false);
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const canEditNow = isManager || !usp || usp.status === "draft";
+
+  return (
+    <div style={{ marginBottom: 22 }}>
+      <WopSubheader icon={BarChart3} title="USP (Unique Selling Point)" subtitle="How to communicate it in one clear message." />
+
+      {!usp && !editing && (
+        <>
+          <WopEmptyState text="No approved USP yet." />
+          <button onClick={() => setEditing(true)} style={wopAddButtonStyle}>+ Suggest USP</button>
+        </>
+      )}
+
+      {usp && !editing && (
+        <div style={{ background: WOP_BURGUNDY_TINT, border: `1px solid ${WOP_BURGUNDY}33`, borderRadius: 12, padding: 16 }}>
+          <div style={{ fontSize: 20, color: WOP_BURGUNDY, lineHeight: 1 }}>&ldquo;</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "#17251F", fontStyle: "italic" }}>{usp.text}</div>
+          <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{
+              fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3, borderRadius: 10, padding: "2px 8px",
+              color: usp.status === "approved" ? WOP_GREEN : WOP_GOLD,
+              background: usp.status === "approved" ? "#F3F7F4" : "#FBF3E4",
+              border: `1px solid ${usp.status === "approved" ? WOP_GREEN : WOP_GOLD}55`,
+            }}>
+              {usp.status.toUpperCase()}
+            </span>
+            {canEditNow && <button onClick={startEdit} style={wopSmallBtnStyle}>Edit</button>}
+            {isManager && usp.status !== "approved" && <button onClick={approve} disabled={saving} style={wopSmallBtnStyle}>{saving ? "…" : "Approve"}</button>}
+          </div>
+        </div>
+      )}
+
+      {editing && (
+        <form onSubmit={submitSuggestion} style={{ ...editorPanelStyle, marginTop: 0 }}>
+          <div style={editorTitleStyle}>{isManager ? "Edit USP" : "Suggest USP"}</div>
+          <EditorField label="USP text" value={text} onChange={(e) => setText(e.target.value)} placeholder="A concise summary of the strongest approved differentiators." textarea />
+          {error && <div style={{ fontSize: 11.5, color: WOP_BURGUNDY, marginBottom: 6 }}>{error}</div>}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="submit" disabled={saving} style={saveButtonStyle}>{saving ? "Saving…" : isManager ? "Save" : "Submit suggestion"}</button>
+            {isManager && <button type="button" disabled={saving} onClick={approve} style={{ ...saveButtonStyle, background: WOP_GREEN }}>Save &amp; Approve</button>}
+            <button type="button" onClick={() => { setEditing(false); setError(""); }} style={cancelButtonStyle}>Cancel</button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+// Presentational only — turns the SAME products/competitors this page
+// already loads into Feature/Ours/Competitor rows. No new data source, no
+// invented competitor facts: a blank cell just means that field isn't on
+// file for that side, exactly like every other section on this page.
+function buildFeatureComparisonRows(products, competitors) {
+  const ourProducts = products || [];
+  const competitorProducts = (competitors || []).map((c) => c.competitorProduct).filter(Boolean);
+  const joinUnique = (arr) => [...new Set(arr.filter(Boolean))].join(", ") || "—";
+  return [
+    { label: "Formulation", ours: joinUnique(ourProducts.map((p) => p.chemicalForm)), competitor: joinUnique(competitorProducts.map((cp) => cp.genericName)) },
+    { label: "Strength", ours: joinUnique(ourProducts.map((p) => (p.compoundAmount ? `${p.compoundAmount}${p.unit || ""}` : ""))), competitor: joinUnique(competitorProducts.map((cp) => cp.dosage)) },
+    { label: "Dosage form", ours: joinUnique(ourProducts.map((p) => p.form)), competitor: joinUnique(competitorProducts.map((cp) => cp.form)) },
+    { label: "Ingredients", ours: joinUnique(ourProducts.map((p) => p.ingredients)), competitor: joinUnique(competitorProducts.map((cp) => cp.ingredients)) },
+    { label: "Product range", ours: `${ourProducts.length} product${ourProducts.length === 1 ? "" : "s"}`, competitor: `${competitorProducts.length} product${competitorProducts.length === 1 ? "" : "s"}` },
+  ];
+}
+
+function WopCompetitorComparisonBlock({ products, competitors, onSaved }) {
+  const ourProducts = (products || []).map((p) => ({ id: p.id, name: p.name }));
+  const existingCompetitorIds = new Set((competitors || []).map((c) => c.competitorProduct?.id).filter(Boolean));
+  const rows = buildFeatureComparisonRows(products, competitors);
+
+  return (
+    <div>
+      <WopSubheader icon={Scale} title="Competitor Comparison" subtitle="How we compare to common alternatives." />
+      {(!competitors || competitors.length === 0) ? (
+        <>
+          <WopEmptyState text="No competitor comparison has been added yet." />
+          <AddCompetitorToCategory ourProducts={ourProducts} existingCompetitorIds={existingCompetitorIds} onSaved={onSaved} />
+        </>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", minWidth: 420, borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid #E5DFD3" }}>
+                <th style={{ textAlign: "left", padding: "6px 8px", color: "#8A8272", fontSize: 10.5 }}>FEATURE</th>
+                <th style={{ textAlign: "left", padding: "6px 8px", color: "#8A8272", fontSize: 10.5 }}>OUR PRODUCTS</th>
+                <th style={{ textAlign: "left", padding: "6px 8px", color: "#8A8272", fontSize: 10.5 }}>COMPETITOR</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.label} style={{ borderBottom: "1px solid #F0EBE0" }}>
+                  <td style={{ padding: "8px", fontWeight: 600, whiteSpace: "nowrap" }}>{r.label}</td>
+                  <td style={{ padding: "8px", color: "#2F5B41" }}>{r.ours}</td>
+                  <td style={{ padding: "8px", color: "#5B5445" }}>{r.competitor}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function statTileStyle() {
   return { background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "10px 12px", minWidth: 100 };
 }
