@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Settings, Target, Gem, BarChart3, Scale } from "lucide-react";
+import { Settings, Target, Gem, BarChart3 } from "lucide-react";
 import { api } from "./api.js";
-import { computeMetrics, fmtMoney, fmtDays, getIngredients, formatIngredients } from "./competitorCalc.js";
+import { computeMetrics, fmtMoney, fmtDays } from "./competitorCalc.js";
 import { TrainingStudiesView } from "./TrainingView.jsx";
 import { CertificationsView } from "./CertificationsView.jsx";
 import { RepQAView } from "./RepQAView.jsx";
@@ -142,7 +142,9 @@ function RecallProductsPanel({ role, repNames }) {
 // Assignments screen still exists for whatever organizational use a
 // manager wants it for; it just no longer gates what a rep sees here.)
 function RecallHome({ role, categories, onOpenCategory, onOpenAssignments }) {
-  const shown = categories;
+  const [search, setSearch] = useState("");
+  const q = search.toLowerCase().trim();
+  const shown = q ? categories.filter((c) => c.name.toLowerCase().includes(q)) : categories;
 
   return (
     <div>
@@ -157,8 +159,17 @@ function RecallHome({ role, categories, onOpenCategory, onOpenAssignments }) {
         </div>
       )}
 
+      {categories.length > 0 && (
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search categories…"
+          style={{ ...inputStyle, marginBottom: 14 }}
+        />
+      )}
+
       {shown.length === 0 ? (
-        <EmptyState text="No categories found." />
+        <EmptyState text={q ? "No categories match this search." : "No categories found."} />
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 10 }}>
           {shown.map((c) => (
@@ -250,7 +261,6 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
           <WhyOurProductsSection
             categoryId={categoryId}
             products={data.products}
-            competitors={data.competitors}
             features={data.features || []}
             benefits={data.benefits || []}
             usp={data.usp}
@@ -791,6 +801,7 @@ function ourProductRow(p) {
     servingSize: p.servingSize || "",
     dosageForm: p.form || "",
     pricePerPill: metrics.hasPrice && metrics.hasPackSize ? [{ label: "", value: metrics.costPerDose }] : [],
+    publicPrice: metrics.hasPrice ? fmtMoney(metrics.price) : "",
     countryOfOrigin: "", // not applicable — this is our own manufacturer/distributor relationship, not a sourced competitor product
     pharmacyDiscount: "", // not applicable to our own products
     raw: p,
@@ -814,6 +825,7 @@ function competitorRow(c) {
     servingSize: "", // not tracked on CompetitorProducts — never inferred
     dosageForm: cp.form || "",
     pricePerPill,
+    publicPrice: metrics.hasPrice ? fmtMoney(metrics.price) : "",
     countryOfOrigin: cp.manufacturingCountry || "",
     pharmacyDiscount: cp.discountRate !== "" && cp.discountRate != null ? `${cp.discountRate}%` : "",
     raw: cp,
@@ -866,6 +878,7 @@ function ComparisonTable({ rows, expandedKey, onToggleExpanded, renderExpanded }
               <ComparisonField label="Days supply" value={r.daysSupply} />
               <ComparisonField label="Serving size" value={r.servingSize} />
               <ComparisonField label="Dosage form" value={r.dosageForm} />
+              <ComparisonField label="Public Price" value={r.publicPrice || "Not verified"} />
               <ComparisonField label="Price per pill" value={priceRows(r.pricePerPill)} />
               <ComparisonField label="Country of origin" value={r.countryOfOrigin || (r.isOurs ? "—" : "")} />
               <ComparisonField label="Pharmacy discount" value={r.pharmacyDiscount || (r.isOurs ? "—" : "")} />
@@ -1082,7 +1095,7 @@ function WopEmptyState({ text }) {
   return <div style={{ fontSize: 12, color: "#B7AF9E", padding: "10px 0" }}>{text}</div>;
 }
 
-function WhyOurProductsSection({ categoryId, products, competitors, features, benefits, usp, role, onSaved }) {
+function WhyOurProductsSection({ categoryId, products, features, benefits, usp, role, onSaved }) {
   return (
     <RecallSection title="Why Our Products?" accent>
       <p style={{ fontSize: 12, color: "#8A8272", margin: "-4px 0 16px", fontStyle: "italic" }}>
@@ -1092,7 +1105,6 @@ function WhyOurProductsSection({ categoryId, products, competitors, features, be
       <WopBenefitsBlock categoryId={categoryId} products={products} features={features} benefits={benefits} role={role} onSaved={onSaved} />
       <WopDifferenceBlock features={features} benefits={benefits} />
       <WopUspBlock categoryId={categoryId} usp={usp} role={role} onSaved={onSaved} />
-      <WopCompetitorComparisonBlock products={products} competitors={competitors} onSaved={onSaved} />
     </RecallSection>
   );
 }
@@ -1493,81 +1505,6 @@ function WopUspBlock({ categoryId, usp, role, onSaved }) {
             <button type="button" onClick={() => { setEditing(false); setError(""); }} style={cancelButtonStyle}>Cancel</button>
           </div>
         </form>
-      )}
-    </div>
-  );
-}
-
-// Presentational only — turns the SAME products/competitors this page
-// already loads into Feature/Ours/Competitor rows. No new data source, no
-// invented competitor facts: a blank cell just means that field isn't on
-// file for that side, exactly like every other section on this page.
-// `ingredients` on both ProductCatalog and CompetitorProducts is a
-// JSON-encoded array of {name, form, amount, unit} (the same structured
-// shape the Analysis/Competitors sections already parse via
-// getIngredients/formatIngredients from competitorCalc.js) — joining the
-// raw field directly, as an earlier version of this row did, printed the
-// literal JSON string instead of a readable ingredient list.
-function buildFeatureComparisonRows(products, competitors) {
-  const ourProducts = products || [];
-  const competitorProducts = (competitors || []).map((c) => c.competitorProduct).filter(Boolean);
-  const joinUnique = (arr) => [...new Set(arr.filter(Boolean))].join(", ") || "—";
-  const joinIngredients = (items) => {
-    const formatted = items.map((item) => formatIngredients(getIngredients(item))).filter(Boolean);
-    return [...new Set(formatted)].join("; ") || "—";
-  };
-  return [
-    { label: "Formulation", ours: joinUnique(ourProducts.map((p) => p.chemicalForm)), competitor: joinUnique(competitorProducts.map((cp) => cp.genericName)) },
-    { label: "Strength", ours: joinUnique(ourProducts.map((p) => (p.compoundAmount ? `${p.compoundAmount}${p.unit || ""}` : ""))), competitor: joinUnique(competitorProducts.map((cp) => cp.dosage)) },
-    { label: "Dosage form", ours: joinUnique(ourProducts.map((p) => p.form)), competitor: joinUnique(competitorProducts.map((cp) => cp.form)) },
-    { label: "Ingredients", ours: joinIngredients(ourProducts), competitor: joinIngredients(competitorProducts) },
-    { label: "Product range", ours: `${ourProducts.length} product${ourProducts.length === 1 ? "" : "s"}`, competitor: `${competitorProducts.length} product${competitorProducts.length === 1 ? "" : "s"}` },
-  ];
-}
-
-function WopCompetitorComparisonBlock({ products, competitors, onSaved }) {
-  const ourProducts = (products || []).map((p) => ({ id: p.id, name: p.name }));
-  const existingCompetitorIds = new Set((competitors || []).map((c) => c.competitorProduct?.id).filter(Boolean));
-  const rows = buildFeatureComparisonRows(products, competitors);
-
-  return (
-    <div>
-      <WopSubheader icon={Scale} title="Competitor Comparison" subtitle="How we compare to common alternatives." />
-      {(!competitors || competitors.length === 0) ? (
-        <>
-          <WopEmptyState text="No competitor comparison has been added yet." />
-          <AddCompetitorToCategory ourProducts={ourProducts} existingCompetitorIds={existingCompetitorIds} onSaved={onSaved} />
-        </>
-      ) : (
-        // Deliberately its own visually distinct container (neutral
-        // beige/gray, heavier border) rather than the white cards used for
-        // Features/Benefits above — this is reference/verification data
-        // about a competitor, not our own approved messaging, and it reads
-        // that way. Stacked per-field cards (not a table) so long values —
-        // ingredient lists especially — wrap naturally instead of forcing
-        // a wide table into horizontal scroll on a phone.
-        <div style={{ background: "#F3F0E8", border: "1px solid #D8D0C0", borderRadius: 12, padding: 12 }}>
-          <div style={{ fontSize: 10.5, color: "#8A8272", marginBottom: 10, fontStyle: "italic" }}>
-            For internal reference only — verify against the current label before citing to a customer.
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {rows.map((r) => (
-              <div key={r.label} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 10 }}>
-                <div style={{ fontSize: 10.5, fontWeight: 700, color: "#5B5445", letterSpacing: 0.3, marginBottom: 6 }}>{r.label.toUpperCase()}</div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                  <div>
-                    <div style={{ fontSize: 9.5, fontWeight: 700, color: WOP_GREEN, marginBottom: 2 }}>OUR PRODUCTS</div>
-                    <div style={{ fontSize: 12, color: "#2F5B41", wordBreak: "break-word" }}>{r.ours}</div>
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 9.5, fontWeight: 700, color: "#8A8272", marginBottom: 2 }}>COMPETITOR</div>
-                    <div style={{ fontSize: 12, color: "#5B5445", wordBreak: "break-word" }}>{r.competitor}</div>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
       )}
     </div>
   );

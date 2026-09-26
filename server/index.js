@@ -8502,6 +8502,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
                 genericName: cp.genericName || "", form: cp.form || "", dosage: cp.dosage || "", packSize: cp.packSize || "",
                 ingredients: cp.ingredients || "", sku: cp.sku || "", manufacturer: cp.manufacturer || "",
                 unitsPerDay: cp.unitsPerDay || "", discountRate: cp.discountRate || "", manufacturingCountry: cp.manufacturingCountry || "",
+                price: cp.price || "",
                 sourceLabel: cp.sourceLabel || "", sourceUrl: cp.sourceUrl || "",
                 researchStatus, notes: cp.notes || "",
                 missingFields,
