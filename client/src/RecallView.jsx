@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { Settings, Target, Gem, BarChart3, Scale } from "lucide-react";
 import { api } from "./api.js";
-import { computeMetrics, fmtMoney, fmtDays } from "./competitorCalc.js";
+import { computeMetrics, fmtMoney, fmtDays, getIngredients, formatIngredients } from "./competitorCalc.js";
 import { TrainingStudiesView } from "./TrainingView.jsx";
 import { CertificationsView } from "./CertificationsView.jsx";
 import { RepQAView } from "./RepQAView.jsx";
@@ -1502,15 +1502,25 @@ function WopUspBlock({ categoryId, usp, role, onSaved }) {
 // already loads into Feature/Ours/Competitor rows. No new data source, no
 // invented competitor facts: a blank cell just means that field isn't on
 // file for that side, exactly like every other section on this page.
+// `ingredients` on both ProductCatalog and CompetitorProducts is a
+// JSON-encoded array of {name, form, amount, unit} (the same structured
+// shape the Analysis/Competitors sections already parse via
+// getIngredients/formatIngredients from competitorCalc.js) — joining the
+// raw field directly, as an earlier version of this row did, printed the
+// literal JSON string instead of a readable ingredient list.
 function buildFeatureComparisonRows(products, competitors) {
   const ourProducts = products || [];
   const competitorProducts = (competitors || []).map((c) => c.competitorProduct).filter(Boolean);
   const joinUnique = (arr) => [...new Set(arr.filter(Boolean))].join(", ") || "—";
+  const joinIngredients = (items) => {
+    const formatted = items.map((item) => formatIngredients(getIngredients(item))).filter(Boolean);
+    return [...new Set(formatted)].join("; ") || "—";
+  };
   return [
     { label: "Formulation", ours: joinUnique(ourProducts.map((p) => p.chemicalForm)), competitor: joinUnique(competitorProducts.map((cp) => cp.genericName)) },
     { label: "Strength", ours: joinUnique(ourProducts.map((p) => (p.compoundAmount ? `${p.compoundAmount}${p.unit || ""}` : ""))), competitor: joinUnique(competitorProducts.map((cp) => cp.dosage)) },
     { label: "Dosage form", ours: joinUnique(ourProducts.map((p) => p.form)), competitor: joinUnique(competitorProducts.map((cp) => cp.form)) },
-    { label: "Ingredients", ours: joinUnique(ourProducts.map((p) => p.ingredients)), competitor: joinUnique(competitorProducts.map((cp) => cp.ingredients)) },
+    { label: "Ingredients", ours: joinIngredients(ourProducts), competitor: joinIngredients(competitorProducts) },
     { label: "Product range", ours: `${ourProducts.length} product${ourProducts.length === 1 ? "" : "s"}`, competitor: `${competitorProducts.length} product${competitorProducts.length === 1 ? "" : "s"}` },
   ];
 }
@@ -1529,25 +1539,34 @@ function WopCompetitorComparisonBlock({ products, competitors, onSaved }) {
           <AddCompetitorToCategory ourProducts={ourProducts} existingCompetitorIds={existingCompetitorIds} onSaved={onSaved} />
         </>
       ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", minWidth: 420, borderCollapse: "collapse", fontSize: 12 }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid #E5DFD3" }}>
-                <th style={{ textAlign: "left", padding: "6px 8px", color: "#8A8272", fontSize: 10.5 }}>FEATURE</th>
-                <th style={{ textAlign: "left", padding: "6px 8px", color: "#8A8272", fontSize: 10.5 }}>OUR PRODUCTS</th>
-                <th style={{ textAlign: "left", padding: "6px 8px", color: "#8A8272", fontSize: 10.5 }}>COMPETITOR</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.label} style={{ borderBottom: "1px solid #F0EBE0" }}>
-                  <td style={{ padding: "8px", fontWeight: 600, whiteSpace: "nowrap" }}>{r.label}</td>
-                  <td style={{ padding: "8px", color: "#2F5B41" }}>{r.ours}</td>
-                  <td style={{ padding: "8px", color: "#5B5445" }}>{r.competitor}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        // Deliberately its own visually distinct container (neutral
+        // beige/gray, heavier border) rather than the white cards used for
+        // Features/Benefits above — this is reference/verification data
+        // about a competitor, not our own approved messaging, and it reads
+        // that way. Stacked per-field cards (not a table) so long values —
+        // ingredient lists especially — wrap naturally instead of forcing
+        // a wide table into horizontal scroll on a phone.
+        <div style={{ background: "#F3F0E8", border: "1px solid #D8D0C0", borderRadius: 12, padding: 12 }}>
+          <div style={{ fontSize: 10.5, color: "#8A8272", marginBottom: 10, fontStyle: "italic" }}>
+            For internal reference only — verify against the current label before citing to a customer.
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {rows.map((r) => (
+              <div key={r.label} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 10 }}>
+                <div style={{ fontSize: 10.5, fontWeight: 700, color: "#5B5445", letterSpacing: 0.3, marginBottom: 6 }}>{r.label.toUpperCase()}</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 9.5, fontWeight: 700, color: WOP_GREEN, marginBottom: 2 }}>OUR PRODUCTS</div>
+                    <div style={{ fontSize: 12, color: "#2F5B41", wordBreak: "break-word" }}>{r.ours}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 9.5, fontWeight: 700, color: "#8A8272", marginBottom: 2 }}>COMPETITOR</div>
+                    <div style={{ fontSize: 12, color: "#5B5445", wordBreak: "break-word" }}>{r.competitor}</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
