@@ -236,6 +236,38 @@ const SCHEMAS = {
     "answeredBy", "answeredAt",
     "answerDocumentMimeType", // appended: the in-app viewer needs this to know whether to render the attachment as a PDF (canvas) or an image
   ],
+
+  // ---------- Product Expert: Why Our Products? (Feature/Benefit/USP) ----------
+  // Features and benefits belong to a category (always set) and optionally
+  // to one of that category's linked ProductCatalog products. imageKey
+  // follows the same R2-object-key-never-exposed-raw pattern as
+  // Certifications.documentKey — a viewer only ever gets a presigned URL.
+  RecallProductFeatures: [
+    "id", "categoryId", "productId", "productName",
+    "title", "description",
+    "imageKey", "imageName", "imageMimeType",
+    "isKeyDifferentiator",
+    "createdBy", "createdAt", "updatedBy", "updatedAt",
+  ],
+  // featureIds is a comma-joined list of RecallProductFeatures ids, same
+  // convention already used by RecallCompetitorRelationships.sourceIds.
+  RecallProductBenefits: [
+    "id", "categoryId", "productId", "productName",
+    "featureIds",
+    "title", "description",
+    "isKeyDifferentiator",
+    "createdBy", "createdAt", "updatedBy", "updatedAt",
+  ],
+  // One row per categoryId, upserted (same upsert-by-key shape as
+  // RepTargets-by-repName) rather than an append-only log — a category has
+  // exactly one current USP at a time. status flips back to "draft"
+  // whenever anyone but a manager edits the text, so an approved badge
+  // never silently survives a content change; only the manager-only approve
+  // route can set "approved".
+  RecallCategoryUsp: [
+    "id", "categoryId", "text", "status",
+    "suggestedBy", "suggestedAt", "approvedBy", "approvedAt",
+  ],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];

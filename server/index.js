@@ -622,6 +622,38 @@ function parseRepQuestion(q) {
   };
 }
 
+// imageKey is left out of every response — same "raw R2 key never reaches
+// the client" rule as parseCertification/parseRepQuestion. A viewer only
+// ever gets a presigned image-url.
+function parseRecallFeature(f) {
+  return {
+    id: f.id, categoryId: f.categoryId, productId: f.productId || "", productName: f.productName || "",
+    title: f.title, description: f.description || "",
+    hasImage: !!f.imageKey, imageName: f.imageName || "", imageMimeType: f.imageMimeType || "",
+    isKeyDifferentiator: f.isKeyDifferentiator === "true",
+    createdBy: f.createdBy, createdAt: f.createdAt, updatedBy: f.updatedBy || "", updatedAt: f.updatedAt || "",
+  };
+}
+
+function parseRecallBenefit(b) {
+  return {
+    id: b.id, categoryId: b.categoryId, productId: b.productId || "", productName: b.productName || "",
+    featureIds: b.featureIds ? b.featureIds.split(",").map((s) => s.trim()).filter(Boolean) : [],
+    title: b.title, description: b.description || "",
+    isKeyDifferentiator: b.isKeyDifferentiator === "true",
+    createdBy: b.createdBy, createdAt: b.createdAt, updatedBy: b.updatedBy || "", updatedAt: b.updatedAt || "",
+  };
+}
+
+function parseRecallUsp(u) {
+  if (!u) return null;
+  return {
+    id: u.id, categoryId: u.categoryId, text: u.text, status: u.status,
+    suggestedBy: u.suggestedBy || "", suggestedAt: u.suggestedAt || "",
+    approvedBy: u.approvedBy || "", approvedAt: u.approvedAt || "",
+  };
+}
+
 function validateTrainingQuiz(quiz) {
   if (!Array.isArray(quiz) || quiz.length === 0) return "quiz must be a non-empty array";
   for (let i = 0; i < quiz.length; i++) {
@@ -8374,7 +8406,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     await ensurePhase2CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
-    const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources] = await Promise.all([
+    const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources, features, benefits, uspRows] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
       db.getAllRows("RecallIngredientForms"),
@@ -8388,6 +8420,9 @@ app.get("/api/recall/categories/:id", async (req, res) => {
       db.getAllRows("RecallRetailerListings"),
       db.getAllRows("RecallFieldConflicts"),
       db.getAllRows("RecallResearchSources"),
+      db.getAllRows("RecallProductFeatures"),
+      db.getAllRows("RecallProductBenefits"),
+      db.getAllRows("RecallCategoryUsp"),
     ]);
     const category = categories.find((c) => c.id === req.params.id);
     if (!category) return res.status(404).json({ error: "Recall category not found." });
@@ -8525,7 +8560,267 @@ app.get("/api/recall/categories/:id", async (req, res) => {
       references,
       quizAvailable: categoryQuiz.length > 0,
       quizQuestionCount: categoryQuiz.length,
+      features: features.filter((f) => f.categoryId === category.id).map(parseRecallFeature),
+      benefits: benefits.filter((b) => b.categoryId === category.id).map(parseRecallBenefit),
+      usp: parseRecallUsp(uspRows.find((u) => u.categoryId === category.id) || null),
     });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// --- Product Expert: Why Our Products? (Features / Benefits / USP) --------
+// Create is open to any employee (same "reps are the ones who notice this
+// stuff" reasoning as training studies / competitor research); edit,
+// delete, and marking a differentiator are requireManager — this codebase
+// has no "edit only your own record" concept anywhere, so that's the
+// existing pattern being followed here too, not a new rule invented for
+// this feature.
+app.post("/api/recall/features", uploadDocument.single("image"), async (req, res) => {
+  try {
+    const { categoryId, productId, title, description } = req.body;
+    if (!categoryId) return res.status(400).json({ error: "categoryId is required" });
+    if (!title || !String(title).trim()) return res.status(400).json({ error: "title is required" });
+
+    let productName = "";
+    if (productId) {
+      const catalog = await db.getAllRows("ProductCatalog");
+      const product = catalog.find((p) => p.id === productId);
+      if (!product) return res.status(400).json({ error: "That product wasn't found." });
+      productName = product.name;
+    }
+
+    const id = `rpf${crypto.randomUUID()}`;
+    const feature = {
+      id, categoryId, productId: productId || "", productName,
+      title: String(title).trim(), description: description ? String(description).trim() : "",
+      imageKey: "", imageName: "", imageMimeType: "",
+      isKeyDifferentiator: "",
+      createdBy: req.repName || "Manager", createdAt: new Date().toISOString(), updatedBy: "", updatedAt: "",
+    };
+    if (req.file) {
+      const imageKey = `recall-features/${id}-${sanitizeFilename(req.file.originalname)}`;
+      await uploadObjectToR2(req.file.buffer, imageKey, req.file.mimetype);
+      feature.imageKey = imageKey;
+      feature.imageName = req.file.originalname;
+      feature.imageMimeType = req.file.mimetype;
+    }
+    await db.appendRow("RecallProductFeatures", feature);
+    res.json(parseRecallFeature(feature));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/recall/features/:id", requireManager, uploadDocument.single("image"), async (req, res) => {
+  try {
+    const rows = await db.getAllRows("RecallProductFeatures");
+    const feature = rows.find((f) => f.id === req.params.id);
+    if (!feature) return res.status(404).json({ error: "Feature not found" });
+
+    const { productId, title, description } = req.body;
+    const patch = { updatedBy: req.repName || "Manager", updatedAt: new Date().toISOString() };
+    if (productId !== undefined) {
+      if (productId) {
+        const catalog = await db.getAllRows("ProductCatalog");
+        const product = catalog.find((p) => p.id === productId);
+        if (!product) return res.status(400).json({ error: "That product wasn't found." });
+        patch.productId = productId;
+        patch.productName = product.name;
+      } else {
+        patch.productId = "";
+        patch.productName = "";
+      }
+    }
+    if (title !== undefined) {
+      if (!String(title).trim()) return res.status(400).json({ error: "title can't be empty" });
+      patch.title = String(title).trim();
+    }
+    if (description !== undefined) patch.description = String(description).trim();
+    if (req.file) {
+      const imageKey = `recall-features/${feature.id}-${sanitizeFilename(req.file.originalname)}`;
+      await uploadObjectToR2(req.file.buffer, imageKey, req.file.mimetype);
+      patch.imageKey = imageKey;
+      patch.imageName = req.file.originalname;
+      patch.imageMimeType = req.file.mimetype;
+    }
+
+    await db.updateRowById("RecallProductFeatures", feature.id, patch);
+    res.json(parseRecallFeature({ ...feature, ...patch }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/recall/features/:id", requireManager, async (req, res) => {
+  try {
+    const ok = await db.deleteRowById("RecallProductFeatures", req.params.id);
+    if (!ok) return res.status(404).json({ error: "Feature not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/recall/features/:id/differentiator", requireManager, async (req, res) => {
+  try {
+    const { isKeyDifferentiator } = req.body;
+    const ok = await db.updateRowById("RecallProductFeatures", req.params.id, { isKeyDifferentiator: isKeyDifferentiator ? "true" : "" });
+    if (!ok) return res.status(404).json({ error: "Feature not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/recall/features/:id/image-url", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("RecallProductFeatures");
+    const feature = rows.find((f) => f.id === req.params.id);
+    if (!feature || !feature.imageKey) return res.status(404).json({ error: "No image found" });
+    const { url, expiresAt } = await createDocumentViewUrl(feature.imageKey);
+    res.json({ url, expiresAt });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/recall/benefits", async (req, res) => {
+  try {
+    const { categoryId, productId, featureIds, title, description } = req.body;
+    if (!categoryId) return res.status(400).json({ error: "categoryId is required" });
+    if (!title || !String(title).trim()) return res.status(400).json({ error: "title is required" });
+
+    let productName = "";
+    if (productId) {
+      const catalog = await db.getAllRows("ProductCatalog");
+      const product = catalog.find((p) => p.id === productId);
+      if (!product) return res.status(400).json({ error: "That product wasn't found." });
+      productName = product.name;
+    }
+
+    const benefit = {
+      id: `rpb${crypto.randomUUID()}`,
+      categoryId, productId: productId || "", productName,
+      featureIds: Array.isArray(featureIds) ? featureIds.join(",") : "",
+      title: String(title).trim(), description: description ? String(description).trim() : "",
+      isKeyDifferentiator: "",
+      createdBy: req.repName || "Manager", createdAt: new Date().toISOString(), updatedBy: "", updatedAt: "",
+    };
+    await db.appendRow("RecallProductBenefits", benefit);
+    res.json(parseRecallBenefit(benefit));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/recall/benefits/:id", requireManager, async (req, res) => {
+  try {
+    const rows = await db.getAllRows("RecallProductBenefits");
+    const benefit = rows.find((b) => b.id === req.params.id);
+    if (!benefit) return res.status(404).json({ error: "Benefit not found" });
+
+    const { productId, featureIds, title, description } = req.body;
+    const patch = { updatedBy: req.repName || "Manager", updatedAt: new Date().toISOString() };
+    if (productId !== undefined) {
+      if (productId) {
+        const catalog = await db.getAllRows("ProductCatalog");
+        const product = catalog.find((p) => p.id === productId);
+        if (!product) return res.status(400).json({ error: "That product wasn't found." });
+        patch.productId = productId;
+        patch.productName = product.name;
+      } else {
+        patch.productId = "";
+        patch.productName = "";
+      }
+    }
+    if (featureIds !== undefined) patch.featureIds = Array.isArray(featureIds) ? featureIds.join(",") : "";
+    if (title !== undefined) {
+      if (!String(title).trim()) return res.status(400).json({ error: "title can't be empty" });
+      patch.title = String(title).trim();
+    }
+    if (description !== undefined) patch.description = String(description).trim();
+
+    await db.updateRowById("RecallProductBenefits", benefit.id, patch);
+    res.json(parseRecallBenefit({ ...benefit, ...patch }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/recall/benefits/:id", requireManager, async (req, res) => {
+  try {
+    const ok = await db.deleteRowById("RecallProductBenefits", req.params.id);
+    if (!ok) return res.status(404).json({ error: "Benefit not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/recall/benefits/:id/differentiator", requireManager, async (req, res) => {
+  try {
+    const { isKeyDifferentiator } = req.body;
+    const ok = await db.updateRowById("RecallProductBenefits", req.params.id, { isKeyDifferentiator: isKeyDifferentiator ? "true" : "" });
+    if (!ok) return res.status(404).json({ error: "Benefit not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Suggest/edit the category's USP. Open to any employee, but always resets
+// status to "draft" and stamps suggestedBy/suggestedAt — so a text edit
+// after approval visibly stops claiming to be the approved wording rather
+// than silently keeping a stale APPROVED badge. Upserts by categoryId (one
+// row per category), same shape as the RepTargets-by-repName upsert.
+app.put("/api/recall/categories/:id/usp", async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || !String(text).trim()) return res.status(400).json({ error: "text is required" });
+    const categories = await db.getAllRows("RecallCategories");
+    if (!categories.find((c) => c.id === req.params.id)) return res.status(404).json({ error: "Category not found" });
+
+    const rows = await db.getAllRows("RecallCategoryUsp");
+    const existing = rows.find((u) => u.categoryId === req.params.id);
+    const now = new Date().toISOString();
+    if (existing) {
+      const patch = { text: String(text).trim(), status: "draft", suggestedBy: req.repName || "Manager", suggestedAt: now };
+      await db.updateRowById("RecallCategoryUsp", existing.id, patch);
+      return res.json(parseRecallUsp({ ...existing, ...patch }));
+    }
+    const usp = {
+      id: `rcu${crypto.randomUUID()}`, categoryId: req.params.id, text: String(text).trim(), status: "draft",
+      suggestedBy: req.repName || "Manager", suggestedAt: now, approvedBy: "", approvedAt: "",
+    };
+    await db.appendRow("RecallCategoryUsp", usp);
+    res.json(parseRecallUsp(usp));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/recall/categories/:id/usp/approve", requireManager, async (req, res) => {
+  try {
+    const rows = await db.getAllRows("RecallCategoryUsp");
+    const existing = rows.find((u) => u.categoryId === req.params.id);
+    if (!existing) return res.status(404).json({ error: "No USP has been suggested for this category yet." });
+    const { text } = req.body;
+    const patch = { status: "approved", approvedBy: req.repName || "Manager", approvedAt: new Date().toISOString() };
+    if (text !== undefined && String(text).trim()) patch.text = String(text).trim();
+    await db.updateRowById("RecallCategoryUsp", existing.id, patch);
+    res.json(parseRecallUsp({ ...existing, ...patch }));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
