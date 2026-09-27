@@ -821,10 +821,17 @@ function competitorRow(c) {
     dosePerUnit: cp.dosage || "",
     pillsPerBox: cp.packSize || "",
     daysSupply: metrics.daysSupply != null ? fmtDays(metrics.daysSupply) : "",
-    servingSize: "", // not tracked on CompetitorProducts — never inferred
+    servingSize: cp.servingSize || "",
     dosageForm: cp.form || "",
     pricePerPill,
     publicPrice: metrics.hasPrice ? fmtMoney(metrics.price) : "",
+    // Lebanese-market retail research — a real observed street price from a
+    // specific local retailer, distinct from `price`/`publicPrice` (this
+    // competitor's own listed/manufacturer price). Blank unless this
+    // product actually has a researched Lebanese market entry.
+    marketPriceUSD: cp.marketPriceUSD !== "" && cp.marketPriceUSD != null ? fmtMoney(Number(cp.marketPriceUSD)) : "",
+    marketPriceRetailer: cp.marketPriceRetailer || "",
+    marketPriceNotes: cp.marketPriceNotes || "",
     countryOfOrigin: cp.manufacturingCountry || "",
     pharmacyDiscount: cp.discountRate !== "" && cp.discountRate != null ? `${cp.discountRate}%` : "",
     raw: cp,
@@ -878,6 +885,10 @@ function ComparisonTable({ rows, expandedKey, onToggleExpanded, renderExpanded }
               <ComparisonField label="Serving size" value={r.servingSize} />
               <ComparisonField label="Dosage form" value={r.dosageForm} />
               <ComparisonField label="Public Price" value={r.publicPrice || "Not verified"} />
+              <ComparisonField
+                label="Lebanon Market Price"
+                value={r.marketPriceUSD ? `${r.marketPriceUSD}${r.marketPriceRetailer ? ` — ${r.marketPriceRetailer}` : ""}` : (r.isOurs ? "—" : "Not researched yet")}
+              />
               <ComparisonField label="Price per pill" value={priceRows(r.pricePerPill)} />
               <ComparisonField label="Country of origin" value={r.countryOfOrigin || (r.isOurs ? "—" : "")} />
               <ComparisonField label="Pharmacy discount" value={r.pharmacyDiscount || (r.isOurs ? "—" : "")} />
@@ -1014,11 +1025,20 @@ function CompetitorExpandedContent({ rel: c, canUnlink, onSaved, onClose }) {
     <div>
       {c.retailerListings.length > 0 && (
         <div style={{ marginBottom: 6 }}>
-          {c.retailerListings.map((l) => (
-            <div key={l.id} style={{ fontSize: 11, color: "#8A8272" }}>
-              {l.retailer}{" — "}{l.sourceUrl ? <a href={l.sourceUrl} target="_blank" rel="noreferrer">source</a> : "source URL not verified"}
-            </div>
-          ))}
+          {c.retailerListings.map((l) => {
+            const details = [
+              l.displayedPrice !== "" && l.displayedPrice != null ? `${l.displayedPrice} ${l.currency || "USD"}` : "",
+              l.packCount ? `pack of ${l.packCount}` : "",
+              l.servingSize ? `serving: ${l.servingSize}` : "",
+              l.unitsPerDay ? `${l.unitsPerDay}/day` : "",
+            ].filter(Boolean).join(" · ");
+            return (
+              <div key={l.id} style={{ fontSize: 11, color: "#8A8272", marginBottom: 2 }}>
+                <strong>{l.retailer}</strong>{details ? ` — ${details}` : ""}
+                {" — "}{l.sourceUrl ? <a href={l.sourceUrl} target="_blank" rel="noreferrer">source</a> : "source URL not verified"}
+              </div>
+            );
+          })}
         </div>
       )}
       <ConflictBanner conflicts={cp.conflicts} onSaved={onSaved} canResolve={true} />

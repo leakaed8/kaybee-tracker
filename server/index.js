@@ -8582,6 +8582,8 @@ app.get("/api/recall/categories/:id", async (req, res) => {
                 ingredients: cp.ingredients || "", sku: cp.sku || "", manufacturer: cp.manufacturer || "",
                 unitsPerDay: cp.unitsPerDay || "", discountRate: cp.discountRate || "", manufacturingCountry: cp.manufacturingCountry || "",
                 price: cp.price || "",
+                servingSize: cp.servingSize || "", marketPriceUSD: cp.marketPriceUSD || "",
+                marketPriceRetailer: cp.marketPriceRetailer || "", marketPriceNotes: cp.marketPriceNotes || "",
                 sourceLabel: cp.sourceLabel || "", sourceUrl: cp.sourceUrl || "",
                 researchStatus, notes: cp.notes || "",
                 missingFields,
@@ -8591,6 +8593,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
           retailerListings: cpListings.map((l) => ({
             id: l.id, retailer: l.retailer, displayedPrice: l.displayedPrice, currency: l.currency,
             sourceUrl: l.sourceUrl || "", notes: l.notes || "",
+            packCount: l.packCount || "", servingSize: l.servingSize || "", unitsPerDay: l.unitsPerDay || "",
           })),
         };
       })

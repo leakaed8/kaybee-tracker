@@ -70,6 +70,12 @@ const SCHEMAS = {
     "unitsPerDay", "ingredients", "manufacturer", "manufacturingCountry", "ingredientOrigin", "gmp", "thirdPartyCertification",
     "coaAvailability", "contaminantTesting", "expiryDate", "evidenceReferences", "otherIngredients", "createdBy", "updatedBy", "updatedAt",
     "researchStatus", "missingFields", "sku", "sourceLabel", "sourceUrl",
+    // Lebanese-market retail research (already live in the production
+    // sheet from an earlier research pass — these four columns existed
+    // with real data before the app's code knew about them, since
+    // getAllRows reads positionally by this array's length; appending them
+    // here is what makes that already-collected data visible/writable).
+    "servingSize", "marketPriceUSD", "marketPriceRetailer", "marketPriceNotes",
   ],
   TrainingVideos: ["id", "title", "r2ObjectKey", "quiz", "createdAt"],
   TrainingProgress: ["id", "employeeId", "videoId", "completedAt", "quizResponses"],
@@ -159,6 +165,10 @@ const SCHEMAS = {
   RecallRetailerListings: [
     "id", "competitorProductId", "retailer", "sourceUrl", "displayedPrice", "currency",
     "researchDate", "notes", "createdBy", "createdAt",
+    // Same situation as CompetitorProducts above — already live in
+    // production with real data from the Lebanese-market research pass,
+    // appended here so the app can finally read them.
+    "packCount", "servingSize", "unitsPerDay",
   ],
   // Generic: usable for a conflict on any entity/field (a competitor
   // product's chemical form, one of our own ProductCatalog products'
