@@ -268,6 +268,25 @@ const SCHEMAS = {
     "id", "categoryId", "text", "status",
     "suggestedBy", "suggestedAt", "approvedBy", "approvedAt",
   ],
+  // Replaces the Feature/Benefit split above with one unified concept: a
+  // "Product Advantage" chains Feature -> Products -> Benefit in a single
+  // row instead of two separately-managed lists a rep had to mentally
+  // reconnect. productIds is a comma-joined list (this codebase has no
+  // join-table concept anywhere — every existing many-to-many, e.g.
+  // RecallCompetitorRelationships.sourceIds and RecallProductBenefits.
+  // featureIds above, is a comma-joined ID list on the owning row; this
+  // follows the same pattern rather than inventing a junction sheet), so
+  // one Advantage can genuinely cover several products (e.g. the same
+  // vitamin at two different doses) with zero product duplication.
+  // RecallProductFeatures/RecallProductBenefits above are NEVER deleted or
+  // written to again once this ships — they become read-only history, and
+  // their existing rows are migrated once (see ensureProductAdvantagesMigrated
+  // in index.js) into this shape rather than lost.
+  RecallProductAdvantages: [
+    "id", "categoryId", "feature", "benefit", "productIds",
+    "isKeyDifferentiator",
+    "createdBy", "createdAt", "updatedBy", "updatedAt",
+  ],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];

@@ -654,6 +654,84 @@ function parseRecallUsp(u) {
   };
 }
 
+function parseRecallProductAdvantage(a) {
+  return {
+    id: a.id, categoryId: a.categoryId, feature: a.feature || "", benefit: a.benefit || "",
+    productIds: a.productIds ? a.productIds.split(",").map((s) => s.trim()).filter(Boolean) : [],
+    isKeyDifferentiator: a.isKeyDifferentiator === "true",
+    createdBy: a.createdBy, createdAt: a.createdAt, updatedBy: a.updatedBy || "", updatedAt: a.updatedAt || "",
+  };
+}
+
+// Pure transform (no I/O) so it's directly trace-testable: converts a
+// category's old Feature/Benefit rows into the new unified Advantage shape.
+// A Benefit that links one or more Features produces ONE Advantage per
+// linked feature — materializing each real edge of that many-to-many as its
+// own row, which preserves every real relationship without inventing one.
+// A Benefit with no linked feature, or a Feature no Benefit ever linked to,
+// becomes its own standalone Advantage. Old title+description fields join
+// into the new single feature/benefit text fields — nothing is dropped.
+function buildMigratedAdvantages(categoryId, categoryFeatures, categoryBenefits) {
+  const now = new Date().toISOString();
+  const combineText = (title, description) => [title, description].filter(Boolean).join(": ");
+  const featureById = new Map(categoryFeatures.map((f) => [f.id, f]));
+  const consumedFeatureIds = new Set();
+  const advantages = [];
+
+  categoryBenefits.forEach((b) => {
+    const featureIds = b.featureIds ? b.featureIds.split(",").map((s) => s.trim()).filter(Boolean) : [];
+    const linkedFeatures = featureIds.map((id) => featureById.get(id)).filter(Boolean);
+    if (linkedFeatures.length > 0) {
+      linkedFeatures.forEach((f) => {
+        consumedFeatureIds.add(f.id);
+        const productIds = [...new Set([f.productId, b.productId].filter(Boolean))];
+        advantages.push({
+          id: `rpa${crypto.randomUUID()}`, categoryId,
+          feature: combineText(f.title, f.description), benefit: combineText(b.title, b.description),
+          productIds: productIds.join(","),
+          isKeyDifferentiator: (f.isKeyDifferentiator === "true" || b.isKeyDifferentiator === "true") ? "true" : "",
+          createdBy: b.createdBy || f.createdBy || "Migration", createdAt: now, updatedBy: "", updatedAt: "",
+        });
+      });
+    } else {
+      advantages.push({
+        id: `rpa${crypto.randomUUID()}`, categoryId,
+        feature: "", benefit: combineText(b.title, b.description),
+        productIds: b.productId || "",
+        isKeyDifferentiator: b.isKeyDifferentiator === "true" ? "true" : "",
+        createdBy: b.createdBy || "Migration", createdAt: now, updatedBy: "", updatedAt: "",
+      });
+    }
+  });
+
+  categoryFeatures.forEach((f) => {
+    if (consumedFeatureIds.has(f.id)) return;
+    advantages.push({
+      id: `rpa${crypto.randomUUID()}`, categoryId,
+      feature: combineText(f.title, f.description), benefit: "",
+      productIds: f.productId || "",
+      isKeyDifferentiator: f.isKeyDifferentiator === "true" ? "true" : "",
+      createdBy: f.createdBy || "Migration", createdAt: now, updatedBy: "", updatedAt: "",
+    });
+  });
+
+  return advantages;
+}
+
+// Runs once per category, ever — guarded by whether any RecallProductAdvantages
+// row already exists for it. RecallProductFeatures/RecallProductBenefits are
+// never written to or deleted by this; they stay as permanent, inspectable
+// history in Google Sheets.
+async function ensureProductAdvantagesMigrated(categoryId, categoryFeatures, categoryBenefits, existingAdvantagesForCategory) {
+  if (existingAdvantagesForCategory.length > 0) return existingAdvantagesForCategory;
+  if (categoryFeatures.length === 0 && categoryBenefits.length === 0) return [];
+  const migrated = buildMigratedAdvantages(categoryId, categoryFeatures, categoryBenefits);
+  for (const row of migrated) {
+    await db.appendRow("RecallProductAdvantages", row);
+  }
+  return migrated;
+}
+
 function validateTrainingQuiz(quiz) {
   if (!Array.isArray(quiz) || quiz.length === 0) return "quiz must be a non-empty array";
   for (let i = 0; i < quiz.length; i++) {
@@ -8406,7 +8484,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     await ensurePhase2CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
-    const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources, features, benefits, uspRows] = await Promise.all([
+    const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources, features, benefits, uspRows, advantageRows] = await Promise.all([
       db.getAllRows("RecallCategories"),
       db.getAllRows("RecallIngredients"),
       db.getAllRows("RecallIngredientForms"),
@@ -8423,6 +8501,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
       db.getAllRows("RecallProductFeatures"),
       db.getAllRows("RecallProductBenefits"),
       db.getAllRows("RecallCategoryUsp"),
+      db.getAllRows("RecallProductAdvantages"),
     ]);
     const category = categories.find((c) => c.id === req.params.id);
     if (!category) return res.status(404).json({ error: "Recall category not found." });
@@ -8550,6 +8629,11 @@ app.get("/api/recall/categories/:id", async (req, res) => {
         };
       });
 
+    const categoryFeatures = features.filter((f) => f.categoryId === category.id);
+    const categoryBenefits = benefits.filter((b) => b.categoryId === category.id);
+    const categoryAdvantagesExisting = advantageRows.filter((a) => a.categoryId === category.id);
+    const categoryAdvantages = await ensureProductAdvantagesMigrated(category.id, categoryFeatures, categoryBenefits, categoryAdvantagesExisting);
+
     res.json({
       category: { id: category.id, name: category.name, description: category.description || "" },
       ingredients: categoryIngredients,
@@ -8561,9 +8645,10 @@ app.get("/api/recall/categories/:id", async (req, res) => {
       references,
       quizAvailable: categoryQuiz.length > 0,
       quizQuestionCount: categoryQuiz.length,
-      features: features.filter((f) => f.categoryId === category.id).map(parseRecallFeature),
-      benefits: benefits.filter((b) => b.categoryId === category.id).map(parseRecallBenefit),
+      features: categoryFeatures.map(parseRecallFeature),
+      benefits: categoryBenefits.map(parseRecallBenefit),
       usp: parseRecallUsp(uspRows.find((u) => u.categoryId === category.id) || null),
+      advantages: categoryAdvantages.map(parseRecallProductAdvantage),
     });
   } catch (e) {
     console.error(e);
@@ -8773,6 +8858,89 @@ app.patch("/api/recall/benefits/:id/differentiator", requireManager, async (req,
     const { isKeyDifferentiator } = req.body;
     const ok = await db.updateRowById("RecallProductBenefits", req.params.id, { isKeyDifferentiator: isKeyDifferentiator ? "true" : "" });
     if (!ok) return res.status(404).json({ error: "Benefit not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// --- Product Expert: Product Advantages (unified Feature -> Products ->
+// Benefit, replacing the separate Feature/Benefit lists above) -----------
+// Create is open to any employee, same reasoning as everywhere else in
+// Recall; edit and delete are requireManager. isKeyDifferentiator is
+// accepted in the body but silently forced to false unless the caller is a
+// manager — a rep filling out the unified form can never self-mark a
+// differentiator, matching the manager-only rule this app already applies
+// to every other "mark as X" action in Recall.
+async function validateAdvantageProductIds(productIds) {
+  if (!Array.isArray(productIds) || productIds.length === 0) return "At least one product is required.";
+  const catalog = await db.getAllRows("ProductCatalog");
+  const catalogIds = new Set(catalog.map((p) => p.id));
+  const invalid = productIds.filter((id) => !catalogIds.has(id));
+  if (invalid.length > 0) return "One or more selected products weren't found.";
+  return null;
+}
+
+app.post("/api/recall/advantages", async (req, res) => {
+  try {
+    const { categoryId, feature, benefit, productIds, isKeyDifferentiator } = req.body;
+    if (!categoryId) return res.status(400).json({ error: "categoryId is required" });
+    if (!feature || !String(feature).trim()) return res.status(400).json({ error: "feature is required" });
+    if (!benefit || !String(benefit).trim()) return res.status(400).json({ error: "benefit is required" });
+    const productError = await validateAdvantageProductIds(productIds);
+    if (productError) return res.status(400).json({ error: productError });
+
+    const advantage = {
+      id: `rpa${crypto.randomUUID()}`, categoryId,
+      feature: String(feature).trim(), benefit: String(benefit).trim(),
+      productIds: productIds.join(","),
+      isKeyDifferentiator: (isKeyDifferentiator && req.role === "manager") ? "true" : "",
+      createdBy: req.repName || "Manager", createdAt: new Date().toISOString(), updatedBy: "", updatedAt: "",
+    };
+    await db.appendRow("RecallProductAdvantages", advantage);
+    res.json(parseRecallProductAdvantage(advantage));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/recall/advantages/:id", requireManager, async (req, res) => {
+  try {
+    const rows = await db.getAllRows("RecallProductAdvantages");
+    const advantage = rows.find((a) => a.id === req.params.id);
+    if (!advantage) return res.status(404).json({ error: "Product advantage not found" });
+
+    const { feature, benefit, productIds, isKeyDifferentiator } = req.body;
+    const patch = { updatedBy: req.repName || "Manager", updatedAt: new Date().toISOString() };
+    if (feature !== undefined) {
+      if (!String(feature).trim()) return res.status(400).json({ error: "feature can't be empty" });
+      patch.feature = String(feature).trim();
+    }
+    if (benefit !== undefined) {
+      if (!String(benefit).trim()) return res.status(400).json({ error: "benefit can't be empty" });
+      patch.benefit = String(benefit).trim();
+    }
+    if (productIds !== undefined) {
+      const productError = await validateAdvantageProductIds(productIds);
+      if (productError) return res.status(400).json({ error: productError });
+      patch.productIds = productIds.join(",");
+    }
+    if (isKeyDifferentiator !== undefined) patch.isKeyDifferentiator = isKeyDifferentiator ? "true" : "";
+
+    await db.updateRowById("RecallProductAdvantages", advantage.id, patch);
+    res.json(parseRecallProductAdvantage({ ...advantage, ...patch }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/recall/advantages/:id", requireManager, async (req, res) => {
+  try {
+    const ok = await db.deleteRowById("RecallProductAdvantages", req.params.id);
+    if (!ok) return res.status(404).json({ error: "Product advantage not found" });
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
