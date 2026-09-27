@@ -183,6 +183,9 @@ export const api = {
     request(`/recall/benefits/${id}/differentiator`, { method: "PATCH", body: JSON.stringify({ isKeyDifferentiator }) }),
   saveRecallCategoryUsp: (categoryId, text) => request(`/recall/categories/${categoryId}/usp`, { method: "PUT", body: JSON.stringify({ text }) }),
   approveRecallCategoryUsp: (categoryId, text) => request(`/recall/categories/${categoryId}/usp/approve`, { method: "PATCH", body: JSON.stringify({ text }) }),
+  addRecallAdvantage: (payload) => request("/recall/advantages", { method: "POST", body: JSON.stringify(payload) }),
+  updateRecallAdvantage: (id, patch) => request(`/recall/advantages/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  removeRecallAdvantage: (id) => request(`/recall/advantages/${id}`, { method: "DELETE" }),
 
   // ---------- Manager Performance Management redesign ----------
   correctInteractionType: (visitId, interactionType, reason) =>

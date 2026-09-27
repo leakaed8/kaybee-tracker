@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Settings, Target, Gem, BarChart3 } from "lucide-react";
+import { Settings, Target, BarChart3 } from "lucide-react";
 import { api } from "./api.js";
 import { computeMetrics, fmtMoney, fmtDays } from "./competitorCalc.js";
 import { TrainingStudiesView } from "./TrainingView.jsx";
@@ -261,8 +261,7 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
           <WhyOurProductsSection
             categoryId={categoryId}
             products={data.products}
-            features={data.features || []}
-            benefits={data.benefits || []}
+            advantages={data.advantages || []}
             usp={data.usp}
             role={role}
             onSaved={load}
@@ -1095,330 +1094,287 @@ function WopEmptyState({ text }) {
   return <div style={{ fontSize: 12, color: "#B7AF9E", padding: "10px 0" }}>{text}</div>;
 }
 
-function WhyOurProductsSection({ categoryId, products, features, benefits, usp, role, onSaved }) {
+function WhyOurProductsSection({ categoryId, products, advantages, usp, role, onSaved }) {
   return (
     <RecallSection title="Why Our Products?" accent>
       <p style={{ fontSize: 12, color: "#8A8272", margin: "-4px 0 16px", fontStyle: "italic" }}>
         Understand what we offer, why it matters, and what makes our range different.
       </p>
-      <WopFeaturesBlock categoryId={categoryId} products={products} features={features} role={role} onSaved={onSaved} />
-      <WopBenefitsBlock categoryId={categoryId} products={products} features={features} benefits={benefits} role={role} onSaved={onSaved} />
-      <WopDifferenceBlock features={features} benefits={benefits} />
+      <WopProductAdvantagesBlock categoryId={categoryId} products={products} advantages={advantages} role={role} onSaved={onSaved} />
       <WopUspBlock categoryId={categoryId} usp={usp} role={role} onSaved={onSaved} />
     </RecallSection>
   );
 }
 
-function WopFeaturesBlock({ categoryId, products, features, role, onSaved }) {
-  const canEdit = role === "manager";
-  const [showForm, setShowForm] = useState(false);
-  const [editingId, setEditingId] = useState(null);
-  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
-  const [busyId, setBusyId] = useState("");
+// Pure grouping transform (trace-tested): turns the flat advantages list
+// into { product, advantages[] } groups, one per product referenced by at
+// least one advantage. An advantage listing 2 products appears once under
+// EACH product's group — same underlying row/id, just shown twice — never
+// duplicated in storage. A product with zero advantages never gets an empty
+// group (keeps the page uncrowded), and a stale/unknown product id on an
+// advantage is skipped rather than fabricating a group for it.
+function groupAdvantagesByProduct(advantages, products) {
+  const productById = new Map((products || []).map((p) => [p.id, p]));
+  const groups = new Map();
+  (advantages || []).forEach((a) => {
+    (a.productIds || []).forEach((pid) => {
+      const product = productById.get(pid);
+      if (!product) return;
+      if (!groups.has(pid)) groups.set(pid, { product, advantages: [] });
+      groups.get(pid).advantages.push(a);
+    });
+  });
+  return [...groups.values()];
+}
 
-  const doDelete = async (id) => {
-    setBusyId(id);
-    try {
-      await api.removeRecallFeature(id);
-      setConfirmDeleteId(null);
-      onSaved();
-    } finally {
-      setBusyId("");
-    }
-  };
-  const toggleDifferentiator = async (f) => {
-    setBusyId(f.id);
-    try {
-      await api.setRecallFeatureDifferentiator(f.id, !f.isKeyDifferentiator);
-      onSaved();
-    } finally {
-      setBusyId("");
-    }
-  };
+function productDoseLine(p) {
+  return p && p.compoundAmount ? `${p.compoundAmount}${p.unit || ""}` : "";
+}
+
+function WopProductAdvantagesBlock({ categoryId, products, advantages, role, onSaved }) {
+  const [showForm, setShowForm] = useState(false);
+  const [editingAdvantage, setEditingAdvantage] = useState(null);
+  const groups = groupAdvantagesByProduct(advantages, products);
+
+  const closeForm = () => { setShowForm(false); setEditingAdvantage(null); };
 
   return (
     <div style={{ marginBottom: 22 }}>
-      <WopSubheader icon={Settings} title="Features" subtitle="What do our products offer?" />
-      {features.length === 0 && <WopEmptyState text="No features added yet." />}
-      {features.length > 0 && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 12 }}>
-          {features.map((f) => (
-            editingId === f.id ? (
-              <div key={f.id} style={{ gridColumn: "1 / -1" }}>
-                <FeatureForm categoryId={categoryId} products={products} feature={f} onSaved={() => { setEditingId(null); onSaved(); }} onCancel={() => setEditingId(null)} />
-              </div>
-            ) : (
-              <div key={f.id} style={wopCardStyle}>
-                {f.hasImage && <WopThumbnail fetchUrl={() => api.getRecallFeatureImageUrl(f.id)} />}
-                <WopIconBadge icon={Settings} size={28} />
-                <div style={{ fontWeight: 700, fontSize: 13, marginTop: 8 }}>{f.title}</div>
-                {f.description && <div style={{ fontSize: 12, color: "#5B5445", marginTop: 4 }}>{f.description}</div>}
-                {f.productName && <div style={{ fontSize: 10.5, color: "#8A8272", marginTop: 6 }}>Product: {f.productName}</div>}
-                {f.isKeyDifferentiator && <div style={wopDiffPillStyle}>Key Differentiator</div>}
-                {canEdit && (
-                  <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #F0EBE0", display: "flex", flexWrap: "wrap", gap: 6 }}>
-                    {confirmDeleteId === f.id ? (
-                      <>
-                        <span style={{ fontSize: 10.5, color: WOP_BURGUNDY }}>Delete?</span>
-                        <button onClick={() => doDelete(f.id)} disabled={busyId === f.id} style={wopSmallDangerBtnStyle}>{busyId === f.id ? "…" : "Yes"}</button>
-                        <button onClick={() => setConfirmDeleteId(null)} style={wopSmallBtnStyle}>Cancel</button>
-                      </>
-                    ) : (
-                      <>
-                        <button onClick={() => setEditingId(f.id)} style={wopSmallBtnStyle}>Edit</button>
-                        <button onClick={() => setConfirmDeleteId(f.id)} style={wopSmallDangerBtnStyle}>Delete</button>
-                        <button onClick={() => toggleDifferentiator(f)} disabled={busyId === f.id} style={wopSmallBtnStyle}>
-                          {f.isKeyDifferentiator ? "Unmark differentiator" : "Mark differentiator"}
-                        </button>
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-            )
+      <WopSubheader icon={Settings} title="Product Advantages" subtitle="Connect each product feature to its customer benefit." />
+      {groups.length === 0 && <WopEmptyState text="No product advantages added yet." />}
+      {groups.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 12 }}>
+          {groups.map((g) => (
+            <ProductGroupCard key={g.product.id} group={g} role={role} onEdit={setEditingAdvantage} onSaved={onSaved} />
           ))}
         </div>
       )}
-      {showForm ? (
-        <FeatureForm categoryId={categoryId} products={products} onSaved={() => { setShowForm(false); onSaved(); }} onCancel={() => setShowForm(false)} />
-      ) : (
-        <button onClick={() => setShowForm(true)} style={wopAddButtonStyle}>+ Add Feature</button>
+      <button onClick={() => setShowForm(true)} style={wopAddButtonStyle}>+ Add Product Advantage</button>
+
+      {(showForm || editingAdvantage) && (
+        <ProductAdvantageForm
+          categoryId={categoryId}
+          products={products}
+          role={role}
+          advantage={editingAdvantage}
+          onSaved={() => { closeForm(); onSaved(); }}
+          onCancel={closeForm}
+        />
       )}
     </div>
   );
 }
 
-function FeatureForm({ categoryId, products, feature, onSaved, onCancel }) {
-  const [title, setTitle] = useState(feature?.title || "");
-  const [description, setDescription] = useState(feature?.description || "");
-  const [productId, setProductId] = useState(feature?.productId || "");
-  const [image, setImage] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-
-  const submit = async (e) => {
-    e.preventDefault();
-    setError("");
-    if (!title.trim()) return setError("Feature name is required.");
-    setSaving(true);
-    try {
-      const fields = { title: title.trim(), description: description.trim(), productId, image: image || undefined };
-      if (feature) await api.updateRecallFeature(feature.id, fields);
-      else await api.addRecallFeature({ ...fields, categoryId });
-      onSaved();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
+function ProductGroupCard({ group, role, onEdit, onSaved }) {
+  const dose = productDoseLine(group.product);
   return (
-    <form onSubmit={submit} style={{ ...editorPanelStyle, marginTop: 0, marginBottom: 12 }}>
-      <div style={editorTitleStyle}>{feature ? "Edit Feature" : "Add Feature"}</div>
-      <EditorField label="Feature Name" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Multiple dosage forms" />
-      <EditorField label="Description" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="e.g. Tablets, sublingual tablets, and capsules." textarea />
-      <div style={{ marginBottom: 8 }}>
-        <label style={{ display: "block", fontSize: 11, color: "#8A8272", marginBottom: 2 }}>Product (optional)</label>
-        <select value={productId} onChange={(e) => setProductId(e.target.value)} style={inputStyle}>
-          <option value="">No specific product</option>
-          {(products || []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
+    <div style={wopCardStyle}>
+      <div style={{ fontWeight: 700, fontSize: 14 }}>{group.product.name}</div>
+      {dose && <div style={{ fontSize: 11, color: "#8A8272", marginBottom: 10 }}>{dose}</div>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: dose ? 0 : 8 }}>
+        {group.advantages.map((a) => (
+          <ProductAdvantageChain key={a.id} advantage={a} role={role} onEdit={() => onEdit(a)} onSaved={onSaved} />
+        ))}
       </div>
-      <div style={{ marginBottom: 8 }}>
-        <label style={{ display: "block", fontSize: 11, color: "#8A8272", marginBottom: 2 }}>Image (optional)</label>
-        <input type="file" accept="image/*" onChange={(e) => setImage(e.target.files[0] || null)} />
-      </div>
-      {error && <div style={{ fontSize: 11.5, color: WOP_BURGUNDY, marginBottom: 6 }}>{error}</div>}
-      <div style={{ display: "flex", gap: 8 }}>
-        <button type="submit" disabled={saving} style={saveButtonStyle}>{saving ? "Saving…" : "Save Feature"}</button>
-        <button type="button" onClick={onCancel} style={cancelButtonStyle}>Cancel</button>
-      </div>
-    </form>
-  );
-}
-
-function WopBenefitsBlock({ categoryId, products, features, benefits, role, onSaved }) {
-  const canEdit = role === "manager";
-  const [showForm, setShowForm] = useState(false);
-  const [editingId, setEditingId] = useState(null);
-  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
-  const [busyId, setBusyId] = useState("");
-  const featureById = new Map(features.map((f) => [f.id, f]));
-
-  const doDelete = async (id) => {
-    setBusyId(id);
-    try {
-      await api.removeRecallBenefit(id);
-      setConfirmDeleteId(null);
-      onSaved();
-    } finally {
-      setBusyId("");
-    }
-  };
-  const toggleDifferentiator = async (b) => {
-    setBusyId(b.id);
-    try {
-      await api.setRecallBenefitDifferentiator(b.id, !b.isKeyDifferentiator);
-      onSaved();
-    } finally {
-      setBusyId("");
-    }
-  };
-
-  return (
-    <div style={{ marginBottom: 22 }}>
-      <WopSubheader icon={Target} title="Benefits" subtitle="Why does it matter to the patient/customer?" />
-      {benefits.length === 0 && <WopEmptyState text="No benefits added yet." />}
-      {benefits.length > 0 && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 12 }}>
-          {benefits.map((b) => (
-            editingId === b.id ? (
-              <div key={b.id} style={{ gridColumn: "1 / -1" }}>
-                <BenefitForm categoryId={categoryId} products={products} features={features} benefit={b} onSaved={() => { setEditingId(null); onSaved(); }} onCancel={() => setEditingId(null)} />
-              </div>
-            ) : (
-              <div key={b.id} style={wopCardStyle}>
-                <WopIconBadge icon={Target} size={28} />
-                <div style={{ fontWeight: 700, fontSize: 13, marginTop: 8 }}>{b.title}</div>
-                {b.description && <div style={{ fontSize: 12, color: "#5B5445", marginTop: 4 }}>{b.description}</div>}
-                {b.featureIds.length > 0 && (
-                  <div style={{ fontSize: 10.5, color: "#8A8272", marginTop: 6 }}>
-                    Related: {b.featureIds.map((id) => featureById.get(id)?.title).filter(Boolean).join(", ") || "—"}
-                  </div>
-                )}
-                {b.productName && <div style={{ fontSize: 10.5, color: "#8A8272", marginTop: 2 }}>Product: {b.productName}</div>}
-                {b.isKeyDifferentiator && <div style={wopDiffPillStyle}>Key Differentiator</div>}
-                {canEdit && (
-                  <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #F0EBE0", display: "flex", flexWrap: "wrap", gap: 6 }}>
-                    {confirmDeleteId === b.id ? (
-                      <>
-                        <span style={{ fontSize: 10.5, color: WOP_BURGUNDY }}>Delete?</span>
-                        <button onClick={() => doDelete(b.id)} disabled={busyId === b.id} style={wopSmallDangerBtnStyle}>{busyId === b.id ? "…" : "Yes"}</button>
-                        <button onClick={() => setConfirmDeleteId(null)} style={wopSmallBtnStyle}>Cancel</button>
-                      </>
-                    ) : (
-                      <>
-                        <button onClick={() => setEditingId(b.id)} style={wopSmallBtnStyle}>Edit</button>
-                        <button onClick={() => setConfirmDeleteId(b.id)} style={wopSmallDangerBtnStyle}>Delete</button>
-                        <button onClick={() => toggleDifferentiator(b)} disabled={busyId === b.id} style={wopSmallBtnStyle}>
-                          {b.isKeyDifferentiator ? "Unmark differentiator" : "Mark differentiator"}
-                        </button>
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-            )
-          ))}
-        </div>
-      )}
-      {showForm ? (
-        <BenefitForm categoryId={categoryId} products={products} features={features} onSaved={() => { setShowForm(false); onSaved(); }} onCancel={() => setShowForm(false)} />
-      ) : (
-        <button onClick={() => setShowForm(true)} style={wopAddButtonStyle}>+ Add Benefit</button>
-      )}
     </div>
   );
 }
 
-function BenefitForm({ categoryId, products, features, benefit, onSaved, onCancel }) {
-  const [title, setTitle] = useState(benefit?.title || "");
-  const [description, setDescription] = useState(benefit?.description || "");
-  const [productId, setProductId] = useState(benefit?.productId || "");
-  const [featureIds, setFeatureIds] = useState(benefit?.featureIds || []);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+// One Feature -> Benefit -> (optional) Differentiator chain, individually
+// collapsible. Edit/Delete act on the shared Advantage row, not this one
+// product's view of it — editing from any product's group opens the same
+// modal pre-filled with every product currently on that Advantage.
+function ProductAdvantageChain({ advantage, role, onEdit, onSaved }) {
+  const canEdit = role === "manager";
+  const [open, setOpen] = useState(true);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
-  const toggleFeature = (id) => {
-    setFeatureIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
-  };
-
-  const submit = async (e) => {
-    e.preventDefault();
-    setError("");
-    if (!title.trim()) return setError("Benefit name is required.");
-    setSaving(true);
+  const doDelete = async () => {
+    setDeleting(true);
     try {
-      const payload = { title: title.trim(), description: description.trim(), productId, featureIds };
-      if (benefit) await api.updateRecallBenefit(benefit.id, payload);
-      else await api.addRecallBenefit({ ...payload, categoryId });
+      await api.removeRecallAdvantage(advantage.id);
       onSaved();
-    } catch (err) {
-      setError(err.message);
     } finally {
-      setSaving(false);
+      setDeleting(false);
     }
   };
 
   return (
-    <form onSubmit={submit} style={{ ...editorPanelStyle, marginTop: 0, marginBottom: 12 }}>
-      <div style={editorTitleStyle}>{benefit ? "Edit Benefit" : "Add Benefit"}</div>
-      <EditorField label="Benefit Name" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. More options to match different needs" />
-      <EditorField label="Description" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Why this matters to the patient/customer" textarea />
-      {features.length > 0 && (
-        <div style={{ marginBottom: 8 }}>
-          <label style={{ display: "block", fontSize: 11, color: "#8A8272", marginBottom: 4 }}>Related Feature(s)</label>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {features.map((f) => (
-              <button
-                type="button"
-                key={f.id}
-                onClick={() => toggleFeature(f.id)}
-                style={{
-                  fontSize: 11, padding: "4px 9px", borderRadius: 12, cursor: "pointer",
-                  border: featureIds.includes(f.id) ? `1px solid ${WOP_BURGUNDY}` : "1px solid #E5DFD3",
-                  background: featureIds.includes(f.id) ? WOP_BURGUNDY_TINT : "#fff",
-                  color: featureIds.includes(f.id) ? WOP_BURGUNDY : "#5B5445",
-                }}
-              >
-                {f.title}
-              </button>
-            ))}
-          </div>
+    <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 10, padding: 10 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer" }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8, textAlign: "left" }}>
+          <WopIconBadge icon={Settings} size={26} />
+          <span style={{ fontWeight: 700, fontSize: 12.5, color: "#17251F" }}>{advantage.feature || "(no feature text)"}</span>
         </div>
-      )}
-      <div style={{ marginBottom: 8 }}>
-        <label style={{ display: "block", fontSize: 11, color: "#8A8272", marginBottom: 2 }}>Product (optional)</label>
-        <select value={productId} onChange={(e) => setProductId(e.target.value)} style={inputStyle}>
-          <option value="">No specific product</option>
-          {(products || []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
-      </div>
-      {error && <div style={{ fontSize: 11.5, color: WOP_BURGUNDY, marginBottom: 6 }}>{error}</div>}
-      <div style={{ display: "flex", gap: 8 }}>
-        <button type="submit" disabled={saving} style={saveButtonStyle}>{saving ? "Saving…" : "Save Benefit"}</button>
-        <button type="button" onClick={onCancel} style={cancelButtonStyle}>Cancel</button>
-      </div>
-    </form>
-  );
-}
+        <span style={{ fontSize: 11, color: "#8A8272", flexShrink: 0, marginLeft: 8 }}>{open ? "▾" : "▸"}</span>
+      </button>
 
-// Purely a filtered view of Features/Benefits a manager already flagged —
-// never asks anyone to rewrite anything, just surfaces what's already there.
-function WopDifferenceBlock({ features, benefits }) {
-  const diffFeatures = features.filter((f) => f.isKeyDifferentiator);
-  const diffBenefits = benefits.filter((b) => b.isKeyDifferentiator);
-  const items = [
-    ...diffFeatures.map((f) => ({ ...f, kind: "Feature" })),
-    ...diffBenefits.map((b) => ({ ...b, kind: "Benefit" })),
-  ];
-  return (
-    <div style={{ marginBottom: 22 }}>
-      <WopSubheader icon={Gem} title="Our Difference" subtitle="What makes our range stand out?" />
-      {items.length === 0 ? (
-        <WopEmptyState text="No differentiators marked yet — a manager can mark a Feature or Benefit above as a Key Differentiator." />
-      ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
-          {items.map((item) => (
-            <div key={`${item.kind}-${item.id}`} style={wopCardStyle}>
-              <div style={{ fontSize: 9.5, fontWeight: 700, color: WOP_GREEN, letterSpacing: 0.3 }}>{item.kind.toUpperCase()}</div>
-              <div style={{ fontWeight: 700, fontSize: 13, marginTop: 4 }}>{item.title}</div>
-              {item.description && <div style={{ fontSize: 12, color: "#5B5445", marginTop: 4 }}>{item.description}</div>}
+      {open && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ textAlign: "center", fontSize: 14, color: "#B7AF9E", margin: "2px 0 8px" }}>↓</div>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+            <WopIconBadge icon={Target} size={26} />
+            <div>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: WOP_GREEN, letterSpacing: 0.3 }}>BENEFIT</div>
+              <div style={{ fontSize: 12.5, color: "#333B36", marginTop: 2 }}>{advantage.benefit || "(no benefit text)"}</div>
             </div>
-          ))}
+          </div>
+          {advantage.isKeyDifferentiator && (
+            <div style={{ ...wopDiffPillStyle, width: "fit-content" }}>⭐ Marked as differentiator</div>
+          )}
+          {canEdit && (
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3", display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {confirmDelete ? (
+                <>
+                  <span style={{ fontSize: 10.5, color: WOP_BURGUNDY }}>Delete?</span>
+                  <button onClick={doDelete} disabled={deleting} style={wopSmallDangerBtnStyle}>{deleting ? "…" : "Yes"}</button>
+                  <button onClick={() => setConfirmDelete(false)} style={wopSmallBtnStyle}>Cancel</button>
+                </>
+              ) : (
+                <>
+                  <button onClick={onEdit} style={wopSmallBtnStyle}>Edit</button>
+                  <button onClick={() => setConfirmDelete(true)} style={wopSmallDangerBtnStyle}>Delete</button>
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
+    </div>
+  );
+}
+
+// Modal overlay (matching the reference design, and the same fixed-overlay
+// technique DocumentViewer already uses) with numbered steps in
+// Product(s) -> Feature -> Benefit -> Differentiator order — the same order
+// the page now reads in. Reused for both Add and Edit; when editing, ALL of
+// the advantage's current products are pre-selected regardless of which
+// product's group the Edit button was clicked from.
+function ProductAdvantageForm({ categoryId, products, role, advantage, onSaved, onCancel }) {
+  const isManager = role === "manager";
+  const [productIds, setProductIds] = useState(advantage?.productIds || []);
+  const [feature, setFeature] = useState(advantage?.feature || "");
+  const [benefit, setBenefit] = useState(advantage?.benefit || "");
+  const [isKeyDifferentiator, setIsKeyDifferentiator] = useState(advantage?.isKeyDifferentiator || false);
+  const [search, setSearch] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const toggleProduct = (id) => {
+    setProductIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+  };
+
+  const q = search.toLowerCase().trim();
+  const filteredProducts = (products || []).filter((p) => !q || p.name.toLowerCase().includes(q));
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError("");
+    if (productIds.length === 0) return setError("Select at least one product.");
+    if (!feature.trim()) return setError("Feature is required.");
+    if (!benefit.trim()) return setError("Benefit is required.");
+    setSaving(true);
+    try {
+      const payload = { feature: feature.trim(), benefit: benefit.trim(), productIds };
+      if (isManager) payload.isKeyDifferentiator = isKeyDifferentiator;
+      if (advantage) await api.updateRecallAdvantage(advantage.id, payload);
+      else await api.addRecallAdvantage({ ...payload, categoryId });
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(23,37,34,0.75)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+      onClick={onCancel}
+    >
+      <div
+        style={{ background: "#fff", borderRadius: 14, width: "min(480px, 100%)", maxHeight: "90vh", overflowY: "auto", display: "flex", flexDirection: "column" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 18px", borderBottom: "1px solid #E5DFD3" }}>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>{advantage ? "Edit Product Advantage" : "Add Product Advantage"}</div>
+          <button type="button" onClick={onCancel} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#5B5445", lineHeight: 1 }}>✕</button>
+        </div>
+
+        <form onSubmit={submit} style={{ padding: 18, display: "flex", flexDirection: "column", gap: 18 }}>
+          <FormStep number={1} title="Select Products" subtitle="You can select one or more products.">
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search products…" style={{ ...inputStyle, marginBottom: 8 }} />
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto" }}>
+              {filteredProducts.map((p) => {
+                const selected = productIds.includes(p.id);
+                const dose = productDoseLine(p);
+                return (
+                  <label
+                    key={p.id}
+                    style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 8, cursor: "pointer", background: selected ? WOP_BURGUNDY_TINT : "#FAF7F2", border: `1px solid ${selected ? WOP_BURGUNDY : "#E5DFD3"}` }}
+                  >
+                    <input type="checkbox" checked={selected} onChange={() => toggleProduct(p.id)} />
+                    <div>
+                      <div style={{ fontSize: 12.5, fontWeight: 600 }}>{p.name}</div>
+                      {dose && <div style={{ fontSize: 10.5, color: "#8A8272" }}>{dose}</div>}
+                    </div>
+                  </label>
+                );
+              })}
+              {filteredProducts.length === 0 && <div style={{ fontSize: 12, color: "#B7AF9E" }}>No products match this search.</div>}
+            </div>
+          </FormStep>
+
+          <FormStep number={2} title="Feature" subtitle="What does the product offer?">
+            <input value={feature} onChange={(e) => setFeature(e.target.value)} placeholder="e.g. Sublingual / Quick Dissolve" style={inputStyle} />
+          </FormStep>
+
+          <FormStep number={3} title="Benefit" subtitle="Why does it matter to the patient/customer?">
+            <textarea value={benefit} onChange={(e) => setBenefit(e.target.value)} placeholder="e.g. Bypasses the digestive tract and enters the bloodstream immediately." rows={3} style={{ ...inputStyle, resize: "vertical" }} />
+          </FormStep>
+
+          {isManager && (
+            <FormStep number={4} title="Mark as Differentiator" subtitle="Check this if it makes our range stand out from competitors." optional>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 8, background: isKeyDifferentiator ? "#FBF3E4" : "#FAF7F2", border: `1px solid ${isKeyDifferentiator ? WOP_GOLD : "#E5DFD3"}`, cursor: "pointer" }}>
+                <input type="checkbox" checked={isKeyDifferentiator} onChange={(e) => setIsKeyDifferentiator(e.target.checked)} />
+                <span style={{ fontSize: 12.5 }}>Mark this as differentiator</span>
+              </label>
+            </FormStep>
+          )}
+
+          {error && <div style={{ fontSize: 12, color: WOP_BURGUNDY }}>{error}</div>}
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" onClick={onCancel} style={{ ...cancelButtonStyle, flex: 1 }}>Cancel</button>
+            <button type="submit" disabled={saving} style={{ ...saveButtonStyle, flex: 1, background: WOP_BURGUNDY }}>{saving ? "Saving…" : "Save"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function FormStep({ number, title, subtitle, optional, children }) {
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 8 }}>
+        <div style={{ width: 26, height: 26, borderRadius: "50%", background: WOP_BURGUNDY_TINT, color: WOP_BURGUNDY, fontWeight: 700, fontSize: 12.5, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          {number}
+        </div>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>
+            {title} {!optional && <span style={{ color: WOP_BURGUNDY }}>*</span>}
+            {optional && <span style={{ fontWeight: 400, color: "#8A8272", fontSize: 11.5 }}> (optional)</span>}
+          </div>
+          <div style={{ fontSize: 11, color: "#8A8272" }}>{subtitle}</div>
+        </div>
+      </div>
+      {children}
     </div>
   );
 }
