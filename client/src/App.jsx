@@ -6461,23 +6461,30 @@ function ClientExcelImportSection({ existingClients, repNames, kind = "pharmacy"
 }
 
 // ---------- Pharmacies View (tiering + follow-up nudges) ----------
-// Territory hierarchy: `area` (e.g. "Dahiyeh") is the Territory, already a
-// free-text field used everywhere; this only adds a finer Sub-territory
-// selector for territories that actually need one. A territory with no
-// entry here just doesn't get a sub-territory dropdown — everything about
-// it keeps working exactly as before.
-// Real imported pharmacy data uses "Baabda" (the actual Lebanese district
-// name) as the Territory value for these — Dahiyeh isn't a separate
-// district, it's the colloquial name for a cluster of neighborhoods inside
-// Baabda (alongside non-Dahiyeh Baabda towns like Hazmieh or Chweifat,
-// which simply won't get one of these sub-territories assigned). Some
-// clients may still have "Dahiyeh" itself as their Territory from earlier
-// manual entry, so both keys are supported.
-const DAHIYEH_SUBTERRITORY_LIST = ["Chiyah", "Ghobeiry", "Haret Hreik", "Borj El Barajneh", "Mreijeh", "Tahwitat El Ghadeer", "Bir Hassan", "Jnah", "Ouzai", "Laylaki"];
-const TERRITORY_SUBTERRITORIES = {
-  Dahiyeh: DAHIYEH_SUBTERRITORY_LIST,
-  Baabda: DAHIYEH_SUBTERRITORY_LIST,
-};
+// Territory hierarchy: `area` (e.g. "Baabda") is the Territory, already a
+// free-text field used everywhere; Sub-territory is a finer selector for
+// territories that actually have one. Rather than a hardcoded list of
+// neighborhood names (the original Dahiyeh cluster only had 10), the set of
+// sub-territories offered for a given Territory is derived from whatever
+// subTerritory values already exist among its pharmacies — a real bulk
+// import (e.g. the Baabda-area Excel, which spans 29 distinct sub-
+// territories: Hazmieh, Choueifat, Hadath, Kfarshima, etc., far beyond the
+// original Dahiyeh neighborhoods) populates this automatically, so the
+// dropdown never again silently excludes real data. A Territory with no
+// subTerritory values yet just doesn't get a sub-territory dropdown —
+// everything about it keeps working exactly as before.
+function useSubTerritoriesByArea(clients) {
+  return useMemo(() => {
+    const byArea = {};
+    for (const c of clients) {
+      if (!c.area || !c.subTerritory) continue;
+      (byArea[c.area] || (byArea[c.area] = new Set())).add(c.subTerritory);
+    }
+    const result = {};
+    for (const [area, set] of Object.entries(byArea)) result[area] = [...set].sort();
+    return result;
+  }, [clients]);
+}
 
 // Manager-only, one-time-use tool for undoing a bulk import made from the
 // wrong file (e.g. a general reference directory imported as if it were the
@@ -6946,7 +6953,8 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
     () => [...new Set(clients.map((c) => c.area).filter(Boolean))].sort(),
     [clients]
   );
-  const subTerritoryOptions = TERRITORY_SUBTERRITORIES[territoryFilter] || null;
+  const subTerritoriesByArea = useSubTerritoriesByArea(clients);
+  const subTerritoryOptions = subTerritoriesByArea[territoryFilter] || null;
 
   // The last few visits to this pharmacy, newest first — fetched only once
   // its history panel is actually expanded, not held for every row.
@@ -7199,14 +7207,14 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
                       {c.assignedRep ? `Rep: ${c.assignedRep}` : "Unassigned"}
                     </span>
                   )}
-                  {role === "manager" && TERRITORY_SUBTERRITORIES[c.area] && (
+                  {role === "manager" && subTerritoriesByArea[c.area] && (
                     <select
                       value={c.subTerritory || ""}
                       onChange={(e) => onUpdateSubTerritory(c.id, e.target.value)}
                       style={{ fontSize: 11, padding: "3px 6px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", marginLeft: 8 }}
                     >
                       <option value="">No sub-territory</option>
-                      {TERRITORY_SUBTERRITORIES[c.area].map((s) => <option key={s} value={s}>{s}</option>)}
+                      {subTerritoriesByArea[c.area].map((s) => <option key={s} value={s}>{s}</option>)}
                     </select>
                   )}
                   {role === "manager" ? (
