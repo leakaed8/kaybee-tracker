@@ -10082,6 +10082,21 @@ function addDaysToTodayStr(days) {
 
 const TIER_CADENCE_DAYS = { A: 14, B: 30, C: 60 };
 
+// Every background job below that fires once immediately at process boot
+// (as opposed to only on its recurring setInterval) is delayed by this much
+// instead of running the instant the process starts. Sheets API calls are
+// now rate-limited to a shared, unprioritized queue (see callGoogleApi in
+// sheetsDb.js) — on a cold start, ensureSheets alone issues ~1 read per
+// schema tab (~48 calls), and without this delay every one of these jobs'
+// own reads would pile into that same queue at the exact same moment,
+// easily exceeding the per-minute budget and pushing a real user's very
+// first request (e.g. loading the app right after a deploy) behind a queue
+// that takes over a minute to drain — well past the client's 25s request
+// timeout ("Couldn't reach the server"). Waiting lets ensureSheets and any
+// early real traffic clear the queue first; background maintenance losing
+// a couple of minutes at boot costs nothing since it's not user-facing.
+const STARTUP_BACKGROUND_JOB_DELAY_MS = 90 * 1000;
+
 async function checkExpiryAndOverdueAlerts() {
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
   try {
@@ -10137,7 +10152,7 @@ async function checkExpiryAndOverdueAlerts() {
 
 const ALERT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
-  checkExpiryAndOverdueAlerts();
+  setTimeout(checkExpiryAndOverdueAlerts, STARTUP_BACKGROUND_JOB_DELAY_MS);
   setInterval(checkExpiryAndOverdueAlerts, ALERT_CHECK_INTERVAL_MS);
 }
 
@@ -10203,7 +10218,7 @@ async function checkTrainingNudges() {
 
 const TRAINING_NUDGE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
-  checkTrainingNudges();
+  setTimeout(checkTrainingNudges, STARTUP_BACKGROUND_JOB_DELAY_MS);
   setInterval(checkTrainingNudges, TRAINING_NUDGE_CHECK_INTERVAL_MS);
 }
 
@@ -10920,16 +10935,16 @@ async function checkMissedPunchOuts() {
     console.error("checkMissedPunchOuts failed", e);
   }
 }
-checkMissedPunchOuts();
+setTimeout(checkMissedPunchOuts, STARTUP_BACKGROUND_JOB_DELAY_MS);
 setInterval(checkMissedPunchOuts, PUNCH_AUTO_CLOSE_CHECK_INTERVAL_MS);
 
 if (telegram.isConfigured()) {
-  checkMonthlyDigest();
-  checkFollowUpReminders();
-  checkSampleReminders();
-  checkMonthlyVisitsSummary();
-  checkInventoryUpdateReminder();
-  checkStockMovementReminder();
+  setTimeout(checkMonthlyDigest, STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setTimeout(checkFollowUpReminders, STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setTimeout(checkSampleReminders, STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setTimeout(checkMonthlyVisitsSummary, STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setTimeout(checkInventoryUpdateReminder, STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setTimeout(checkStockMovementReminder, STARTUP_BACKGROUND_JOB_DELAY_MS);
   setInterval(checkMonthlyDigest, MONTHLY_DIGEST_CHECK_INTERVAL_MS);
   setInterval(checkFollowUpReminders, FOLLOWUP_CHECK_INTERVAL_MS);
   setInterval(checkSampleReminders, FOLLOWUP_CHECK_INTERVAL_MS);
