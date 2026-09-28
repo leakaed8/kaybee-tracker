@@ -425,6 +425,15 @@ function buildCleanOrderItems(items) {
     originalPrice: Number(it.originalPrice) || 0,
     expiry: it.expiry || "",
     offerId: it.offerId || "",
+    // Which independent offer INSTANCE this item belongs to on this order —
+    // distinct from offerId (which promotion TYPE it is). Two separate
+    // "BUY 7 GET 1 FREE" selections on the same order share one offerId but
+    // get two different groupId values, so they validate independently
+    // instead of being summed into one combined requirement. Items saved
+    // before this field existed have no groupId; validateOfferGroups falls
+    // back to one group per offerId for those, matching the only grouping
+    // that ever existed for them.
+    groupId: it.groupId || "",
   }));
 }
 
@@ -446,6 +455,12 @@ function buildCleanOrderItems(items) {
 // checks below close that gap: exactly getQty units may be marked free (no
 // more, no fewer), and every unit marked free must actually be priced at 0
 // — never trusting the client's isFree/unitPrice pair beyond that.
+//
+// Grouping key is groupId (one specific offer INSTANCE on this order), not
+// offerId (the promotion type) — two independent instances of the same
+// promotion must validate separately. Items with no groupId (saved before
+// it existed) fall back to one group per offerId, exactly matching the only
+// grouping those older orders ever had.
 async function validateOfferGroups(cleanItems) {
   const offerRows = await db.getAllRows("Offers");
   // Looked up by id across ALL offers, not just currently-active ones — an
@@ -455,11 +470,13 @@ async function validateOfferGroups(cleanItems) {
   // order was originally saved under, not silently stop checking. Only a
   // fully DELETED offer row has nothing left to validate against.
   const offerById = new Map(offerRows.map(parseOffer).map((o) => [o.id, o]));
-  const groupIds = [...new Set(cleanItems.map((it) => it.offerId).filter(Boolean))];
-  for (const offerId of groupIds) {
-    const offer = offerById.get(offerId);
+  const itemsWithOffers = cleanItems.filter((it) => it.offerId);
+  const groupKeyOf = (it) => it.groupId || `legacy-${it.offerId}`;
+  const groupKeys = [...new Set(itemsWithOffers.map(groupKeyOf))];
+  for (const groupKey of groupKeys) {
+    const groupItems = itemsWithOffers.filter((it) => groupKeyOf(it) === groupKey);
+    const offer = offerById.get(groupItems[0].offerId);
     if (!offer) continue; // offer row was deleted entirely — nothing to validate against
-    const groupItems = cleanItems.filter((it) => it.offerId === offerId);
     const groupQty = groupItems.reduce((sum, it) => sum + it.qty, 0);
     const required = offer.buyQty + offer.getQty;
     if (groupQty !== required) {

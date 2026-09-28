@@ -3722,7 +3722,11 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     if (!editOrder) return [];
     return editOrder.items.map((it, i) => {
       const matched = products.find((p) => p.id === it.productId);
-      return { key: i, ...it, availableQty: matched ? matched.qty : Infinity };
+      // Orders saved before independent offer instances existed have no
+      // groupId — fall back to one group per offerId, exactly the single
+      // grouping those items ever had (see validateOfferGroups server-side).
+      const groupId = it.groupId || (it.offerId ? `legacy-${it.offerId}` : "");
+      return { key: i, ...it, groupId, availableQty: matched ? matched.qty : Infinity };
     });
   });
   // Which offer group the NEXT added item joins — "" means regular/no-offer.
@@ -3730,9 +3734,26 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   // mistake is remove-and-re-add, matching how every other item edit in
   // this form already works (there's no in-place qty edit either).
   const [pendingOfferId, setPendingOfferId] = useState("");
+  // The offer INSTANCE the shared add-item row currently targets — distinct
+  // from pendingOfferId (which promotion TYPE is selected). null means "the
+  // next add starts a brand-new instance." Only three things ever change
+  // it: the very first add under a chosen promotion (mints one), "+ Add
+  // another offer" (clears it so the next add mints a fresh one), and
+  // "Edit offer" on a past group (re-opens that exact instance as the
+  // target). This is what lets the same promotion be picked twice on one
+  // order as two independent groups instead of being summed together.
+  const [activeGroupId, setActiveGroupId] = useState(null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const nextKeyRef = useRef(editOrder ? editOrder.items.length : 0);
+  const nextGroupKeyRef = useRef((() => {
+    if (!editOrder) return 0;
+    const nums = editOrder.items
+      .map((it) => /^g(\d+)$/.exec(it.groupId || ""))
+      .filter(Boolean)
+      .map((m) => Number(m[1]));
+    return nums.length ? Math.max(...nums) + 1 : 0;
+  })());
 
   // Pre-filled from the pharmacy's own negotiated rate, but editable per
   // order — discounts aren't uniform across pharmacies, and even a given
@@ -3755,14 +3776,37 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     if (!q || q <= 0) { setError("Enter a quantity greater than 0."); return; }
     const offerId = pendingOfferId && activeOfferIds.has(pendingOfferId) ? pendingOfferId : "";
 
+    // Which group this item lands in: the currently-open instance if there
+    // is one (started by an earlier add, "+ Add another offer", or "Edit
+    // offer"), otherwise a brand-new instance is minted right here. If the
+    // open instance already holds items under a DIFFERENT promotion, the
+    // rep changed the dropdown while still targeting it — same as clicking
+    // "Edit offer" then picking a different promotion, so every item
+    // already in that instance is retagged to match (mirrors
+    // switchGroupOffer, just triggered from the dropdown instead of the
+    // auto-suggestion button). A brand-new instance can never have this
+    // problem, since nothing is in it yet.
+    let groupId = "";
+    if (offerId) {
+      if (activeGroupId) {
+        groupId = activeGroupId;
+        const retag = items.some((it) => it.groupId === activeGroupId && it.offerId !== offerId);
+        if (retag) setItems((prev) => prev.map((it) => (it.groupId === activeGroupId ? { ...it, offerId } : it)));
+      } else {
+        groupId = `g${nextGroupKeyRef.current++}`;
+        setActiveGroupId(groupId);
+      }
+    }
+
     setItems((prev) => {
       // Merge into an existing line for the same batch *within the same
-      // offer group* instead of adding a duplicate row — otherwise 2 units
-      // entered as two separate clicks would sit in two lines of qty 1
-      // each, and the free-item engine could only carve a free unit out of
-      // one line at a time. A product added to two different offer groups
-      // (or one offer group and also regular) deliberately stays separate.
-      const existingIdx = prev.findIndex((it) => it.productId === matchedProduct.id && it.offerId === offerId);
+      // offer group instance* instead of adding a duplicate row — otherwise
+      // 2 units entered as two separate clicks would sit in two lines of
+      // qty 1 each, and the free-item engine could only carve a free unit
+      // out of one line at a time. A product added to two different offer
+      // instances (or one instance and also regular) deliberately stays
+      // separate — that's the whole point of an instance being independent.
+      const existingIdx = prev.findIndex((it) => it.productId === matchedProduct.id && (offerId ? it.groupId === groupId : !it.offerId));
       if (existingIdx >= 0) {
         return prev.map((it, i) => (i === existingIdx ? { ...it, qty: it.qty + q } : it));
       }
@@ -3776,6 +3820,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
         expiry: matchedProduct.expiry,
         isFree: false,
         offerId,
+        groupId,
       }];
     });
     setProductQuery("");
@@ -3784,11 +3829,36 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
 
   const removeItem = (key) => setItems((prev) => prev.filter((it) => it.key !== key));
 
-  // Reassigns every raw item currently in `fromOfferId` to `toOfferId` —
-  // used by the "Switch to next offer" suggestion below. Never touches
-  // qty/price/product, only which group a line belongs to.
-  const switchGroupOffer = (fromOfferId, toOfferId) => {
-    setItems((prev) => prev.map((it) => (it.offerId === fromOfferId ? { ...it, offerId: toOfferId } : it)));
+  // Removes every item in one specific offer instance — "Remove offer".
+  // Never touches any other instance, even one under the same promotion.
+  const removeGroup = (groupId) => {
+    setItems((prev) => prev.filter((it) => it.groupId !== groupId));
+    setActiveGroupId((cur) => (cur === groupId ? null : cur));
+  };
+
+  // "+ Add another offer" — closes whatever instance the add-item row is
+  // currently targeting (if any) so the next add mints a fresh, independent
+  // one, and clears the promotion dropdown so the rep picks explicitly
+  // (even if it ends up being the same promotion again).
+  const startNewOfferGroup = () => {
+    setActiveGroupId(null);
+    setPendingOfferId("");
+  };
+
+  // "Edit offer" — re-opens one specific PAST instance as the add-item
+  // row's target, so further adds/promotion changes land on it instead of
+  // starting yet another instance. Every other instance is untouched.
+  const editGroupOffer = (groupId, offerId) => {
+    setActiveGroupId(groupId);
+    setPendingOfferId(offerId);
+  };
+
+  // Reassigns every raw item currently in one specific offer INSTANCE
+  // (groupId) to a different promotion — used by the "Switch to next offer"
+  // suggestion below. Never touches qty/price/product, and never touches
+  // any other instance, even one under the same promotion.
+  const switchGroupOffer = (groupId, toOfferId) => {
+    setItems((prev) => prev.map((it) => (it.groupId === groupId ? { ...it, offerId: toOfferId } : it)));
   };
 
   // Never-assigned items are "regular". Items whose offerId points at an
@@ -3797,9 +3867,13 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   // must not be silently discarded on save (see orphanedOfferItems below).
   const regularItems = items.filter((it) => !it.offerId);
   const orphanedOfferItems = items.filter((it) => it.offerId && !activeOfferIds.has(it.offerId));
+  // Grouped by groupId (one specific offer INSTANCE on this order), not
+  // offerId (the promotion type) — this is what lets "BUY 7 GET 1 FREE" be
+  // picked twice on one order as two independent groups instead of being
+  // summed into one combined requirement.
   const groupIds = [];
   items.forEach((it) => {
-    if (it.offerId && activeOfferIds.has(it.offerId) && !groupIds.includes(it.offerId)) groupIds.push(it.offerId);
+    if (it.offerId && activeOfferIds.has(it.offerId) && it.groupId && !groupIds.includes(it.groupId)) groupIds.push(it.groupId);
   });
 
   // Each offer group is computed in total isolation — its own call to the
@@ -3807,25 +3881,27 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   // its own single offer, so one group's average price / free-item pick
   // can never see or affect another group's. A regular order (no offer
   // groups at all) is just an empty array here, unchanged from before.
-  const offerGroups = groupIds.map((offerId) => {
+  const offerGroups = groupIds.map((groupId) => {
+    const rawItems = items.filter((it) => it.groupId === groupId);
+    const offerId = rawItems[0].offerId; // every item in one instance shares one offerId, by construction
     const offer = activeOffers.find((o) => o.id === offerId);
-    const rawItems = items.filter((it) => it.offerId === offerId);
     const totalQty = rawItems.reduce((sum, it) => sum + it.qty, 0);
     const required = offer.buyQty + offer.getQty;
     const { displayItems, appliedOffer, avg, roundedAvg, freeItems, freeQty } = applyOfferToItems(rawItems, [offer]);
     return {
+      groupId,
       offerId,
       offer,
       rawItems,
       totalQty,
       required,
       valid: totalQty === required,
-      taggedDisplayItems: displayItems.map((it) => ({ ...it, offerId })),
+      taggedDisplayItems: displayItems.map((it) => ({ ...it, offerId, groupId })),
       appliedOffer, avg, roundedAvg, freeItems, freeQty,
     };
   });
 
-  const regularTagged = regularItems.map((it) => ({ ...it, offerId: "" }));
+  const regularTagged = regularItems.map((it) => ({ ...it, offerId: "", groupId: "" }));
   // Orphaned items pass through completely unchanged — same qty/price/
   // offerId as they already had. They aren't re-validated as a group (the
   // offer that defined their buy/get requirement no longer exists or isn't
@@ -3917,8 +3993,8 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
       const payload = {
         clientName,
         visitId,
-        items: finalItems.map(({ productId, name, qty, unitPrice, isFree, originalPrice, expiry, offerId }) => ({
-          productId, name, qty, unitPrice, isFree: !!isFree, originalPrice: originalPrice || 0, expiry: expiry || "", offerId: offerId || "",
+        items: finalItems.map(({ productId, name, qty, unitPrice, isFree, originalPrice, expiry, offerId, groupId }) => ({
+          productId, name, qty, unitPrice, isFree: !!isFree, originalPrice: originalPrice || 0, expiry: expiry || "", offerId: offerId || "", groupId: groupId || "",
         })),
         discountRate: finalDiscountRate,
       };
@@ -3989,16 +4065,36 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
 
       {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
 
-      {offerGroups.map((g) => {
+      {offerGroups.map((g, idx) => {
         const suggestion = nextOfferSuggestion(g);
         const statusColor = g.valid ? "#4C7A5E" : "#B33A3A";
+        const isActive = activeGroupId === g.groupId;
         return (
-          <div key={g.offerId} style={{ ...groupCardStyle, background: g.valid ? "#F7FBF8" : "#FBF3F0", borderColor: g.valid ? "#C7DFCE" : "#E5B8B0" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-              <span style={{ fontSize: 13, fontWeight: 600 }}>{g.offer.label}</span>
-              <span className="kb-font-mono" style={{ fontSize: 12, fontWeight: 600, color: statusColor }}>
-                {g.totalQty} / {g.required} units {g.valid ? "✓" : "⚠"}
-              </span>
+          <div key={g.groupId} data-testid="offer-group-card" data-group-id={g.groupId} style={{ ...groupCardStyle, background: g.valid ? "#F7FBF8" : "#FBF3F0", borderColor: isActive ? "#1F2A24" : (g.valid ? "#C7DFCE" : "#E5B8B0") }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, flexWrap: "wrap", gap: 6 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 10, fontWeight: 700, color: "#7A3B3B", background: "#F0EBE0", borderRadius: 5, padding: "2px 7px" }}>OFFER {idx + 1}</span>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>{g.offer.label}</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span className="kb-font-mono" style={{ fontSize: 12, fontWeight: 600, color: statusColor }}>
+                  {g.totalQty} / {g.required} units {g.valid ? "✓" : "⚠"}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => editGroupOffer(g.groupId, g.offerId)}
+                  style={{ fontSize: 11, fontWeight: 500, color: "#5B5445", background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "4px 8px", cursor: "pointer" }}
+                >
+                  Edit offer
+                </button>
+                <button
+                  type="button"
+                  onClick={() => removeGroup(g.groupId)}
+                  style={{ fontSize: 11, fontWeight: 500, color: "#B33A3A", background: "#fff", border: "1px solid #E5B8B0", borderRadius: 6, padding: "4px 8px", cursor: "pointer" }}
+                >
+                  Remove offer
+                </button>
+              </div>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
               {g.rawItems.map((it) => (
@@ -4024,7 +4120,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
                     If you want to order {g.totalQty} units, the next available offer is <strong>{suggestion.label}</strong>, which requires {suggestion.buyQty + suggestion.getQty} units.
                     <div style={{ marginTop: 4 }}>
                       <button
-                        onClick={() => switchGroupOffer(g.offerId, suggestion.id)}
+                        onClick={() => switchGroupOffer(g.groupId, suggestion.id)}
                         style={{ fontSize: 11.5, fontWeight: 600, color: "#C17817", background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 6, padding: "4px 8px", cursor: "pointer" }}
                       >
                         Switch to {suggestion.label}
@@ -4037,6 +4133,20 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
           </div>
         );
       })}
+
+      {offerGroups.length > 0 && (
+        <button
+          type="button"
+          onClick={startNewOfferGroup}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 6, width: "100%",
+            padding: "10px 14px", borderRadius: 8, border: "1px dashed #4C7A5E", background: "#fff",
+            color: "#2F5B41", fontSize: 12.5, fontWeight: 600, cursor: "pointer", marginBottom: 8,
+          }}
+        >
+          <Plus size={14} /> Add another offer
+        </button>
+      )}
 
       {orphanedOfferItems.length > 0 && (
         <div style={{ ...groupCardStyle, background: "#FBF3E8", borderColor: "#E9C88A" }}>
@@ -4151,9 +4261,9 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
           {offerGroups.length} offer group{offerGroups.length === 1 ? "" : "s"} · {totalFreeUnits} free unit{totalFreeUnits === 1 ? "" : "s"} · {regularUnitTotal} regular unit{regularUnitTotal === 1 ? "" : "s"} · {totalUnits} total units
           {offerGroups.length > 0 && (
             <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 8 }}>
-              {offerGroups.map((g) => (
-                <span key={g.offerId} style={{ color: g.valid ? "#4C7A5E" : "#B33A3A", fontWeight: 500 }}>
-                  {g.valid ? "✓" : "⚠"} {g.offer.label}
+              {offerGroups.map((g, idx) => (
+                <span key={g.groupId} style={{ color: g.valid ? "#4C7A5E" : "#B33A3A", fontWeight: 500 }}>
+                  {g.valid ? "✓" : "⚠"} Offer {idx + 1}: {g.offer.label}
                 </span>
               ))}
             </div>
