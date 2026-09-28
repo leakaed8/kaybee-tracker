@@ -399,6 +399,7 @@ export default function App() {
   const updateClientDiscount = (id, discountRate) => withSync(() => api.updateClientDiscount(id, discountRate), { touchesReference: true });
   const updateClientSubTerritory = (id, subTerritory) => withSync(() => api.updateClientSubTerritory(id, subTerritory), { touchesReference: true });
   const applyDahiyehSubTerritorySuggestions = (assignments) => withSync(() => api.applyDahiyehSubTerritorySuggestions(assignments), { touchesReference: true });
+  const applyZahraaTerritoryFix = (ids) => withSync(() => api.applyZahraaTerritoryFix(ids), { touchesReference: true });
   const bulkRemoveClients = (ids) => withSync(() => api.bulkRemoveClients(ids), { touchesReference: true });
   const commitClientImport = (rows) => withSync(() => api.commitClientImport(rows), { touchesReference: true });
   const completeClientInfo = (id, patch) => withSync(() => api.completeClientInfo(id, patch), { touchesReference: true });
@@ -602,6 +603,7 @@ export default function App() {
                 onUpdateDiscount={updateClientDiscount}
                 onUpdateSubTerritory={updateClientSubTerritory}
                 onApplyDahiyehSuggestions={applyDahiyehSubTerritorySuggestions}
+                onApplyZahraaTerritoryFix={applyZahraaTerritoryFix}
                 onBulkRemove={bulkRemoveClients}
                 onDuplicateSafeImport={commitClientImport}
                 onCompleteInfo={completeClientInfo}
@@ -6602,18 +6604,121 @@ function ImportUndoTool({ onRemove }) {
     </div>
   );
 }
+// One-time fix for a real bug in the duplicate-safe pharmacy import: it
+// used to write the app's Territory field (`area`) from the wrong Excel
+// column, so every pharmacy a real import touched ended up with
+// area="Zahraa" (a useless constant from that file) instead of the real
+// district. Unlike ImportUndoTool this never deletes anything — it only
+// corrects one field — so all matches default to CHECKED for convenience,
+// though the manager can still review and uncheck any that look wrong
+// before applying.
+function ZahraaTerritoryFixTool({ onApply }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [candidates, setCandidates] = useState(null);
+  const [checked, setChecked] = useState({});
+  const [applying, setApplying] = useState(false);
+  const [message, setMessage] = useState("");
+
+  const load = () => {
+    setLoading(true);
+    return api.getZahraaTerritoryFixCandidates()
+      .then((data) => {
+        const list = data.candidates || [];
+        setCandidates(list);
+        setChecked(Object.fromEntries(list.map((c) => [c.id, true])));
+      })
+      .catch(() => setCandidates([]))
+      .finally(() => setLoading(false));
+  };
+
+  const toggleOpen = () => {
+    setOpen((v) => {
+      const next = !v;
+      if (next && candidates === null) load();
+      return next;
+    });
+  };
+
+  const selectedIds = Object.keys(checked).filter((id) => checked[id]);
+
+  const apply = async () => {
+    if (selectedIds.length === 0) return;
+    setApplying(true);
+    try {
+      const data = await onApply(selectedIds);
+      await load();
+      setMessage(`Fixed ${data.fixed} pharmac${data.fixed === 1 ? "y" : "ies"} — Territory set back to Baabda.`);
+    } catch (e) {
+      setMessage(e.message || "Couldn't apply the fix.");
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <button type="button" onClick={toggleOpen} style={{
+        padding: "7px 12px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5, fontWeight: 500,
+      }}>
+        {open ? "Hide Territory fix tool" : "Fix pharmacies mislabeled \"Zahraa\""}
+      </button>
+      {open && (
+        <div style={{ marginTop: 8, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
+          <p style={{ fontSize: 12, color: "#8A8272", margin: "0 0 8px" }}>
+            A bug in the Excel import wrote "Zahraa" as the Territory for pharmacies that should have been "Baabda." This finds every pharmacy currently mislabeled that way and lets you correct it back. Nothing changes until you apply.
+          </p>
+          {loading && <div style={{ fontSize: 12, color: "#8A8272" }}>Loading…</div>}
+          {!loading && candidates && candidates.length === 0 && (
+            <div style={{ fontSize: 12, color: "#8A8272" }}>No pharmacies currently mislabeled "Zahraa."</div>
+          )}
+          {!loading && candidates && candidates.length > 0 && (
+            <>
+              <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>{candidates.length} pharmac{candidates.length === 1 ? "y" : "ies"} found</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 10, maxHeight: 320, overflowY: "auto" }}>
+                {candidates.map((c) => (
+                  <label key={c.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 12, borderBottom: "1px solid #F0EBE0" }}>
+                    <input type="checkbox" checked={!!checked[c.id]} onChange={(e) => setChecked((ck) => ({ ...ck, [c.id]: e.target.checked }))} />
+                    <span style={{ flex: 1 }}>{c.name}{c.phone ? ` · ${c.phone}` : ""}{c.subTerritory ? ` · ${c.subTerritory}` : ""}</span>
+                  </label>
+                ))}
+              </div>
+              <button
+                type="button"
+                disabled={applying || selectedIds.length === 0}
+                onClick={apply}
+                style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: selectedIds.length ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
+              >
+                {applying ? "Fixing…" : `Fix ${selectedIds.length} pharmac${selectedIds.length === 1 ? "y" : "ies"} to Baabda`}
+              </button>
+            </>
+          )}
+          {message && <div style={{ marginTop: 8, fontSize: 12, color: "#4C7A5E" }}>{message}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
 const cancelButtonStyleLike = { padding: "5px 10px", borderRadius: 7, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", cursor: "pointer" };
 
 // Column names this tool expects, in the exact shape a translated pharmacy
 // directory (Arabic + English name/address, phone, territory columns) comes
 // in — matched case-insensitively/trimmed rather than by exact position, so
 // small header formatting differences between exports don't break it.
+//
+// `area` (the app's top-level Territory field, e.g. "Baabda") is mapped
+// from "Governorate/District" first, NOT "Area" — a real production file
+// (343 Baabda-area rows) turned out to have "Governorate/District" holding
+// the real, correct district ("Baabda" for every row) while its "Area"
+// column held one single useless constant value for every row instead of
+// real per-pharmacy data. "Area" is kept only as a lower-priority fallback
+// for a differently-shaped file where it might genuinely hold the right
+// thing; "Sub Territory" is unaffected by this and was always correct.
 const DUPLICATE_SAFE_IMPORT_COLUMNS = {
   nameAr: ["Pharmacy Name (Arabic)"],
   name: ["Pharmacy Name (English)"],
   phone: ["Telephone", "Phone"],
-  district: ["Governorate/District", "District"],
-  area: ["Area"],
+  area: ["Governorate/District", "District", "Area"],
   subTerritory: ["Sub Territory", "SubTerritory"],
   addressAr: ["Address (Arabic)"],
   address: ["Address (English)"],
@@ -6946,7 +7051,7 @@ function DahiyehMatchTool({ onApply }) {
 // tiers, lead scoring, discount rate, GPS, bulk import, order/visit
 // history — works identically for supplement stores with no separate
 // component to maintain.
-function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onUpdateSubTerritory, onApplyDahiyehSuggestions, onBulkRemove, onDuplicateSafeImport, onCompleteInfo }) {
+function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onUpdateSubTerritory, onApplyDahiyehSuggestions, onApplyZahraaTerritoryFix, onBulkRemove, onDuplicateSafeImport, onCompleteInfo }) {
   const clients = useMemo(() => allClients.filter((c) => (c.type || "pharmacy") === kind), [allClients, kind]);
   const isSupplementStore = kind === "supplement_store";
   const entityWord = isSupplementStore ? "supplement store" : "pharmacy";
@@ -7111,6 +7216,7 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
       {role === "manager" && showImport && <ClientExcelImportSection existingClients={clients} repNames={repNames} kind={kind} onImport={onBulkImport} onDone={() => setShowImport(false)} />}
       {role === "manager" && kind === "pharmacy" && <DuplicateSafePharmacyImport onCommit={onDuplicateSafeImport} />}
       {role === "manager" && kind === "pharmacy" && <ImportUndoTool onRemove={onBulkRemove} />}
+      {role === "manager" && kind === "pharmacy" && <ZahraaTerritoryFixTool onApply={onApplyZahraaTerritoryFix} />}
       {role === "manager" && kind === "pharmacy" && <DahiyehMatchTool onApply={onApplyDahiyehSuggestions} />}
 
       {showAdd && (

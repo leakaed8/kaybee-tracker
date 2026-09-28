@@ -4218,6 +4218,51 @@ app.post("/api/clients/import-preview/commit", requireManager, async (req, res) 
   }
 });
 
+// One-time fix for a real bug: the duplicate-safe pharmacy import used to
+// map the app's Territory field (`area`) from the Excel's "Area" column,
+// but a real production file (343 Baabda-area rows) had that column set to
+// the single useless constant "Zahraa" for every row, while the REAL
+// district ("Baabda") was sitting in "Governorate/District" instead — which
+// the import never read into `area` at all. Every pharmacy that import
+// touched (whether newly added or updated via "Replace") ended up with
+// area="Zahraa" instead of "Baabda" as a result. "Zahraa" as an exact,
+// case-sensitive value is specific enough to this one bug that it's safe to
+// list every pharmacy currently carrying it as a likely victim — but this
+// still previews the full list and requires an explicit apply, exactly
+// like every other bulk-correction tool in this app, rather than silently
+// mass-editing records.
+app.get("/api/clients/fix-zahraa-territory", requireManager, async (req, res) => {
+  try {
+    const clients = await db.getAllRows("Clients");
+    const candidates = clients
+      .filter((c) => (c.type || "pharmacy") === "pharmacy" && c.area === "Zahraa")
+      .map((c) => ({ id: c.id, name: c.name, phone: c.phone || "", subTerritory: c.subTerritory || "", address: c.address || "" }));
+    res.json({ candidates });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/clients/fix-zahraa-territory/apply", requireManager, async (req, res) => {
+  try {
+    const ids = new Set((Array.isArray(req.body.ids) ? req.body.ids : []).map(String));
+    if (ids.size === 0) return res.status(400).json({ error: "No ids provided." });
+    const clients = await db.getAllRows("Clients");
+    // Re-verify each id is STILL mislabeled "Zahraa" right now, in case the
+    // live data changed since the preview was fetched — never blindly
+    // trust a client-supplied id list for a bulk field write.
+    const updates = clients
+      .filter((c) => ids.has(String(c.id)) && c.area === "Zahraa")
+      .map((c) => ({ id: c.id, patch: { area: "Baabda" } }));
+    if (updates.length > 0) await db.batchUpdateRows("Clients", updates);
+    res.json({ ok: true, fixed: updates.length });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Helps a manager find and undo a bulk import made from the WRONG file — in
 // particular, the general Mount Lebanon pharmacist reference directory
 // (MOUNT_LEBANON_REFERENCE_NAMES, the same file used for Dahiyeh
