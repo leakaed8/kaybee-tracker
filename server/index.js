@@ -1677,6 +1677,7 @@ app.post("/api/pharmacy-sales/import", requireManager, async (req, res) => {
 });
 
 app.post("/api/visits", async (req, res) => {
+  const startedAt = Date.now();
   try {
     const { client, notes, coords, mentionedItems, competitorName, competitorNotes } = req.body;
     if (!client) return res.status(400).json({ error: "client is required" });
@@ -1704,7 +1705,11 @@ app.post("/api/visits", async (req, res) => {
     // A visit must point at a real Pharmacies/Doctors record, not a name
     // typed on the spot — otherwise it has no tier, address, or assigned
     // rep behind it. New clients get added properly via their own tab.
-    const [allClients, allDoctors] = await Promise.all([db.getAllRows("Clients"), db.getAllRows("Doctors")]);
+    // Reps is fetched in this SAME batched call too (one Sheets API request
+    // instead of three separate ones) since it's needed further down for
+    // the rep's export-sheet id — a rep sitting on "Saving…" waiting for
+    // this exact route feels every extra round trip here directly.
+    const { Clients: allClients, Doctors: allDoctors, Reps: allReps } = await db.getAllRowsBatch(["Clients", "Doctors", "Reps"]);
     const matchedClient = allClients.find((c) => c.name.toLowerCase().trim() === client.toLowerCase().trim());
     const matchedDoctor = allDoctors.find((d) => d.name.toLowerCase().trim() === client.toLowerCase().trim());
     if (!matchedClient && !matchedDoctor) {
@@ -1758,8 +1763,7 @@ app.post("/api/visits", async (req, res) => {
     const row = visitToRow(visit);
     await db.appendRow("Visits", row);
     if (req.repName) {
-      const reps = await db.getAllRows("Reps");
-      const rep = reps.find((r) => r.name === req.repName);
+      const rep = allReps.find((r) => r.name === req.repName);
       if (rep?.exportSheetId) await db.appendToRepExportSheet(rep.exportSheetId, row);
     }
 
@@ -1768,11 +1772,14 @@ app.post("/api/visits", async (req, res) => {
     // assigned to that user." If it's already assigned to someone else,
     // leave the assignment alone but flag it so both the rep (in the
     // response) and the manager (via push) know this crosses territories.
+    // Uses updateRowAtPosition (not updateRowById) since matchedClient was
+    // already fetched above in this same request — no need to re-read the
+    // whole Clients tab a second time just to re-find a row already held.
     let assignedRepWarning = null;
     if (isInPerson && req.repName) {
       if (matchedClient) {
         if (!matchedClient.assignedRep) {
-          await db.updateRowById("Clients", matchedClient.id, { assignedRep: req.repName });
+          await db.updateRowAtPosition("Clients", matchedClient._row, { ...matchedClient, assignedRep: req.repName });
         } else if (matchedClient.assignedRep !== req.repName) {
           assignedRepWarning = matchedClient.assignedRep;
           notifyManagers({
@@ -1801,7 +1808,7 @@ app.post("/api/visits", async (req, res) => {
       // reusing it here isn't asked for, so a doctor visited by a second rep
       // just leaves the original assignment alone with no separate alert.
       if (matchedDoctor && !matchedDoctor.assignedRep) {
-        await db.updateRowById("Doctors", matchedDoctor.id, { assignedRep: req.repName });
+        await db.updateRowAtPosition("Doctors", matchedDoctor._row, { ...matchedDoctor, assignedRep: req.repName });
       }
     }
 
@@ -1847,8 +1854,10 @@ app.post("/api/visits", async (req, res) => {
       });
     }
 
+    console.log(`visit save: done in ${Date.now() - startedAt}ms`);
     res.json({ ...visit, assignedRepWarning });
   } catch (e) {
+    console.log(`visit save: failed after ${Date.now() - startedAt}ms`);
     logErr(e);
     res.status(500).json({ error: e.message });
   }
@@ -2193,6 +2202,7 @@ app.post("/api/visits/:id/comments", async (req, res) => {
 });
 
 app.post("/api/punch", async (req, res) => {
+  const startedAt = Date.now();
   try {
     if (!req.repName) return res.status(403).json({ error: "Reps only." });
     const { type, coords } = req.body;
@@ -2251,8 +2261,10 @@ app.post("/api/punch", async (req, res) => {
           .catch((e) => console.error("punch-in telegram notify failed", e));
       }).catch((e) => console.error("punch-in telegram notify failed", e));
     }
+    console.log(`punch: done in ${Date.now() - startedAt}ms`);
     res.json(entry);
   } catch (e) {
+    console.log(`punch: failed after ${Date.now() - startedAt}ms`);
     logErr(e);
     res.status(500).json({ error: e.message });
   }

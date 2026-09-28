@@ -621,19 +621,33 @@ async function appendRows(tab, objects) {
 
 async function updateRowById(tab, id, patch) {
   await ensureSheets();
-  const sheets = getSheets();
-  const headers = SCHEMAS[tab];
   const rows = await getAllRows(tab);
   const target = rows.find((r) => String(r.id) === String(id));
   if (!target) return false;
-  const merged = { ...target, ...patch };
+  await updateRowAtPosition(tab, target._row, { ...target, ...patch });
+  return true;
+}
+
+// Writes a row a caller has ALREADY fetched (and already knows the sheet
+// position of, via its `_row` from an earlier getAllRows/getAllRowsBatch
+// call in the SAME request) — skipping the read-then-find that
+// updateRowById does internally. A hot path that already loaded a table
+// once (e.g. /api/visits already has matchedClient/matchedDoctor from its
+// own initial batch fetch) would otherwise pay for that same table again
+// just to re-locate a row it's already holding, purely to patch one field —
+// real, felt latency on an action a rep is sitting there waiting on.
+// `mergedObj` must be the FULL row (already merged with whatever patch is
+// wanted), not a partial patch, since this never reads the row back first.
+async function updateRowAtPosition(tab, rowNum, mergedObj) {
+  await ensureSheets();
+  const sheets = getSheets();
+  const headers = SCHEMAS[tab];
   await callGoogleApi(() => sheets.spreadsheets.values.update({
     spreadsheetId: SHEET_ID,
-    range: `${tab}!A${target._row}:${columnLetter(headers.length)}${target._row}`,
+    range: `${tab}!A${rowNum}:${columnLetter(headers.length)}${rowNum}`,
     valueInputOption: "RAW",
-    requestBody: { values: [objectToRow(headers, merged)] },
+    requestBody: { values: [objectToRow(headers, mergedObj)] },
   }));
-  return true;
 }
 
 // Applies many patches to the SAME tab in one read + one write, instead of
@@ -784,6 +798,7 @@ module.exports = {
   appendRow,
   appendRows,
   updateRowById,
+  updateRowAtPosition,
   batchUpdateRows,
   deleteRowById,
   replaceAllRows,
