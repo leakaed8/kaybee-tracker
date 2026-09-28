@@ -3769,6 +3769,18 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
 
   const matchedProduct = products.find((p) => batchLabel(p) === productQuery.trim());
 
+  // Same product name can have several batches with different expiries
+  // (e.g. two Biotin batches, one expiring 2028 and one 2029) — nearest
+  // expiry listed first, so a rep naturally picks the batch that needs to
+  // sell through first (first-expiry-first-out) instead of whatever order
+  // the Products sheet happens to have them in. Only reorders the search
+  // dropdown's display; matchedProduct/stock lookups elsewhere still read
+  // from the original `products` array untouched.
+  const productsByNearestExpiry = useMemo(
+    () => [...products].sort((a, b) => new Date(a.expiry) - new Date(b.expiry)),
+    [products]
+  );
+
   const todayStr = new Date().toISOString().slice(0, 10);
   const activeOffers = offers.filter((o) => o.active && (!o.expiresAt || o.expiresAt >= todayStr));
   const activeOfferIds = new Set(activeOffers.map((o) => o.id));
@@ -4096,7 +4108,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
           <SearchableSelect
             value={productQuery}
             onChange={setProductQuery}
-            options={products}
+            options={productsByNearestExpiry}
             getLabel={batchLabel}
             placeholder="Search product — pick the batch by expiry…"
             style={inputStyle}
