@@ -1146,18 +1146,30 @@ function StockView({ products }) {
 // address, registration number, ...) without being able to touch fields
 // that already have a value — that still requires a manager. `fields` is
 // [{key, label}] for whichever fields are currently blank on this record.
-function CompleteInfoForm({ fields, onSave, onCancel }) {
-  const [values, setValues] = useState({});
+// Doubles as both "fill in what's missing" and "correct what's wrong" — every
+// field pre-fills with its current value (currentValues), and only fields
+// that actually changed get sent, so leaving a field alone never touches it.
+// A blank input is simply ignored rather than saved, so this can never be
+// used to erase a value (including name) down to empty.
+function CompleteInfoForm({ fields, currentValues, onSave, onCancel }) {
+  const [values, setValues] = useState(() =>
+    Object.fromEntries(fields.map((f) => [f.key, currentValues?.[f.key] || ""]))
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  const hasAny = Object.values(values).some((v) => v && v.trim());
+  const changed = Object.fromEntries(
+    Object.entries(values)
+      .map(([k, v]) => [k, (v || "").trim()])
+      .filter(([k, v]) => v !== "" && v !== (currentValues?.[k] || ""))
+  );
+  const hasAny = Object.keys(changed).length > 0;
 
   const save = async () => {
     setSaving(true);
     setError("");
     try {
-      await onSave(values);
+      await onSave(changed);
       onCancel();
     } catch (e) {
       setError(e.message || "Couldn't save.");
@@ -6331,6 +6343,7 @@ function ClientExcelImportSection({ existingClients, repNames, kind = "pharmacy"
 
 // ---------- Pharmacies View (tiering + follow-up nudges) ----------
 const CLIENT_FILLABLE_FIELDS = [
+  { key: "name", label: "Name" },
   { key: "phone", label: "WhatsApp number" },
   { key: "area", label: "Area" },
   { key: "address", label: "Address" },
@@ -6616,15 +6629,11 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
               <button onClick={() => setHistoryId(historyId === c.id ? null : c.id)} style={{ background: "none", border: "none", color: "#5B5445", fontSize: 11, fontWeight: 500 }}>
                 {historyId === c.id ? "Hide history" : "History"}
               </button>
-              {role === "rep" && (() => {
-                const missing = CLIENT_FILLABLE_FIELDS.filter((f) => !c[f.key]);
-                if (missing.length === 0) return null;
-                return (
-                  <button onClick={() => setCompletingId(completingId === c.id ? null : c.id)} style={{ background: "none", border: "none", color: "#C17817", fontSize: 11, fontWeight: 500 }}>
-                    {completingId === c.id ? "Cancel" : "Complete missing info"}
-                  </button>
-                );
-              })()}
+              {role === "rep" && (
+                <button onClick={() => setCompletingId(completingId === c.id ? null : c.id)} style={{ background: "none", border: "none", color: "#C17817", fontSize: 11, fontWeight: 500 }}>
+                  {completingId === c.id ? "Cancel" : "Edit info"}
+                </button>
+              )}
               <button onClick={() => onRemove(c.id)} style={{ background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
             </div>
             {historyId === c.id && (
@@ -6634,7 +6643,8 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
             )}
             {role === "rep" && completingId === c.id && (
               <CompleteInfoForm
-                fields={CLIENT_FILLABLE_FIELDS.filter((f) => !c[f.key])}
+                fields={CLIENT_FILLABLE_FIELDS}
+                currentValues={c}
                 onSave={(values) => onCompleteInfo(c.id, values)}
                 onCancel={() => setCompletingId(null)}
               />
@@ -6881,6 +6891,7 @@ function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
 
 // ---------- Doctors View (tiering + follow-up nudges) ----------
 const DOCTOR_FILLABLE_FIELDS = [
+  { key: "name", label: "Name" },
   { key: "phone", label: "Phone" },
   { key: "area", label: "Area" },
   { key: "hospital", label: "Hospital / clinic" },
@@ -7094,15 +7105,11 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
               <a href={mapsLinkFor(d)} target="_blank" rel="noreferrer" style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#4C7A5E", textDecoration: "none" }}>
                 <MapPin size={11} /> Get directions
               </a>
-              {role === "rep" && (() => {
-                const missing = DOCTOR_FILLABLE_FIELDS.filter((f) => !d[f.key]);
-                if (missing.length === 0) return null;
-                return (
-                  <button onClick={() => setCompletingId(completingId === d.id ? null : d.id)} style={{ background: "none", border: "none", color: "#C17817", fontSize: 11, fontWeight: 500 }}>
-                    {completingId === d.id ? "Cancel" : "Complete missing info"}
-                  </button>
-                );
-              })()}
+              {role === "rep" && (
+                <button onClick={() => setCompletingId(completingId === d.id ? null : d.id)} style={{ background: "none", border: "none", color: "#C17817", fontSize: 11, fontWeight: 500 }}>
+                  {completingId === d.id ? "Cancel" : "Edit info"}
+                </button>
+              )}
               <button onClick={() => setHistoryId(historyId === d.id ? null : d.id)} style={{ background: "none", border: "none", color: "#5B5445", fontSize: 11, fontWeight: 500 }}>
                 {historyId === d.id ? "Hide history" : "History"}
               </button>
@@ -7115,7 +7122,8 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
             )}
             {role === "rep" && completingId === d.id && (
               <CompleteInfoForm
-                fields={DOCTOR_FILLABLE_FIELDS.filter((f) => !d[f.key])}
+                fields={DOCTOR_FILLABLE_FIELDS}
+                currentValues={d}
                 onSave={(values) => onCompleteInfo(d.id, values)}
                 onCancel={() => setCompletingId(null)}
               />

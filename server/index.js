@@ -3303,12 +3303,35 @@ app.patch("/api/doctors/:id", requireManager, async (req, res) => {
   }
 });
 
-// Rep-accessible, but deliberately narrow: only fills in fields that are
-// currently blank. A rep filling gaps in an existing record (phone,
-// address, registration number) is fine; overwriting something a manager
-// already entered is not — that still goes through the manager-only PATCH
-// above.
-const CLIENT_FILLABLE_FIELDS = ["phone", "address", "registrationNumber", "area", "nameAr"];
+// Visits.client, Orders.clientName, and FollowUps.entityName all reference
+// a pharmacy/supplement-store/doctor by name text, not by id — this app's
+// established identity convention (same as repName elsewhere). Correcting a
+// mistyped name therefore has to re-point every historical row to the new
+// name, or that history would silently stop showing up under the corrected
+// entry. includeOrders is false for doctors (Orders is pharmacy/supplement-
+// store only).
+async function renameEntityAcrossHistory(oldName, newName, { includeOrders }) {
+  const [visits, followUps, orders] = await Promise.all([
+    db.getAllRows("Visits"),
+    db.getAllRows("FollowUps"),
+    includeOrders ? db.getAllRows("Orders") : Promise.resolve([]),
+  ]);
+  const visitUpdates = visits.filter((v) => v.client === oldName).map((v) => ({ id: v.id, patch: { client: newName } }));
+  const followUpUpdates = followUps.filter((f) => f.entityName === oldName).map((f) => ({ id: f.id, patch: { entityName: newName } }));
+  const orderUpdates = orders.filter((o) => o.clientName === oldName).map((o) => ({ id: o.id, patch: { clientName: newName } }));
+  await Promise.all([
+    db.batchUpdateRows("Visits", visitUpdates),
+    db.batchUpdateRows("FollowUps", followUpUpdates),
+    includeOrders ? db.batchUpdateRows("Orders", orderUpdates) : Promise.resolve(),
+  ]);
+}
+
+// Rep-accessible, and — per an explicit product decision — allowed to
+// correct an already-filled field (e.g. a mistyped name), not just fill in
+// what's blank. A manager-only, more sweeping edit surface still exists via
+// the PATCH route above for assignedRep/discountRate; this one is scoped to
+// the same descriptive-fact fields it always covered, plus name.
+const CLIENT_FILLABLE_FIELDS = ["name", "phone", "address", "registrationNumber", "area", "nameAr"];
 app.patch("/api/clients/:id/complete-info", async (req, res) => {
   try {
     if (!req.repName) return res.status(403).json({ error: "Reps only." });
@@ -3317,10 +3340,17 @@ app.patch("/api/clients/:id/complete-info", async (req, res) => {
     if (!existing) return res.status(404).json({ error: "Client not found" });
     const patch = {};
     for (const field of CLIENT_FILLABLE_FIELDS) {
-      if (!existing[field] && req.body[field]) patch[field] = String(req.body[field]).trim();
+      if (req.body[field] === undefined) continue;
+      const value = String(req.body[field]).trim();
+      if (value) patch[field] = value;
     }
-    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing new to add." });
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
+    const oldName = existing.name;
     await db.updateRowById("Clients", existing.id, patch);
+    if (patch.name && patch.name !== oldName) {
+      await renameEntityAcrossHistory(oldName, patch.name, { includeOrders: true });
+      await writeAuditLog({ entityType: "client_rename", entityId: existing.id, field: "name", oldValue: oldName, newValue: patch.name, changedBy: req.repName, reason: "Corrected via Edit info" });
+    }
     res.json({ ok: true, patch });
   } catch (e) {
     console.error(e);
@@ -3328,7 +3358,7 @@ app.patch("/api/clients/:id/complete-info", async (req, res) => {
   }
 });
 
-const DOCTOR_FILLABLE_FIELDS = ["phone", "address", "registrationNumber", "area", "hospital", "specialty"];
+const DOCTOR_FILLABLE_FIELDS = ["name", "phone", "address", "registrationNumber", "area", "hospital", "specialty"];
 app.patch("/api/doctors/:id/complete-info", async (req, res) => {
   try {
     if (!req.repName) return res.status(403).json({ error: "Reps only." });
@@ -3337,10 +3367,17 @@ app.patch("/api/doctors/:id/complete-info", async (req, res) => {
     if (!existing) return res.status(404).json({ error: "Doctor not found" });
     const patch = {};
     for (const field of DOCTOR_FILLABLE_FIELDS) {
-      if (!existing[field] && req.body[field]) patch[field] = String(req.body[field]).trim();
+      if (req.body[field] === undefined) continue;
+      const value = String(req.body[field]).trim();
+      if (value) patch[field] = value;
     }
-    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing new to add." });
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
+    const oldName = existing.name;
     await db.updateRowById("Doctors", existing.id, patch);
+    if (patch.name && patch.name !== oldName) {
+      await renameEntityAcrossHistory(oldName, patch.name, { includeOrders: false });
+      await writeAuditLog({ entityType: "doctor_rename", entityId: existing.id, field: "name", oldValue: oldName, newValue: patch.name, changedBy: req.repName, reason: "Corrected via Edit info" });
+    }
     res.json({ ok: true, patch });
   } catch (e) {
     console.error(e);
