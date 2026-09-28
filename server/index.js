@@ -3962,22 +3962,32 @@ function nameMatchStrength(aName, aNameAr, bName, bNameAr) {
   if (arA && arB && arA === arB) return "strong";
   return "none";
 }
+// Compares every combination of the two sides' address fields (English vs
+// English, Arabic vs Arabic, AND English vs Arabic each way), taking the
+// strongest result found rather than stopping at the first pair that has
+// text on both sides. Two reasons this can't just compare addressAr to
+// addressAr: (1) addressAr is a brand-new field — an existing client
+// created before this import feature has it blank, so its real Arabic
+// address (if it has one at all) lives in the plain `address` field,
+// whichever script it happens to be written in; (2) a weak English-address
+// match must not short-circuit before a genuinely strong Arabic match on
+// the SAME pair of pharmacies gets a chance to be checked.
 function addressMatchStrength(aAddr, aAddrAr, bAddr, bAddrAr) {
-  const nA = normalizeAddressText(aAddr);
-  const nB = normalizeAddressText(bAddr);
-  if (nA && nB) {
+  const pairs = [
+    [normalizeAddressText(aAddr), normalizeAddressText(bAddr)],
+    [normalizeAddressText(aAddrAr), normalizeAddressText(bAddrAr)],
+    [normalizeAddressText(aAddrAr), normalizeAddressText(bAddr)],
+    [normalizeAddressText(aAddr), normalizeAddressText(bAddrAr)],
+  ];
+  let sawWeak = false;
+  for (const [nA, nB] of pairs) {
+    if (!nA || !nB) continue;
     if (nA === nB) return "strong";
     const ratio = tokenOverlapRatio(nA, nB);
     if (ratio >= 0.6) return "strong";
-    if (ratio >= 0.3) return "weak";
+    if (ratio >= 0.3) sawWeak = true;
   }
-  const arA = normalizeAddressText(aAddrAr);
-  const arB = normalizeAddressText(bAddrAr);
-  if (arA && arB) {
-    if (arA === arB) return "strong";
-    if (tokenOverlapRatio(arA, arB) >= 0.6) return "strong";
-  }
-  return "none";
+  return sawWeak ? "weak" : "none";
 }
 
 // Compares one incoming row (from the Excel file OR a not-yet-committed
@@ -4082,40 +4092,78 @@ app.post("/api/clients/import-preview", requireManager, async (req, res) => {
   }
 });
 
+// Only the import-provided identity/contact/location fields — never tier,
+// assignedRep, registrationNumber, coordsLat/Lng, discountRate, or type,
+// which have nothing to do with the Excel and belong to the manager's own
+// existing business relationship with that client.
+function importRowToClientFields(r) {
+  return {
+    name: r.name, phone: r.phone || "", area: r.area || "",
+    subTerritory: r.subTerritory || "", address: r.address || "",
+    nameAr: r.nameAr || "", addressAr: r.addressAr || "",
+  };
+}
+
 // Re-runs the EXACT same classification at commit time (never trusts the
 // preview's classification to still hold — the live sheet may have changed
 // since, e.g. another manager importing concurrently) and only ever appends
-// rows that are STILL genuinely new. This is also what makes the whole
-// import idempotent: running it again with the same file re-classifies
-// every previously-imported row as DUPLICATE against the now-updated
-// Clients list, so a second run adds zero rows.
+// or updates rows the manager explicitly approved AND that are STILL
+// genuinely eligible under a fresh classification. This is also what makes
+// the whole import idempotent: running it again with the same file
+// re-classifies every previously-imported row as DUPLICATE against the
+// now-updated Clients list, so a second run adds zero rows.
 //
-// A row the manager explicitly approved from the "Needs review" list (sent
-// with forceImport: true) is allowed through — that is the one case a human
-// decision can override. A DUPLICATE is never overridable, at any
-// confidence: "do not create duplicate records" has no exception in this
-// tool, matching what was asked for.
+// A NEEDS_REVIEW row only moves if the manager picked an explicit action on
+// it: "add_new" appends it as a separate new client (same as before);
+// "replace" instead overwrites the matched EXISTING client's own
+// name/phone/area/subTerritory/address fields with the Excel row's values
+// (never its tier/assignedRep/registrationNumber/discountRate — those are
+// the manager's own business data, unrelated to the Excel), and is only
+// honored if that row still has a real matchedClientId after
+// re-classification — a within-file collision (matched against another
+// Excel row, not a real client) has none, since there is nothing to
+// replace. A DUPLICATE is never overridable, at any confidence or action:
+// "do not create duplicate records" has no exception in this tool,
+// matching what was asked for.
 app.post("/api/clients/import-preview/commit", requireManager, async (req, res) => {
   try {
     const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
     const existingClients = await db.getAllRows("Clients");
     const results = classifyImportRows(rows, existingClients);
     const newClients = [];
+    const updates = [];
     let blockedAsDuplicate = 0;
+    let blockedInvalidReplace = 0;
     results.forEach((r, i) => {
-      const forceImport = !!rows[i]?.forceImport;
-      if (r.status === "DUPLICATE") { blockedAsDuplicate++; return; }
-      if (r.status === "NEEDS_REVIEW" && !forceImport) return;
-      newClients.push({
-        id: `c${crypto.randomUUID()}`,
-        name: r.name, phone: r.phone || "", tier: "B", area: r.area || "",
-        assignedRep: "", registrationNumber: "", address: r.address || "",
-        coordsLat: "", coordsLng: "", discountRate: "", nameAr: r.nameAr || "",
-        type: "pharmacy", subTerritory: r.subTerritory || "", addressAr: r.addressAr || "",
-      });
+      const action = rows[i]?.action || (rows[i]?.forceImport ? "add_new" : "");
+      if (r.status === "DUPLICATE") { if (action) blockedAsDuplicate++; return; }
+      if (r.status === "IMPORTED") {
+        newClients.push({
+          id: `c${crypto.randomUUID()}`,
+          ...importRowToClientFields(r),
+          tier: "B", assignedRep: "", registrationNumber: "",
+          coordsLat: "", coordsLng: "", discountRate: "", type: "pharmacy",
+        });
+        return;
+      }
+      // NEEDS_REVIEW
+      if (action === "replace") {
+        if (r.matchedClientId) updates.push({ id: r.matchedClientId, patch: importRowToClientFields(r) });
+        else blockedInvalidReplace++;
+        return;
+      }
+      if (action === "add_new") {
+        newClients.push({
+          id: `c${crypto.randomUUID()}`,
+          ...importRowToClientFields(r),
+          tier: "B", assignedRep: "", registrationNumber: "",
+          coordsLat: "", coordsLng: "", discountRate: "", type: "pharmacy",
+        });
+      }
     });
     if (newClients.length > 0) await db.appendRows("Clients", newClients);
-    res.json({ ok: true, added: newClients.length, blockedAsDuplicate });
+    if (updates.length > 0) await db.batchUpdateRows("Clients", updates);
+    res.json({ ok: true, added: newClients.length, updated: updates.length, blockedAsDuplicate, blockedInvalidReplace });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });

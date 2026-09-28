@@ -6640,14 +6640,14 @@ function DuplicateSafePharmacyImport({ onCommit }) {
   const [previewing, setPreviewing] = useState(false);
   const [results, setResults] = useState(null); // [{...row, matchedLabel, reason, status, confidence}]
   const [summary, setSummary] = useState(null);
-  const [approvedReview, setApprovedReview] = useState({}); // index -> bool, for NEEDS_REVIEW rows
+  const [rowActions, setRowActions] = useState({}); // index -> "add_new" | "replace", for NEEDS_REVIEW rows
   const [committing, setCommitting] = useState(false);
   const [commitResult, setCommitResult] = useState(null);
   const fileInputRef = useRef(null);
 
   const reset = () => {
     setParseError(""); setRows(null); setResults(null); setSummary(null);
-    setApprovedReview({}); setCommitResult(null);
+    setRowActions({}); setCommitResult(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -6694,8 +6694,8 @@ function DuplicateSafePharmacyImport({ onCommit }) {
     setParseError("");
     try {
       const toSend = results
-        .map((r, i) => ({ ...r, forceImport: !!approvedReview[i] }))
-        .filter((r) => r.status === "IMPORTED" || (r.status === "NEEDS_REVIEW" && r.forceImport));
+        .map((r, i) => ({ ...r, action: rowActions[i] || "" }))
+        .filter((r) => r.status === "IMPORTED" || (r.status === "NEEDS_REVIEW" && r.action));
       const data = await onCommit(toSend);
       setCommitResult(data);
       setResults(null);
@@ -6708,7 +6708,7 @@ function DuplicateSafePharmacyImport({ onCommit }) {
     }
   };
 
-  const approvedCount = Object.values(approvedReview).filter(Boolean).length;
+  const approvedCount = Object.values(rowActions).filter(Boolean).length;
   const importCount = (summary?.imported || 0) + approvedCount;
 
   return (
@@ -6772,10 +6772,36 @@ function DuplicateSafePharmacyImport({ onCommit }) {
                           <td style={{ padding: "6px 8px" }}>{r.confidence}</td>
                           <td style={{ padding: "6px 8px" }}>
                             {r.status === "NEEDS_REVIEW" && (
-                              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, whiteSpace: "nowrap" }}>
-                                <input type="checkbox" checked={!!approvedReview[i]} onChange={(e) => setApprovedReview((p) => ({ ...p, [i]: e.target.checked }))} />
-                                Import anyway
-                              </label>
+                              <div style={{ display: "flex", gap: 4, flexWrap: "nowrap" }}>
+                                {r.matchedClientId && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setRowActions((p) => ({ ...p, [i]: p[i] === "replace" ? "" : "replace" }))}
+                                    title={`Overwrite ${r.matchedLabel}'s name/phone/area/address with this Excel row's info`}
+                                    style={{
+                                      fontSize: 10.5, padding: "3px 7px", borderRadius: 6, whiteSpace: "nowrap",
+                                      border: rowActions[i] === "replace" ? "1px solid #1F2A24" : "1px solid #E5DFD3",
+                                      background: rowActions[i] === "replace" ? "#1F2A24" : "#fff",
+                                      color: rowActions[i] === "replace" ? "#FAF7F2" : "#5B5445", fontWeight: 500,
+                                    }}
+                                  >
+                                    Replace
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => setRowActions((p) => ({ ...p, [i]: p[i] === "add_new" ? "" : "add_new" }))}
+                                  title="Add this Excel row as a brand-new, separate pharmacy — does not touch the matched client above"
+                                  style={{
+                                    fontSize: 10.5, padding: "3px 7px", borderRadius: 6, whiteSpace: "nowrap",
+                                    border: rowActions[i] === "add_new" ? "1px solid #1F2A24" : "1px solid #E5DFD3",
+                                    background: rowActions[i] === "add_new" ? "#1F2A24" : "#fff",
+                                    color: rowActions[i] === "add_new" ? "#FAF7F2" : "#5B5445", fontWeight: 500,
+                                  }}
+                                >
+                                  Add as new
+                                </button>
+                              </div>
                             )}
                           </td>
                         </tr>
@@ -6801,8 +6827,10 @@ function DuplicateSafePharmacyImport({ onCommit }) {
 
           {commitResult && (
             <div style={{ marginTop: 8, fontSize: 12, color: "#4C7A5E" }}>
-              Added {commitResult.added} new pharmac{commitResult.added === 1 ? "y" : "ies"}.
+              Added {commitResult.added} new pharmac{commitResult.added === 1 ? "y" : "ies"}
+              {commitResult.updated > 0 && `, updated ${commitResult.updated} existing pharmac${commitResult.updated === 1 ? "y" : "ies"}`}.
               {commitResult.blockedAsDuplicate > 0 && ` ${commitResult.blockedAsDuplicate} row(s) were re-checked and blocked as duplicates at the last moment (e.g. added by someone else in the meantime).`}
+              {commitResult.blockedInvalidReplace > 0 && ` ${commitResult.blockedInvalidReplace} "Replace" request(s) couldn't be applied because that match no longer exists (re-checked at the last moment).`}
             </div>
           )}
         </div>
