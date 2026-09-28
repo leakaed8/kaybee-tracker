@@ -399,6 +399,7 @@ export default function App() {
   const updateClientDiscount = (id, discountRate) => withSync(() => api.updateClientDiscount(id, discountRate), { touchesReference: true });
   const updateClientSubTerritory = (id, subTerritory) => withSync(() => api.updateClientSubTerritory(id, subTerritory), { touchesReference: true });
   const applyDahiyehSubTerritorySuggestions = (assignments) => withSync(() => api.applyDahiyehSubTerritorySuggestions(assignments), { touchesReference: true });
+  const bulkRemoveClients = (ids) => withSync(() => api.bulkRemoveClients(ids), { touchesReference: true });
   const completeClientInfo = (id, patch) => withSync(() => api.completeClientInfo(id, patch), { touchesReference: true });
   const completeDoctorInfo = (id, patch) => withSync(() => api.completeDoctorInfo(id, patch), { touchesReference: true });
   const addDoctor = (doctor) => withSync(() => api.addDoctor(doctor), { touchesReference: true });
@@ -600,6 +601,7 @@ export default function App() {
                 onUpdateDiscount={updateClientDiscount}
                 onUpdateSubTerritory={updateClientSubTerritory}
                 onApplyDahiyehSuggestions={applyDahiyehSubTerritorySuggestions}
+                onBulkRemove={bulkRemoveClients}
                 onCompleteInfo={completeClientInfo}
               />
             )}
@@ -6365,6 +6367,124 @@ const TERRITORY_SUBTERRITORIES = {
   Baabda: DAHIYEH_SUBTERRITORY_LIST,
 };
 
+// Manager-only, one-time-use tool for undoing a bulk import made from the
+// wrong file (e.g. a general reference directory imported as if it were the
+// company's own client list). Everything defaults UNCHECKED — this deletes
+// real records and can't be undone, so nothing is ever pre-selected for the
+// manager; they opt in row by row (or via "Select all without activity"),
+// then confirm once more before anything is actually removed.
+function ImportUndoTool({ onRemove }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [candidates, setCandidates] = useState(null);
+  const [checked, setChecked] = useState({});
+  const [confirming, setConfirming] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [message, setMessage] = useState("");
+
+  const load = () => {
+    setLoading(true);
+    return api.getClientImportReview()
+      .then((data) => {
+        setCandidates(data.candidates || []);
+        setChecked({});
+      })
+      .catch(() => setCandidates([]))
+      .finally(() => setLoading(false));
+  };
+
+  const toggleOpen = () => {
+    setOpen((v) => {
+      const next = !v;
+      if (next && candidates === null) load();
+      return next;
+    });
+  };
+
+  const selectedIds = Object.keys(checked).filter((id) => checked[id]);
+
+  const selectAllSafe = () => {
+    setChecked(Object.fromEntries((candidates || []).filter((c) => !c.hasActivity).map((c) => [c.id, true])));
+  };
+
+  const remove = async () => {
+    if (selectedIds.length === 0) return;
+    setRemoving(true);
+    try {
+      await onRemove(selectedIds);
+      setConfirming(false);
+      await load();
+      setMessage(`Removed ${selectedIds.length} pharmac${selectedIds.length === 1 ? "y" : "ies"}.`);
+    } catch (e) {
+      setMessage(e.message || "Couldn't remove.");
+    } finally {
+      setRemoving(false);
+    }
+  };
+
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <button type="button" onClick={toggleOpen} style={{
+        padding: "7px 12px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5, fontWeight: 500,
+      }}>
+        {open ? "Hide import undo tool" : "Undo a wrong Excel import"}
+      </button>
+      {open && (
+        <div style={{ marginTop: 8, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
+          <p style={{ fontSize: 12, color: "#8A8272", margin: "0 0 8px" }}>
+            Finds current pharmacies matching the Mount Lebanon reference directory by name or phone — useful if that file was accidentally imported as real clients. Nothing is pre-selected, and nothing is removed until you confirm.
+          </p>
+          {loading && <div style={{ fontSize: 12, color: "#8A8272" }}>Loading…</div>}
+          {!loading && candidates && candidates.length === 0 && (
+            <div style={{ fontSize: 12, color: "#8A8272" }}>No matching pharmacies found.</div>
+          )}
+          {!loading && candidates && candidates.length > 0 && (
+            <>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <span style={{ fontSize: 11.5, color: "#8A8272" }}>{candidates.length} match{candidates.length === 1 ? "" : "es"} found</span>
+                <button type="button" onClick={selectAllSafe} style={{ ...cancelButtonStyleLike, fontSize: 11.5 }}>Select all without activity</button>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 10, maxHeight: 320, overflowY: "auto" }}>
+                {candidates.map((c) => (
+                  <label key={c.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 12, borderBottom: "1px solid #F0EBE0" }}>
+                    <input type="checkbox" checked={!!checked[c.id]} onChange={(e) => setChecked((ck) => ({ ...ck, [c.id]: e.target.checked }))} />
+                    <span style={{ flex: 1 }}>{c.name}{c.phone ? ` · ${c.phone}` : ""}{c.area ? ` · ${c.area}` : ""}</span>
+                    {c.hasActivity && <span style={{ fontSize: 10.5, fontWeight: 600, color: "#B33A3A" }}>has activity</span>}
+                  </label>
+                ))}
+              </div>
+              {!confirming ? (
+                <button
+                  type="button"
+                  disabled={selectedIds.length === 0}
+                  onClick={() => setConfirming(true)}
+                  style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: selectedIds.length ? "#B33A3A" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
+                >
+                  Remove selected ({selectedIds.length})
+                </button>
+              ) : (
+                <div style={{ background: "#FDEEEE", border: "1px solid #F0C8C8", borderRadius: 8, padding: 10 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: "#7A3B3B", marginBottom: 8 }}>
+                    Permanently remove {selectedIds.length} pharmac{selectedIds.length === 1 ? "y" : "ies"}? This can't be undone.
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button type="button" disabled={removing} onClick={remove} style={{ padding: "6px 12px", borderRadius: 7, border: "none", background: "#B33A3A", color: "#fff", fontSize: 12, fontWeight: 500 }}>
+                      {removing ? "Removing…" : "Yes, remove them"}
+                    </button>
+                    <button type="button" onClick={() => setConfirming(false)} style={{ padding: "6px 12px", borderRadius: 7, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", fontSize: 12 }}>Cancel</button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+          {message && <div style={{ marginTop: 8, fontSize: 12, color: "#4C7A5E" }}>{message}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+const cancelButtonStyleLike = { padding: "5px 10px", borderRadius: 7, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", cursor: "pointer" };
+
 const CLIENT_FILLABLE_FIELDS = [
   { key: "name", label: "Name" },
   { key: "phone", label: "WhatsApp number" },
@@ -6472,7 +6592,7 @@ function DahiyehMatchTool({ onApply }) {
 // tiers, lead scoring, discount rate, GPS, bulk import, order/visit
 // history — works identically for supplement stores with no separate
 // component to maintain.
-function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onUpdateSubTerritory, onApplyDahiyehSuggestions, onCompleteInfo }) {
+function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onUpdateSubTerritory, onApplyDahiyehSuggestions, onBulkRemove, onCompleteInfo }) {
   const clients = useMemo(() => allClients.filter((c) => (c.type || "pharmacy") === kind), [allClients, kind]);
   const isSupplementStore = kind === "supplement_store";
   const entityWord = isSupplementStore ? "supplement store" : "pharmacy";
@@ -6634,6 +6754,7 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
       </div>
 
       {role === "manager" && showImport && <ClientExcelImportSection existingClients={clients} repNames={repNames} kind={kind} onImport={onBulkImport} onDone={() => setShowImport(false)} />}
+      {role === "manager" && kind === "pharmacy" && <ImportUndoTool onRemove={onBulkRemove} />}
       {role === "manager" && kind === "pharmacy" && <DahiyehMatchTool onApply={onApplyDahiyehSuggestions} />}
 
       {showAdd && (

@@ -9,6 +9,7 @@ const db = require("./sheetsDb");
 const telegram = require("./telegram");
 const { importedInventory, defaultTemplates } = require("./seedData");
 const { DAHIYEH_REFERENCE_PHARMACIES } = require("./dahiyehReference");
+const { MOUNT_LEBANON_REFERENCE_NAMES } = require("./mountLebanonReferenceNames");
 
 const app = express();
 app.use(express.json({ limit: "25mb" }));
@@ -3847,6 +3848,74 @@ app.post("/api/clients/import-bulk", requireManager, async (req, res) => {
     if (newClients.length > 0) await db.appendRows("Clients", newClients);
 
     res.json({ ok: true, added: newClients.length, skipped });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Helps a manager find and undo a bulk import made from the WRONG file — in
+// particular, the general Mount Lebanon pharmacist reference directory
+// (MOUNT_LEBANON_REFERENCE_NAMES, the same file used for Dahiyeh
+// sub-territory matching) being mistakenly imported as if it were this
+// company's own client roster. Clients has no createdAt/createdBy field, so
+// there is no way to know exactly which rows a given import added; instead
+// this flags every CURRENT client whose name or phone matches that
+// reference file, and separately flags whether it already has real activity
+// (a visit, an order, a follow-up, or a manager assignment) — a client with
+// any of those is far more likely a genuine pre-existing customer that just
+// happens to share a name with a reference-directory entry, not an import
+// artifact, so the review UI defaults those to NOT selected. Never deletes
+// anything itself — see the apply route below.
+app.get("/api/clients/import-review", requireManager, async (req, res) => {
+  try {
+    const norm = (s) => String(s || "").trim().toLowerCase();
+    const normPhone = (s) => String(s || "").replace(/[^0-9]/g, "");
+    const [clients, visits, orders, followUps] = await Promise.all([
+      db.getAllRows("Clients"),
+      db.getAllRows("Visits"),
+      db.getAllRows("Orders"),
+      db.getAllRows("FollowUps"),
+    ]);
+    const refNames = new Set(MOUNT_LEBANON_REFERENCE_NAMES.map((r) => norm(r.name)));
+    const refPhones = new Set();
+    for (const r of MOUNT_LEBANON_REFERENCE_NAMES) {
+      if (r.phone) refPhones.add(r.phone);
+      if (r.mobile) refPhones.add(r.mobile);
+    }
+    const visitedNames = new Set(visits.map((v) => norm(v.client)));
+    const orderedNames = new Set(orders.map((o) => norm(o.clientName)));
+    const followedNames = new Set(followUps.map((f) => norm(f.entityName)));
+
+    const candidates = clients
+      .filter((c) => refNames.has(norm(c.name)) || (c.phone && refPhones.has(normPhone(c.phone))))
+      .map((c) => {
+        const nameNorm = norm(c.name);
+        const hasActivity = visitedNames.has(nameNorm) || orderedNames.has(nameNorm) || followedNames.has(nameNorm)
+          || !!c.assignedRep || !!c.subTerritory || !!c.discountRate;
+        return { id: c.id, name: c.name, phone: c.phone || "", area: c.area || "", type: c.type || "pharmacy", hasActivity };
+      });
+    res.json({ candidates, referenceTotal: MOUNT_LEBANON_REFERENCE_NAMES.length });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Removes exactly the client ids a manager picked in the review above.
+// Rewrites the whole Clients tab in one batched write instead of one
+// Sheets API call per row — deleting up to ~350 rows one at a time would
+// burn straight through the Sheets read/write quota (see the 429s this app
+// hit earlier from far lighter traffic).
+app.post("/api/clients/bulk-remove", requireManager, async (req, res) => {
+  try {
+    const ids = new Set((Array.isArray(req.body.ids) ? req.body.ids : []).map(String));
+    if (ids.size === 0) return res.status(400).json({ error: "No ids provided." });
+    const clients = await db.getAllRows("Clients");
+    const kept = clients.filter((c) => !ids.has(c.id));
+    const removed = clients.length - kept.length;
+    await db.replaceAllRows("Clients", kept);
+    res.json({ ok: true, removed });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
