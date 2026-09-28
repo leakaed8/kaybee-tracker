@@ -3715,6 +3715,34 @@ function applyOfferToItems(rawItems, offers) {
   return { displayItems, appliedOffer: offer, avg, roundedAvg, freeItems: freeLines, freeQty };
 }
 
+// Editing a previously saved order loads its items straight from
+// editOrder.items — which, for any group that already qualified for an
+// offer at save time, is NOT the raw quantities the rep entered but the
+// PREVIOUSLY CARVED result: a paid line plus a separate isFree line at
+// unitPrice 0. Feeding that straight back into applyOfferToItems as if it
+// were fresh raw input double-counts the free allocation — the old free
+// line passes through untouched (its unitPrice is 0, so the carving loop's
+// `unitPrice > 0` candidate filter skips it) while a brand-new getQty
+// allocation is ALSO carved from the remaining priced lines. Undo the
+// split first: restore each free line's real price from originalPrice and
+// merge it back into its sibling paid line for the same product (mirroring
+// how addItem merges same-product-same-group lines in the first place), so
+// every recompute always starts from the true originally-entered
+// quantities, never a stale post-carving split.
+function reconstituteRawItems(groupItems) {
+  const merged = new Map();
+  for (const it of groupItems) {
+    const unitPrice = it.isFree ? (it.originalPrice ?? it.unitPrice) : it.unitPrice;
+    const existing = merged.get(it.productId);
+    if (existing) {
+      existing.qty += it.qty;
+    } else {
+      merged.set(it.productId, { ...it, unitPrice, isFree: false, originalPrice: undefined });
+    }
+  }
+  return [...merged.values()];
+}
+
 function OrderBuilder({ clientName, visitId, products, offers, clients, onCreateOrder, onUpdateOrder, onQueueOrderOffline, pendingVisitLocalKey, onAttachPendingOrder, editOrder, onDone }) {
   const [productQuery, setProductQuery] = useState("");
   const [qty, setQty] = useState("");
@@ -3897,7 +3925,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   // only its own items and its own single offer — a card always shows
   // exactly what the rep entered into it, regardless of pooling below.
   const baseOfferGroups = groupIds.map((groupId) => {
-    const rawItems = items.filter((it) => it.groupId === groupId);
+    const rawItems = reconstituteRawItems(items.filter((it) => it.groupId === groupId));
     const offerId = rawItems[0].offerId; // every item in one instance shares one offerId, by construction
     const offer = activeOffers.find((o) => o.id === offerId);
     const totalQty = rawItems.reduce((sum, it) => sum + it.qty, 0);
