@@ -2,7 +2,14 @@
 // comes back, anything) has no natural end — fetch() itself has no timeout,
 // so without this an action like Punch In can spin on "Punching in…"
 // forever with no way for the rep to know something's wrong or retry.
-const REQUEST_TIMEOUT_MS = 25000;
+// Render's own dashboard warns a free-tier instance waking from sleep (or
+// right after a fresh deploy) "can delay requests by 50 seconds or more" —
+// a shorter timeout than that isn't "fail fast on a real problem," it's
+// "kill a cold-start request that would have succeeded," which is exactly
+// what was happening at 25s (the very first request after any redeploy
+// failed with "Couldn't reach the server" even though the server was fine,
+// just still waking up).
+const REQUEST_TIMEOUT_MS = 60000;
 
 async function request(path, options) {
   const controller = new AbortController();
