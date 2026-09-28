@@ -2,6 +2,69 @@ const { google } = require("googleapis");
 
 const SHEET_ID = process.env.SHEET_ID;
 
+// ---------- Rate limiting + retry for the Google Sheets/Drive APIs ----------
+// Google enforces "Read requests per minute per user" (and a separate write
+// limit) at 60, shared by every call this one service account makes. On
+// Render's free tier the whole process restarts on every deploy AND every
+// wake-from-sleep, and several independent background jobs each issue their
+// own handful of reads the instant the process starts (see the startup
+// section of index.js) — that burst alone can exceed 60 requests inside the
+// first second, well before any real user traffic arrives, and used to just
+// fail outright (429, logged, and the job's work silently skipped until its
+// next interval). Every direct Sheets/Drive API call in this file now goes
+// through callGoogleApi(), which (1) queues the call behind a sliding-window
+// limiter capped safely under Google's ceiling so a burst spreads out over a
+// few seconds instead of overrunning it, and (2) retries a 429 with
+// exponential backoff + jitter instead of dropping the operation.
+const GOOGLE_API_RATE_LIMIT_PER_MINUTE = 50;
+const GOOGLE_API_RATE_WINDOW_MS = 60 * 1000;
+let recentGoogleApiCallTimestamps = [];
+let googleApiQueueTail = Promise.resolve();
+
+function acquireGoogleApiSlot() {
+  const slot = googleApiQueueTail.then(async () => {
+    for (;;) {
+      const now = Date.now();
+      recentGoogleApiCallTimestamps = recentGoogleApiCallTimestamps.filter(
+        (t) => now - t < GOOGLE_API_RATE_WINDOW_MS
+      );
+      if (recentGoogleApiCallTimestamps.length < GOOGLE_API_RATE_LIMIT_PER_MINUTE) {
+        recentGoogleApiCallTimestamps.push(now);
+        return;
+      }
+      const waitMs = GOOGLE_API_RATE_WINDOW_MS - (now - recentGoogleApiCallTimestamps[0]) + 50;
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  });
+  // Detach so one slot's rejection can't poison the shared queue chain for
+  // every call after it — each caller awaits its own `slot`, independently.
+  googleApiQueueTail = slot.catch(() => {});
+  return slot;
+}
+
+function isGoogleRateLimitError(err) {
+  const code = err?.code ?? err?.response?.status;
+  if (code === 429) return true;
+  return /quota exceeded|rate limit exceeded/i.test(err?.message || "");
+}
+
+async function callGoogleApi(fn, { maxRetries = 5 } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    await acquireGoogleApiSlot();
+    try {
+      return await fn();
+    } catch (err) {
+      if (isGoogleRateLimitError(err) && attempt < maxRetries) {
+        const backoffMs = Math.min(1000 * 2 ** attempt, 30000) + Math.random() * 500;
+        console.warn(`Google API rate-limited, retrying in ${Math.round(backoffMs)}ms (attempt ${attempt + 1}/${maxRetries})`);
+        await new Promise((r) => setTimeout(r, backoffMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 const SCHEMAS = {
   Products: ["id", "name", "category", "expiry", "qty", "sold90", "description", "price", "form", "packSize", "unitsPerDay", "ingredients", "updatedBy", "updatedAt", "sku"],
   // Doctor-visit redesign (Doctor Memory / Call Coaching / Follow-up system)
@@ -349,27 +412,27 @@ function getDrive() {
 // view access with their email, and returns the new spreadsheet's ID.
 async function createRepExportSheet(repName, email) {
   const sheets = getSheets();
-  const created = await sheets.spreadsheets.create({
+  const created = await callGoogleApi(() => sheets.spreadsheets.create({
     requestBody: {
       properties: { title: `KayBee Visits — ${repName}` },
       sheets: [{ properties: { title: "Visits" } }],
     },
-  });
+  }));
   const spreadsheetId = created.data.spreadsheetId;
-  await sheets.spreadsheets.values.update({
+  await callGoogleApi(() => sheets.spreadsheets.values.update({
     spreadsheetId,
     range: "Visits!A1",
     valueInputOption: "RAW",
     requestBody: { values: [VISIT_EXPORT_HEADERS] },
-  });
+  }));
   if (email) {
     try {
       const drive = getDrive();
-      await drive.permissions.create({
+      await callGoogleApi(() => drive.permissions.create({
         fileId: spreadsheetId,
         sendNotificationEmail: true,
         requestBody: { type: "user", role: "reader", emailAddress: email },
-      });
+      }));
     } catch (e) {
       console.error("Couldn't share visits export sheet", e.message);
     }
@@ -381,13 +444,13 @@ async function appendToRepExportSheet(spreadsheetId, visitRow) {
   if (!spreadsheetId) return;
   try {
     const sheets = getSheets();
-    await sheets.spreadsheets.values.append({
+    await callGoogleApi(() => sheets.spreadsheets.values.append({
       spreadsheetId,
       range: "Visits!A1",
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: [VISIT_EXPORT_HEADERS.map((h) => visitRow[h] ?? "")] },
-    });
+    }));
   } catch (e) {
     console.error("Couldn't append to rep's visits export sheet", e.message);
   }
@@ -406,17 +469,17 @@ async function ensureSheets() {
   if (initPromise) return initPromise;
   initPromise = (async () => {
     const sheets = getSheets();
-    const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+    const meta = await callGoogleApi(() => sheets.spreadsheets.get({ spreadsheetId: SHEET_ID }));
     const existingTitles = meta.data.sheets.map((s) => s.properties.title);
 
     const missing = Object.keys(SCHEMAS).filter((name) => !existingTitles.includes(name));
     if (missing.length) {
-      await sheets.spreadsheets.batchUpdate({
+      await callGoogleApi(() => sheets.spreadsheets.batchUpdate({
         spreadsheetId: SHEET_ID,
         requestBody: {
           requests: missing.map((title) => ({ addSheet: { properties: { title } } })),
         },
-      });
+      }));
     }
 
     for (const [tab, headers] of Object.entries(SCHEMAS)) {
@@ -424,10 +487,10 @@ async function ensureSheets() {
       // schema with more than 26 columns (e.g. CompetitorProducts) would
       // otherwise never be seen as "already topped up" past column Z, and
       // get its header row rewritten on every single init.
-      const existing = await sheets.spreadsheets.values.get({
+      const existing = await callGoogleApi(() => sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID,
         range: `${tab}!A1:${columnLetter(headers.length)}1`,
-      });
+      }));
       const firstRow = existing.data.values?.[0];
       // Also tops up an existing tab whose header row is shorter than the
       // current schema (e.g. new columns added to Orders for POS tracking)
@@ -435,12 +498,12 @@ async function ensureSheets() {
       // schema array, never by looking up the sheet's header text, so this
       // is purely for a human opening the sheet to see the right labels.
       if (!firstRow || firstRow.length === 0 || firstRow.length < headers.length) {
-        await sheets.spreadsheets.values.update({
+        await callGoogleApi(() => sheets.spreadsheets.values.update({
           spreadsheetId: SHEET_ID,
           range: `${tab}!A1`,
           valueInputOption: "RAW",
           requestBody: { values: [headers] },
-        });
+        }));
       }
     }
 
@@ -486,10 +549,10 @@ async function getAllRows(tab) {
   await ensureSheets();
   const sheets = getSheets();
   const headers = SCHEMAS[tab];
-  const res = await sheets.spreadsheets.values.get({
+  const res = await callGoogleApi(() => sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
     range: `${tab}!A2:${columnLetter(headers.length)}`,
-  });
+  }));
   const rows = res.data.values || [];
   return rows
     .map((row, idx) => ({ ...rowToObject(headers, row), _row: idx + 2 }))
@@ -508,10 +571,10 @@ async function getAllRowsBatch(tabs) {
     const headers = SCHEMAS[tab];
     return `${tab}!A2:${columnLetter(headers.length)}`;
   });
-  const res = await sheets.spreadsheets.values.batchGet({
+  const res = await callGoogleApi(() => sheets.spreadsheets.values.batchGet({
     spreadsheetId: SHEET_ID,
     ranges,
-  });
+  }));
   const valueRanges = res.data.valueRanges || [];
   const result = {};
   tabs.forEach((tab, i) => {
@@ -528,13 +591,13 @@ async function appendRow(tab, obj) {
   await ensureSheets();
   const sheets = getSheets();
   const headers = SCHEMAS[tab];
-  await sheets.spreadsheets.values.append({
+  await callGoogleApi(() => sheets.spreadsheets.values.append({
     spreadsheetId: SHEET_ID,
     range: `${tab}!A1`,
     valueInputOption: "RAW",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values: [objectToRow(headers, obj)] },
-  });
+  }));
 }
 
 const APPEND_CHUNK_SIZE = 2000;
@@ -546,13 +609,13 @@ async function appendRows(tab, objects) {
   const headers = SCHEMAS[tab];
   for (let i = 0; i < objects.length; i += APPEND_CHUNK_SIZE) {
     const chunk = objects.slice(i, i + APPEND_CHUNK_SIZE);
-    await sheets.spreadsheets.values.append({
+    await callGoogleApi(() => sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
       range: `${tab}!A1`,
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: chunk.map((o) => objectToRow(headers, o)) },
-    });
+    }));
   }
 }
 
@@ -564,12 +627,12 @@ async function updateRowById(tab, id, patch) {
   const target = rows.find((r) => String(r.id) === String(id));
   if (!target) return false;
   const merged = { ...target, ...patch };
-  await sheets.spreadsheets.values.update({
+  await callGoogleApi(() => sheets.spreadsheets.values.update({
     spreadsheetId: SHEET_ID,
     range: `${tab}!A${target._row}:${columnLetter(headers.length)}${target._row}`,
     valueInputOption: "RAW",
     requestBody: { values: [objectToRow(headers, merged)] },
-  });
+  }));
   return true;
 }
 
@@ -597,10 +660,10 @@ async function batchUpdateRows(tab, updates) {
     });
   }
   if (!data.length) return;
-  await sheets.spreadsheets.values.batchUpdate({
+  await callGoogleApi(() => sheets.spreadsheets.values.batchUpdate({
     spreadsheetId: SHEET_ID,
     requestBody: { valueInputOption: "RAW", data },
-  });
+  }));
 }
 
 async function deleteRowById(tab, id) {
@@ -610,10 +673,10 @@ async function deleteRowById(tab, id) {
   const target = rows.find((r) => String(r.id) === String(id));
   if (!target) return false;
 
-  const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  const meta = await callGoogleApi(() => sheets.spreadsheets.get({ spreadsheetId: SHEET_ID }));
   const sheetProps = meta.data.sheets.find((s) => s.properties.title === tab).properties;
 
-  await sheets.spreadsheets.batchUpdate({
+  await callGoogleApi(() => sheets.spreadsheets.batchUpdate({
     spreadsheetId: SHEET_ID,
     requestBody: {
       requests: [
@@ -629,7 +692,7 @@ async function deleteRowById(tab, id) {
         },
       ],
     },
-  });
+  }));
   return true;
 }
 
@@ -639,17 +702,17 @@ async function replaceAllRows(tab, objects) {
   const headers = SCHEMAS[tab];
 
   // clear everything below the header row, then write the new rows in one shot
-  await sheets.spreadsheets.values.clear({
+  await callGoogleApi(() => sheets.spreadsheets.values.clear({
     spreadsheetId: SHEET_ID,
     range: `${tab}!A2:${columnLetter(headers.length)}`,
-  });
+  }));
   if (objects.length > 0) {
-    await sheets.spreadsheets.values.update({
+    await callGoogleApi(() => sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
       range: `${tab}!A2`,
       valueInputOption: "RAW",
       requestBody: { values: objects.map((o) => objectToRow(headers, o)) },
-    });
+    }));
   }
 }
 
@@ -669,10 +732,10 @@ async function getAllRowsRaw(tab) {
   await ensureSheets();
   const sheets = getSheets();
   const headers = SCHEMAS[tab];
-  const res = await sheets.spreadsheets.values.get({
+  const res = await callGoogleApi(() => sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
     range: `${tab}!A2:${columnLetter(headers.length)}`,
-  });
+  }));
   return res.data.values || [];
 }
 
@@ -698,19 +761,19 @@ async function setSettings(patch) {
     }
   }
   if (updates.length) {
-    await sheets.spreadsheets.values.batchUpdate({
+    await callGoogleApi(() => sheets.spreadsheets.values.batchUpdate({
       spreadsheetId: SHEET_ID,
       requestBody: { valueInputOption: "RAW", data: updates },
-    });
+    }));
   }
   if (appends.length) {
-    await sheets.spreadsheets.values.append({
+    await callGoogleApi(() => sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
       range: "Settings!A1",
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: appends },
-    });
+    }));
   }
 }
 
