@@ -4075,6 +4075,14 @@ function classifyImportRows(rows, existingClients) {
 }
 
 app.post("/api/clients/import-preview", requireManager, async (req, res) => {
+  // Explicit entry/exit timing — the "Couldn't reach the server" timeout
+  // this route hit in production gave no server-side evidence either way of
+  // whether the request arrived at all or was just slow, since a clean
+  // success path logs nothing on its own. This makes both visible in the
+  // Render log regardless of which one it turns out to be next time.
+  const startedAt = Date.now();
+  const rowCount = Array.isArray(req.body?.rows) ? req.body.rows.length : 0;
+  console.log(`import-preview: received, ${rowCount} rows`);
   try {
     const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
     const existingClients = await db.getAllRows("Clients");
@@ -4085,8 +4093,10 @@ app.post("/api/clients/import-preview", requireManager, async (req, res) => {
       duplicate: results.filter((r) => r.status === "DUPLICATE").length,
       needsReview: results.filter((r) => r.status === "NEEDS_REVIEW").length,
     };
+    console.log(`import-preview: done in ${Date.now() - startedAt}ms — ${existingClients.length} existing clients compared against`);
     res.json({ results, summary });
   } catch (e) {
+    console.log(`import-preview: failed after ${Date.now() - startedAt}ms`);
     logErr(e);
     res.status(500).json({ error: e.message });
   }
@@ -4126,6 +4136,9 @@ function importRowToClientFields(r) {
 // "do not create duplicate records" has no exception in this tool,
 // matching what was asked for.
 app.post("/api/clients/import-preview/commit", requireManager, async (req, res) => {
+  const startedAt = Date.now();
+  const rowCount = Array.isArray(req.body?.rows) ? req.body.rows.length : 0;
+  console.log(`import-preview/commit: received, ${rowCount} rows`);
   try {
     const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
     const existingClients = await db.getAllRows("Clients");
@@ -4163,8 +4176,10 @@ app.post("/api/clients/import-preview/commit", requireManager, async (req, res) 
     });
     if (newClients.length > 0) await db.appendRows("Clients", newClients);
     if (updates.length > 0) await db.batchUpdateRows("Clients", updates);
+    console.log(`import-preview/commit: done in ${Date.now() - startedAt}ms — added ${newClients.length}, updated ${updates.length}`);
     res.json({ ok: true, added: newClients.length, updated: updates.length, blockedAsDuplicate, blockedInvalidReplace });
   } catch (e) {
+    console.log(`import-preview/commit: failed after ${Date.now() - startedAt}ms`);
     logErr(e);
     res.status(500).json({ error: e.message });
   }

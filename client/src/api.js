@@ -11,7 +11,16 @@
 // just still waking up).
 const REQUEST_TIMEOUT_MS = 60000;
 
-async function request(path, options) {
+// `retries` (default 0, opt in per call site) only re-attempts a request
+// that never got a response at all (timeout/dropped connection) — never a
+// request the server actually answered, even with an error status, since
+// that's a real rejection worth surfacing immediately, not a network blip.
+// Only wire this up for calls a caller has confirmed are safe to repeat
+// (e.g. a read-only preview, or a commit route specifically designed to be
+// idempotent) — blindly retrying an arbitrary mutating action (an order, a
+// visit) risks a real double-submission if the first attempt actually
+// reached the server and only the response was lost in transit.
+async function request(path, options, retries = 0) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   let res;
@@ -27,6 +36,7 @@ async function request(path, options) {
     });
   } catch (e) {
     if (e.name === "AbortError") {
+      if (retries > 0) return request(path, options, retries - 1);
       throw new Error("Couldn't reach the server — check your connection and try again.");
     }
     throw e;
@@ -108,8 +118,13 @@ export const api = {
   removeOffer: (id) => request(`/offers/${id}`, { method: "DELETE" }),
   addClient: (client) => request("/clients", { method: "POST", body: JSON.stringify(client) }),
   importClientsBulk: (payload) => request("/clients/import-bulk", { method: "POST", body: JSON.stringify(payload) }),
-  previewClientImport: (rows) => request("/clients/import-preview", { method: "POST", body: JSON.stringify({ rows }) }),
-  commitClientImport: (rows) => request("/clients/import-preview/commit", { method: "POST", body: JSON.stringify({ rows }) }),
+  // retries: 2 — both routes are read-only-or-idempotent by design (preview
+  // never writes anything; commit always re-classifies from scratch and
+  // only ever adds a row that's still genuinely new), so silently retrying
+  // a request that timed out without a response is safe here, unlike most
+  // mutating calls in this file.
+  previewClientImport: (rows) => request("/clients/import-preview", { method: "POST", body: JSON.stringify({ rows }) }, 2),
+  commitClientImport: (rows) => request("/clients/import-preview/commit", { method: "POST", body: JSON.stringify({ rows }) }, 2),
   getClientImportReview: () => request("/clients/import-review"),
   bulkRemoveClients: (ids) => request("/clients/bulk-remove", { method: "POST", body: JSON.stringify({ ids }) }),
   removeClient: (id) => request(`/clients/${id}`, { method: "DELETE" }),
