@@ -3938,12 +3938,23 @@ function tokenOverlapRatio(a, b) {
 // to combine this with the address signal before deciding DUPLICATE vs
 // NEEDS_REVIEW (name alone, even an exact one, is never enough on its own —
 // see the decision table in matchImportRow below).
+// Whole-word substring containment — e.g. "Rayan" is a real match inside
+// "Al Rayan" ("Al Rayan" padded is " al rayan ", which contains " rayan ").
+// Plain string .includes() would ALSO match on a coincidental character run
+// that straddles two unrelated words — "H&A pharmacy" normalizes to "h a",
+// which is a literal substring of "atash and i" purely because "atasH
+// Andi" happens to spell "h a" at the word boundary, even though the two
+// names share nothing. Padding both sides with spaces and requiring the
+// shorter one to appear as a space-delimited chunk rules that out.
+function containsWholeWords(haystack, needle) {
+  return needle.length > 0 && ` ${haystack} `.includes(` ${needle} `);
+}
 function nameMatchStrength(aName, aNameAr, bName, bNameAr) {
   const nA = normalizeNameCore(aName);
   const nB = normalizeNameCore(bName);
   if (nA && nB) {
     if (nA === nB) return "strong";
-    if (nA.length >= 3 && nB.length >= 3 && (nA.includes(nB) || nB.includes(nA))) return "strong";
+    if (nA.length >= 3 && nB.length >= 3 && (containsWholeWords(nA, nB) || containsWholeWords(nB, nA))) return "strong";
     if (tokenOverlapRatio(nA, nB) >= 0.5) return "weak";
   }
   const arA = normalizeNameCore(aNameAr);
