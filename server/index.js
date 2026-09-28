@@ -9439,6 +9439,54 @@ app.patch("/api/recall/competitor-research/:id", async (req, res) => {
 const RECALL_OUR_PRODUCT_LINK_FIELDS = ["chemicalForm", "compoundAmount", "activeAmount", "unit", "servingSize", "dailyAmount", "amountBasis", "manufacturer", "sourceLabel", "sourceUrl", "linkNotes"];
 const RECALL_OUR_PRODUCT_CATALOG_FIELDS = ["name", "price", "form", "packSize", "unitsPerDay", "ingredients", "catalogNotes", "sku"];
 
+// Attaches an EXISTING ProductCatalog product to a category (via one of its
+// ingredients) so it shows up in that category's Analysis table. Never
+// creates a ProductCatalog row itself — a product not in the catalog yet has
+// to be added under Settings -> Product Catalog first, same "add it at the
+// source screen first" rule already used for competitor products. Manager-
+// only, matching every other our-product edit/delete on this route.
+app.post("/api/recall/product-links", requireManager, async (req, res) => {
+  try {
+    const { ingredientId, productId } = req.body;
+    if (!ingredientId || !productId) return res.status(400).json({ error: "ingredientId and productId are required." });
+    const [ingredients, catalog, existingLinks] = await Promise.all([
+      db.getAllRows("RecallIngredients"),
+      db.getAllRows("ProductCatalog"),
+      db.getAllRows("RecallProductIngredients"),
+    ]);
+    if (!ingredients.some((i) => i.id === ingredientId)) return res.status(404).json({ error: "Ingredient not found." });
+    if (!catalog.some((p) => p.id === productId)) return res.status(404).json({ error: "Product not found." });
+    if (existingLinks.some((l) => l.ingredientId === ingredientId && l.productId === productId)) {
+      return res.status(400).json({ error: "That product is already linked to this ingredient." });
+    }
+    const row = {
+      id: `rpi${crypto.randomUUID()}`, productId, ingredientId,
+      chemicalForm: "", compoundAmount: "", activeAmount: "", unit: "", servingSize: "",
+      dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "NOT_VERIFIED",
+      notes: "", missingFields: "", sku: "", manufacturer: "", sourceLabel: "", sourceUrl: "",
+    };
+    for (const key of RECALL_OUR_PRODUCT_LINK_FIELDS) {
+      if (req.body[key] === undefined) continue;
+      row[key === "linkNotes" ? "notes" : key] = req.body[key];
+    }
+    await db.appendRow("RecallProductIngredients", row);
+    res.json({ ok: true, link: row });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/recall/product-links/:linkId", requireManager, async (req, res) => {
+  try {
+    await db.deleteRowById("RecallProductIngredients", req.params.linkId);
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.patch("/api/recall/our-products/:linkId", requireManager, async (req, res) => {
   try {
     const links = await db.getAllRows("RecallProductIngredients");

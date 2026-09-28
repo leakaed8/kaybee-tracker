@@ -49,7 +49,7 @@ function MissingInfoBadge({ researchStatus, missingFields }) {
 // Studies is TrainingStudiesView re-routed here from the old Training tab
 // (same component, same data, no rewrite); Certifications and Rep Q&A are
 // new features (see CertificationsView.jsx / RepQAView.jsx).
-export function RecallView({ role, repName, repNames, products }) {
+export function RecallView({ role, repName, repNames, products, catalogProducts }) {
   const [subTab, setSubTab] = useState("products");
   const pillStyle = (active) => ({
     padding: "6px 14px", borderRadius: 16, fontSize: 12.5, fontWeight: 500,
@@ -71,7 +71,7 @@ export function RecallView({ role, repName, repNames, products }) {
         <button onClick={() => setSubTab("qa")} style={pillStyle(subTab === "qa")}>Rep Q&A</button>
       </div>
 
-      {subTab === "products" && <RecallProductsPanel role={role} repNames={repNames} />}
+      {subTab === "products" && <RecallProductsPanel role={role} repNames={repNames} catalogProducts={catalogProducts} />}
       {subTab === "studies" && <TrainingStudiesView role={role} products={products} />}
       {subTab === "certifications" && <CertificationsView role={role} products={products} />}
       {subTab === "qa" && <RepQAView role={role} repName={repName} products={products} />}
@@ -82,7 +82,7 @@ export function RecallView({ role, repName, repNames, products }) {
 // Exactly what RecallView rendered before this reorganization — the
 // category list -> category detail -> assignments flow — unchanged, just
 // wrapped under the new "Products" pill instead of being the whole tab.
-function RecallProductsPanel({ role, repNames }) {
+function RecallProductsPanel({ role, repNames, catalogProducts }) {
   const [categories, setCategories] = useState([]);
   const [myAssignedCategoryIds, setMyAssignedCategoryIds] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -131,6 +131,7 @@ function RecallProductsPanel({ role, repNames }) {
           categoryName={categories.find((c) => c.id === view)?.name || ""}
           onBack={() => setView("home")}
           role={role}
+          catalogProducts={catalogProducts}
         />
       )}
     </div>
@@ -192,7 +193,7 @@ function RecallHome({ role, categories, onOpenCategory, onOpenAssignments }) {
   );
 }
 
-function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
+function RecallCategoryDetail({ categoryId, categoryName, onBack, role, catalogProducts }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -254,7 +255,7 @@ function RecallCategoryDetail({ categoryId, categoryName, onBack, role }) {
             )}
           </RecallSection>
 
-          <RecallAnalysisSection products={data.products} ingredient={data.ingredients[0]} role={role} onSaved={load} />
+          <RecallAnalysisSection products={data.products} ingredient={data.ingredients[0]} ingredients={data.ingredients} catalogProducts={catalogProducts} role={role} onSaved={load} />
 
           <RecallCompetitorsSection competitors={data.competitors} products={data.products} role={role} onSaved={load} />
 
@@ -684,12 +685,12 @@ function ConflictBanner({ conflicts, onSaved, canResolve }) {
   );
 }
 
-// Attaches an EXISTING competitor product (already in the Competitors tab)
-// to this category, by linking it against one of the category's own
-// products. Never creates a competitor product here — search only finds
-// ones that already exist; if it doesn't exist yet, it has to be added
-// under the Competitors tab first. Open to any employee, matching the
-// shared competitor-research editing rule.
+// Links a competitor product into this category, against one of the
+// category's own products. Search finds one that already exists in the
+// shared price list; "Can't find it?" below lets a rep create a brand-new
+// one on the spot and link it in the same step, instead of needing the
+// (manager-only) Settings -> Competitors screen first. Open to any
+// employee, matching the shared competitor-research editing rule.
 function AddCompetitorToCategory({ ourProducts, existingCompetitorIds, onSaved }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -698,6 +699,11 @@ function AddCompetitorToCategory({ ourProducts, existingCompetitorIds, onSaved }
   const [ourProductId, setOurProductId] = useState(ourProducts[0]?.id || "");
   const [error, setError] = useState("");
   const [addingId, setAddingId] = useState("");
+  const [showNewForm, setShowNewForm] = useState(false);
+  const [newProduct, setNewProduct] = useState({ competitorName: "", productName: "", genericName: "", dosage: "", form: "", packSize: "" });
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState("");
+  const setNewField = (key) => (e) => setNewProduct((p) => ({ ...p, [key]: e.target.value }));
 
   useEffect(() => {
     if (!open) return;
@@ -726,6 +732,22 @@ function AddCompetitorToCategory({ ourProducts, existingCompetitorIds, onSaved }
       setError(e.message || "Couldn't link that competitor.");
     } finally {
       setAddingId("");
+    }
+  };
+
+  const createAndAdd = async () => {
+    setCreating(true);
+    setCreateError("");
+    try {
+      const created = await api.addCompetitorProduct(newProduct);
+      await api.addRecallCompetitorRelationship({ competitorProductId: created.id, ourProductId });
+      setShowNewForm(false);
+      setNewProduct({ competitorName: "", productName: "", genericName: "", dosage: "", form: "", packSize: "" });
+      onSaved();
+    } catch (e) {
+      setCreateError(e.message || "Couldn't add that competitor product.");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -765,6 +787,34 @@ function AddCompetitorToCategory({ ourProducts, existingCompetitorIds, onSaved }
               </button>
             </div>
           ))}
+
+          {!showNewForm ? (
+            <button type="button" onClick={() => setShowNewForm(true)} style={{ ...editButtonStyle, marginTop: 8 }}>
+              Can't find it? + Add a new competitor product
+            </button>
+          ) : (
+            <div style={editorPanelStyle}>
+              <div style={editorTitleStyle}>New Competitor Product</div>
+              <EditorField label="Brand" value={newProduct.competitorName} onChange={setNewField("competitorName")} />
+              <EditorField label="Product name" value={newProduct.productName} onChange={setNewField("productName")} />
+              <EditorField label="Active ingredient" value={newProduct.genericName} onChange={setNewField("genericName")} />
+              <EditorField label="Dose" value={newProduct.dosage} onChange={setNewField("dosage")} placeholder="e.g. 500mg" />
+              <EditorField label="Dosage form" value={newProduct.form} onChange={setNewField("form")} placeholder="e.g. Capsule" />
+              <EditorField label="Pack size" value={newProduct.packSize} onChange={setNewField("packSize")} />
+              {createError && <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 6 }}>{createError}</div>}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  type="button"
+                  disabled={creating || !newProduct.competitorName.trim() || !newProduct.productName.trim()}
+                  onClick={createAndAdd}
+                  style={saveButtonStyle}
+                >
+                  {creating ? "Adding…" : "Add to this comparison"}
+                </button>
+                <button type="button" onClick={() => setShowNewForm(false)} style={cancelButtonStyle}>Cancel</button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -905,16 +955,93 @@ function ComparisonTable({ rows, expandedKey, onToggleExpanded, renderExpanded }
   );
 }
 
+// Links an EXISTING ProductCatalog product into this category (via one of
+// its ingredients). Never creates a new catalog product here — a product
+// that isn't in the catalog yet has to be added under Settings -> Product
+// Catalog first, same "add it at the source screen first" rule already used
+// for competitor products in AddCompetitorToCategory below. Manager-only,
+// matching every other our-product edit/delete in this section.
+function AddOurProductToCategory({ ingredients, catalogProducts, existingProductIds, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [productId, setProductId] = useState("");
+  const [ingredientId, setIngredientId] = useState(ingredients[0]?.id || "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const q = query.toLowerCase().trim();
+  const results = (catalogProducts || [])
+    .filter((p) => !existingProductIds.has(p.id))
+    .filter((p) => !q || p.name.toLowerCase().includes(q))
+    .slice(0, 15);
+
+  const add = async () => {
+    if (!productId || !ingredientId) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api.addRecallProductLink({ ingredientId, productId });
+      setOpen(false);
+      setQuery("");
+      setProductId("");
+      onSaved();
+    } catch (e) {
+      setError(e.message || "Couldn't add that product.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!open) return <button type="button" onClick={() => setOpen(true)} style={editButtonStyle}>+ Add our product to this category</button>;
+
+  return (
+    <div style={{ marginTop: 4, marginBottom: 14, paddingTop: 10, borderTop: "1px solid #F0EBE0" }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search our Product Catalog by name…"
+          style={{ ...inputStyle, flex: 1, minWidth: 180 }}
+        />
+        {ingredients.length > 1 && (
+          <select value={ingredientId} onChange={(e) => setIngredientId(e.target.value)} style={{ ...inputStyle, width: "auto" }}>
+            {ingredients.map((i) => <option key={i.id} value={i.id}>Under: {i.name}</option>)}
+          </select>
+        )}
+        <button type="button" onClick={() => { setOpen(false); setQuery(""); setProductId(""); }} style={cancelButtonStyle}>Close</button>
+      </div>
+      {error && <div style={{ color: "#B33A3A", fontSize: 11.5, marginBottom: 6 }}>{error}</div>}
+      {results.length === 0 ? (
+        <div style={{ fontSize: 11.5, color: "#8A8272" }}>
+          No unlinked product matches{query.trim() ? "" : " yet"} — add it under Settings → Product Catalog first if it doesn't exist there.
+        </div>
+      ) : (
+        results.map((p) => (
+          <label key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid #F0EBE0", fontSize: 12 }}>
+            <input type="radio" name="add-our-product" checked={productId === p.id} onChange={() => setProductId(p.id)} />
+            <span style={{ flex: 1 }}>{p.name}</span>
+          </label>
+        ))
+      )}
+      <button type="button" disabled={saving || !productId} onClick={add} style={{ ...saveButtonStyle, marginTop: 8 }}>
+        {saving ? "Adding…" : "Add to this category"}
+      </button>
+    </div>
+  );
+}
+
 // Our own products only — the comparison table plus a positioning
 // conclusion built from those same documented facts. Editing (and its
 // conflict/missing-info detail) now lives directly in the table's Actions
 // column instead of a separate "Manage research" list below — the two used
 // to show the exact same product twice.
-function RecallAnalysisSection({ products, ingredient, role, onSaved }) {
+function RecallAnalysisSection({ products, ingredient, ingredients, catalogProducts, role, onSaved }) {
   const ourRows = (products || []).map(ourProductRow);
   const whatNotToClaimFirstLine = (ingredient?.whatNotToClaim || "").split("\n").filter(Boolean)[0] || "";
   const [expandedKey, setExpandedKey] = useState(null);
   const canEdit = role === "manager";
+  const existingProductIds = new Set((products || []).map((p) => p.id));
 
   return (
     <RecallSection title="Analysis">
@@ -959,6 +1086,9 @@ function RecallAnalysisSection({ products, ingredient, role, onSaved }) {
             );
           })}
         </>
+      )}
+      {role === "manager" && (ingredients || []).length > 0 && (
+        <AddOurProductToCategory ingredients={ingredients} catalogProducts={catalogProducts} existingProductIds={existingProductIds} onSaved={onSaved} />
       )}
     </RecallSection>
   );

@@ -637,7 +637,7 @@ export default function App() {
               <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
             )}
             {tab === "recall" && (
-              <RecallView role={role} repName={repName} repNames={repNames} products={products} />
+              <RecallView role={role} repName={repName} repNames={repNames} products={products} catalogProducts={productCatalog} />
             )}
             {tab === "route" && role === "rep" && !isSupervisor && <RouteView clients={clients} doctors={doctors} />}
             {tab === "dashboard" && role === "manager" && (
