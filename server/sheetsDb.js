@@ -35,7 +35,11 @@ const SCHEMAS = {
   // blank for every pharmacy outside a territory that actually needs one.
   // `area` itself stays the top-level "Territory" — never renamed, since it's
   // already searched/displayed everywhere as-is.
-  Clients: ["id", "name", "phone", "tier", "area", "assignedRep", "registrationNumber", "address", "coordsLat", "coordsLng", "discountRate", "nameAr", "type", "subTerritory"],
+  // addressAr appended (duplicate-safe pharmacy import) — the Arabic-text
+  // address a source file often carries alongside its English translation;
+  // kept alongside `address` (English) rather than replacing it, same as
+  // nameAr sits alongside `name`.
+  Clients: ["id", "name", "phone", "tier", "area", "assignedRep", "registrationNumber", "address", "coordsLat", "coordsLng", "discountRate", "nameAr", "type", "subTerritory", "addressAr"],
   // assignedRep appended (Manager Performance Management redesign) — mirrors
   // Clients.assignedRep exactly, including the same auto-claim-on-first-visit
   // behavior, so per-rep doctor coverage/targets mean something. "" = doctor

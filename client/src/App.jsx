@@ -400,6 +400,7 @@ export default function App() {
   const updateClientSubTerritory = (id, subTerritory) => withSync(() => api.updateClientSubTerritory(id, subTerritory), { touchesReference: true });
   const applyDahiyehSubTerritorySuggestions = (assignments) => withSync(() => api.applyDahiyehSubTerritorySuggestions(assignments), { touchesReference: true });
   const bulkRemoveClients = (ids) => withSync(() => api.bulkRemoveClients(ids), { touchesReference: true });
+  const commitClientImport = (rows) => withSync(() => api.commitClientImport(rows), { touchesReference: true });
   const completeClientInfo = (id, patch) => withSync(() => api.completeClientInfo(id, patch), { touchesReference: true });
   const completeDoctorInfo = (id, patch) => withSync(() => api.completeDoctorInfo(id, patch), { touchesReference: true });
   const addDoctor = (doctor) => withSync(() => api.addDoctor(doctor), { touchesReference: true });
@@ -602,6 +603,7 @@ export default function App() {
                 onUpdateSubTerritory={updateClientSubTerritory}
                 onApplyDahiyehSuggestions={applyDahiyehSubTerritorySuggestions}
                 onBulkRemove={bulkRemoveClients}
+                onDuplicateSafeImport={commitClientImport}
                 onCompleteInfo={completeClientInfo}
               />
             )}
@@ -6595,6 +6597,213 @@ function ImportUndoTool({ onRemove }) {
 }
 const cancelButtonStyleLike = { padding: "5px 10px", borderRadius: 7, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", cursor: "pointer" };
 
+// Column names this tool expects, in the exact shape a translated pharmacy
+// directory (Arabic + English name/address, phone, territory columns) comes
+// in — matched case-insensitively/trimmed rather than by exact position, so
+// small header formatting differences between exports don't break it.
+const DUPLICATE_SAFE_IMPORT_COLUMNS = {
+  nameAr: ["Pharmacy Name (Arabic)"],
+  name: ["Pharmacy Name (English)"],
+  phone: ["Telephone", "Phone"],
+  district: ["Governorate/District", "District"],
+  area: ["Area"],
+  subTerritory: ["Sub Territory", "SubTerritory"],
+  addressAr: ["Address (Arabic)"],
+  address: ["Address (English)"],
+};
+function findColumnKey(sampleRowKeys, candidates) {
+  for (const cand of candidates) {
+    const found = sampleRowKeys.find((k) => k.trim().toLowerCase() === cand.toLowerCase());
+    if (found) return found;
+  }
+  return null;
+}
+
+// Manager-only. A separate, more careful path than "Import from Excel"
+// above (which only ever compares by exact name) — built for importing a
+// general pharmacy directory that may already substantially overlap this
+// company's real Clients list under different spellings/phone formats.
+// Nothing is ever written before the manager sees and approves a preview;
+// "Needs review" rows are never auto-imported, only ever added if the
+// manager explicitly checks them.
+function DuplicateSafePharmacyImport({ onCommit }) {
+  const [open, setOpen] = useState(false);
+  const [parseError, setParseError] = useState("");
+  const [rows, setRows] = useState(null); // parsed Excel rows, before preview
+  const [previewing, setPreviewing] = useState(false);
+  const [results, setResults] = useState(null); // [{...row, matchedLabel, reason, status, confidence}]
+  const [summary, setSummary] = useState(null);
+  const [approvedReview, setApprovedReview] = useState({}); // index -> bool, for NEEDS_REVIEW rows
+  const [committing, setCommitting] = useState(false);
+  const [commitResult, setCommitResult] = useState(null);
+  const fileInputRef = useRef(null);
+
+  const reset = () => {
+    setParseError(""); setRows(null); setResults(null); setSummary(null);
+    setApprovedReview({}); setCommitResult(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const handleFile = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    reset();
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(new Uint8Array(buf), { type: "array" });
+      const sheetName = wb.SheetNames.find((n) => n.trim().toLowerCase() === "pharmacies") || wb.SheetNames[0];
+      const json = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: "" });
+      if (json.length === 0) { setParseError("That sheet has no rows."); return; }
+      const sampleKeys = Object.keys(json[0]);
+      const colKeys = Object.fromEntries(
+        Object.entries(DUPLICATE_SAFE_IMPORT_COLUMNS).map(([field, candidates]) => [field, findColumnKey(sampleKeys, candidates)])
+      );
+      if (!colKeys.name) { setParseError('Could not find a "Pharmacy Name (English)" column in this file.'); return; }
+      const parsed = json
+        .map((r) => Object.fromEntries(Object.entries(colKeys).map(([field, key]) => [field, key ? String(r[key] ?? "").trim() : ""])))
+        .filter((r) => r.name);
+      setRows(parsed);
+    } catch (err) {
+      setParseError("Couldn't read that file. Make sure it's a valid Excel (.xlsx) file.");
+    }
+  };
+
+  const runPreview = async () => {
+    setPreviewing(true);
+    setParseError("");
+    try {
+      const data = await api.previewClientImport(rows);
+      setResults(data.results || []);
+      setSummary(data.summary || null);
+    } catch (e) {
+      setParseError(e.message || "Couldn't preview this file.");
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  const doCommit = async () => {
+    setCommitting(true);
+    setParseError("");
+    try {
+      const toSend = results
+        .map((r, i) => ({ ...r, forceImport: !!approvedReview[i] }))
+        .filter((r) => r.status === "IMPORTED" || (r.status === "NEEDS_REVIEW" && r.forceImport));
+      const data = await onCommit(toSend);
+      setCommitResult(data);
+      setResults(null);
+      setSummary(null);
+      setRows(null);
+    } catch (e) {
+      setParseError(e.message || "Import failed.");
+    } finally {
+      setCommitting(false);
+    }
+  };
+
+  const approvedCount = Object.values(approvedReview).filter(Boolean).length;
+  const importCount = (summary?.imported || 0) + approvedCount;
+
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <button type="button" onClick={() => { setOpen((v) => !v); if (open) reset(); }} style={{
+        padding: "7px 12px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5, fontWeight: 500,
+      }}>
+        {open ? "Hide duplicate-safe pharmacy import" : "Duplicate-safe pharmacy import"}
+      </button>
+      {open && (
+        <div style={{ marginTop: 8, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
+          <p style={{ fontSize: 12, color: "#8A8272", margin: "0 0 8px" }}>
+            For importing an outside pharmacy directory (name/phone/address in Arabic and English) safely against your real client list — every row is checked by phone, name, and address before anything is added. Nothing is written until you review and confirm below.
+          </p>
+          {!results && (
+            <>
+              <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ fontSize: 12.5 }} />
+              {parseError && <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 8 }}>{parseError}</div>}
+              {rows && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 12.5, marginBottom: 8 }}>{rows.length} row{rows.length === 1 ? "" : "s"} found in the file.</div>
+                  <button type="button" disabled={previewing} onClick={runPreview} style={{
+                    padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
+                  }}>
+                    {previewing ? "Checking against existing clients…" : "Preview import"}
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+
+          {results && summary && (
+            <>
+              <div style={{ display: "flex", gap: 14, fontSize: 12.5, marginBottom: 10, flexWrap: "wrap" }}>
+                <span style={{ color: "#4C7A5E", fontWeight: 600 }}>{summary.imported} new</span>
+                <span style={{ color: "#B33A3A", fontWeight: 600 }}>{summary.duplicate} duplicate (skipped)</span>
+                <span style={{ color: "#C17817", fontWeight: 600 }}>{summary.needsReview} need review</span>
+                <span style={{ color: "#8A8272" }}>{summary.total} total rows</span>
+              </div>
+              <div style={{ maxHeight: 400, overflowY: "auto", border: "1px solid #E5DFD3", borderRadius: 8 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+                  <thead>
+                    <tr style={{ textAlign: "left", color: "#8A8272", background: "#FAF7F2" }}>
+                      <th style={{ padding: "6px 8px" }}>Excel Pharmacy</th>
+                      <th style={{ padding: "6px 8px" }}>Existing Client Match</th>
+                      <th style={{ padding: "6px 8px" }}>Match Reason</th>
+                      <th style={{ padding: "6px 8px" }}>Status</th>
+                      <th style={{ padding: "6px 8px" }}>Confidence</th>
+                      <th style={{ padding: "6px 8px" }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {results.map((r, i) => {
+                      const statusColor = r.status === "IMPORTED" ? "#4C7A5E" : r.status === "DUPLICATE" ? "#B33A3A" : "#C17817";
+                      return (
+                        <tr key={i} style={{ borderTop: "1px solid #F0EBE0" }}>
+                          <td style={{ padding: "6px 8px" }}>{r.name}</td>
+                          <td style={{ padding: "6px 8px", color: "#8A8272" }}>{r.matchedLabel || "—"}</td>
+                          <td style={{ padding: "6px 8px", color: "#8A8272" }}>{r.reason}</td>
+                          <td style={{ padding: "6px 8px", fontWeight: 600, color: statusColor }}>{r.status.replace("_", " ")}</td>
+                          <td style={{ padding: "6px 8px" }}>{r.confidence}</td>
+                          <td style={{ padding: "6px 8px" }}>
+                            {r.status === "NEEDS_REVIEW" && (
+                              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, whiteSpace: "nowrap" }}>
+                                <input type="checkbox" checked={!!approvedReview[i]} onChange={(e) => setApprovedReview((p) => ({ ...p, [i]: e.target.checked }))} />
+                                Import anyway
+                              </label>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {parseError && <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 8 }}>{parseError}</div>}
+              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                <button
+                  type="button"
+                  disabled={committing || importCount === 0}
+                  onClick={doCommit}
+                  style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: importCount ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
+                >
+                  {committing ? "Importing…" : `Import ${importCount} pharmac${importCount === 1 ? "y" : "ies"}`}
+                </button>
+                <button type="button" onClick={reset} style={cancelButtonStyleLike}>Cancel</button>
+              </div>
+            </>
+          )}
+
+          {commitResult && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "#4C7A5E" }}>
+              Added {commitResult.added} new pharmac{commitResult.added === 1 ? "y" : "ies"}.
+              {commitResult.blockedAsDuplicate > 0 && ` ${commitResult.blockedAsDuplicate} row(s) were re-checked and blocked as duplicates at the last moment (e.g. added by someone else in the meantime).`}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const CLIENT_FILLABLE_FIELDS = [
   { key: "name", label: "Name" },
   { key: "phone", label: "WhatsApp number" },
@@ -6702,7 +6911,7 @@ function DahiyehMatchTool({ onApply }) {
 // tiers, lead scoring, discount rate, GPS, bulk import, order/visit
 // history — works identically for supplement stores with no separate
 // component to maintain.
-function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onUpdateSubTerritory, onApplyDahiyehSuggestions, onBulkRemove, onCompleteInfo }) {
+function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onUpdateSubTerritory, onApplyDahiyehSuggestions, onBulkRemove, onDuplicateSafeImport, onCompleteInfo }) {
   const clients = useMemo(() => allClients.filter((c) => (c.type || "pharmacy") === kind), [allClients, kind]);
   const isSupplementStore = kind === "supplement_store";
   const entityWord = isSupplementStore ? "supplement store" : "pharmacy";
@@ -6864,6 +7073,7 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
       </div>
 
       {role === "manager" && showImport && <ClientExcelImportSection existingClients={clients} repNames={repNames} kind={kind} onImport={onBulkImport} onDone={() => setShowImport(false)} />}
+      {role === "manager" && kind === "pharmacy" && <DuplicateSafePharmacyImport onCommit={onDuplicateSafeImport} />}
       {role === "manager" && kind === "pharmacy" && <ImportUndoTool onRemove={onBulkRemove} />}
       {role === "manager" && kind === "pharmacy" && <DahiyehMatchTool onApply={onApplyDahiyehSuggestions} />}
 

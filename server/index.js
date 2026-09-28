@@ -3871,6 +3871,246 @@ app.post("/api/clients/import-bulk", requireManager, async (req, res) => {
   }
 });
 
+// ---------- Duplicate-safe pharmacy import (preview + commit) ----------
+// A separate, more careful path than /api/clients/import-bulk above — that
+// route only ever compares by exact (case-insensitive) name, which is fine
+// for a manager's own curated file but not safe for an external directory
+// full of slightly different spellings/phone formats for pharmacies that
+// may already be real clients. This never touches an existing Clients row
+// (no update, ever) and never deletes anything — it only ever decides
+// whether to APPEND a genuinely new one. Reused by both the preview (dry
+// run, tells the manager what WOULD happen) and the commit (actually
+// appends) so the two can never classify a row differently.
+function normalizePhoneDigits(s) {
+  return String(s || "").replace(/[^0-9]/g, "");
+}
+// Strips generic "pharmacy" wording (so "Pharmadol" and "Pharmadol
+// Pharmacy" normalize to the same core name) plus punctuation/casing, but
+// never touches the distinguishing part of a name.
+function normalizeNameCore(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/pharmacie|pharmacy|pharma\b/g, "")
+    .replace(/[^a-z0-9؀-ۿ]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+const ADDRESS_TERM_NORMALIZATIONS = [
+  [/\bstr\.?\b/g, "street"], [/\bst\.?\b/g, "street"],
+  [/\brd\.?\b/g, "road"],
+  [/\bbldg\.?\b/g, "building"],
+  [/\bctr\.?\b/g, "center"], [/\bctre\.?\b/g, "center"], [/\bcentre\b/g, "center"],
+  [/\bopp\.?\b/g, "opposite"],
+  [/\bnr\.?\b/g, "near"],
+];
+function normalizeAddressText(s) {
+  let t = String(s || "").toLowerCase();
+  for (const [rx, replacement] of ADDRESS_TERM_NORMALIZATIONS) t = t.replace(rx, replacement);
+  return t.replace(/[^a-z0-9؀-ۿ]+/g, " ").trim().replace(/\s+/g, " ");
+}
+// "al"/"el" (the Arabic definite article, transliterated), "mar"/"saint"
+// (a mandatory prefix on any name honoring a saint), and "new"/"modern" (a
+// generic rebrand qualifier) each open a huge share of real Lebanese
+// pharmacy names — "Mar Takla" and "Mar Roukoz" share nothing meaningful,
+// but a naive token-overlap check would call that a 50% match. Dropped
+// here, so overlap only ever measures the actually distinguishing words.
+// Confirmed against the real 343-pharmacy file this was built for: without
+// this, roughly 40% of genuinely unrelated pharmacies falsely matched each
+// other on name alone.
+const OVERLAP_STOPWORDS = new Set(["al", "el", "and", "of", "the", "mar", "saint", "new", "modern"]);
+// Fraction of the SHORTER meaningful-token set that also appears in the
+// other — generous on purpose, since one side is often an abbreviated or
+// partial address, but never counts a stopword as a shared word. Requires
+// at least 2 meaningful tokens on the shorter side: a single remaining word
+// (e.g. "Pharma Care" -> "care" once the generic "pharma" is stripped) is
+// too generic on its own to safely fuzzy-match against anything — it's
+// only ever compared via the exact/substring "strong" check above this.
+function tokenOverlapRatio(a, b) {
+  const meaningful = (s) => s.split(" ").filter((t) => t.length >= 2 && !OVERLAP_STOPWORDS.has(t));
+  const ta = new Set(meaningful(a));
+  const tb = new Set(meaningful(b));
+  if (Math.min(ta.size, tb.size) < 2) return 0;
+  let common = 0;
+  for (const t of ta) if (tb.has(t)) common++;
+  return common / Math.min(ta.size, tb.size);
+}
+// "strong" / "weak" / "none" — never a raw boolean, since the caller needs
+// to combine this with the address signal before deciding DUPLICATE vs
+// NEEDS_REVIEW (name alone, even an exact one, is never enough on its own —
+// see the decision table in matchImportRow below).
+function nameMatchStrength(aName, aNameAr, bName, bNameAr) {
+  const nA = normalizeNameCore(aName);
+  const nB = normalizeNameCore(bName);
+  if (nA && nB) {
+    if (nA === nB) return "strong";
+    if (nA.length >= 3 && nB.length >= 3 && (nA.includes(nB) || nB.includes(nA))) return "strong";
+    if (tokenOverlapRatio(nA, nB) >= 0.5) return "weak";
+  }
+  const arA = normalizeNameCore(aNameAr);
+  const arB = normalizeNameCore(bNameAr);
+  if (arA && arB && arA === arB) return "strong";
+  return "none";
+}
+function addressMatchStrength(aAddr, aAddrAr, bAddr, bAddrAr) {
+  const nA = normalizeAddressText(aAddr);
+  const nB = normalizeAddressText(bAddr);
+  if (nA && nB) {
+    if (nA === nB) return "strong";
+    const ratio = tokenOverlapRatio(nA, nB);
+    if (ratio >= 0.6) return "strong";
+    if (ratio >= 0.3) return "weak";
+  }
+  const arA = normalizeAddressText(aAddrAr);
+  const arB = normalizeAddressText(bAddrAr);
+  if (arA && arB) {
+    if (arA === arB) return "strong";
+    if (tokenOverlapRatio(arA, arB) >= 0.6) return "strong";
+  }
+  return "none";
+}
+
+// Compares one incoming row (from the Excel file OR a not-yet-committed
+// earlier row in the same file) against one candidate — existing client or
+// prior row — and returns a classification, or null if nothing about this
+// pair is worth flagging. `candidateLabel` is what to show as the "matched"
+// side of the preview table; `candidateIsExisting` controls the wording
+// only (a within-file duplicate is worded differently from a real client
+// match) — the decision logic itself is identical either way, since a
+// second copy of the same pharmacy is a duplicate regardless of which list
+// it was first seen in.
+function matchImportRow(row, candidate, candidateLabel, candidateIsExisting) {
+  const rowPhone = normalizePhoneDigits(row.phone);
+  const candidatePhone = normalizePhoneDigits(candidate.phone);
+  if (rowPhone && candidatePhone && rowPhone === candidatePhone) {
+    return {
+      matchedLabel: candidateLabel,
+      matchedClientId: candidateIsExisting ? candidate.id : "",
+      reason: candidateIsExisting ? "Same phone number" : "Same phone number as another row in this file",
+      status: "DUPLICATE", confidence: "High",
+    };
+  }
+  const nameStrength = nameMatchStrength(row.name, row.nameAr, candidate.name, candidate.nameAr);
+  const addrStrength = addressMatchStrength(row.address, row.addressAr, candidate.address, candidate.addressAr);
+  if (nameStrength === "strong" && addrStrength === "strong") {
+    return {
+      matchedLabel: candidateLabel,
+      matchedClientId: candidateIsExisting ? candidate.id : "",
+      reason: candidateIsExisting ? "Name + address match" : "Name + address match with another row in this file",
+      status: "DUPLICATE", confidence: "High",
+    };
+  }
+  if (nameStrength === "strong" || (nameStrength === "weak" && addrStrength !== "none")) {
+    return {
+      matchedLabel: candidateLabel,
+      matchedClientId: candidateIsExisting ? candidate.id : "",
+      reason: `Similar name${addrStrength !== "none" ? " and address" : ", different phone/address"}`,
+      status: "NEEDS_REVIEW", confidence: nameStrength === "strong" ? "Medium" : "Low",
+    };
+  }
+  if (nameStrength === "weak") {
+    return {
+      matchedLabel: candidateLabel,
+      matchedClientId: candidateIsExisting ? candidate.id : "",
+      reason: "Similar name only, different phone/address",
+      status: "NEEDS_REVIEW", confidence: "Low",
+    };
+  }
+  return null;
+}
+const IMPORT_STATUS_RANK = { DUPLICATE: 2, NEEDS_REVIEW: 1 };
+const IMPORT_CONFIDENCE_RANK = { High: 3, Medium: 2, Low: 1 };
+// Runs the whole file's rows through matchImportRow against both the live
+// Clients list and every row already accepted earlier in this SAME batch
+// (so the file duplicating itself is caught too, and a same-file duplicate
+// pair always keeps only its FIRST occurrence as the "importable" one).
+// Never mutates anything — used identically by the preview and the commit,
+// so the commit can never accept a row the preview didn't already clear.
+function classifyImportRows(rows, existingClients) {
+  const acceptedSoFar = []; // rows from this batch classified IMPORTED so far
+  return rows.map((row) => {
+    let best = null;
+    for (const client of existingClients) {
+      const m = matchImportRow(row, client, client.name, true);
+      if (!m) continue;
+      if (!best || IMPORT_STATUS_RANK[m.status] > IMPORT_STATUS_RANK[best.status]
+        || (IMPORT_STATUS_RANK[m.status] === IMPORT_STATUS_RANK[best.status] && IMPORT_CONFIDENCE_RANK[m.confidence] > IMPORT_CONFIDENCE_RANK[best.confidence])) {
+        best = m;
+      }
+    }
+    for (const priorRow of acceptedSoFar) {
+      const m = matchImportRow(row, priorRow, priorRow.name, false);
+      if (!m) continue;
+      if (!best || IMPORT_STATUS_RANK[m.status] > IMPORT_STATUS_RANK[best.status]
+        || (IMPORT_STATUS_RANK[m.status] === IMPORT_STATUS_RANK[best.status] && IMPORT_CONFIDENCE_RANK[m.confidence] > IMPORT_CONFIDENCE_RANK[best.confidence])) {
+        best = m;
+      }
+    }
+    if (!best) {
+      acceptedSoFar.push(row);
+      return { ...row, matchedLabel: "", matchedClientId: "", reason: "No match", status: "IMPORTED", confidence: "High" };
+    }
+    return { ...row, ...best };
+  });
+}
+
+app.post("/api/clients/import-preview", requireManager, async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+    const existingClients = await db.getAllRows("Clients");
+    const results = classifyImportRows(rows, existingClients);
+    const summary = {
+      total: results.length,
+      imported: results.filter((r) => r.status === "IMPORTED").length,
+      duplicate: results.filter((r) => r.status === "DUPLICATE").length,
+      needsReview: results.filter((r) => r.status === "NEEDS_REVIEW").length,
+    };
+    res.json({ results, summary });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Re-runs the EXACT same classification at commit time (never trusts the
+// preview's classification to still hold — the live sheet may have changed
+// since, e.g. another manager importing concurrently) and only ever appends
+// rows that are STILL genuinely new. This is also what makes the whole
+// import idempotent: running it again with the same file re-classifies
+// every previously-imported row as DUPLICATE against the now-updated
+// Clients list, so a second run adds zero rows.
+//
+// A row the manager explicitly approved from the "Needs review" list (sent
+// with forceImport: true) is allowed through — that is the one case a human
+// decision can override. A DUPLICATE is never overridable, at any
+// confidence: "do not create duplicate records" has no exception in this
+// tool, matching what was asked for.
+app.post("/api/clients/import-preview/commit", requireManager, async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+    const existingClients = await db.getAllRows("Clients");
+    const results = classifyImportRows(rows, existingClients);
+    const newClients = [];
+    let blockedAsDuplicate = 0;
+    results.forEach((r, i) => {
+      const forceImport = !!rows[i]?.forceImport;
+      if (r.status === "DUPLICATE") { blockedAsDuplicate++; return; }
+      if (r.status === "NEEDS_REVIEW" && !forceImport) return;
+      newClients.push({
+        id: `c${crypto.randomUUID()}`,
+        name: r.name, phone: r.phone || "", tier: "B", area: r.area || "",
+        assignedRep: "", registrationNumber: "", address: r.address || "",
+        coordsLat: "", coordsLng: "", discountRate: "", nameAr: r.nameAr || "",
+        type: "pharmacy", subTerritory: r.subTerritory || "", addressAr: r.addressAr || "",
+      });
+    });
+    if (newClients.length > 0) await db.appendRows("Clients", newClients);
+    res.json({ ok: true, added: newClients.length, blockedAsDuplicate });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Helps a manager find and undo a bulk import made from the WRONG file — in
 // particular, the general Mount Lebanon pharmacist reference directory
 // (MOUNT_LEBANON_REFERENCE_NAMES, the same file used for Dahiyeh
