@@ -1296,6 +1296,7 @@ app.get("/api/competitor-products", async (req, res) => {
     await ensureOurProductsMasterDataSeeded();
     await ensurePhase1CategoriesSeeded();
     await ensurePhase2CategoriesSeeded();
+    await ensurePhase3CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const { q, limit } = req.query;
@@ -5974,6 +5975,7 @@ async function ensureCompetitorMasterDataSeeded() {
   await ensureB12ProductDataSeeded();
   await ensurePhase1CategoriesSeeded();
   await ensurePhase2CategoriesSeeded();
+  await ensurePhase3CategoriesSeeded();
   const norm = (s) => String(s || "").trim().toLowerCase();
 
   const existingProducts = await db.getAllRows("CompetitorProducts");
@@ -8253,6 +8255,139 @@ async function ensurePhase2CategoriesSeeded() {
   phase2CategoriesSeedChecked = true;
 }
 
+// ---------- Recall Phase 3: Sleep / Stress / Mood anchor (Melatonin,
+// Valerian, Ashwagandha) ----------
+// The "sleep-stress-mood" category (RECALL_CATEGORIES_SEED) and its real,
+// sourced competitor rows (COMPETITOR_MASTER_SEED.newProducts, tagged
+// categoryId: "sleep-stress-mood" — three Ashwagandha brands, one 5-HTP, one
+// Melatonin) already existed with nothing anchoring them: the auto-link step
+// in ensureCompetitorMasterDataSeeded only links a category's competitor
+// rows once at least one of our own products is linked into that category
+// via RecallIngredients + RecallProductIngredients, and no such link existed
+// for this category. This phase adds exactly that missing anchor. Unlike
+// Phase 1/2, these three ingredients were NOT researched live via PubMed in
+// this pass, so — matching this app's own "never type clinical content from
+// memory" rule — no clinicalUses/evidenceSummary/precautions/interactions/
+// forms are populated here; every field beyond name/commonName/
+// scientificName/description/evidenceLevel is left blank and evidenceLevel
+// is NOT_VERIFIED, the same honest-gap convention used everywhere else in
+// Recall.
+const PHASE3_OUR_PRODUCTS_SEED = [
+  {
+    // Matches the real in-stock item "Ashwagandha 2100mg 60 Caps (alfa)"
+    // (seedData.js s7/s8 — two batches of the SAME product; ProductCatalog
+    // is the batch-independent master list per its own schema comment
+    // above, so this is one catalog entry, not two). No source URL or price
+    // is available for this entry — left blank rather than invented, same
+    // rule as the Selenium catalog entry above ("Price shown as 0 ... left
+    // blank").
+    name: "Ashwagandha 2100mg 60 Caps (alfa)",
+    price: "",
+    form: "Capsule",
+    packSize: 60,
+    ingredients: "[{\"name\": \"Ashwagandha 2100mg\", \"form\": \"\", \"amount\": \"\", \"unit\": \"\"}]",
+    sourceUrl: "",
+    notes: "",
+  },
+];
+
+const PHASE3_INGREDIENTS_SEED = [
+  {
+    id: "melatonin", categoryId: "sleep-stress-mood", name: "Melatonin", commonName: "Melatonin", scientificName: "",
+    description: "Melatonin is a hormone produced by the pineal gland that helps regulate the body's sleep-wake cycle.",
+    evidenceLevel: "NOT_VERIFIED",
+    productMatches: [
+      { productName: "Mason Natural Melatonin 3mg 60 Tabs", chemicalForm: "Melatonin", compoundAmount: 3, activeAmount: "", unit: "mg", servingSize: "1 tablet", notes: "Also contains Vitamin B6 1 mg + Calcium 55 mg, per the product's own ingredient text." },
+      { productName: "Mason Natural Melatonin 5mg 60 Tabs", chemicalForm: "Melatonin", compoundAmount: 5, activeAmount: "", unit: "mg", servingSize: "1 tablet", notes: "Also contains Vitamin B6 1 mg + Calcium 55 mg, per the product's own ingredient text." },
+    ],
+  },
+  {
+    id: "valerian", categoryId: "sleep-stress-mood", name: "Valerian", commonName: "Valerian root", scientificName: "",
+    description: "Valerian is an herb whose root is commonly used in dietary supplements marketed for sleep support.",
+    evidenceLevel: "NOT_VERIFIED",
+    productMatches: [
+      { productName: "Mason Natural Valerian Root 60 Cap", chemicalForm: "Valerian root", compoundAmount: 500, activeAmount: "", unit: "mg", servingSize: "1 capsule", notes: "" },
+    ],
+  },
+  {
+    id: "ashwagandha", categoryId: "sleep-stress-mood", name: "Ashwagandha", commonName: "Ashwagandha", scientificName: "Withania somnifera",
+    description: "Ashwagandha is an herb (Withania somnifera) commonly used in dietary supplements marketed as an adaptogen.",
+    evidenceLevel: "NOT_VERIFIED",
+    productMatches: [
+      { productName: "Ashwagandha 2100mg 60 Caps (alfa)", chemicalForm: "Ashwagandha", compoundAmount: 2100, activeAmount: "", unit: "mg", servingSize: "", notes: "" },
+    ],
+  },
+];
+
+let phase3CategoriesSeedChecked = false;
+async function ensurePhase3CategoriesSeeded() {
+  if (phase3CategoriesSeedChecked) return;
+  // Self-sufficient, same reasoning as ensurePhase1/2CategoriesSeeded above.
+  await ensureRecallCategoriesSeeded();
+  await ensureRecallB12Seeded();
+  await ensureB12ProductDataSeeded();
+  await ensureOurProductsMasterDataSeeded();
+  await ensurePhase1CategoriesSeeded();
+  await ensurePhase2CategoriesSeeded();
+
+  const existingIngredients = await db.getAllRows("RecallIngredients");
+  const existingIngredientIds = new Set(existingIngredients.map((i) => i.id));
+  const missingIngredientDefs = PHASE3_INGREDIENTS_SEED.filter((def) => !existingIngredientIds.has(def.id));
+  if (missingIngredientDefs.length === 0) { phase3CategoriesSeedChecked = true; return; }
+
+  // ---- Our products: add the missing Ashwagandha catalog entry, matched by
+  // exact name so it is never duplicated on a later run ----
+  const norm = (s) => String(s || "").trim().toLowerCase();
+  let catalog = await db.getAllRows("ProductCatalog");
+  const catalogNameSet = new Set(catalog.map((p) => norm(p.name)));
+  const newCatalogRows = [];
+  for (const item of PHASE3_OUR_PRODUCTS_SEED) {
+    if (catalogNameSet.has(norm(item.name))) continue;
+    newCatalogRows.push({
+      id: `pc${crypto.randomUUID()}`, name: item.name, price: item.price,
+      form: item.form, packSize: item.packSize, unitsPerDay: "",
+      ingredients: item.ingredients, notes: item.notes,
+      createdBy: "Recall Phase 3 product seed", createdAt: new Date().toISOString(),
+      updatedBy: "", updatedAt: "",
+    });
+  }
+  if (newCatalogRows.length) {
+    await db.appendRows("ProductCatalog", newCatalogRows);
+    catalog = await db.getAllRows("ProductCatalog");
+  }
+
+  const catalogByName = new Map(catalog.map((p) => [p.name, p]));
+  const newIngredientRows = [];
+  const newLinkRows = [];
+
+  for (const def of missingIngredientDefs) {
+    newIngredientRows.push({
+      id: def.id, categoryId: def.categoryId, name: def.name, commonName: def.commonName || "", scientificName: def.scientificName || "",
+      description: def.description || "", physiologicalRole: "", clinicalUses: "",
+      evidenceSummary: "", evidenceLevel: def.evidenceLevel || "NOT_VERIFIED",
+      precautions: "", contraindications: "", drugInteractionSummary: "",
+      clinicalCheckpoints: "", repQuickTakeaway: "", whatNotToClaim: "", lastReviewed: "",
+      absorptionTimingNotes: "", repTakeawayQuestions: "", repTakeaway30Second: "",
+    });
+
+    for (const m of def.productMatches || []) {
+      const product = catalogByName.get(m.productName);
+      if (!product) continue; // never invents a product — only links one that's already in the catalog
+      newLinkRows.push({
+        id: `rpi-${def.id}-${crypto.randomUUID()}`, productId: product.id, ingredientId: def.id,
+        chemicalForm: m.chemicalForm || "", compoundAmount: m.compoundAmount ?? "", activeAmount: m.activeAmount ?? "", unit: m.unit || "",
+        servingSize: m.servingSize || "", dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "PARTIALLY_VERIFIED",
+        notes: m.notes || "", missingFields: "", sku: "", manufacturer: "", sourceLabel: "Product catalog import", sourceUrl: "",
+      });
+    }
+  }
+
+  if (newIngredientRows.length) await db.appendRows("RecallIngredients", newIngredientRows);
+  if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
+
+  phase3CategoriesSeedChecked = true;
+}
+
 // ---------- Recall: auto-link ANY competitor product into its matching
 // category, by shared ingredient ----------
 // Not a one-time seed step like the functions above — a competitor product
@@ -8472,6 +8607,7 @@ app.get("/api/recall/categories", async (req, res) => {
     await ensureOurProductsMasterDataSeeded();
     await ensurePhase1CategoriesSeeded();
     await ensurePhase2CategoriesSeeded();
+    await ensurePhase3CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
@@ -8527,6 +8663,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
     await ensureOurProductsMasterDataSeeded();
     await ensurePhase1CategoriesSeeded();
     await ensurePhase2CategoriesSeeded();
+    await ensurePhase3CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources, features, benefits, uspRows, advantageRows] = await Promise.all([
