@@ -8,6 +8,7 @@ const multer = require("multer");
 const db = require("./sheetsDb");
 const telegram = require("./telegram");
 const { importedInventory, defaultTemplates } = require("./seedData");
+const { DAHIYEH_REFERENCE_PHARMACIES } = require("./dahiyehReference");
 
 const app = express();
 app.use(express.json({ limit: "25mb" }));
@@ -3306,6 +3307,68 @@ app.patch("/api/doctors/:id", requireManager, async (req, res) => {
       });
     }
     res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Suggests a subTerritory for existing Dahiyeh clients by matching them
+// against DAHIYEH_REFERENCE_PHARMACIES (a general pharmacist directory, NOT
+// this company's own client roster) — phone number is the primary signal
+// (reliable, since two different physical pharmacies essentially never
+// share one), with an exact normalized name match as a lower-confidence
+// fallback when no phone matches. Never applies anything itself — a manager
+// reviews and picks which suggestions to accept via the apply route below.
+function normalizePhoneDigits(s) {
+  return String(s || "").replace(/[^0-9]/g, "");
+}
+function normalizeNameForMatch(s) {
+  return String(s || "").toLowerCase().replace(/pharmacy|pharmacie|pharma/g, "").replace(/[^a-z0-9؀-ۿ]+/g, "");
+}
+app.get("/api/clients/dahiyeh-subterritory-suggestions", requireManager, async (req, res) => {
+  try {
+    const clients = await db.getAllRows("Clients");
+    const candidates = clients.filter((c) => (c.area || "") === "Dahiyeh" && !c.subTerritory);
+    const byPhone = new Map();
+    const byName = new Map();
+    for (const ref of DAHIYEH_REFERENCE_PHARMACIES) {
+      const refPhone = normalizePhoneDigits(ref.phone);
+      const refMobile = normalizePhoneDigits(ref.mobile);
+      if (refPhone) byPhone.set(refPhone, ref);
+      if (refMobile) byPhone.set(refMobile, ref);
+      const refName = normalizeNameForMatch(ref.name);
+      if (refName) byName.set(refName, ref);
+    }
+    const suggestions = [];
+    for (const c of candidates) {
+      const phoneDigits = normalizePhoneDigits(c.phone);
+      const nameKey = normalizeNameForMatch(c.name);
+      const phoneMatch = phoneDigits ? byPhone.get(phoneDigits) : null;
+      const nameMatch = !phoneMatch && nameKey ? byName.get(nameKey) : null;
+      const match = phoneMatch || nameMatch;
+      if (!match) continue;
+      suggestions.push({
+        clientId: c.id, clientName: c.name, clientPhone: c.phone || "",
+        matchedName: match.name, subTerritory: match.subTerritory,
+        matchedVia: phoneMatch ? "phone" : "name",
+      });
+    }
+    res.json({ suggestions, candidateCount: candidates.length });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/clients/dahiyeh-subterritory-suggestions/apply", requireManager, async (req, res) => {
+  try {
+    const assignments = Array.isArray(req.body.assignments) ? req.body.assignments : [];
+    const updates = assignments
+      .filter((a) => a.id && a.subTerritory)
+      .map((a) => ({ id: a.id, patch: { subTerritory: a.subTerritory } }));
+    if (updates.length) await db.batchUpdateRows("Clients", updates);
+    res.json({ ok: true, applied: updates.length });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });

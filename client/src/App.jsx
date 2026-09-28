@@ -398,6 +398,7 @@ export default function App() {
   const assignClientRep = (id, assignedRep) => withSync(() => api.assignClientRep(id, assignedRep), { touchesReference: true });
   const updateClientDiscount = (id, discountRate) => withSync(() => api.updateClientDiscount(id, discountRate), { touchesReference: true });
   const updateClientSubTerritory = (id, subTerritory) => withSync(() => api.updateClientSubTerritory(id, subTerritory), { touchesReference: true });
+  const applyDahiyehSubTerritorySuggestions = (assignments) => withSync(() => api.applyDahiyehSubTerritorySuggestions(assignments), { touchesReference: true });
   const completeClientInfo = (id, patch) => withSync(() => api.completeClientInfo(id, patch), { touchesReference: true });
   const completeDoctorInfo = (id, patch) => withSync(() => api.completeDoctorInfo(id, patch), { touchesReference: true });
   const addDoctor = (doctor) => withSync(() => api.addDoctor(doctor), { touchesReference: true });
@@ -598,6 +599,7 @@ export default function App() {
                 onAssignRep={assignClientRep}
                 onUpdateDiscount={updateClientDiscount}
                 onUpdateSubTerritory={updateClientSubTerritory}
+                onApplyDahiyehSuggestions={applyDahiyehSubTerritorySuggestions}
                 onCompleteInfo={completeClientInfo}
               />
             )}
@@ -6363,6 +6365,97 @@ const CLIENT_FILLABLE_FIELDS = [
   { key: "nameAr", label: "Name in Arabic" },
 ];
 
+// Manager-only, one-time-use tool: proposes a subTerritory for existing
+// Dahiyeh pharmacies by matching them (phone first, exact name as fallback)
+// against a reference pharmacist directory — never applies anything without
+// the manager reviewing and picking which suggestions to keep.
+function DahiyehMatchTool({ onApply }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [suggestions, setSuggestions] = useState(null);
+  const [checked, setChecked] = useState({});
+  const [applying, setApplying] = useState(false);
+  const [message, setMessage] = useState("");
+
+  const load = () => {
+    setLoading(true);
+    return api.getDahiyehSubTerritorySuggestions()
+      .then((data) => {
+        const list = data.suggestions || [];
+        setSuggestions(list);
+        setChecked(Object.fromEntries(list.map((s) => [s.clientId, true])));
+      })
+      .catch(() => setSuggestions([]))
+      .finally(() => setLoading(false));
+  };
+
+  const toggleOpen = () => {
+    setOpen((v) => {
+      const next = !v;
+      if (next && suggestions === null) load();
+      return next;
+    });
+  };
+
+  const apply = async () => {
+    const assignments = (suggestions || [])
+      .filter((s) => checked[s.clientId])
+      .map((s) => ({ id: s.clientId, subTerritory: s.subTerritory }));
+    if (assignments.length === 0) return;
+    setApplying(true);
+    try {
+      await onApply(assignments);
+      await load();
+      setMessage(`Assigned a sub-territory to ${assignments.length} pharmac${assignments.length === 1 ? "y" : "ies"}.`);
+    } catch (e) {
+      setMessage(e.message || "Couldn't apply.");
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <button type="button" onClick={toggleOpen} style={{
+        padding: "7px 12px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5, fontWeight: 500,
+      }}>
+        {open ? "Hide Dahiyeh sub-territory matcher" : "Match Dahiyeh sub-territories"}
+      </button>
+      {open && (
+        <div style={{ marginTop: 8, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
+          <p style={{ fontSize: 12, color: "#8A8272", margin: "0 0 8px" }}>
+            Matches Dahiyeh pharmacies with no sub-territory yet against a reference directory, by phone number (reliable) or exact name (less certain). Nothing changes until you apply.
+          </p>
+          {loading && <div style={{ fontSize: 12, color: "#8A8272" }}>Loading…</div>}
+          {!loading && suggestions && suggestions.length === 0 && (
+            <div style={{ fontSize: 12, color: "#8A8272" }}>No matches found.</div>
+          )}
+          {!loading && suggestions && suggestions.length > 0 && (
+            <>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 10, maxHeight: 300, overflowY: "auto" }}>
+                {suggestions.map((s) => (
+                  <label key={s.clientId} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 12, borderBottom: "1px solid #F0EBE0" }}>
+                    <input type="checkbox" checked={!!checked[s.clientId]} onChange={(e) => setChecked((c) => ({ ...c, [s.clientId]: e.target.checked }))} />
+                    <span style={{ flex: 1 }}>{s.clientName}</span>
+                    <span style={{ color: "#8A8272", fontSize: 11 }}>{s.matchedVia === "phone" ? "phone match" : "name match"} — {s.matchedName}</span>
+                    <span style={{ fontWeight: 600, fontSize: 11.5 }}>{s.subTerritory}</span>
+                  </label>
+                ))}
+              </div>
+              <button type="button" disabled={applying} onClick={apply} style={{
+                padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
+              }}>
+                {applying ? "Applying…" : "Apply selected"}
+              </button>
+            </>
+          )}
+          {message && <div style={{ marginTop: 8, fontSize: 12, color: "#4C7A5E" }}>{message}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // kind picks which slice of the Clients table this instance manages —
 // "pharmacy" (the original behavior) or "supplement_store" (a second,
 // symmetrical tab). Both live in the same underlying table/routes (a
@@ -6370,7 +6463,7 @@ const CLIENT_FILLABLE_FIELDS = [
 // tiers, lead scoring, discount rate, GPS, bulk import, order/visit
 // history — works identically for supplement stores with no separate
 // component to maintain.
-function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onUpdateSubTerritory, onCompleteInfo }) {
+function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onUpdateSubTerritory, onApplyDahiyehSuggestions, onCompleteInfo }) {
   const clients = useMemo(() => allClients.filter((c) => (c.type || "pharmacy") === kind), [allClients, kind]);
   const isSupplementStore = kind === "supplement_store";
   const entityWord = isSupplementStore ? "supplement store" : "pharmacy";
@@ -6532,6 +6625,7 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
       </div>
 
       {role === "manager" && showImport && <ClientExcelImportSection existingClients={clients} repNames={repNames} kind={kind} onImport={onBulkImport} onDone={() => setShowImport(false)} />}
+      {role === "manager" && kind === "pharmacy" && <DahiyehMatchTool onApply={onApplyDahiyehSuggestions} />}
 
       {showAdd && (
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
