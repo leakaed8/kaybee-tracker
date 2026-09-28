@@ -3887,13 +3887,32 @@ function normalizePhoneDigits(s) {
 // Strips generic "pharmacy" wording (so "Pharmadol" and "Pharmadol
 // Pharmacy" normalize to the same core name) plus punctuation/casing, but
 // never touches the distinguishing part of a name.
-function normalizeNameCore(s) {
-  return String(s || "")
-    .toLowerCase()
-    .replace(/pharmacie|pharmacy|pharma\b/g, "")
-    .replace(/[^a-z0-9؀-ۿ]+/g, " ")
-    .trim()
-    .replace(/\s+/g, " ");
+//
+// Memoized by raw input string. classifyImportRows calls this on the SAME
+// existing client's name up to once per Excel row, and on the SAME Excel
+// row's name up to once per existing client — comparing 343 rows against
+// ~1,400 real clients recomputed this (and normalizeAddressText below)
+// roughly 475,000 times in production, when there are only ~1,700 distinct
+// strings to actually normalize. That redundant work was the real reason a
+// real import took 70+ seconds server-side, long enough to trip even a 60s
+// client timeout and occasionally a 502 from Render's own gateway. Caching
+// by input turns the cost into O(rows + candidates) instead of
+// O(rows × candidates), with zero change in output — both functions are
+// pure, and only ever called from this import-matching code.
+const normalizeNameCoreCache = new Map();
+function normalizeNameCore(rawInput) {
+  const s = String(rawInput || "");
+  let cached = normalizeNameCoreCache.get(s);
+  if (cached === undefined) {
+    cached = s
+      .toLowerCase()
+      .replace(/pharmacie|pharmacy|pharma\b/g, "")
+      .replace(/[^a-z0-9؀-ۿ]+/g, " ")
+      .trim()
+      .replace(/\s+/g, " ");
+    normalizeNameCoreCache.set(s, cached);
+  }
+  return cached;
 }
 const ADDRESS_TERM_NORMALIZATIONS = [
   [/\bstr\.?\b/g, "street"], [/\bst\.?\b/g, "street"],
@@ -3903,10 +3922,17 @@ const ADDRESS_TERM_NORMALIZATIONS = [
   [/\bopp\.?\b/g, "opposite"],
   [/\bnr\.?\b/g, "near"],
 ];
-function normalizeAddressText(s) {
-  let t = String(s || "").toLowerCase();
-  for (const [rx, replacement] of ADDRESS_TERM_NORMALIZATIONS) t = t.replace(rx, replacement);
-  return t.replace(/[^a-z0-9؀-ۿ]+/g, " ").trim().replace(/\s+/g, " ");
+const normalizeAddressTextCache = new Map();
+function normalizeAddressText(rawInput) {
+  const s = String(rawInput || "");
+  let cached = normalizeAddressTextCache.get(s);
+  if (cached === undefined) {
+    let t = s.toLowerCase();
+    for (const [rx, replacement] of ADDRESS_TERM_NORMALIZATIONS) t = t.replace(rx, replacement);
+    cached = t.replace(/[^a-z0-9؀-ۿ]+/g, " ").trim().replace(/\s+/g, " ");
+    normalizeAddressTextCache.set(s, cached);
+  }
+  return cached;
 }
 // "al"/"el" (the Arabic definite article, transliterated), "mar"/"saint"
 // (a mandatory prefix on any name honoring a saint), and "new"/"modern" (a
@@ -3973,11 +3999,18 @@ function nameMatchStrength(aName, aNameAr, bName, bNameAr) {
 // match must not short-circuit before a genuinely strong Arabic match on
 // the SAME pair of pharmacies gets a chance to be checked.
 function addressMatchStrength(aAddr, aAddrAr, bAddr, bAddrAr) {
+  // Normalize each of the 4 raw strings exactly once (normalizeAddressText
+  // is memoized anyway, but there's no reason to even do the cache lookup
+  // twice per side within a single call).
+  const nAddr = normalizeAddressText(aAddr);
+  const nAddrAr = normalizeAddressText(aAddrAr);
+  const nBddr = normalizeAddressText(bAddr);
+  const nBddrAr = normalizeAddressText(bAddrAr);
   const pairs = [
-    [normalizeAddressText(aAddr), normalizeAddressText(bAddr)],
-    [normalizeAddressText(aAddrAr), normalizeAddressText(bAddrAr)],
-    [normalizeAddressText(aAddrAr), normalizeAddressText(bAddr)],
-    [normalizeAddressText(aAddr), normalizeAddressText(bAddrAr)],
+    [nAddr, nBddr],
+    [nAddrAr, nBddrAr],
+    [nAddrAr, nBddr],
+    [nAddr, nBddrAr],
   ];
   let sawWeak = false;
   for (const [nA, nB] of pairs) {
