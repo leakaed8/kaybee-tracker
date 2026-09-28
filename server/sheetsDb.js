@@ -30,7 +30,12 @@ const SCHEMAS = {
     "treatmentGoal", "keyMessage", "plannedObjectionHandling", "plannedClose",
     "buyingMotive", "customerComments",
   ],
-  Clients: ["id", "name", "phone", "tier", "area", "assignedRep", "registrationNumber", "address", "coordsLat", "coordsLng", "discountRate", "nameAr", "type"],
+  // subTerritory appended (Pharmacy territory hierarchy) — a finer
+  // classification WITHIN `area` (e.g. area="Dahiyeh", subTerritory="Chiyah"),
+  // blank for every pharmacy outside a territory that actually needs one.
+  // `area` itself stays the top-level "Territory" — never renamed, since it's
+  // already searched/displayed everywhere as-is.
+  Clients: ["id", "name", "phone", "tier", "area", "assignedRep", "registrationNumber", "address", "coordsLat", "coordsLng", "discountRate", "nameAr", "type", "subTerritory"],
   // assignedRep appended (Manager Performance Management redesign) — mirrors
   // Clients.assignedRep exactly, including the same auto-claim-on-first-visit
   // behavior, so per-rep doctor coverage/targets mean something. "" = doctor

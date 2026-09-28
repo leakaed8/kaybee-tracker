@@ -3266,6 +3266,7 @@ app.patch("/api/clients/:id", requireManager, async (req, res) => {
     if (req.body.assignedRep !== undefined) patch.assignedRep = req.body.assignedRep;
     if (req.body.discountRate !== undefined) patch.discountRate = req.body.discountRate;
     if (req.body.nameAr !== undefined) patch.nameAr = req.body.nameAr;
+    if (req.body.subTerritory !== undefined) patch.subTerritory = req.body.subTerritory;
     let previous = null;
     if (patch.assignedRep !== undefined) {
       const clients = await db.getAllRows("Clients");

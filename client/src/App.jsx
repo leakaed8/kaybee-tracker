@@ -397,6 +397,7 @@ export default function App() {
   const bulkImportClients = (payload) => withSync(() => api.importClientsBulk(payload), { touchesReference: true });
   const assignClientRep = (id, assignedRep) => withSync(() => api.assignClientRep(id, assignedRep), { touchesReference: true });
   const updateClientDiscount = (id, discountRate) => withSync(() => api.updateClientDiscount(id, discountRate), { touchesReference: true });
+  const updateClientSubTerritory = (id, subTerritory) => withSync(() => api.updateClientSubTerritory(id, subTerritory), { touchesReference: true });
   const completeClientInfo = (id, patch) => withSync(() => api.completeClientInfo(id, patch), { touchesReference: true });
   const completeDoctorInfo = (id, patch) => withSync(() => api.completeDoctorInfo(id, patch), { touchesReference: true });
   const addDoctor = (doctor) => withSync(() => api.addDoctor(doctor), { touchesReference: true });
@@ -596,6 +597,7 @@ export default function App() {
                 onBulkImport={bulkImportClients}
                 onAssignRep={assignClientRep}
                 onUpdateDiscount={updateClientDiscount}
+                onUpdateSubTerritory={updateClientSubTerritory}
                 onCompleteInfo={completeClientInfo}
               />
             )}
@@ -611,6 +613,7 @@ export default function App() {
                 onBulkImport={bulkImportClients}
                 onAssignRep={assignClientRep}
                 onUpdateDiscount={updateClientDiscount}
+                onUpdateSubTerritory={updateClientSubTerritory}
                 onCompleteInfo={completeClientInfo}
               />
             )}
@@ -6342,6 +6345,15 @@ function ClientExcelImportSection({ existingClients, repNames, kind = "pharmacy"
 }
 
 // ---------- Pharmacies View (tiering + follow-up nudges) ----------
+// Territory hierarchy: `area` (e.g. "Dahiyeh") is the Territory, already a
+// free-text field used everywhere; this only adds a finer Sub-territory
+// selector for territories that actually need one. A territory with no
+// entry here just doesn't get a sub-territory dropdown — everything about
+// it keeps working exactly as before.
+const TERRITORY_SUBTERRITORIES = {
+  Dahiyeh: ["Chiyah", "Ghobeiry", "Haret Hreik", "Borj El Barajneh", "Mreijeh", "Tahwitat El Ghadeer", "Bir Hassan", "Jnah", "Ouzai", "Laylaki"],
+};
+
 const CLIENT_FILLABLE_FIELDS = [
   { key: "name", label: "Name" },
   { key: "phone", label: "WhatsApp number" },
@@ -6358,7 +6370,7 @@ const CLIENT_FILLABLE_FIELDS = [
 // tiers, lead scoring, discount rate, GPS, bulk import, order/visit
 // history — works identically for supplement stores with no separate
 // component to maintain.
-function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onCompleteInfo }) {
+function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onUpdateSubTerritory, onCompleteInfo }) {
   const clients = useMemo(() => allClients.filter((c) => (c.type || "pharmacy") === kind), [allClients, kind]);
   const isSupplementStore = kind === "supplement_store";
   const entityWord = isSupplementStore ? "supplement store" : "pharmacy";
@@ -6379,10 +6391,21 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
   const [assignedRep, setAssignedRep] = useState("");
   const [discountRate, setDiscountRate] = useState("");
   const [search, setSearch] = useState("");
+  const [territoryFilter, setTerritoryFilter] = useState("");
+  const [subTerritoryFilter, setSubTerritoryFilter] = useState("");
   const [coords, setCoords] = useState(null);
   const [locating, setLocating] = useState(false);
   const [locError, setLocError] = useState("");
   const [statsByName, setStatsByName] = useState({});
+
+  // Distinct Territory values actually in use, so this dropdown never lists
+  // a territory that doesn't exist here and never needs a hardcoded list of
+  // every area the company uses.
+  const territoryOptions = useMemo(
+    () => [...new Set(clients.map((c) => c.area).filter(Boolean))].sort(),
+    [clients]
+  );
+  const subTerritoryOptions = TERRITORY_SUBTERRITORIES[territoryFilter] || null;
 
   // The last few visits to this pharmacy, newest first — fetched only once
   // its history panel is actually expanded, not held for every row.
@@ -6420,6 +6443,16 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
     setShowAdd(false);
   };
 
+  // Territory/Sub-territory narrow the pool FIRST, so search (below) only
+  // ever looks inside whatever Territory/Sub-territory is selected — exactly
+  // like the existing "type to search" behavior, just scoped first. Selecting
+  // a Territory with no Sub-territory chosen browses ALL its pharmacies with
+  // no search text needed at all.
+  const territoryScoped = territoryFilter ? clients.filter((c) => (c.area || "") === territoryFilter) : clients;
+  const subTerritoryScoped = territoryFilter && subTerritoryFilter
+    ? territoryScoped.filter((c) => (c.subTerritory || "") === subTerritoryFilter)
+    : territoryScoped;
+
   // Filters raw clients by the search text FIRST, then only fetches the
   // expensive per-row stuff (last visit, revenue) for whatever matched, in
   // one batched request — computing that for every pharmacy on every
@@ -6427,15 +6460,20 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
   // approach) is exactly what made this search feel slow, and holding that
   // full history in the browser at all is exactly what this rework removes.
   const q = search.toLowerCase().trim();
-  const nameMatches = q
-    ? clients.filter((c) =>
+  const searched = q
+    ? subTerritoryScoped.filter((c) =>
         c.name.toLowerCase().includes(q) ||
         (c.nameAr || "").includes(search.trim()) ||
         (c.area || "").toLowerCase().includes(q) ||
         (c.phone || "").toLowerCase().includes(q) ||
         (c.registrationNumber || "").toLowerCase().includes(q)
       )
-    : [];
+    : subTerritoryScoped;
+  // With neither a Territory nor a search term picked, keep the original
+  // "type to search" behavior (an empty list) rather than dumping the whole
+  // national pharmacy list — selecting a Territory is what unlocks browsing
+  // without typing.
+  const nameMatches = (q || territoryFilter) ? searched : [];
   // Bounds the batch stats request even for a broad match (e.g. a whole
   // area) — generous relative to the final render cap since this set gets
   // sorted by leadScore before slicing down to LIST_DISPLAY_CAP.
@@ -6547,6 +6585,29 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
         </div>
       )}
 
+      {territoryOptions.length > 0 && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+          <select
+            value={territoryFilter}
+            onChange={(e) => { setTerritoryFilter(e.target.value); setSubTerritoryFilter(""); }}
+            style={{ ...inputStyle, width: "auto", flex: "1 1 160px" }}
+          >
+            <option value="">All Territories</option>
+            {territoryOptions.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          {subTerritoryOptions && (
+            <select
+              value={subTerritoryFilter}
+              onChange={(e) => setSubTerritoryFilter(e.target.value)}
+              style={{ ...inputStyle, width: "auto", flex: "1 1 160px" }}
+            >
+              <option value="">All {territoryFilter}</option>
+              {subTerritoryOptions.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          )}
+        </div>
+      )}
+
       <div style={{ position: "relative", marginBottom: 14 }}>
         <Search size={15} style={{ position: "absolute", left: 12, top: 10, color: "#8A8272" }} />
         <input
@@ -6576,7 +6637,7 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
                   </span>
                 </div>
                 <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 3 }}>
-                  {c.area || "no area set"} {c.phone ? `· ${c.phone}` : ""} {c.revenue > 0 ? `· $${c.revenue.toLocaleString()} orders` : ""}
+                  {c.area || "no area set"}{c.subTerritory ? ` · ${c.subTerritory}` : ""} {c.phone ? `· ${c.phone}` : ""} {c.revenue > 0 ? `· $${c.revenue.toLocaleString()} orders` : ""}
                 </div>
                 {c.address && <div style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>{c.address}</div>}
                 <div style={{ marginTop: 6 }}>
@@ -6593,6 +6654,16 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
                     <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 7px", borderRadius: 5, background: "#F0EBE0", color: "#5B5445" }}>
                       {c.assignedRep ? `Rep: ${c.assignedRep}` : "Unassigned"}
                     </span>
+                  )}
+                  {role === "manager" && TERRITORY_SUBTERRITORIES[c.area] && (
+                    <select
+                      value={c.subTerritory || ""}
+                      onChange={(e) => onUpdateSubTerritory(c.id, e.target.value)}
+                      style={{ fontSize: 11, padding: "3px 6px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", marginLeft: 8 }}
+                    >
+                      <option value="">No sub-territory</option>
+                      {TERRITORY_SUBTERRITORIES[c.area].map((s) => <option key={s} value={s}>{s}</option>)}
+                    </select>
                   )}
                   {role === "manager" ? (
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 8, fontSize: 11, color: "#5B5445" }}>
