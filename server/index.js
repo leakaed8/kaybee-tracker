@@ -451,16 +451,26 @@ function buildCleanOrderItems(items) {
 // client-side miscalculation (or a hand-crafted payload) could satisfy that
 // check while marking every unit in the group isFree, undercharging the
 // whole group instead of just its getQty units — exactly what "everything
-// was too free" on a 12+2/14+2 order looks like from a rep's side. The two
-// checks below close that gap: exactly getQty units may be marked free (no
-// more, no fewer), and every unit marked free must actually be priced at 0
-// — never trusting the client's isFree/unitPrice pair beyond that.
+// was too free" on a 12+2/14+2 order looks like from a rep's side. The
+// checks below close that gap: every unit marked free must actually be
+// priced at 0 (never trusting the client's isFree/unitPrice pair beyond
+// that), and the free COUNT is right.
 //
-// Grouping key is groupId (one specific offer INSTANCE on this order), not
-// offerId (the promotion type) — two independent instances of the same
-// promotion must validate separately. Items with no groupId (saved before
-// it existed) fall back to one group per offerId, exactly matching the only
-// grouping those older orders ever had.
+// Grouping key for the QUANTITY check is groupId (one specific offer
+// INSTANCE on this order) — two independent instances of the same
+// promotion must each independently total exactly buyQty+getQty; one
+// instance can never borrow units from another to "complete" itself. Items
+// with no groupId (saved before it existed) fall back to one group per
+// offerId, exactly matching the only grouping those older orders ever had.
+//
+// The free-COUNT check, though, is done per offerId (the promotion type),
+// not per groupId — when the SAME promotion is picked 2+ times, the client
+// pools those instances' free-item selection together (picking whichever
+// product across the combined pool is closest to the combined average
+// price — see applyOfferToItems/promotionFamilies client-side), so one
+// instance can legitimately end up with 0 free units while another carries
+// more than its own getQty. What must always be exactly right is the TOTAL
+// free count for that promotion across every instance of it on this order.
 async function validateOfferGroups(cleanItems) {
   const offerRows = await db.getAllRows("Offers");
   // Looked up by id across ALL offers, not just currently-active ones — an
@@ -473,6 +483,7 @@ async function validateOfferGroups(cleanItems) {
   const itemsWithOffers = cleanItems.filter((it) => it.offerId);
   const groupKeyOf = (it) => it.groupId || `legacy-${it.offerId}`;
   const groupKeys = [...new Set(itemsWithOffers.map(groupKeyOf))];
+
   for (const groupKey of groupKeys) {
     const groupItems = itemsWithOffers.filter((it) => groupKeyOf(it) === groupKey);
     const offer = offerById.get(groupItems[0].offerId);
@@ -482,13 +493,22 @@ async function validateOfferGroups(cleanItems) {
     if (groupQty !== required) {
       return `${offer.label} requires exactly ${required} units. This order currently has ${groupQty} units assigned to it. Please adjust the quantities to ${required} units to continue.`;
     }
-    const freeQty = groupItems.filter((it) => it.isFree).reduce((sum, it) => sum + it.qty, 0);
-    if (freeQty !== offer.getQty) {
-      return `${offer.label} should give exactly ${offer.getQty} free unit${offer.getQty === 1 ? "" : "s"} — this order has ${freeQty} marked free. Please re-add this offer's items so the free quantity is recalculated correctly.`;
-    }
     const mispricedFreeItem = groupItems.find((it) => it.isFree && it.unitPrice !== 0);
     if (mispricedFreeItem) {
       return `${offer.label}: "${mispricedFreeItem.name}" is marked free but isn't priced at 0. Please re-add this offer's items so pricing is recalculated correctly.`;
+    }
+  }
+
+  const offerIds = [...new Set(itemsWithOffers.map((it) => it.offerId))];
+  for (const offerId of offerIds) {
+    const offer = offerById.get(offerId);
+    if (!offer) continue;
+    const familyItems = itemsWithOffers.filter((it) => it.offerId === offerId);
+    const instanceCount = new Set(familyItems.map(groupKeyOf)).size;
+    const expectedFree = offer.getQty * instanceCount;
+    const actualFree = familyItems.filter((it) => it.isFree).reduce((sum, it) => sum + it.qty, 0);
+    if (actualFree !== expectedFree) {
+      return `${offer.label} should give exactly ${expectedFree} free unit${expectedFree === 1 ? "" : "s"} across its ${instanceCount} instance${instanceCount === 1 ? "" : "s"} on this order — this order has ${actualFree} marked free. Please re-add this offer's items so the free quantity is recalculated correctly.`;
     }
   }
   return null;

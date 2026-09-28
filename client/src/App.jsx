@@ -3880,12 +3880,11 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     if (it.offerId && activeOfferIds.has(it.offerId) && it.groupId && !groupIds.includes(it.groupId)) groupIds.push(it.groupId);
   });
 
-  // Each offer group is computed in total isolation — its own call to the
-  // existing, unmodified applyOfferToItems() with only its own items and
-  // its own single offer, so one group's average price / free-item pick
-  // can never see or affect another group's. A regular order (no offer
-  // groups at all) is just an empty array here, unchanged from before.
-  const offerGroups = groupIds.map((groupId) => {
+  // Base pass: each offer group's own totalQty/required/valid/rawItems come
+  // from its own call to the existing, unmodified applyOfferToItems() with
+  // only its own items and its own single offer — a card always shows
+  // exactly what the rep entered into it, regardless of pooling below.
+  const baseOfferGroups = groupIds.map((groupId) => {
     const rawItems = items.filter((it) => it.groupId === groupId);
     const offerId = rawItems[0].offerId; // every item in one instance shares one offerId, by construction
     const offer = activeOffers.find((o) => o.id === offerId);
@@ -3903,6 +3902,60 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
       taggedDisplayItems: displayItems.map((it) => ({ ...it, offerId, groupId })),
       appliedOffer, avg, roundedAvg, freeItems, freeQty,
     };
+  });
+
+  // Promotion-family aggregation: when the SAME promotion (offerId) is
+  // picked 2+ times as separate, already-complete instances, their free
+  // item(s) are picked from whichever product across the COMBINED pool is
+  // closest to the COMBINED average price — not independently per instance
+  // — per an explicit business rule. A single instance of a promotion is
+  // completely unaffected (no other instance to pool with). Different
+  // promotion types are NEVER combined, even if their quantities could add
+  // up to another configured promotion's threshold — only instances sharing
+  // the exact same offerId ever pool together.
+  const promotionFamilyBuckets = new Map(); // offerId -> baseOfferGroups[]
+  for (const g of baseOfferGroups) {
+    if (!g.valid) continue; // only complete instances ever pool
+    if (!promotionFamilyBuckets.has(g.offerId)) promotionFamilyBuckets.set(g.offerId, []);
+    promotionFamilyBuckets.get(g.offerId).push(g);
+  }
+  const pooledOverridesByGroupId = new Map();
+  const promotionFamilies = [];
+  for (const [offerId, members] of promotionFamilyBuckets) {
+    const offer = members[0].offer;
+    const n = members.length;
+    if (n >= 2) {
+      // Every member is already an exact multiple of buyQty+getQty (it's
+      // `valid`), so the pooled total is automatically an exact multiple of
+      // this synthetic n-times-bigger offer too — applyOfferToItems needs
+      // no changes at all, just a bigger pool and a scaled-up offer.
+      const syntheticOffer = { ...offer, buyQty: offer.buyQty * n, getQty: offer.getQty * n };
+      const pooledRawItems = members.flatMap((g) => g.rawItems.map((it) => ({ ...it, __groupId: g.groupId })));
+      const pooledResult = applyOfferToItems(pooledRawItems, [syntheticOffer]);
+      for (const g of members) {
+        const ownDisplay = pooledResult.displayItems
+          .filter((it) => it.__groupId === g.groupId)
+          .map(({ __groupId, ...rest }) => rest);
+        const ownFreeItems = (pooledResult.freeItems || []).filter((it) => it.__groupId === g.groupId).map(({ __groupId, ...rest }) => rest);
+        pooledOverridesByGroupId.set(g.groupId, {
+          taggedDisplayItems: ownDisplay.map((it) => ({ ...it, offerId, groupId: g.groupId })),
+          freeItems: ownFreeItems,
+          freeQty: ownFreeItems.reduce((sum, it) => sum + it.qty, 0),
+          avg: pooledResult.avg,
+          roundedAvg: pooledResult.roundedAvg,
+        });
+      }
+    }
+    const qualifyingQty = offer.buyQty * n; // the "eligible units" the spec's own vocabulary means — the paid portion of each complete instance
+    const freeQty = n >= 2
+      ? members.reduce((sum, g) => sum + (pooledOverridesByGroupId.get(g.groupId)?.freeQty || 0), 0)
+      : members[0].freeQty;
+    promotionFamilies.push({ offerId, offer, instanceCount: n, qualifyingQty, freeQty, remainingTowardNext: qualifyingQty % offer.buyQty });
+  }
+
+  const offerGroups = baseOfferGroups.map((g) => {
+    const override = pooledOverridesByGroupId.get(g.groupId);
+    return override ? { ...g, ...override } : g;
   });
 
   const regularTagged = regularItems.map((it) => ({ ...it, offerId: "", groupId: "" }));
@@ -4269,6 +4322,23 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
                 <span key={g.groupId} style={{ color: g.valid ? "#4C7A5E" : "#B33A3A", fontWeight: 500 }}>
                   {g.valid ? "✓" : "⚠"} Offer {idx + 1}: {g.offer.label}
                 </span>
+              ))}
+            </div>
+          )}
+          {/* Same promotion picked 2+ times as separate instances — their
+              qualifying units and free units are aggregated for this combined
+              view (this is what explains why, e.g., two "BUY 7 GET 1" cards
+              together produce 2 free units total). A lone instance of a
+              promotion has nothing to combine with, so it's left off here —
+              its own card above already shows everything. */}
+          {promotionFamilies.filter((f) => f.instanceCount >= 2).length > 0 && (
+            <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #E5DFD3" }}>
+              <div style={{ fontWeight: 600, color: "#5B5445", marginBottom: 4 }}>Promotion summary</div>
+              {promotionFamilies.filter((f) => f.instanceCount >= 2).map((f) => (
+                <div key={f.offerId} style={{ marginBottom: 2 }}>
+                  <span style={{ fontWeight: 500 }}>{f.offer.label}</span> — {f.qualifyingQty} eligible units → <span style={{ color: "#4C7A5E", fontWeight: 600 }}>{f.freeQty} free unit{f.freeQty === 1 ? "" : "s"}</span>
+                  {f.remainingTowardNext > 0 && ` (${f.remainingTowardNext} unit${f.remainingTowardNext === 1 ? "" : "s"} toward next ${f.offer.label})`}
+                </div>
               ))}
             </div>
           )}
