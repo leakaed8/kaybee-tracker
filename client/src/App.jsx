@@ -6352,8 +6352,17 @@ function ClientExcelImportSection({ existingClients, repNames, kind = "pharmacy"
 // selector for territories that actually need one. A territory with no
 // entry here just doesn't get a sub-territory dropdown — everything about
 // it keeps working exactly as before.
+// Real imported pharmacy data uses "Baabda" (the actual Lebanese district
+// name) as the Territory value for these — Dahiyeh isn't a separate
+// district, it's the colloquial name for a cluster of neighborhoods inside
+// Baabda (alongside non-Dahiyeh Baabda towns like Hazmieh or Chweifat,
+// which simply won't get one of these sub-territories assigned). Some
+// clients may still have "Dahiyeh" itself as their Territory from earlier
+// manual entry, so both keys are supported.
+const DAHIYEH_SUBTERRITORY_LIST = ["Chiyah", "Ghobeiry", "Haret Hreik", "Borj El Barajneh", "Mreijeh", "Tahwitat El Ghadeer", "Bir Hassan", "Jnah", "Ouzai", "Laylaki"];
 const TERRITORY_SUBTERRITORIES = {
-  Dahiyeh: ["Chiyah", "Ghobeiry", "Haret Hreik", "Borj El Barajneh", "Mreijeh", "Tahwitat El Ghadeer", "Bir Hassan", "Jnah", "Ouzai", "Laylaki"],
+  Dahiyeh: DAHIYEH_SUBTERRITORY_LIST,
+  Baabda: DAHIYEH_SUBTERRITORY_LIST,
 };
 
 const CLIENT_FILLABLE_FIELDS = [

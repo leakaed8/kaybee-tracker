@@ -3329,7 +3329,9 @@ function normalizeNameForMatch(s) {
 app.get("/api/clients/dahiyeh-subterritory-suggestions", requireManager, async (req, res) => {
   try {
     const clients = await db.getAllRows("Clients");
-    const candidates = clients.filter((c) => (c.area || "") === "Dahiyeh" && !c.subTerritory);
+    // "Baabda" is the real district name real imports use; "Dahiyeh" is kept
+    // too for any client entered manually under that name directly.
+    const candidates = clients.filter((c) => ["Dahiyeh", "Baabda"].includes(c.area || "") && !c.subTerritory);
     const byPhone = new Map();
     const byName = new Map();
     for (const ref of DAHIYEH_REFERENCE_PHARMACIES) {
