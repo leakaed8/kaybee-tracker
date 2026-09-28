@@ -12,6 +12,13 @@ const { importedInventory, defaultTemplates } = require("./seedData");
 const app = express();
 app.use(express.json({ limit: "25mb" }));
 
+// console.error(e) alone truncates a Google Sheets API error to "[Object]"
+// in Render's logs — Node's default inspect depth (2) doesn't reach
+// err.response.data.error, where the real message actually lives.
+function logErr(e) {
+  console.error(e && e.response && e.response.data ? JSON.stringify(e.response.data) : e);
+}
+
 // Regenerated on every boot and handed to Telegram via setWebhook — Telegram
 // echoes it back on every webhook call so we can reject anything that isn't
 // genuinely from Telegram, without needing to persist a secret anywhere.
@@ -901,7 +908,7 @@ app.post("/api/login", async (req, res) => {
 
     res.status(401).json({ error: "Incorrect passcode." });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -980,7 +987,7 @@ app.post("/api/push/subscribe", async (req, res) => {
     await db.appendRow("PushSubscriptions", record);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1086,7 +1093,7 @@ app.get("/api/bootstrap", async (req, res) => {
     }
     res.json(shapeLiveBootstrap(raw, req.repName));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1106,7 +1113,7 @@ app.get("/api/bootstrap/reference", async (req, res) => {
     referenceBootstrapCache = { data, timestamp: Date.now() };
     res.json(data);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1157,7 +1164,7 @@ app.get("/api/visits", async (req, res) => {
     }));
     res.json({ visits: withComments, total });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1200,7 +1207,7 @@ app.get("/api/orders", async (req, res) => {
     const start = (pageNum - 1) * pageSize;
     res.json({ orders: orders.slice(start, start + pageSize), total, page: pageNum, limit: pageSize });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1217,7 +1224,7 @@ app.get("/api/samples", async (req, res) => {
     if (visitId) samples = samples.filter((s) => s.visitId === visitId);
     res.json({ samples: samples.slice(0, clampLimit(limit, 50, 500)) });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1237,7 +1244,7 @@ app.get("/api/punch-log", async (req, res) => {
     if (repName && repName !== "all") log = log.filter((p) => p.repName === repName);
     res.json({ punchLog: log.slice(0, clampLimit(limit, 200, 1000)) });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1249,7 +1256,7 @@ app.get("/api/outreach-log/today", async (req, res) => {
     const entries = rows.filter((o) => o.date === todayStr);
     res.json({ entries });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1266,7 +1273,7 @@ app.get("/api/competitor-sightings", async (req, res) => {
     if (visitId) sightings = sightings.filter((s) => s.visitId === visitId);
     res.json({ sightings: sightings.slice(0, clampLimit(limit, 200, 500)) });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1305,7 +1312,7 @@ app.get("/api/competitor-products", async (req, res) => {
     }
     res.json({ competitorProducts: products.slice(0, clampLimit(limit, 200, 500)), total: products.length });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1327,7 +1334,7 @@ app.post("/api/products", async (req, res) => {
     await db.appendRow("Products", product);
     res.json(product);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1337,7 +1344,7 @@ app.delete("/api/products/:id", async (req, res) => {
     await db.deleteRowById("Products", req.params.id);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1347,7 +1354,7 @@ app.post("/api/products/import-sample", async (req, res) => {
     await db.replaceAllRows("Products", importedInventory);
     res.json({ ok: true, count: importedInventory.length });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1403,7 +1410,7 @@ app.post("/api/products/import-bulk", async (req, res) => {
     await db.replaceAllRows("Products", normalized);
     res.json({ ok: true, count: normalized.length });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1438,7 +1445,7 @@ app.post("/api/product-catalog", requireManager, async (req, res) => {
     await db.appendRow("ProductCatalog", product);
     res.json(product);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1461,7 +1468,7 @@ app.patch("/api/product-catalog/:id", requireManager, async (req, res) => {
     if (!ok) return res.status(404).json({ error: "Product not found" });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1471,7 +1478,7 @@ app.delete("/api/product-catalog/:id", requireManager, async (req, res) => {
     await db.deleteRowById("ProductCatalog", req.params.id);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1518,7 +1525,7 @@ app.post("/api/product-catalog/import-bulk", requireManager, async (req, res) =>
     for (const u of toUpdate) await db.updateRowById("ProductCatalog", u.id, { price: u.price });
     res.json({ ok: true, added: toAdd.length, updated: toUpdate.length });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1536,7 +1543,7 @@ app.get("/api/stock-movement/status", requireManager, async (req, res) => {
     rows.forEach((r) => { countByYear[r.year] = (countByYear[r.year] || 0) + 1; });
     res.json({ lockedYears, countByYear });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1569,7 +1576,7 @@ app.post("/api/stock-movement/import", requireManager, async (req, res) => {
     }
     res.json({ ok: true, count: cleanRows.length });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1587,7 +1594,7 @@ app.post("/api/stock-movement/unlock", requireManager, async (req, res) => {
     await db.setSettings({ stockMovementLockedYears: JSON.stringify(lockedYears.filter((y) => y !== yearNum)) });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1603,7 +1610,7 @@ app.get("/api/pharmacy-sales/status", requireManager, async (req, res) => {
     const rows = await db.getAllRows("PharmacySales");
     res.json({ rowCount: rows.length });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1624,7 +1631,7 @@ app.post("/api/pharmacy-sales/import", requireManager, async (req, res) => {
     await db.replaceAllRows("PharmacySales", cleanRows);
     res.json({ ok: true, count: cleanRows.length });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1802,7 +1809,7 @@ app.post("/api/visits", async (req, res) => {
 
     res.json({ ...visit, assignedRepWarning });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1897,7 +1904,7 @@ app.patch("/api/visits/:id", async (req, res) => {
 
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1940,7 +1947,7 @@ app.patch("/api/visits/:id/interaction-type", requireManager, async (req, res) =
     });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1958,7 +1965,7 @@ app.get("/api/audit-log", requireManager, async (req, res) => {
     const limit = clampLimit(req.query.limit, 100, 500);
     res.json({ entries: rows.slice(0, limit) });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1994,7 +2001,7 @@ app.post("/api/samples", async (req, res) => {
     await db.appendRows("Samples", rows);
     res.json({ ok: true, count: rows.length });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2062,7 +2069,7 @@ app.post("/api/followups", async (req, res) => {
 
     res.json(followUp);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2093,7 +2100,7 @@ app.post("/api/followups/stop", async (req, res) => {
     await db.appendRow("FollowUps", followUp);
     res.json(followUp);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2103,7 +2110,7 @@ app.delete("/api/visits/:id", requireManager, async (req, res) => {
     await db.deleteRowById("Visits", req.params.id);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2140,7 +2147,7 @@ app.post("/api/visits/:id/comments", async (req, res) => {
     }
     res.json(comment);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2206,7 +2213,7 @@ app.post("/api/punch", async (req, res) => {
     }
     res.json(entry);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2270,7 +2277,7 @@ app.post("/api/orders", async (req, res) => {
     notifySupervisorOrderTelegram(order, cleanItems, total, appliedDiscountRate, netTotal, "🧾 New order —");
     res.json(parseOrder(order));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2316,7 +2323,7 @@ app.patch("/api/orders/:id", async (req, res) => {
     notifySupervisorOrderTelegram(updated, cleanItems, total, appliedDiscountRate, netTotal, "✏️ Order updated —");
     res.json(parseOrder(updated));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2344,7 +2351,7 @@ app.post("/api/orders/:id/request-delete", async (req, res) => {
     }
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2354,7 +2361,7 @@ app.post("/api/orders/:id/approve-delete", requireManager, async (req, res) => {
     await db.deleteRowById("Orders", req.params.id);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2365,7 +2372,7 @@ app.post("/api/orders/:id/deny-delete", requireManager, async (req, res) => {
     if (!ok) return res.status(404).json({ error: "Order not found" });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2375,7 +2382,7 @@ app.delete("/api/orders/:id", requireManager, async (req, res) => {
     await db.deleteRowById("Orders", req.params.id);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2399,7 +2406,7 @@ app.patch("/api/orders/:id/pos-entered", async (req, res) => {
     if (!ok) return res.status(404).json({ error: "Order not found" });
     res.json({ ok: true, ...patch });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2419,7 +2426,7 @@ app.post("/api/offers", requireManager, async (req, res) => {
     await db.appendRow("Offers", offer);
     res.json(parseOffer(offer));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2432,7 +2439,7 @@ app.patch("/api/offers/:id", requireManager, async (req, res) => {
     if (!ok) return res.status(404).json({ error: "Offer not found" });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2442,7 +2449,7 @@ app.delete("/api/offers/:id", requireManager, async (req, res) => {
     await db.deleteRowById("Offers", req.params.id);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2459,7 +2466,7 @@ app.get("/api/training-videos", async (req, res) => {
     const videos = rows.map((v) => parseTrainingVideo(v)).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     res.json({ videos });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2471,7 +2478,7 @@ app.get("/api/training-videos/:id", async (req, res) => {
     if (!video) return res.status(404).json({ error: "Training video not found" });
     res.json(parseTrainingVideo(video, { includeQuiz: true, includeR2Key: req.role === "manager" }));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2499,7 +2506,7 @@ app.post("/api/admin/training-videos", requireManager, async (req, res) => {
     await db.appendRow("TrainingVideos", video);
     res.json(parseTrainingVideo(video));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2537,7 +2544,7 @@ app.patch("/api/admin/training-videos/:id", requireManager, async (req, res) => 
     await db.updateRowById("TrainingVideos", video.id, patch);
     res.json(parseTrainingVideo({ ...video, ...patch }, { includeQuiz: true, includeR2Key: true }));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2552,7 +2559,7 @@ app.delete("/api/admin/training-videos/:id", requireManager, async (req, res) =>
     if (!ok) return res.status(404).json({ error: "Training video not found" });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2571,7 +2578,7 @@ app.get("/api/training-videos/:id/playback-url", async (req, res) => {
     const { url, expiresAt } = await createTrainingPlaybackUrl(video);
     res.json({ url, expiresAt });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2599,7 +2606,7 @@ app.post("/api/training-videos/:id/complete", async (req, res) => {
     await db.appendRow("TrainingProgress", progress);
     res.json(parseTrainingProgress(progress));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2617,7 +2624,7 @@ app.get("/api/training-progress", async (req, res) => {
     }
     res.json({ progress });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2633,7 +2640,7 @@ app.get("/api/training-studies", async (req, res) => {
     const studies = rows.map(parseTrainingStudy).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     res.json({ studies });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2664,7 +2671,7 @@ app.post("/api/admin/training-studies", async (req, res) => {
     notifyAllReps({ title: "New training study added", body: `"${study.title}"${nutrientNote} was just added to Training Studies.`, url: "/" });
     res.json(parseTrainingStudy(study));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2695,7 +2702,7 @@ app.patch("/api/admin/training-studies/:id", requireManager, async (req, res) =>
     await db.updateRowById("TrainingStudies", study.id, patch);
     res.json(parseTrainingStudy({ ...study, ...patch }));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2706,7 +2713,7 @@ app.delete("/api/admin/training-studies/:id", requireManager, async (req, res) =
     if (!ok) return res.status(404).json({ error: "Study not found" });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2732,7 +2739,7 @@ app.post("/api/training-studies/:id/viewed", async (req, res) => {
     }
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2749,7 +2756,7 @@ app.patch("/api/training-studies/:id/nutrient", async (req, res) => {
     if (!ok) return res.status(404).json({ error: "Study not found" });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2768,7 +2775,7 @@ app.get("/api/certifications", async (req, res) => {
     const certifications = rows.map(parseCertification).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     res.json({ certifications });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2801,7 +2808,7 @@ app.post("/api/admin/certifications", requireManager, uploadDocument.single("fil
     await db.appendRow("Certifications", cert);
     res.json(parseCertification(cert));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2847,7 +2854,7 @@ app.patch("/api/admin/certifications/:id", requireManager, uploadDocument.single
     await db.updateRowById("Certifications", cert.id, patch);
     res.json(parseCertification({ ...cert, ...patch }));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2858,7 +2865,7 @@ app.delete("/api/admin/certifications/:id", requireManager, async (req, res) => 
     if (!ok) return res.status(404).json({ error: "Certification not found" });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2871,7 +2878,7 @@ app.get("/api/certifications/:id/view-url", async (req, res) => {
     const { url, expiresAt } = await createDocumentViewUrl(cert.documentKey);
     res.json({ url, expiresAt });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2892,7 +2899,7 @@ app.get("/api/rep-questions", async (req, res) => {
     questions.sort((a, b) => new Date(b.askedAt) - new Date(a.askedAt));
     res.json({ questions });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2915,7 +2922,7 @@ app.post("/api/rep-questions", async (req, res) => {
     await db.appendRow("RepQuestions", q);
     res.json(parseRepQuestion(q));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2944,7 +2951,7 @@ app.patch("/api/admin/rep-questions/:id/answer", requireManager, uploadDocument.
     await db.updateRowById("RepQuestions", q.id, patch);
     res.json(parseRepQuestion({ ...q, ...patch }));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2957,7 +2964,7 @@ app.get("/api/rep-questions/:id/answer-document/view-url", async (req, res) => {
     const { url, expiresAt } = await createDocumentViewUrl(q.answerDocumentKey);
     res.json({ url, expiresAt });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2982,7 +2989,7 @@ app.post("/api/competitors", requireManager, async (req, res) => {
     await db.appendRow("Competitors", competitor);
     res.json(competitor);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2997,7 +3004,7 @@ app.patch("/api/competitors/:id", requireManager, async (req, res) => {
     if (!ok) return res.status(404).json({ error: "Competitor not found" });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3007,7 +3014,7 @@ app.delete("/api/competitors/:id", requireManager, async (req, res) => {
     await db.deleteRowById("Competitors", req.params.id);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3137,7 +3144,7 @@ app.post("/api/competitor-products", async (req, res) => {
     await db.appendRow("CompetitorProducts", product);
     res.json(product);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3163,7 +3170,7 @@ app.post("/api/competitor-products/import-bulk", requireManager, async (req, res
     if (newProducts.length > 0) await db.appendRows("CompetitorProducts", newProducts);
     res.json({ ok: true, added: newProducts.length, skipped: addList.length - newProducts.length });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3199,7 +3206,7 @@ app.patch("/api/competitor-products/:id", async (req, res) => {
     if (!ok) return res.status(404).json({ error: "Competitor product not found" });
     res.json({ ok: true, patch });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3209,7 +3216,7 @@ app.delete("/api/competitor-products/:id", requireManager, async (req, res) => {
     await db.deleteRowById("CompetitorProducts", req.params.id);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3248,7 +3255,7 @@ app.post("/api/clients", async (req, res) => {
     await db.appendRow("Clients", client);
     res.json(client);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3274,7 +3281,7 @@ app.patch("/api/clients/:id", requireManager, async (req, res) => {
     }
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3298,7 +3305,7 @@ app.patch("/api/doctors/:id", requireManager, async (req, res) => {
     }
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3353,7 +3360,7 @@ app.patch("/api/clients/:id/complete-info", async (req, res) => {
     }
     res.json({ ok: true, patch });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3380,7 +3387,7 @@ app.patch("/api/doctors/:id/complete-info", async (req, res) => {
     }
     res.json({ ok: true, patch });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3395,7 +3402,7 @@ app.get("/api/reps", requireManager, async (req, res) => {
       medRepOnly: r.medRepOnly === "true",
     })));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3414,7 +3421,7 @@ app.post("/api/reps", requireManager, async (req, res) => {
     await db.appendRow("Reps", rep);
     res.json(rep);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3439,7 +3446,7 @@ app.patch("/api/reps/:id", requireManager, async (req, res) => {
     if (!ok) return res.status(404).json({ error: "Rep not found" });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3459,7 +3466,7 @@ app.get("/api/telegram/status", async (req, res) => {
     }
     res.json(result);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3478,7 +3485,7 @@ app.post("/api/reps/me/telegram-link-code", async (req, res) => {
     await db.updateRowById("Reps", rep.id, { telegramLinkCode: code });
     res.json({ code, botUsername: telegramBotUsername });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3494,7 +3501,7 @@ app.post("/api/telegram/send-digest-now", requireManager, async (req, res) => {
     await db.setSettings({ lastMonthlyDigestMonth: thisMonth });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3507,7 +3514,7 @@ app.post("/api/reps/:id/telegram-link-code", requireManager, async (req, res) =>
     if (!ok) return res.status(404).json({ error: "Rep not found" });
     res.json({ code, botUsername: telegramBotUsername });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3519,7 +3526,7 @@ app.post("/api/settings/telegram-link-code", requireManager, async (req, res) =>
     await db.setSettings({ managerTelegramLinkCode: code });
     res.json({ code, botUsername: telegramBotUsername });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3537,7 +3544,7 @@ app.post("/api/reps/:id/create-export-sheet", requireManager, async (req, res) =
     await db.updateRowById("Reps", req.params.id, { exportSheetId });
     res.json({ ok: true, exportSheetId });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3549,7 +3556,7 @@ app.get("/api/reps/me/export-sheet", async (req, res) => {
     const rep = reps.find((r) => r.name === req.repName);
     res.json({ exportSheetId: rep?.exportSheetId || "" });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3559,7 +3566,7 @@ app.delete("/api/reps/:id", requireManager, async (req, res) => {
     await db.deleteRowById("Reps", req.params.id);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3596,7 +3603,7 @@ app.get("/api/rep-targets", async (req, res) => {
     const rows = await db.getAllRows("RepTargets");
     res.json({ targets: rows.map(parseRepTarget) });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3644,7 +3651,7 @@ app.put("/api/rep-targets/:repName", requireManager, async (req, res) => {
     for (const w of auditWrites) await writeAuditLog(w);
     res.json({ ok: true, changedFields: auditWrites.map((w) => w.field) });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3666,7 +3673,7 @@ app.get("/api/followups", async (req, res) => {
     rows.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
     res.json({ followups: rows });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3692,7 +3699,7 @@ app.patch("/api/followups/:id", requireManager, async (req, res) => {
     }
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3707,7 +3714,7 @@ app.get("/api/manager-notes", requireManager, async (req, res) => {
     rows.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     res.json({ notes: rows });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3726,7 +3733,7 @@ app.post("/api/manager-notes", requireManager, async (req, res) => {
     await writeAuditLog({ entityType: "manager_note", entityId: entry.id, field: "note", oldValue: "", newValue: entry.note, changedBy: entry.createdBy });
     res.json(entry);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3774,7 +3781,7 @@ app.post("/api/clients/import-bulk", requireManager, async (req, res) => {
 
     res.json({ ok: true, added: newClients.length, skipped });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3784,7 +3791,7 @@ app.delete("/api/clients/:id", async (req, res) => {
     await db.deleteRowById("Clients", req.params.id);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3818,7 +3825,7 @@ app.post("/api/clients/visit-stats", async (req, res) => {
     });
     res.json({ stats });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3849,7 +3856,7 @@ app.post("/api/doctors", async (req, res) => {
     await db.appendRow("Doctors", doctor);
     res.json(doctor);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3888,7 +3895,7 @@ app.post("/api/doctors/import-bulk", requireManager, async (req, res) => {
 
     res.json({ ok: true, added: newDoctors.length, skipped });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3898,7 +3905,7 @@ app.delete("/api/doctors/:id", async (req, res) => {
     await db.deleteRowById("Doctors", req.params.id);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3934,7 +3941,7 @@ app.post("/api/doctors/visit-stats", async (req, res) => {
     });
     res.json({ stats });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -4057,7 +4064,7 @@ app.get("/api/doctors/:name/profile", async (req, res) => {
     if (!doctor) return res.status(404).json({ error: "Doctor not found." });
     res.json(await buildEntityProfile(doctor, "doctor", name));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -4074,7 +4081,7 @@ app.get("/api/clients/:name/profile", async (req, res) => {
     if (!client) return res.status(404).json({ error: "Client not found." });
     res.json(await buildEntityProfile(client, client.type === "supplement_store" ? "supplement_store" : "pharmacy", name));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -4175,7 +4182,7 @@ app.get("/api/visit-cadence", async (req, res) => {
 
     res.json({ cadence });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -4192,7 +4199,7 @@ app.post("/api/outreach-log", async (req, res) => {
     await db.appendRow("OutreachLog", entry);
     res.json(entry);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -4205,7 +4212,7 @@ app.patch("/api/settings", async (req, res) => {
     const raw = await db.getSettings();
     res.json(parseSettings(raw));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -4299,7 +4306,7 @@ app.get("/api/recall/dosage-forms", async (req, res) => {
     const forms = await db.getAllRows("RecallDosageForms");
     res.json({ dosageForms: forms.map((f) => ({ id: f.id, name: f.name })) });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -8500,7 +8507,7 @@ app.get("/api/recall/categories", async (req, res) => {
       : [];
     res.json({ categories: result, myAssignedCategoryIds });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -8691,7 +8698,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
       advantages: categoryAdvantages.map(parseRecallProductAdvantage),
     });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -8735,7 +8742,7 @@ app.post("/api/recall/features", uploadDocument.single("image"), async (req, res
     await db.appendRow("RecallProductFeatures", feature);
     res.json(parseRecallFeature(feature));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -8776,7 +8783,7 @@ app.patch("/api/recall/features/:id", requireManager, uploadDocument.single("ima
     await db.updateRowById("RecallProductFeatures", feature.id, patch);
     res.json(parseRecallFeature({ ...feature, ...patch }));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -8787,7 +8794,7 @@ app.delete("/api/recall/features/:id", requireManager, async (req, res) => {
     if (!ok) return res.status(404).json({ error: "Feature not found" });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -8799,7 +8806,7 @@ app.patch("/api/recall/features/:id/differentiator", requireManager, async (req,
     if (!ok) return res.status(404).json({ error: "Feature not found" });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -8812,7 +8819,7 @@ app.get("/api/recall/features/:id/image-url", async (req, res) => {
     const { url, expiresAt } = await createDocumentViewUrl(feature.imageKey);
     res.json({ url, expiresAt });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -8842,7 +8849,7 @@ app.post("/api/recall/benefits", async (req, res) => {
     await db.appendRow("RecallProductBenefits", benefit);
     res.json(parseRecallBenefit(benefit));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -8877,7 +8884,7 @@ app.patch("/api/recall/benefits/:id", requireManager, async (req, res) => {
     await db.updateRowById("RecallProductBenefits", benefit.id, patch);
     res.json(parseRecallBenefit({ ...benefit, ...patch }));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -8888,7 +8895,7 @@ app.delete("/api/recall/benefits/:id", requireManager, async (req, res) => {
     if (!ok) return res.status(404).json({ error: "Benefit not found" });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -8900,7 +8907,7 @@ app.patch("/api/recall/benefits/:id/differentiator", requireManager, async (req,
     if (!ok) return res.status(404).json({ error: "Benefit not found" });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -8941,7 +8948,7 @@ app.post("/api/recall/advantages", async (req, res) => {
     await db.appendRow("RecallProductAdvantages", advantage);
     res.json(parseRecallProductAdvantage(advantage));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -8972,7 +8979,7 @@ app.patch("/api/recall/advantages/:id", requireManager, async (req, res) => {
     await db.updateRowById("RecallProductAdvantages", advantage.id, patch);
     res.json(parseRecallProductAdvantage({ ...advantage, ...patch }));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -8983,7 +8990,7 @@ app.delete("/api/recall/advantages/:id", requireManager, async (req, res) => {
     if (!ok) return res.status(404).json({ error: "Product advantage not found" });
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9015,7 +9022,7 @@ app.put("/api/recall/categories/:id/usp", async (req, res) => {
     await db.appendRow("RecallCategoryUsp", usp);
     res.json(parseRecallUsp(usp));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9031,7 +9038,7 @@ app.patch("/api/recall/categories/:id/usp/approve", requireManager, async (req, 
     await db.updateRowById("RecallCategoryUsp", existing.id, patch);
     res.json(parseRecallUsp({ ...existing, ...patch }));
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9044,7 +9051,7 @@ app.get("/api/recall/assignments", requireManager, async (req, res) => {
     const categoryIds = assignments.filter((a) => a.repId === repName).map((a) => a.categoryId);
     res.json({ categoryIds });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9073,7 +9080,7 @@ app.post("/api/recall/assignments", requireManager, async (req, res) => {
     await db.replaceAllRows("RepCategoryAssignments", [...keptForOtherReps, ...newRowsForThisRep]);
     res.json({ ok: true, count: newRowsForThisRep.length });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9090,7 +9097,7 @@ app.get("/api/recall/retailer-listings", async (req, res) => {
     const filtered = competitorProductId ? listings.filter((l) => l.competitorProductId === competitorProductId) : listings;
     res.json({ listings: filtered });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9135,7 +9142,7 @@ app.post("/api/recall/retailer-listings", async (req, res) => {
     await db.appendRow("RecallRetailerListings", listing);
     res.json(listing);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9147,7 +9154,7 @@ app.get("/api/recall/field-conflicts", async (req, res) => {
     const filtered = conflicts.filter((c) => (!entityType || c.entityType === entityType) && (!entityId || c.entityId === entityId));
     res.json({ conflicts: filtered });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9181,7 +9188,7 @@ app.post("/api/recall/field-conflicts", async (req, res) => {
     await db.appendRow("RecallFieldConflicts", conflict);
     res.json(conflict);
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9215,7 +9222,7 @@ app.patch("/api/recall/competitor-research/:id", async (req, res) => {
     const derived = await recomputeCompetitorResearchStatus(req.params.id);
     res.json({ ok: true, ...derived });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9262,7 +9269,7 @@ app.patch("/api/recall/our-products/:linkId", requireManager, async (req, res) =
     const derived = await recomputeOurProductResearchStatus(req.params.linkId);
     res.json({ ok: true, ...derived });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9290,7 +9297,7 @@ app.patch("/api/recall/retailer-listings/:id", async (req, res) => {
     await db.updateRowById("RecallRetailerListings", req.params.id, patch);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9330,7 +9337,7 @@ app.patch("/api/recall/field-conflicts/:id/resolve", async (req, res) => {
     if (targetTable === "CompetitorProducts") await recomputeCompetitorResearchStatus(conflict.entityId);
     res.json({ ok: true, appliedValue: chosenValue });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9365,7 +9372,7 @@ app.get("/api/recall/linkable-products", async (req, res) => {
     }
     res.json({ products });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9398,7 +9405,7 @@ app.get("/api/recall/competitor-relationships", async (req, res) => {
     });
     res.json({ relationships });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9436,7 +9443,7 @@ app.post("/api/recall/competitor-relationships", async (req, res) => {
     await db.appendRows("RecallCompetitorRelationships", [row]);
     res.json({ ok: true, id: row.id });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -9453,7 +9460,7 @@ app.delete("/api/recall/competitor-relationships/:id", requireManager, async (re
     await db.deleteRowById("RecallCompetitorRelationships", req.params.id);
     res.json({ ok: true });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
