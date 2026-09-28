@@ -10281,6 +10281,17 @@ const TIER_CADENCE_DAYS = { A: 14, B: 30, C: 60 };
 // a couple of minutes at boot costs nothing since it's not user-facing.
 const STARTUP_BACKGROUND_JOB_DELAY_MS = 90 * 1000;
 
+// The 90s delay above only prevents a background job's Sheets calls from
+// competing with the FIRST requests after a cold start — it does nothing to
+// stop a real user request that happens to land at (or after) that same
+// 90s mark from getting queued behind a background job's own calls, which
+// is exactly what caused a Check-In save to take 47 seconds in production.
+// Wrapping every scheduled background job with this marks its entire
+// execution (including anything it awaits) as low-priority in sheetsDb's
+// rate limiter — see runAsBackgroundJob there — so it can only ever use
+// leftover quota, never quota a live request is waiting on.
+const asBackgroundJob = (fn) => () => db.runAsBackgroundJob(fn);
+
 async function checkExpiryAndOverdueAlerts() {
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
   try {
@@ -10336,8 +10347,8 @@ async function checkExpiryAndOverdueAlerts() {
 
 const ALERT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
-  setTimeout(checkExpiryAndOverdueAlerts, STARTUP_BACKGROUND_JOB_DELAY_MS);
-  setInterval(checkExpiryAndOverdueAlerts, ALERT_CHECK_INTERVAL_MS);
+  setTimeout(asBackgroundJob(checkExpiryAndOverdueAlerts), STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setInterval(asBackgroundJob(checkExpiryAndOverdueAlerts), ALERT_CHECK_INTERVAL_MS);
 }
 
 // ---------- Every-other-day training nudge (alternating video/study) ----------
@@ -10402,8 +10413,8 @@ async function checkTrainingNudges() {
 
 const TRAINING_NUDGE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
-  setTimeout(checkTrainingNudges, STARTUP_BACKGROUND_JOB_DELAY_MS);
-  setInterval(checkTrainingNudges, TRAINING_NUDGE_CHECK_INTERVAL_MS);
+  setTimeout(asBackgroundJob(checkTrainingNudges), STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setInterval(asBackgroundJob(checkTrainingNudges), TRAINING_NUDGE_CHECK_INTERVAL_MS);
 }
 
 // ---------- Monthly Telegram digest: Pick up vs Stress to sell ----------
@@ -11119,22 +11130,22 @@ async function checkMissedPunchOuts() {
     console.error("checkMissedPunchOuts failed", e);
   }
 }
-setTimeout(checkMissedPunchOuts, STARTUP_BACKGROUND_JOB_DELAY_MS);
-setInterval(checkMissedPunchOuts, PUNCH_AUTO_CLOSE_CHECK_INTERVAL_MS);
+setTimeout(asBackgroundJob(checkMissedPunchOuts), STARTUP_BACKGROUND_JOB_DELAY_MS);
+setInterval(asBackgroundJob(checkMissedPunchOuts), PUNCH_AUTO_CLOSE_CHECK_INTERVAL_MS);
 
 if (telegram.isConfigured()) {
-  setTimeout(checkMonthlyDigest, STARTUP_BACKGROUND_JOB_DELAY_MS);
-  setTimeout(checkFollowUpReminders, STARTUP_BACKGROUND_JOB_DELAY_MS);
-  setTimeout(checkSampleReminders, STARTUP_BACKGROUND_JOB_DELAY_MS);
-  setTimeout(checkMonthlyVisitsSummary, STARTUP_BACKGROUND_JOB_DELAY_MS);
-  setTimeout(checkInventoryUpdateReminder, STARTUP_BACKGROUND_JOB_DELAY_MS);
-  setTimeout(checkStockMovementReminder, STARTUP_BACKGROUND_JOB_DELAY_MS);
-  setInterval(checkMonthlyDigest, MONTHLY_DIGEST_CHECK_INTERVAL_MS);
-  setInterval(checkFollowUpReminders, FOLLOWUP_CHECK_INTERVAL_MS);
-  setInterval(checkSampleReminders, FOLLOWUP_CHECK_INTERVAL_MS);
-  setInterval(checkMonthlyVisitsSummary, MONTHLY_DIGEST_CHECK_INTERVAL_MS);
-  setInterval(checkInventoryUpdateReminder, MONTHLY_DIGEST_CHECK_INTERVAL_MS);
-  setInterval(checkStockMovementReminder, MONTHLY_DIGEST_CHECK_INTERVAL_MS);
+  setTimeout(asBackgroundJob(checkMonthlyDigest), STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setTimeout(asBackgroundJob(checkFollowUpReminders), STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setTimeout(asBackgroundJob(checkSampleReminders), STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setTimeout(asBackgroundJob(checkMonthlyVisitsSummary), STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setTimeout(asBackgroundJob(checkInventoryUpdateReminder), STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setTimeout(asBackgroundJob(checkStockMovementReminder), STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setInterval(asBackgroundJob(checkMonthlyDigest), MONTHLY_DIGEST_CHECK_INTERVAL_MS);
+  setInterval(asBackgroundJob(checkFollowUpReminders), FOLLOWUP_CHECK_INTERVAL_MS);
+  setInterval(asBackgroundJob(checkSampleReminders), FOLLOWUP_CHECK_INTERVAL_MS);
+  setInterval(asBackgroundJob(checkMonthlyVisitsSummary), MONTHLY_DIGEST_CHECK_INTERVAL_MS);
+  setInterval(asBackgroundJob(checkInventoryUpdateReminder), MONTHLY_DIGEST_CHECK_INTERVAL_MS);
+  setInterval(asBackgroundJob(checkStockMovementReminder), MONTHLY_DIGEST_CHECK_INTERVAL_MS);
   telegram.getMe().then((me) => { telegramBotUsername = me.username; }).catch((e) => console.error("telegram getMe failed", e));
   if (process.env.RENDER_EXTERNAL_URL) {
     telegram.setWebhook(`${process.env.RENDER_EXTERNAL_URL}/api/telegram/webhook`, TELEGRAM_WEBHOOK_SECRET)

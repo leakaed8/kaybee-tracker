@@ -1,4 +1,5 @@
 const { google } = require("googleapis");
+const { AsyncLocalStorage } = require("async_hooks");
 
 const SHEET_ID = process.env.SHEET_ID;
 
@@ -7,39 +8,74 @@ const SHEET_ID = process.env.SHEET_ID;
 // limit) at 60, shared by every call this one service account makes. On
 // Render's free tier the whole process restarts on every deploy AND every
 // wake-from-sleep, and several independent background jobs each issue their
-// own handful of reads the instant the process starts (see the startup
-// section of index.js) — that burst alone can exceed 60 requests inside the
-// first second, well before any real user traffic arrives, and used to just
-// fail outright (429, logged, and the job's work silently skipped until its
-// next interval). Every direct Sheets/Drive API call in this file now goes
-// through callGoogleApi(), which (1) queues the call behind a sliding-window
-// limiter capped safely under Google's ceiling so a burst spreads out over a
-// few seconds instead of overrunning it, and (2) retries a 429 with
-// exponential backoff + jitter instead of dropping the operation.
+// own handful of reads (see the startup section of index.js) — that burst
+// alone can exceed 60 requests inside the first second, well before any real
+// user traffic arrives, and used to just fail outright (429, logged, and the
+// job's work silently skipped until its next interval).
+//
+// A single shared FIFO queue fixed that (a burst spreads out instead of
+// overrunning the quota) but created a DIFFERENT real problem: the six
+// background jobs are deliberately delayed 90s past boot so they don't
+// compete with the very first requests after a cold start — but a real user
+// action landing at or after that same 90s mark could still get queued
+// BEHIND dozens of background-job calls with no way to jump the line,
+// turning an ordinary Check-In save into a 47-SECOND wait (confirmed via
+// this file's callGoogleApi timing logs). A background job losing a few
+// seconds is invisible to everyone; a rep staring at "Saving…" is not.
+//
+// The fix is real priority, not just staggered timing: every Sheets/Drive
+// call made from inside a background job's own execution is tagged via
+// runAsBackgroundJob() (an AsyncLocalStorage context, since the tag has to
+// survive through async/await without being threaded through every
+// function signature in this file). The scheduler below always drains the
+// INTERACTIVE queue first — a background call only ever gets a turn when
+// there is no interactive call waiting, so a live user request can never be
+// stuck behind background housekeeping, only behind other live requests or
+// Google's own quota window.
+const backgroundJobContext = new AsyncLocalStorage();
+function runAsBackgroundJob(fn) {
+  return backgroundJobContext.run(true, fn);
+}
+function isRunningAsBackgroundJob() {
+  return backgroundJobContext.getStore() === true;
+}
+
 const GOOGLE_API_RATE_LIMIT_PER_MINUTE = 50;
 const GOOGLE_API_RATE_WINDOW_MS = 60 * 1000;
 let recentGoogleApiCallTimestamps = [];
-let googleApiQueueTail = Promise.resolve();
+const interactiveWaitQueue = [];
+const backgroundWaitQueue = [];
+let pumpingGoogleApiQueue = false;
 
-function acquireGoogleApiSlot() {
-  const slot = googleApiQueueTail.then(async () => {
-    for (;;) {
+function pumpGoogleApiQueue() {
+  if (pumpingGoogleApiQueue) return;
+  pumpingGoogleApiQueue = true;
+  (async () => {
+    while (interactiveWaitQueue.length > 0 || backgroundWaitQueue.length > 0) {
       const now = Date.now();
       recentGoogleApiCallTimestamps = recentGoogleApiCallTimestamps.filter(
         (t) => now - t < GOOGLE_API_RATE_WINDOW_MS
       );
-      if (recentGoogleApiCallTimestamps.length < GOOGLE_API_RATE_LIMIT_PER_MINUTE) {
-        recentGoogleApiCallTimestamps.push(now);
-        return;
+      if (recentGoogleApiCallTimestamps.length >= GOOGLE_API_RATE_LIMIT_PER_MINUTE) {
+        const waitMs = GOOGLE_API_RATE_WINDOW_MS - (now - recentGoogleApiCallTimestamps[0]) + 50;
+        await new Promise((r) => setTimeout(r, waitMs));
+        continue;
       }
-      const waitMs = GOOGLE_API_RATE_WINDOW_MS - (now - recentGoogleApiCallTimestamps[0]) + 50;
-      await new Promise((r) => setTimeout(r, waitMs));
+      // Interactive (a live HTTP request) always goes first — background
+      // only gets a slot when nothing real is waiting.
+      const resolveNext = interactiveWaitQueue.length > 0 ? interactiveWaitQueue.shift() : backgroundWaitQueue.shift();
+      recentGoogleApiCallTimestamps.push(Date.now());
+      resolveNext();
     }
+    pumpingGoogleApiQueue = false;
+  })();
+}
+
+function acquireGoogleApiSlot() {
+  return new Promise((resolve) => {
+    (isRunningAsBackgroundJob() ? backgroundWaitQueue : interactiveWaitQueue).push(resolve);
+    pumpGoogleApiQueue();
   });
-  // Detach so one slot's rejection can't poison the shared queue chain for
-  // every call after it — each caller awaits its own `slot`, independently.
-  googleApiQueueTail = slot.catch(() => {});
-  return slot;
 }
 
 function isGoogleRateLimitError(err) {
@@ -806,4 +842,5 @@ module.exports = {
   setSettings,
   createRepExportSheet,
   appendToRepExportSheet,
+  runAsBackgroundJob,
 };
