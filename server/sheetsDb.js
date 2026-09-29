@@ -40,41 +40,61 @@ function isRunningAsBackgroundJob() {
   return backgroundJobContext.getStore() === true;
 }
 
-const GOOGLE_API_RATE_LIMIT_PER_MINUTE = 50;
+// Google tracks "Read requests per minute per user" and "Write requests per
+// minute per user" as SEPARATE 60/min budgets — but this used to be modeled
+// as one shared 50/min bucket for every call regardless of type. As real
+// usage grew (more reps, more concurrent actions, the Telegram bot), that
+// single undersized bucket became the actual bottleneck: a page that only
+// reads competed with a save that only writes for the exact same slots,
+// and interactive requests queued behind each other even though Google's
+// real read and write quotas were nowhere near exhausted. Splitting into
+// two independent trackers (each still kept a few requests under Google's
+// real 60/min ceiling as a safety margin) roughly doubles real throughput
+// with no added risk of a genuine 429.
+const GOOGLE_API_READ_LIMIT_PER_MINUTE = 55;
+const GOOGLE_API_WRITE_LIMIT_PER_MINUTE = 55;
 const GOOGLE_API_RATE_WINDOW_MS = 60 * 1000;
-let recentGoogleApiCallTimestamps = [];
-const interactiveWaitQueue = [];
-const backgroundWaitQueue = [];
-let pumpingGoogleApiQueue = false;
 
-function pumpGoogleApiQueue() {
-  if (pumpingGoogleApiQueue) return;
-  pumpingGoogleApiQueue = true;
+const rateTrackers = {
+  read: { timestamps: [], limit: GOOGLE_API_READ_LIMIT_PER_MINUTE },
+  write: { timestamps: [], limit: GOOGLE_API_WRITE_LIMIT_PER_MINUTE },
+};
+// Interactive (a live HTTP request) always goes first within its own type's
+// queue — background only gets a slot when nothing real is waiting for that
+// same type. Read and write are fully independent: a write-quota wait can
+// never hold up a read, and vice versa.
+const queuesByType = {
+  read: { interactive: [], background: [] },
+  write: { interactive: [], background: [] },
+};
+const pumpingByType = { read: false, write: false };
+
+function pumpGoogleApiQueue(type) {
+  if (pumpingByType[type]) return;
+  pumpingByType[type] = true;
   (async () => {
-    while (interactiveWaitQueue.length > 0 || backgroundWaitQueue.length > 0) {
+    const tracker = rateTrackers[type];
+    const queues = queuesByType[type];
+    while (queues.interactive.length > 0 || queues.background.length > 0) {
       const now = Date.now();
-      recentGoogleApiCallTimestamps = recentGoogleApiCallTimestamps.filter(
-        (t) => now - t < GOOGLE_API_RATE_WINDOW_MS
-      );
-      if (recentGoogleApiCallTimestamps.length >= GOOGLE_API_RATE_LIMIT_PER_MINUTE) {
-        const waitMs = GOOGLE_API_RATE_WINDOW_MS - (now - recentGoogleApiCallTimestamps[0]) + 50;
+      tracker.timestamps = tracker.timestamps.filter((t) => now - t < GOOGLE_API_RATE_WINDOW_MS);
+      if (tracker.timestamps.length >= tracker.limit) {
+        const waitMs = GOOGLE_API_RATE_WINDOW_MS - (now - tracker.timestamps[0]) + 50;
         await new Promise((r) => setTimeout(r, waitMs));
         continue;
       }
-      // Interactive (a live HTTP request) always goes first — background
-      // only gets a slot when nothing real is waiting.
-      const resolveNext = interactiveWaitQueue.length > 0 ? interactiveWaitQueue.shift() : backgroundWaitQueue.shift();
-      recentGoogleApiCallTimestamps.push(Date.now());
+      const resolveNext = queues.interactive.length > 0 ? queues.interactive.shift() : queues.background.shift();
+      tracker.timestamps.push(Date.now());
       resolveNext();
     }
-    pumpingGoogleApiQueue = false;
+    pumpingByType[type] = false;
   })();
 }
 
-function acquireGoogleApiSlot() {
+function acquireGoogleApiSlot(type) {
   return new Promise((resolve) => {
-    (isRunningAsBackgroundJob() ? backgroundWaitQueue : interactiveWaitQueue).push(resolve);
-    pumpGoogleApiQueue();
+    (isRunningAsBackgroundJob() ? queuesByType[type].background : queuesByType[type].interactive).push(resolve);
+    pumpGoogleApiQueue(type);
   });
 }
 
@@ -84,9 +104,14 @@ function isGoogleRateLimitError(err) {
   return /quota exceeded|rate limit exceeded/i.test(err?.message || "");
 }
 
-async function callGoogleApi(fn, { maxRetries = 5 } = {}) {
+// `type` classifies the call against Google's own read/write quota split:
+// "read" for values.get/batchGet and spreadsheet metadata reads, "write"
+// for anything that mutates the sheet (append/update/batchUpdate/clear,
+// spreadsheet structure changes, Drive permission grants). Every call site
+// below passes it explicitly.
+async function callGoogleApi(fn, { maxRetries = 5, type = "write" } = {}) {
   for (let attempt = 0; ; attempt++) {
-    await acquireGoogleApiSlot();
+    await acquireGoogleApiSlot(type);
     try {
       return await fn();
     } catch (err) {
@@ -99,6 +124,41 @@ async function callGoogleApi(fn, { maxRetries = 5 } = {}) {
       throw err;
     }
   }
+}
+
+// ---------- Short-TTL read cache for slow-changing tabs ----------
+// Every request that touches a client, doctor, product, rep, or active
+// offer re-read that whole tab from Google Sheets from scratch, even though
+// these tabs are edited rarely (an admin adding a pharmacy, a manager
+// updating stock) compared to how often they're READ (every visit, punch,
+// order, and bootstrap call needs them). Caching them for a few seconds
+// means the many requests that land in the same short window — multiple
+// reps active at once, or one rep's own visit+punch+order in quick
+// succession — share a single Sheets API read instead of each paying for
+// their own, which is the single biggest lever against the shared
+// read-quota bucket above filling up under real traffic. Never applied to
+// high-churn tabs (Visits, Orders, Samples, PunchLog, ...) where a request
+// needs the true current state, not a few seconds behind.
+const CACHEABLE_TABS = new Set(["Products", "Clients", "Doctors", "Reps", "Offers", "Settings"]);
+const READ_CACHE_TTL_MS = 20 * 1000;
+const readCache = new Map(); // tab -> { data, expiresAt }
+
+function getFreshCacheEntry(tab) {
+  if (!CACHEABLE_TABS.has(tab)) return undefined;
+  const entry = readCache.get(tab);
+  return entry && entry.expiresAt > Date.now() ? entry : undefined;
+}
+
+function setCacheEntry(tab, data) {
+  if (!CACHEABLE_TABS.has(tab)) return;
+  readCache.set(tab, { data, expiresAt: Date.now() + READ_CACHE_TTL_MS });
+}
+
+// Called after every write to a tab so the next read reflects it
+// immediately rather than serving stale data for up to READ_CACHE_TTL_MS —
+// correctness always wins over the cache.
+function invalidateReadCache(tab) {
+  readCache.delete(tab);
 }
 
 const SCHEMAS = {
@@ -453,14 +513,14 @@ async function createRepExportSheet(repName, email) {
       properties: { title: `KayBee Visits — ${repName}` },
       sheets: [{ properties: { title: "Visits" } }],
     },
-  }));
+  }), { type: "write" });
   const spreadsheetId = created.data.spreadsheetId;
   await callGoogleApi(() => sheets.spreadsheets.values.update({
     spreadsheetId,
     range: "Visits!A1",
     valueInputOption: "RAW",
     requestBody: { values: [VISIT_EXPORT_HEADERS] },
-  }));
+  }), { type: "write" });
   if (email) {
     try {
       const drive = getDrive();
@@ -468,7 +528,7 @@ async function createRepExportSheet(repName, email) {
         fileId: spreadsheetId,
         sendNotificationEmail: true,
         requestBody: { type: "user", role: "reader", emailAddress: email },
-      }));
+      }), { type: "write" });
     } catch (e) {
       console.error("Couldn't share visits export sheet", e.message);
     }
@@ -486,7 +546,7 @@ async function appendToRepExportSheet(spreadsheetId, visitRow) {
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: [VISIT_EXPORT_HEADERS.map((h) => visitRow[h] ?? "")] },
-    }));
+    }), { type: "write" });
   } catch (e) {
     console.error("Couldn't append to rep's visits export sheet", e.message);
   }
@@ -505,7 +565,7 @@ async function ensureSheets() {
   if (initPromise) return initPromise;
   initPromise = (async () => {
     const sheets = getSheets();
-    const meta = await callGoogleApi(() => sheets.spreadsheets.get({ spreadsheetId: SHEET_ID }));
+    const meta = await callGoogleApi(() => sheets.spreadsheets.get({ spreadsheetId: SHEET_ID }), { type: "read" });
     const existingTitles = meta.data.sheets.map((s) => s.properties.title);
 
     const missing = Object.keys(SCHEMAS).filter((name) => !existingTitles.includes(name));
@@ -515,7 +575,7 @@ async function ensureSheets() {
         requestBody: {
           requests: missing.map((title) => ({ addSheet: { properties: { title } } })),
         },
-      }));
+      }), { type: "write" });
     }
 
     for (const [tab, headers] of Object.entries(SCHEMAS)) {
@@ -526,7 +586,7 @@ async function ensureSheets() {
       const existing = await callGoogleApi(() => sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID,
         range: `${tab}!A1:${columnLetter(headers.length)}1`,
-      }));
+      }), { type: "read" });
       const firstRow = existing.data.values?.[0];
       // Also tops up an existing tab whose header row is shorter than the
       // current schema (e.g. new columns added to Orders for POS tracking)
@@ -539,7 +599,7 @@ async function ensureSheets() {
           range: `${tab}!A1`,
           valueInputOption: "RAW",
           requestBody: { values: [headers] },
-        }));
+        }), { type: "write" });
       }
     }
 
@@ -582,43 +642,63 @@ function objectToRow(headers, obj) {
 }
 
 async function getAllRows(tab) {
+  const cached = getFreshCacheEntry(tab);
+  if (cached) return cached.data;
   await ensureSheets();
   const sheets = getSheets();
   const headers = SCHEMAS[tab];
   const res = await callGoogleApi(() => sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
     range: `${tab}!A2:${columnLetter(headers.length)}`,
-  }));
+  }), { type: "read" });
   const rows = res.data.values || [];
-  return rows
+  const result = rows
     .map((row, idx) => ({ ...rowToObject(headers, row), _row: idx + 2 }))
     .filter((r) => r.id !== "" && r.id !== undefined);
+  setCacheEntry(tab, result);
+  return result;
 }
 
 // Fetches multiple id-keyed tabs in a single Sheets API request instead of
 // one request per tab — the biggest lever against "Read requests per
 // minute" quota errors, since the polled /api/bootstrap endpoint used to
 // cost 12 separate requests every 20 seconds, per open session. Not for
-// Settings (key/value shape, no "id" column to filter on).
+// Settings (key/value shape, no "id" column to filter on). Tabs already
+// served by the short-TTL cache skip the API call entirely; only the
+// tabs that are missing or stale go into the batchGet, so a request whose
+// tabs are all cache-hits costs zero Sheets API calls.
 async function getAllRowsBatch(tabs) {
+  const result = {};
+  const tabsToFetch = [];
+  for (const tab of tabs) {
+    const cached = getFreshCacheEntry(tab);
+    if (cached) {
+      result[tab] = cached.data;
+    } else {
+      tabsToFetch.push(tab);
+    }
+  }
+  if (tabsToFetch.length === 0) return result;
+
   await ensureSheets();
   const sheets = getSheets();
-  const ranges = tabs.map((tab) => {
+  const ranges = tabsToFetch.map((tab) => {
     const headers = SCHEMAS[tab];
     return `${tab}!A2:${columnLetter(headers.length)}`;
   });
   const res = await callGoogleApi(() => sheets.spreadsheets.values.batchGet({
     spreadsheetId: SHEET_ID,
     ranges,
-  }));
+  }), { type: "read" });
   const valueRanges = res.data.valueRanges || [];
-  const result = {};
-  tabs.forEach((tab, i) => {
+  tabsToFetch.forEach((tab, i) => {
     const headers = SCHEMAS[tab];
     const rows = valueRanges[i]?.values || [];
-    result[tab] = rows
+    const parsed = rows
       .map((row, idx) => ({ ...rowToObject(headers, row), _row: idx + 2 }))
       .filter((r) => r.id !== "" && r.id !== undefined);
+    result[tab] = parsed;
+    setCacheEntry(tab, parsed);
   });
   return result;
 }
@@ -633,7 +713,8 @@ async function appendRow(tab, obj) {
     valueInputOption: "RAW",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values: [objectToRow(headers, obj)] },
-  }));
+  }), { type: "write" });
+  invalidateReadCache(tab);
 }
 
 const APPEND_CHUNK_SIZE = 2000;
@@ -651,8 +732,9 @@ async function appendRows(tab, objects) {
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: chunk.map((o) => objectToRow(headers, o)) },
-    }));
+    }), { type: "write" });
   }
+  invalidateReadCache(tab);
 }
 
 async function updateRowById(tab, id, patch) {
@@ -683,7 +765,8 @@ async function updateRowAtPosition(tab, rowNum, mergedObj) {
     range: `${tab}!A${rowNum}:${columnLetter(headers.length)}${rowNum}`,
     valueInputOption: "RAW",
     requestBody: { values: [objectToRow(headers, mergedObj)] },
-  }));
+  }), { type: "write" });
+  invalidateReadCache(tab);
 }
 
 // Applies many patches to the SAME tab in one read + one write, instead of
@@ -713,7 +796,8 @@ async function batchUpdateRows(tab, updates) {
   await callGoogleApi(() => sheets.spreadsheets.values.batchUpdate({
     spreadsheetId: SHEET_ID,
     requestBody: { valueInputOption: "RAW", data },
-  }));
+  }), { type: "write" });
+  invalidateReadCache(tab);
 }
 
 async function deleteRowById(tab, id) {
@@ -723,7 +807,7 @@ async function deleteRowById(tab, id) {
   const target = rows.find((r) => String(r.id) === String(id));
   if (!target) return false;
 
-  const meta = await callGoogleApi(() => sheets.spreadsheets.get({ spreadsheetId: SHEET_ID }));
+  const meta = await callGoogleApi(() => sheets.spreadsheets.get({ spreadsheetId: SHEET_ID }), { type: "read" });
   const sheetProps = meta.data.sheets.find((s) => s.properties.title === tab).properties;
 
   await callGoogleApi(() => sheets.spreadsheets.batchUpdate({
@@ -742,7 +826,8 @@ async function deleteRowById(tab, id) {
         },
       ],
     },
-  }));
+  }), { type: "write" });
+  invalidateReadCache(tab);
   return true;
 }
 
@@ -755,15 +840,16 @@ async function replaceAllRows(tab, objects) {
   await callGoogleApi(() => sheets.spreadsheets.values.clear({
     spreadsheetId: SHEET_ID,
     range: `${tab}!A2:${columnLetter(headers.length)}`,
-  }));
+  }), { type: "write" });
   if (objects.length > 0) {
     await callGoogleApi(() => sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
       range: `${tab}!A2`,
       valueInputOption: "RAW",
       requestBody: { values: objects.map((o) => objectToRow(headers, o)) },
-    }));
+    }), { type: "write" });
   }
+  invalidateReadCache(tab);
 }
 
 async function getSettings() {
@@ -779,14 +865,18 @@ async function getSettings() {
 // Settings uses "key" as its id column, so it can't reuse getAllRows (which
 // filters/expects an "id" column) — read it directly instead.
 async function getAllRowsRaw(tab) {
+  const cached = getFreshCacheEntry(tab);
+  if (cached) return cached.data;
   await ensureSheets();
   const sheets = getSheets();
   const headers = SCHEMAS[tab];
   const res = await callGoogleApi(() => sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
     range: `${tab}!A2:${columnLetter(headers.length)}`,
-  }));
-  return res.data.values || [];
+  }), { type: "read" });
+  const result = res.data.values || [];
+  setCacheEntry(tab, result);
+  return result;
 }
 
 async function setSettings(patch) {
@@ -814,7 +904,7 @@ async function setSettings(patch) {
     await callGoogleApi(() => sheets.spreadsheets.values.batchUpdate({
       spreadsheetId: SHEET_ID,
       requestBody: { valueInputOption: "RAW", data: updates },
-    }));
+    }), { type: "write" });
   }
   if (appends.length) {
     await callGoogleApi(() => sheets.spreadsheets.values.append({
@@ -823,8 +913,9 @@ async function setSettings(patch) {
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: appends },
-    }));
+    }), { type: "write" });
   }
+  invalidateReadCache("Settings");
 }
 
 module.exports = {
