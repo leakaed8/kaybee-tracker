@@ -1,25 +1,78 @@
-// A plain "YYYY-MM-DD" string should mean the same calendar day no matter who
-// views it. `new Date("YYYY-MM-DD")` parses that as UTC midnight, and every
-// display/comparison method that follows (toLocaleDateString, setHours, ...)
-// converts to the VIEWER's local timezone — so anyone west of UTC sees it
-// roll back a day (e.g. "2026-09-01" reads as "31 Aug 2026"). Building the
-// date directly from its Y/M/D parts sidesteps that UTC round-trip entirely.
-const parseDateOnly = (dateStr) => {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  return new Date(y, m - 1, d);
-};
+// The whole app operates on Lebanon time (Asia/Beirut) for every viewer,
+// regardless of their device's own timezone — see the matching module in
+// server/dateUtils.js, which every Beirut-day calculation on the server
+// funnels through for the same reason this one does on the client.
+//
+// Two distinct kinds of date value exist in this app, and they need
+// DIFFERENT treatment:
+// - A plain "YYYY-MM-DD" string (product.expiry, a follow-up's dueDate) is a
+//   calendar day that means the same thing to every viewer everywhere — Oct 7
+//   is Oct 7 no matter where you open the app. It must never be reinterpreted
+//   through ANY timezone (not the browser's, not even Beirut's) — doing so
+//   is exactly what used to make the same stored date shift a day depending
+//   on the viewer's device (e.g. "2026-09-01" reading as "31 Aug 2026" for
+//   anyone west of UTC, since `new Date("YYYY-MM-DD")` parses as UTC
+//   midnight and every local display method then converts to the viewer's
+//   own zone).
+// - A real timestamp (visit.time, createdAt, a punch time) IS timezone-
+//   sensitive — "10:32 AM" means nothing without a zone — and must always
+//   display as Beirut wall-clock time, the same for every viewer, never the
+//   viewer's own device zone.
+const TZ = "Asia/Beirut";
 
+// Today's calendar date in Beirut, as "YYYY-MM-DD" — the anchor every
+// date-only calculation below is built from, never the viewer's own device
+// "today".
+export const todayBeirutStr = () => new Date().toLocaleDateString("sv-SE", { timeZone: TZ });
+
+// Which Beirut calendar day a real timestamp falls on — for bucketing/
+// comparison (e.g. "is this visit on the selected route date"), never for
+// arithmetic on its own.
+export const beirutDateStrOfInstant = (isoString) => new Date(isoString).toLocaleDateString("sv-SE", { timeZone: TZ });
+
+// Pure calendar-day diff between a date-only string and "today in Beirut" —
+// anchored at Date.UTC on each side's Y/M/D, so wall-clock hours (and thus
+// DST) never enter the arithmetic at all. Matches server/dateUtils.js's
+// daysUntilFromToday exactly.
 export const daysUntil = (dateStr) => {
-  const d = parseDateOnly(dateStr);
-  const now = new Date();
-  d.setHours(0, 0, 0, 0);
-  now.setHours(0, 0, 0, 0);
-  return Math.round((d - now) / 86400000);
+  const [y1, m1, d1] = dateStr.split("-").map(Number);
+  const [y2, m2, d2] = todayBeirutStr().split("-").map(Number);
+  return Math.round((Date.UTC(y1, m1 - 1, d1) - Date.UTC(y2, m2 - 1, d2)) / 86400000);
 };
 
+// Date-only display never needs Beirut at all — it's an opaque calendar
+// label, identical for every viewer once it's not reinterpreted through any
+// zone. Anchoring at Date.UTC and reading back with timeZone:"UTC" guarantees
+// the exact Y/M/D we stored is what renders, regardless of the browser's own
+// zone.
 export const fmtDate = (dateStr) => {
-  const d = parseDateOnly(dateStr);
-  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" });
+};
+
+// For a genuine timestamp (visit.time, createdAt, Orders.date, punch times)
+// — every viewer sees the same Beirut wall-clock date/time, not their own
+// device's.
+export const fmtDateOfInstant = (isoString) => new Date(isoString).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: TZ });
+export const fmtTime = (isoString) => new Date(isoString).toLocaleTimeString("en-GB", { hour: "numeric", minute: "2-digit", timeZone: TZ });
+export const fmtDateTime = (isoString) => new Date(isoString).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit", timeZone: TZ });
+
+// Adds N days to any "YYYY-MM-DD" value via the same Date.UTC round-trip as
+// daysUntil above — pure calendar-day arithmetic, no timezone involved once
+// you already have a Y/M/D triple (a calendar day plus N days means the same
+// thing everywhere).
+export const addDaysToDateStr = (dateStr, days) => {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
+};
+
+// Day of week (0=Sun..6=Sat) for a "YYYY-MM-DD" value — timezone-independent
+// once you have the correct Y/M/D, since a calendar date's weekday never
+// changes depending on who's looking at it.
+export const weekdayOfDateStr = (dateStr) => {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
 };
 
 export const turnoverPct = (sold90, qty) => {

@@ -19,7 +19,7 @@ import { TrainingVideosView, TrainingStudiesView } from "./TrainingView.jsx";
 import { RecallView } from "./RecallView.jsx";
 import {
   daysUntil, fmtDate, turnoverPct, zoneFor, isSlowMover, isAtRisk, effectiveSold90, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
-  computeLeadScore,
+  computeLeadScore, todayBeirutStr, beirutDateStrOfInstant, fmtDateOfInstant, fmtTime, fmtDateTime, addDaysToDateStr, weekdayOfDateStr,
 } from "./helpers.js";
 import {
   DRUG_NUTRIENT_DATA, CONDITION_TALKING_POINTS, SPECIALTY_TALKING_POINTS,
@@ -450,7 +450,7 @@ export default function App() {
   // older unconfirmed entry left some reps permanently stuck with an error
   // the UI had no way to resolve. Removed entirely; punch-in is simply
   // allowed whenever the rep isn't already punched in today.
-  const punchedInToday = myLastPunch?.type === "in" && new Date(myLastPunch.time).toDateString() === new Date().toDateString();
+  const punchedInToday = myLastPunch?.type === "in" && beirutDateStrOfInstant(myLastPunch.time) === todayBeirutStr();
   if (loaded && role === "rep" && !punchedInToday) {
     return <PunchInGate repName={repName} onPunch={punch} onLogout={logout} />;
   }
@@ -1383,8 +1383,8 @@ function MyVisitsView({ repName, onClose }) {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
               <span style={{ fontWeight: 600, fontSize: 13 }}>{v.client}</span>
               <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>
-                {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}{" "}
-                {new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
+                {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })}{" "}
+                {new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Beirut" })}
               </span>
             </div>
             {v.notes && (
@@ -1615,7 +1615,7 @@ function DoctorBrief({ profile, loading, objective, onObjectiveChange, onViewFul
             {/* fmtDate (helpers.js) expects a plain "YYYY-MM-DD" date-only
                 string, not a full ISO timestamp — lastVisit.date is a real
                 timestamp, so it's formatted directly here instead. */}
-            {new Date(lastVisit.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })} ({daysSince(lastVisit.date)}d ago)
+            {new Date(lastVisit.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })} ({daysSince(lastVisit.date)}d ago)
           </div>
           {lastVisit.lastProductDiscussed && (
             <div style={{ fontSize: 13, marginBottom: 4 }}><strong>Discussed:</strong> {lastVisit.lastProductDiscussed}</div>
@@ -1774,7 +1774,7 @@ function DoctorTimeline({ visits }) {
                 <span style={{ fontSize: 12.5, fontWeight: 600 }}>
                   {/* v.time is a full ISO timestamp, not the plain
                       date-only string fmtDate (helpers.js) expects. */}
-                  {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })} {v.reaction ? REACTION_EMOJI(v.reaction) : ""}
+                  {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })} {v.reaction ? REACTION_EMOJI(v.reaction) : ""}
                 </span>
                 <span style={{ fontSize: 11, color: "#8A8272" }}>{expanded ? "▲" : "▼"}</span>
               </div>
@@ -2470,7 +2470,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
           </div>
           <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 2 }}>
             {lastPunch
-              ? `${isPunchedIn ? "Since" : "Last punched out at"} ${new Date(lastPunch.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}`
+              ? `${isPunchedIn ? "Since" : "Last punched out at"} ${new Date(lastPunch.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Beirut" })}`
               : "Punch in when you start your day"}
           </div>
           {punchError && <div style={{ fontSize: 11.5, color: "#B33A3A", marginTop: 4 }}>{punchError}</div>}
@@ -2616,7 +2616,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                   {recentVisitsForEntity.map((v) => (
                     <div key={v.id} style={{ fontSize: 12 }}>
                       <span className="kb-font-mono" style={{ color: "#8A8272" }}>
-                        {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}{v.repName && v.repName !== repName ? ` · ${v.repName}` : ""}
+                        {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })}{v.repName && v.repName !== repName ? ` · ${v.repName}` : ""}
                       </span>
                       {v.notes && <div>{v.notes}</div>}
                       {v.mentionedItems && v.mentionedItems.length > 0 && (
@@ -3266,7 +3266,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                 style={{ display: "flex", width: "100%", justifyContent: "space-between", alignItems: "flex-start", gap: 8, background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer" }}
               >
                 <span style={{ fontWeight: 600, fontSize: 13.5 }}>{isExpanded ? "▾" : "▸"} {v.client}</span>
-                <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>{new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span>
+                <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>{new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Beirut" })}</span>
               </button>
               {v.notes && <div style={{ fontSize: 12.5, color: "#5B5445", marginTop: 4 }}>{v.notes}</div>}
               {v.mentionedItems && v.mentionedItems.length > 0 && (
@@ -3379,7 +3379,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
             <div>
               <div style={{ fontWeight: 600, fontSize: 13.5 }}>{o.clientName}</div>
               <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
-                {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })} · collected {Number(o.netTotal ?? o.total).toFixed(2)}
+                {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", timeZone: "Asia/Beirut" })} · collected {Number(o.netTotal ?? o.total).toFixed(2)}
                 {o.discountRate > 0 ? ` (list ${o.total.toFixed(2)}, ${o.discountRate}% off)` : ""}
               </div>
             </div>
@@ -3489,7 +3489,7 @@ function downloadOrderPdf(order, stockWarnings = []) {
   doc.text("KayBee Pharma — Proforma Invoice", 14, 18);
   doc.setFontSize(10);
   doc.text(`Pharmacy: ${order.clientName}`, 14, 28);
-  doc.text(`Date: ${new Date(order.date).toLocaleDateString("en-GB")}`, 14, 34);
+  doc.text(`Date: ${new Date(order.date).toLocaleDateString("en-GB", { timeZone: "Asia/Beirut" })}`, 14, 34);
   autoTable(doc, {
     startY: 42,
     head: [["Item", "Qty", "Expiry", "Unit Price", "Line Total"]],
@@ -3529,7 +3529,7 @@ function downloadOrderPdf(order, stockWarnings = []) {
           : [`  - None — this was the only batch of this product with any stock.`]),
         `DOUBLE CHECK if any other pharmacies have also ordered this item:`,
         ...(w.otherOrders.length > 0
-          ? w.otherOrders.map((o) => `  - ${o.clientName} — ${o.qty} units on ${new Date(o.date).toLocaleDateString("en-GB")}`)
+          ? w.otherOrders.map((o) => `  - ${o.clientName} — ${o.qty} units on ${new Date(o.date).toLocaleDateString("en-GB", { timeZone: "Asia/Beirut" })}`)
           : [`  - No other recent orders of this item found in the app — confirm manually since stock may already be committed elsewhere.`]),
       ];
       const wrapped = doc.splitTextToSize(lines.join("\n"), 180);
@@ -4522,14 +4522,14 @@ function OrderHistoryView({ role, repNames, products, offers, clients, onDelete,
               <div>
                 <div style={{ fontWeight: 600, fontSize: 13.5 }}>{o.clientName}{o.repName ? ` · ${o.repName}` : ""}</div>
                 <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
-                  {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })} · {o.items.length} item{o.items.length === 1 ? "" : "s"} · collected {Number(o.netTotal ?? o.total).toFixed(2)}
+                  {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })} · {o.items.length} item{o.items.length === 1 ? "" : "s"} · collected {Number(o.netTotal ?? o.total).toFixed(2)}
                   {o.discountRate > 0 ? ` (list ${o.total.toFixed(2)}, ${o.discountRate}% off)` : ""}
                 </div>
                 {o.status === "deletion_requested" && <div style={{ fontSize: 11.5, color: "#B33A3A", marginTop: 4 }}>Rep requested deletion</div>}
                 <div style={{ fontSize: 11, marginTop: 4 }}>
                   {o.posEntered ? (
                     <span style={{ color: "#4C7A5E", fontWeight: 600 }}>
-                      ✓ POS Entered{o.posEnteredBy ? ` — ${o.posEnteredBy}` : ""}{o.posEnteredAt ? `, ${new Date(o.posEnteredAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}` : ""}
+                      ✓ POS Entered{o.posEnteredBy ? ` — ${o.posEnteredBy}` : ""}{o.posEnteredAt ? `, ${new Date(o.posEnteredAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", timeZone: "Asia/Beirut" })}` : ""}
                     </span>
                   ) : (
                     <span style={{ color: "#C17817", fontWeight: 600 }}>Pending POS</span>
@@ -4650,7 +4650,7 @@ function PendingPOSView({ isSupervisor }) {
             <div>
               <div style={{ fontWeight: 600, fontSize: 13.5 }}>{o.clientName}{o.repName ? ` · ${o.repName}` : ""}</div>
               <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
-                {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })} · {o.items.length} item{o.items.length === 1 ? "" : "s"} · collected {Number(o.netTotal ?? o.total).toFixed(2)}
+                {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })} · {o.items.length} item{o.items.length === 1 ? "" : "s"} · collected {Number(o.netTotal ?? o.total).toFixed(2)}
               </div>
             </div>
             {isSupervisor && (
@@ -4904,7 +4904,7 @@ function CompetitorsView({ canEdit, competitors, ourProducts, onAdd, onUpdate, o
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {sightings.slice(0, LIST_DISPLAY_CAP).map((s) => (
           <div key={s.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "10px 12px", fontSize: 12.5 }}>
-            <strong>{s.competitorName}</strong> at {s.client} — logged by {s.repName || "unknown"} on {new Date(s.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}
+            <strong>{s.competitorName}</strong> at {s.client} — logged by {s.repName || "unknown"} on {new Date(s.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })}
             {s.notes && <div style={{ color: "#8A8272", marginTop: 2 }}>{s.notes}</div>}
           </div>
         ))}
@@ -5252,9 +5252,9 @@ function CompetitorProductRow({ p, canEditProduct, canDelete, onStartEdit, confi
             {p.notes && <div style={{ fontSize: 12, color: "#8A8272", marginTop: 6 }}>{p.notes}</div>}
 
             <div style={{ fontSize: 10.5, color: "#B7AF9E", marginTop: 6 }}>
-              Added by {p.createdBy || "unknown"}{p.createdAt ? ` · ${new Date(p.createdAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}` : ""}
+              Added by {p.createdBy || "unknown"}{p.createdAt ? ` · ${new Date(p.createdAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })}` : ""}
               {p.updatedBy && (
-                <> · Edited by: {p.updatedBy}{p.updatedAt ? ` (${new Date(p.updatedAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })})` : ""}</>
+                <> · Edited by: {p.updatedBy}{p.updatedAt ? ` (${new Date(p.updatedAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })})` : ""}</>
               )}
             </div>
 
@@ -5912,7 +5912,7 @@ function VisitCadenceView({ role, isSupervisor, repNames }) {
             </div>
             {r.stopped && (
               <div style={{ color: "#B33A3A", marginTop: 4 }}>
-                Stopped {new Date(r.stopDate).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}
+                Stopped {new Date(r.stopDate).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })}
                 {r.stopReason ? ` — "${r.stopReason}"` : ""}
               </div>
             )}
@@ -5960,7 +5960,7 @@ function RepRouteMap({ points }) {
       const color = p.kind === "punch" ? (p.punchType === "in" ? "#4C7A5E" : "#B33A3A") : "#2B6FCB";
       const marker = L.circleMarker(latlngs[i], { radius: 10, color: "#fff", weight: 2, fillColor: color, fillOpacity: 1 }).addTo(map);
       marker.bindTooltip(String(i + 1), { permanent: true, direction: "center", className: "kb-route-marker-label" });
-      marker.bindPopup(`<b>${i + 1}. ${p.label}</b><br/>${new Date(p.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`);
+      marker.bindPopup(`<b>${i + 1}. ${p.label}</b><br/>${new Date(p.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Beirut" })}`);
     });
 
     if (latlngs.length === 1) map.setView(latlngs[0], 15);
@@ -5977,7 +5977,7 @@ function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemov
   const [commentText, setCommentText] = useState("");
   const [commentSaving, setCommentSaving] = useState(false);
   const [viewMode, setViewMode] = useState("list"); // list | map
-  const [routeDate, setRouteDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [routeDate, setRouteDate] = useState(() => todayBeirutStr());
   const canComment = role === "manager" || isSupervisor;
   // Manager-only interaction-type correction (Manager Performance Management
   // redesign) — the only sanctioned way to fix a submitted visit's type,
@@ -6085,7 +6085,7 @@ function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemov
   // rather than plotted at a wrong/default spot.
   const routePoints = selectedRep !== "all"
     ? [...visitEvents, ...punchEvents]
-        .filter((e) => e.coords && new Date(e.time).toDateString() === new Date(routeDate).toDateString())
+        .filter((e) => e.coords && beirutDateStrOfInstant(e.time) === routeDate)
         .sort((a, b) => new Date(a.time) - new Date(b.time))
     : [];
 
@@ -6137,7 +6137,7 @@ function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemov
         ) : (
           <div>
             <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 10px" }}>
-              {selectedRep}'s {new Date(routeDate).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })} — numbered in the order it happened. Green = punched in, red = punched out, blue = pharmacy/doctor visit.
+              {selectedRep}'s {fmtDate(routeDate)} — numbered in the order it happened. Green = punched in, red = punched out, blue = pharmacy/doctor visit.
             </p>
             {routePoints.length === 0 ? (
               <EmptyState text="No GPS-tagged events for this rep on this day." />
@@ -6172,7 +6172,7 @@ function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemov
                   )}
                 </div>
                 <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
-                  {new Date(e.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                  {new Date(e.time).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Beirut" })}
                   {e.coords ? ` · ${e.coords.lat}, ${e.coords.lng}` : " · no GPS captured"}
                 </div>
                 {e.kind === "visit" && (!e.interactionType || e.interactionType === "in_person") && (
@@ -6283,7 +6283,7 @@ function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemov
                       <div key={a.id} style={{ fontSize: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "6px 10px" }}>
                         <strong>{INTERACTION_TYPE_LABELS[a.oldValue] || a.oldValue}</strong> → <strong>{INTERACTION_TYPE_LABELS[a.newValue] || a.newValue}</strong>
                         <div style={{ color: "#8A8272", marginTop: 2 }}>
-                          by {a.changedBy} · {new Date(a.changedAt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                          by {a.changedBy} · {new Date(a.changedAt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Beirut" })}
                           {a.reason ? ` · "${a.reason}"` : ""}
                         </div>
                       </div>
@@ -8848,15 +8848,25 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
     }).finally(() => setLoading(false));
   }, []);
 
+  // A real instant, used ONLY for genuine elapsed-real-time windows below
+  // (e.g. "orders in the last 21 days") — those are timezone-agnostic by
+  // construction (comparing two absolute instants gives the same answer for
+  // every viewer). Every "this month"/"last month" CALENDAR bucket below is
+  // instead Beirut's calendar month — bucketed via its Beirut month-key
+  // string (not a device-local Date range) so every viewer sees the same
+  // bucketing regardless of their own device's timezone.
   const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  const monthLabel = now.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+  const todayStr = todayBeirutStr();
+  const [beirutYear, beirutMonth] = todayStr.split("-").map(Number);
+  const thisMonthKey = `${beirutYear}-${String(beirutMonth).padStart(2, "0")}`;
+  const lastMonthDate = new Date(Date.UTC(beirutYear, beirutMonth - 2, 1));
+  const lastMonthKey = `${lastMonthDate.getUTCFullYear()}-${String(lastMonthDate.getUTCMonth() + 1).padStart(2, "0")}`;
+  const monthLabel = new Date(Date.UTC(beirutYear, beirutMonth - 1, 1)).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
 
-  const monthVisits = visits.filter((v) => new Date(v.time) >= monthStart);
-  const lastMonthVisits = visits.filter((v) => new Date(v.time) >= lastMonthStart && new Date(v.time) < monthStart);
-  const monthOrders = orders.filter((o) => new Date(o.date) >= monthStart);
-  const lastMonthOrders = orders.filter((o) => new Date(o.date) >= lastMonthStart && new Date(o.date) < monthStart);
+  const monthVisits = visits.filter((v) => beirutDateStrOfInstant(v.time).slice(0, 7) === thisMonthKey);
+  const lastMonthVisits = visits.filter((v) => beirutDateStrOfInstant(v.time).slice(0, 7) === lastMonthKey);
+  const monthOrders = orders.filter((o) => beirutDateStrOfInstant(o.date).slice(0, 7) === thisMonthKey);
+  const lastMonthOrders = orders.filter((o) => beirutDateStrOfInstant(o.date).slice(0, 7) === lastMonthKey);
   const pctChange = (curr, prev) => (prev > 0 ? Math.round(((curr - prev) / prev) * 100) : null);
 
   // ---- Section 1: Sales Performance (real Orders data) ----
@@ -8898,7 +8908,7 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
     const key = o.clientName.toLowerCase().trim();
     if (!firstOrderDateByClient.has(key)) firstOrderDateByClient.set(key, o.date);
   });
-  const newCustomersThisMonth = [...firstOrderDateByClient.values()].filter((d) => new Date(d) >= monthStart).length;
+  const newCustomersThisMonth = [...firstOrderDateByClient.values()].filter((d) => beirutDateStrOfInstant(d).slice(0, 7) === thisMonthKey).length;
   const tierFreq = settings?.tierVisitFrequency || { A: { perMonth: 2 }, B: { perMonth: 1 }, C: { perMonth: 0.4 } };
   const visitCountThisMonthByName = (name) => monthVisits.filter((v) => isInPersonVisit(v) && v.client.toLowerCase().trim() === name.toLowerCase().trim()).length;
   const priorityCompliantCount = allAccounts.filter((a) => visitCountThisMonthByName(a.name) >= Math.max(1, Math.ceil(tierFreq[a.tier || "B"]?.perMonth || 1))).length;
@@ -8927,7 +8937,7 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
 
   // ---- Section 5: Opportunities & Follow-ups ----
   const openFollowUpsCount = followUps.filter((f) => f.status === "pending").length;
-  const overdueFollowUpsCount = followUps.filter((f) => f.status === "pending" && new Date(f.dueDate) < now).length;
+  const overdueFollowUpsCount = followUps.filter((f) => f.status === "pending" && daysUntil(f.dueDate) < 0).length;
   // "Open objection" = a customer whose MOST RECENT visit left a concerned
   // reaction with nothing more recent to supersede it — the same "latest
   // state wins" logic the Doctor Memory feature already uses elsewhere.
@@ -8946,7 +8956,7 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
     const key = o.clientName.toLowerCase().trim();
     if (!lastOrderDateByClient.has(key) || new Date(o.date) > new Date(lastOrderDateByClient.get(key))) lastOrderDateByClient.set(key, o.date);
   });
-  const reorderOpportunitiesCount = [...lastOrderDateByClient.values()].filter((d) => (now - new Date(d)) / 86400000 > REORDER_DUE_DAYS).length;
+  const reorderOpportunitiesCount = [...lastOrderDateByClient.values()].filter((d) => daysSince(d) > REORDER_DUE_DAYS).length;
 
   // ---- Section 6: Recent Important Activity (replaces the old raw "recent visits" list) ----
   const RECENT_ACTIVITY_WINDOW_DAYS = 21;
@@ -8967,7 +8977,7 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
       date: o.date, status: "COMPLETED", icon: "pharmacy",
     });
   });
-  followUps.filter((f) => f.status === "pending" && new Date(f.dueDate) < now && new Date(f.dueDate) >= recentCutoff).forEach((f) => {
+  followUps.filter((f) => f.status === "pending" && daysUntil(f.dueDate) < 0 && daysUntil(f.dueDate) >= -RECENT_ACTIVITY_WINDOW_DAYS).forEach((f) => {
     activityEvents.push({ name: f.entityName, desc: "Follow-up overdue", date: f.dueDate, status: "OPEN", icon: f.entityType === "doctor" ? "doctor" : "pharmacy" });
   });
   activityEvents.sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -8976,12 +8986,12 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
   // ---- Section 7: Business Trend (last 3 months, real data) ----
   const TREND_MONTHS = 3;
   const trendData = Array.from({ length: TREND_MONTHS }, (_, i) => {
-    const d = new Date(now.getFullYear(), now.getMonth() - (TREND_MONTHS - 1 - i), 1);
-    const nextD = new Date(d.getFullYear(), d.getMonth() + 1, 1);
-    const monthOrdersRange = orders.filter((o) => new Date(o.date) >= d && new Date(o.date) < nextD);
-    const monthVisitsRange = visits.filter((v) => new Date(v.time) >= d && new Date(v.time) < nextD);
+    const d = new Date(Date.UTC(beirutYear, beirutMonth - 1 - (TREND_MONTHS - 1 - i), 1));
+    const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+    const monthOrdersRange = orders.filter((o) => beirutDateStrOfInstant(o.date).slice(0, 7) === key);
+    const monthVisitsRange = visits.filter((v) => beirutDateStrOfInstant(v.time).slice(0, 7) === key);
     return {
-      month: d.toLocaleDateString("en-GB", { month: "short" }),
+      month: d.toLocaleDateString("en-GB", { month: "short", timeZone: "UTC" }),
       Revenue: Math.round(monthOrdersRange.reduce((s, o) => s + Number(o.netTotal ?? o.total ?? 0), 0)),
       Orders: monthOrdersRange.length,
       "In-person visits": monthVisitsRange.filter(isInPersonVisit).length,
@@ -9116,7 +9126,7 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
                     <div style={{ fontSize: 11.5, color: DASH.sub }}>{e.desc}</div>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
-                    <span className="kb-font-mono" style={{ fontSize: 11, color: DASH.sub }}>{new Date(e.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}</span>
+                    <span className="kb-font-mono" style={{ fontSize: 11, color: DASH.sub }}>{new Date(e.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", timeZone: "Asia/Beirut" })}</span>
                     <DashStatusPill status={e.status} />
                   </div>
                 </div>
@@ -9383,11 +9393,15 @@ function RepPerformanceCard({
   // dumping Visit Breakdown/Territory Coverage/Business Results/By-week/
   // Pharmacies-visited open for every rep at once.
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const dayOfMonth = now.getDate();
-  const monthVisits = visits.filter((v) => new Date(v.time) >= monthStart);
+  // Beirut's calendar month/day — see the comment on the analogous block
+  // in ManagerDashboard above for why this is bucketed by Beirut month-key
+  // string rather than a device-local Date range.
+  const todayStr = todayBeirutStr();
+  const [beirutYear, beirutMonth, beirutDay] = todayStr.split("-").map(Number);
+  const thisMonthKey = `${beirutYear}-${String(beirutMonth).padStart(2, "0")}`;
+  const daysInMonth = new Date(Date.UTC(beirutYear, beirutMonth, 0)).getUTCDate();
+  const dayOfMonth = beirutDay;
+  const monthVisits = visits.filter((v) => beirutDateStrOfInstant(v.time).slice(0, 7) === thisMonthKey);
   // Visit ≠ Contact (Section 2): only in-person interactions count toward
   // the field-visit KPI/target/pace math. Legacy rows (no interactionType
   // recorded) count as in_person — they always were.
@@ -9418,9 +9432,9 @@ function RepPerformanceCard({
 
   // ---- Follow-up compliance % (Section 4/7) — this rep's scheduled follow-ups that aren't overdue-pending ----
   const relevantFollowUps = repNameFilter ? followUps.filter((f) => f.repName === repNameFilter) : followUps;
-  const followUpOnTrack = relevantFollowUps.filter((f) => f.status !== "pending" || new Date(f.dueDate) >= now).length;
+  const followUpOnTrack = relevantFollowUps.filter((f) => f.status !== "pending" || daysUntil(f.dueDate) >= 0).length;
   const followUpPct = relevantFollowUps.length ? Math.round((followUpOnTrack / relevantFollowUps.length) * 100) : null;
-  const overdueFollowUpCount = relevantFollowUps.filter((f) => f.status === "pending" && new Date(f.dueDate) < now).length;
+  const overdueFollowUpCount = relevantFollowUps.filter((f) => f.status === "pending" && daysUntil(f.dueDate) < 0).length;
 
   const weeks = {};
   monthInPersonVisits.forEach((v) => {
@@ -9428,7 +9442,7 @@ function RepPerformanceCard({
     weeks[wk] = (weeks[wk] || 0) + 1;
   });
 
-  const monthOrders = orders.filter((o) => new Date(o.date) >= monthStart);
+  const monthOrders = orders.filter((o) => beirutDateStrOfInstant(o.date).slice(0, 7) === thisMonthKey);
   const revenueThisMonth = monthOrders.reduce((s, o) => s + Number(o.netTotal ?? o.total ?? 0), 0);
   const revenuePct = Math.min(100, Math.round((revenueThisMonth / Math.max(monthlyRevenueTarget, 1)) * 100));
   const convertedVisits = monthVisits.filter((v) => monthOrders.some((o) => o.visitId === v.id)).length;
@@ -9503,15 +9517,14 @@ function RepPerformanceCard({
         return Object.values(byClient).sort((a, b) => new Date(b.time) - new Date(a.time));
       })()
     : [];
-  const weekDay = now.getDay();
-  const weekStart = new Date(now);
-  weekStart.setDate(now.getDate() - (weekDay === 0 ? 6 : weekDay - 1));
-  weekStart.setHours(0, 0, 0, 0);
-  const weekEnd = new Date(weekStart);
-  weekEnd.setDate(weekStart.getDate() + 6);
-  weekEnd.setHours(23, 59, 59, 999);
+  // Beirut's calendar week (Mon-Sun), as "YYYY-MM-DD" bounds — string
+  // comparison works correctly since ISO date strings sort lexicographically,
+  // so this never needs to construct a device-zoned Date range.
+  const weekDay = weekdayOfDateStr(todayStr);
+  const weekStartStr = addDaysToDateStr(todayStr, weekDay === 0 ? -6 : -(weekDay - 1));
+  const weekEndStr = addDaysToDateStr(weekStartStr, 6);
   const orderThisWeekFor = (clientName) =>
-    orders.find((o) => o.clientName === clientName && new Date(o.date) >= weekStart && new Date(o.date) <= weekEnd);
+    orders.find((o) => o.clientName === clientName && beirutDateStrOfInstant(o.date) >= weekStartStr && beirutDateStrOfInstant(o.date) <= weekEndStr);
 
   const handleMarkPosEntered = async (orderId) => {
     if (!onMarkPosEntered) return;
@@ -9664,8 +9677,8 @@ function RepPerformanceCard({
                   >
                     <span style={{ fontSize: 13, fontWeight: 600 }}>{isOpen ? "▾" : "▸"} {v.client}</span>
                     <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>
-                      {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}{" "}
-                      {new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
+                      {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", timeZone: "Asia/Beirut" })}{" "}
+                      {new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Beirut" })}
                     </span>
                   </button>
                   {isOpen && (
@@ -9695,7 +9708,7 @@ function RepPerformanceCard({
                           </div>
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
                             <span style={{ fontSize: 11.5, fontWeight: 600, color: order.posEntered ? "#4C7A5E" : "#C17817" }}>
-                              {order.posEntered ? `✓ POS Entered — ${order.posEnteredBy}, ${new Date(order.posEnteredAt).toLocaleDateString("en-GB")}` : "Pending POS"}
+                              {order.posEntered ? `✓ POS Entered — ${order.posEnteredBy}, ${new Date(order.posEnteredAt).toLocaleDateString("en-GB", { timeZone: "Asia/Beirut" })}` : "Pending POS"}
                             </span>
                             {!order.posEntered && isSupervisor && onMarkPosEntered && (
                               <button
@@ -9778,7 +9791,7 @@ function RepActivityToday({ repNames }) {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
                 <span style={{ fontWeight: 600, fontSize: 13.5 }}>{v.client}</span>
                 <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>
-                  {new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
+                  {new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Beirut" })}
                 </span>
               </div>
 
@@ -9829,8 +9842,11 @@ function PerformanceView({
   clients, doctors, repNames, monthlyVisitTarget, setMonthlyVisitTarget, monthlyRevenueTarget, setMonthlyRevenueTarget, isSupervisor,
   role, qualityCallRequiredFields, tierVisitFrequency,
 }) {
-  const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  // Beirut's calendar month — see the comment on the analogous block in
+  // ManagerDashboard for why this is bucketed by Beirut month-key string
+  // rather than a device-local Date range.
+  const [beirutYear, beirutMonth] = todayBeirutStr().split("-").map(Number);
+  const thisMonthKey = `${beirutYear}-${String(beirutMonth).padStart(2, "0")}`;
   const [subView, setSubView] = useState("overview"); // overview | targets
 
   // Fetched once when this tab is opened (manager/supervisor-only, not
@@ -9898,19 +9914,20 @@ function PerformanceView({
     };
   });
 
-  const revenueThisMonthTotal = orders.filter((o) => new Date(o.date) >= monthStart).reduce((s, o) => s + Number(o.netTotal ?? o.total ?? 0), 0);
+  const revenueThisMonthTotal = orders.filter((o) => beirutDateStrOfInstant(o.date).slice(0, 7) === thisMonthKey).reduce((s, o) => s + Number(o.netTotal ?? o.total ?? 0), 0);
   const revenueTargetTotal = monthlyRevenueTarget * Math.max(repNames.length, 1);
 
   const MONTHS_BACK = 6;
   const monthCols = Array.from({ length: MONTHS_BACK }, (_, i) => {
-    const d = new Date(now.getFullYear(), now.getMonth() - (MONTHS_BACK - 1 - i), 1);
-    return { year: d.getFullYear(), month: d.getMonth(), label: d.toLocaleDateString("en-GB", { month: "short" }) };
+    const d = new Date(Date.UTC(beirutYear, beirutMonth - 1 - (MONTHS_BACK - 1 - i), 1));
+    const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+    return { key, label: d.toLocaleDateString("en-GB", { month: "short", timeZone: "UTC" }) };
   });
-  const revenueTrend = monthCols.map(({ year, month, label }) => {
+  const revenueTrend = monthCols.map(({ key, label }) => {
     const row = { month: label };
     repNames.forEach((name) => {
       row[name] = orders
-        .filter((o) => o.repName === name && new Date(o.date).getFullYear() === year && new Date(o.date).getMonth() === month)
+        .filter((o) => o.repName === name && beirutDateStrOfInstant(o.date).slice(0, 7) === key)
         .reduce((s, o) => s + Number(o.netTotal ?? o.total ?? 0), 0);
     });
     return row;
@@ -9926,8 +9943,8 @@ function PerformanceView({
     const row = { metric };
     repNames.forEach((name) => {
       const repVisits = visits.filter((v) => v.repName === name);
-      const monthVisits = repVisits.filter((v) => new Date(v.time) >= monthStart);
-      const repOrders = orders.filter((o) => o.repName === name && new Date(o.date) >= monthStart);
+      const monthVisits = repVisits.filter((v) => beirutDateStrOfInstant(v.time).slice(0, 7) === thisMonthKey);
+      const repOrders = orders.filter((o) => o.repName === name && beirutDateStrOfInstant(o.date).slice(0, 7) === thisMonthKey);
       const repRevenue = repOrders.reduce((s, o) => s + Number(o.netTotal ?? o.total ?? 0), 0);
       const convertedVisits = monthVisits.filter((v) => repOrders.some((o) => o.visitId === v.id)).length;
       const conversionRate = monthVisits.length ? convertedVisits / monthVisits.length : 0;
@@ -9952,7 +9969,7 @@ function PerformanceView({
   // target profile, falling back to the global setting only when a rep has
   // no target profile configured yet. ----
   const repBuckets = repNames.map((name) => {
-    const repMonthInPerson = visits.filter((v) => v.repName === name && new Date(v.time) >= monthStart && isInPersonVisit(v));
+    const repMonthInPerson = visits.filter((v) => v.repName === name && beirutDateStrOfInstant(v.time).slice(0, 7) === thisMonthKey && isInPersonVisit(v));
     const target = effectiveMonthlyVisitTarget(repTargetsByName[name], monthlyVisitTarget) || monthlyVisitTarget;
     const pct = target ? repMonthInPerson.length / target : 0;
     return { name, pct };
@@ -9963,10 +9980,10 @@ function PerformanceView({
 
   // ---- Manager Attention (Section 13) — real, rule-based alerts only,
   // never fabricated coaching text. ----
-  const teamOverdueFollowUps = followUps.filter((f) => f.status === "pending" && new Date(f.dueDate) < now).length;
+  const teamOverdueFollowUps = followUps.filter((f) => f.status === "pending" && daysUntil(f.dueDate) < 0).length;
   const priorityADoctorsNotVisited = doctors.filter((d) => (d.tier || "B") === "A"
-    && !visits.some((v) => new Date(v.time) >= monthStart && isInPersonVisit(v) && v.client.toLowerCase().trim() === d.name.toLowerCase().trim())).length;
-  const teamDoctorInPersonVisits = visits.filter((v) => new Date(v.time) >= monthStart && isInPersonVisit(v) && doctors.some((d) => d.name.toLowerCase().trim() === v.client.toLowerCase().trim()));
+    && !visits.some((v) => beirutDateStrOfInstant(v.time).slice(0, 7) === thisMonthKey && isInPersonVisit(v) && v.client.toLowerCase().trim() === d.name.toLowerCase().trim())).length;
+  const teamDoctorInPersonVisits = visits.filter((v) => beirutDateStrOfInstant(v.time).slice(0, 7) === thisMonthKey && isInPersonVisit(v) && doctors.some((d) => d.name.toLowerCase().trim() === v.client.toLowerCase().trim()));
   const teamQualityCallCount = teamDoctorInPersonVisits.filter((v) => isQualityCall(v, qualityCallRequiredFields)).length;
   const teamQualityPct = teamDoctorInPersonVisits.length ? Math.round((teamQualityCallCount / teamDoctorInPersonVisits.length) * 100) : null;
   const managerAlerts = [
@@ -10210,7 +10227,7 @@ function ManagerAttentionPanel({ alerts, repNames }) {
               <div>{n.note}</div>
               {n.coachingAction && <div style={{ color: "#5B5445", marginTop: 2 }}><strong>Action:</strong> {n.coachingAction}</div>}
               <div style={{ color: "#8A8272", marginTop: 2 }}>
-                {n.createdBy} · {new Date(n.createdAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}
+                {n.createdBy} · {new Date(n.createdAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })}
                 {n.reviewDate ? ` · review by ${n.reviewDate}` : ""}
               </div>
             </div>

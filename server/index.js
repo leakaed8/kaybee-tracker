@@ -7,6 +7,7 @@ const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const multer = require("multer");
 const db = require("./sheetsDb");
 const telegram = require("./telegram");
+const { beirutDateStr, beirutWeekday, beirutHour, todayBeirutStr, beirutDateParts, daysUntilFromToday, addDaysToTodayStr, beirutMonthKeyOfInstant } = require("./dateUtils");
 const { importedInventory, defaultTemplates } = require("./seedData");
 const { DAHIYEH_REFERENCE_PHARMACIES } = require("./dahiyehReference");
 const { MOUNT_LEBANON_REFERENCE_NAMES } = require("./mountLebanonReferenceNames");
@@ -349,7 +350,7 @@ function parseProduct(p) {
 // average, not zero — a product with only 2023+2025 data still gets a real
 // average across those 24 months, it just doesn't include 2022/2024.
 function buildMovementIndex(rows) {
-  const currentYear = new Date().getFullYear();
+  const currentYear = beirutDateParts(new Date()).year;
   const index = new Map();
   rows.forEach((r) => {
     const key = String(r.productName || "").trim().toLowerCase();
@@ -1088,7 +1089,7 @@ function shapeLiveBootstrap(raw, repName) {
   // Nothing in the app reads outreach history — only "how many contacted
   // today" — so this stays a full read server-side (Sheets can't filter by
   // date on its own) but ships as a single number, not the ever-growing log.
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = todayBeirutStr();
   const todayOutreachCount = raw.outreachRows.filter((o) => o.date === todayStr).length;
 
   return {
@@ -1291,7 +1292,7 @@ app.get("/api/punch-log", async (req, res) => {
 app.get("/api/outreach-log/today", async (req, res) => {
   try {
     const rows = await db.getAllRows("OutreachLog");
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = todayBeirutStr();
     const entries = rows.filter((o) => o.date === todayStr);
     res.json({ entries });
   } catch (e) {
@@ -1593,7 +1594,7 @@ app.post("/api/stock-movement/import", requireManager, async (req, res) => {
     const { year, rows } = req.body;
     const yearNum = Number(year);
     if (!yearNum || !Array.isArray(rows)) return res.status(400).json({ error: "year and rows are required" });
-    const currentYear = new Date().getFullYear();
+    const currentYear = beirutDateParts(new Date()).year;
     const settings = await db.getSettings();
     const lockedYears = settings.stockMovementLockedYears ? JSON.parse(settings.stockMovementLockedYears) : [];
     if (yearNum !== currentYear && lockedYears.includes(yearNum)) {
@@ -3612,8 +3613,8 @@ app.post("/api/telegram/send-digest-now", requireManager, async (req, res) => {
     if (!telegram.isConfigured()) return res.status(400).json({ error: "Telegram isn't configured on the server yet." });
     const settings = await db.getSettings();
     if (!settings.managerTelegramChatId) return res.status(400).json({ error: "Link your own Telegram first." });
-    const now = new Date();
-    const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const { year, month } = beirutDateParts(new Date());
+    const thisMonth = `${year}-${String(month).padStart(2, "0")}`;
     await runMonthlyDigest(thisMonth);
     await db.setSettings({ lastMonthlyDigestMonth: thisMonth });
     res.json({ ok: true });
@@ -4770,7 +4771,7 @@ app.post("/api/outreach-log", async (req, res) => {
     const entry = {
       id: `o${crypto.randomUUID()}`,
       name: name || "Unnamed",
-      date: date || new Date().toISOString().slice(0, 10),
+      date: date || todayBeirutStr(),
       templateIndex: templateIndex ?? 0,
     };
     await db.appendRow("OutreachLog", entry);
@@ -9847,7 +9848,7 @@ app.post("/api/recall/retailer-listings", async (req, res) => {
       sourceUrl: String(sourceUrl).trim(),
       displayedPrice: displayedPrice === "" || displayedPrice == null ? "" : Number(displayedPrice),
       currency: currency || "",
-      researchDate: researchDate || new Date().toISOString().slice(0, 10),
+      researchDate: researchDate || todayBeirutStr(),
       notes: notes || "",
       createdBy: req.repName || "Manager",
       createdAt: new Date().toISOString(),
@@ -10243,26 +10244,6 @@ app.get("*", (req, res) => {
   res.setHeader("Cache-Control", "no-cache");
   res.sendFile(path.join(clientDist, "index.html"));
 });
-
-// See the matching comment in client/src/helpers.js — a plain "YYYY-MM-DD"
-// string must not round-trip through UTC before being compared, or it can
-// shift a day depending on the server process's local timezone.
-function daysUntilFromToday(dateStr) {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  const date = new Date(y, m - 1, d);
-  const now = new Date();
-  date.setHours(0, 0, 0, 0);
-  now.setHours(0, 0, 0, 0);
-  return Math.round((date - now) / 86400000);
-}
-
-// Same local-date-components approach as above, applied in reverse: builds a
-// "YYYY-MM-DD" string N days from today without a UTC round-trip.
-function addDaysToTodayStr(days) {
-  const d = new Date();
-  d.setDate(d.getDate() + days);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
 
 const TIER_CADENCE_DAYS = { A: 14, B: 30, C: 60 };
 
@@ -10709,9 +10690,10 @@ async function checkMonthlyDigest() {
   if (!telegram.isConfigured()) return;
   try {
     const now = new Date();
-    if (now.getDate() !== MONTHLY_DIGEST_DAY) return;
+    const { year, month, day } = beirutDateParts(now);
+    if (day !== MONTHLY_DIGEST_DAY) return;
     const settings = await db.getSettings();
-    const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const thisMonth = `${year}-${String(month).padStart(2, "0")}`;
     if (settings.lastMonthlyDigestMonth === thisMonth) return;
     await runMonthlyDigest(thisMonth);
     await db.setSettings({ lastMonthlyDigestMonth: thisMonth });
@@ -10950,11 +10932,7 @@ async function runMonthlyVisitsSummary(month) {
   const pharmacyNames = new Set(clients.map((c) => c.name.toLowerCase().trim()));
   const doctorNames = new Set(doctors.map((d) => d.name.toLowerCase().trim()));
 
-  const [y, m] = month.split("-").map(Number);
-  const inMonth = (dateStr) => {
-    const d = new Date(dateStr);
-    return d.getFullYear() === y && d.getMonth() + 1 === m;
-  };
+  const inMonth = (dateStr) => beirutMonthKeyOfInstant(dateStr) === month;
   // What actually gets collected after the pharmacy's negotiated discount —
   // orders placed before this field existed have no netTotal stored, so
   // their list total is the best available stand-in.
@@ -11016,12 +10994,16 @@ async function checkMonthlyVisitsSummary() {
   if (!telegram.isConfigured()) return;
   try {
     const now = new Date();
-    if (now.getDate() !== MONTHLY_VISITS_SUMMARY_DAY) return;
+    const { year, month, day } = beirutDateParts(now);
+    if (day !== MONTHLY_VISITS_SUMMARY_DAY) return;
     const settings = await db.getSettings();
     // Fires on the 1st, so the month that just ended (not the one that just
     // started, which on day 1 has nothing in it yet) is the one to report.
-    const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const prevMonth = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, "0")}`;
+    // Date.UTC rolls a month index of -1 back into December of the prior
+    // year automatically, so the Beirut year-boundary case (Jan 1 -> report
+    // last December) needs no special-casing here.
+    const prev = new Date(Date.UTC(year, month - 2, 1));
+    const prevMonth = `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, "0")}`;
     if (settings.lastMonthlyVisitsSummaryMonth === prevMonth) return;
     await runMonthlyVisitsSummary(prevMonth);
     await db.setSettings({ lastMonthlyVisitsSummaryMonth: prevMonth });
@@ -11035,9 +11017,6 @@ async function checkMonthlyVisitsSummary() {
 // tells it, so this is purely a nudge, not an automated check. Guarded by
 // the exact date string (not just "day === Sunday") so it can only ever
 // fire once for a given Sunday even though the interval polls hourly.
-function beirutWeekday(date) {
-  return new Date(date.toLocaleString("en-US", { timeZone: "Asia/Beirut" })).getDay(); // 0 = Sunday
-}
 async function checkInventoryUpdateReminder() {
   if (!telegram.isConfigured()) return;
   try {
@@ -11067,14 +11046,15 @@ async function checkStockMovementReminder() {
   if (!telegram.isConfigured()) return;
   try {
     const now = new Date();
-    if (now.getDate() !== STOCK_MOVEMENT_REMINDER_DAY) return;
+    const { year, month, day } = beirutDateParts(now);
+    if (day !== STOCK_MOVEMENT_REMINDER_DAY) return;
     const settings = await db.getSettings();
     if (!settings.managerTelegramChatId) return;
-    const thisMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const thisMonthKey = `${year}-${String(month).padStart(2, "0")}`;
     if (settings.lastStockMovementReminderMonth === thisMonthKey) return;
     await telegram.sendMessage(
       settings.managerTelegramChatId,
-      `📈 <b>Monthly reminder</b>\n\nUpload ${now.getFullYear()}'s Stock Movement data in Settings so slow/fast-mover calculations use this year's real numbers instead of last year's.`
+      `📈 <b>Monthly reminder</b>\n\nUpload ${year}'s Stock Movement data in Settings so slow/fast-mover calculations use this year's real numbers instead of last year's.`
     );
     await db.setSettings({ lastStockMovementReminderMonth: thisMonthKey });
   } catch (e) {
@@ -11092,14 +11072,10 @@ async function checkStockMovementReminder() {
 // means the auto-close is just accepted, no gate, no correction step.
 const PUNCH_AUTO_CLOSE_HOUR = 21; // 9pm Beirut
 const PUNCH_AUTO_CLOSE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
-function beirutDateStr(date) {
-  return date.toLocaleDateString("sv-SE", { timeZone: "Asia/Beirut" }); // yyyy-mm-dd, sorts/compares cleanly
-}
 async function checkMissedPunchOuts() {
   try {
     const now = new Date();
-    const beirutHour = Number(now.toLocaleString("en-US", { timeZone: "Asia/Beirut", hour: "2-digit", hour12: false }));
-    if (beirutHour < PUNCH_AUTO_CLOSE_HOUR) return;
+    if (beirutHour(now) < PUNCH_AUTO_CLOSE_HOUR) return;
     const todayStr = beirutDateStr(now);
     const settings = await db.getSettings();
     if (settings.lastPunchAutoCloseDate === todayStr) return;

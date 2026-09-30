@@ -111,7 +111,7 @@ function TrainingVideoPlayer({ videoId, repName, onEnded }) {
                 fontFamily: "'IBM Plex Mono', monospace", letterSpacing: 0.2,
               }}
             >
-              {repName} · {watermarkAt.toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+              {repName} · {watermarkAt.toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "Asia/Beirut" })}
             </div>
           )}
         </>
@@ -480,7 +480,7 @@ export function TrainingVideosView({ role, repName, isSupervisor, repNames }) {
                   {!isManagerView && (
                     mine ? (
                       <div style={{ fontSize: 11.5, color: "#4C7A5E", marginTop: 3, fontWeight: 600 }}>
-                        <Check size={12} style={{ verticalAlign: -1 }} /> Completed {new Date(mine.completedAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}
+                        <Check size={12} style={{ verticalAlign: -1 }} /> Completed {new Date(mine.completedAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })}
                       </div>
                     ) : (
                       <div style={{ fontSize: 11.5, color: "#C17817", marginTop: 3, fontWeight: 600 }}>Not completed</div>
@@ -513,7 +513,7 @@ export function TrainingVideosView({ role, repName, isSupervisor, repNames }) {
                       <div key={name} style={{ display: "flex", justifyContent: "space-between" }}>
                         <span>{name}</span>
                         {rowProgress ? (
-                          <span style={{ color: "#4C7A5E" }}>✓ {new Date(rowProgress.completedAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}</span>
+                          <span style={{ color: "#4C7A5E" }}>✓ {new Date(rowProgress.completedAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", timeZone: "Asia/Beirut" })}</span>
                         ) : (
                           <span style={{ color: "#C17817" }}>Not completed</span>
                         )}
