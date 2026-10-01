@@ -214,7 +214,26 @@ const SCHEMAS = {
   PunchLog: ["id", "repName", "type", "time", "coordsLat", "coordsLng", "auto", "confirmed"],
   StockMovement: ["id", "productName", "year", "month", "qty"],
   MonthlyDigests: ["id", "month", "status", "payload", "createdAt"],
-  FollowUps: ["id", "entityName", "entityType", "repName", "dueDate", "status", "visitId", "createdAt", "needsSample", "sampleItems", "sampleReminded", "stopReason", "smartiObjective"],
+  // My Schedule (Med Rep Schedule feature) appended 10 columns, reusing this
+  // SAME tab for both check-in-driven follow-ups AND manual meetings rather
+  // than building a parallel table — `type` ("FOLLOW_UP"/"MEETING", blank =
+  // legacy FOLLOW_UP) is the only new concept, everything else here already
+  // fit meetings too (entityName/entityType/repName/dueDate/status). `status`
+  // gained two new values: "cancelled" (a single activity called off from
+  // the calendar — NOT the same as "stopped", which means "stop visiting
+  // this pharmacy altogether" and keeps its existing distinct meaning) and
+  // "rescheduled" (the row a reschedule replaced — distinct from "done" so a
+  // snoozed/rescheduled follow-up is never miscounted as completed).
+  // `dueTime` is a plain "HH:MM" string, never reinterpreted through any
+  // Date/timezone logic, exactly like `dueDate` already is — always Beirut
+  // wall-clock by the app's standing timezone convention. `reminderSentAt`
+  // doubles as the reminder jobs' own idempotency guard (same pattern as
+  // `sampleReminded` above). `rescheduledFromId` gives a queryable
+  // reschedule audit chain.
+  FollowUps: [
+    "id", "entityName", "entityType", "repName", "dueDate", "status", "visitId", "createdAt", "needsSample", "sampleItems", "sampleReminded", "stopReason", "smartiObjective",
+    "type", "dueTime", "purpose", "notes", "reminderEnabled", "reminderOffset", "reminderSentAt", "cancelledAt", "completedAt", "rescheduledFromId",
+  ],
   PharmacySales: ["id", "productName", "pharmacyName", "expiry", "qty"],
   Competitors: ["id", "name", "supplierName", "supplierContact", "offerDetails", "notes", "createdAt"],
   CompetitorSightings: ["id", "visitId", "client", "repName", "competitorName", "notes", "date"],

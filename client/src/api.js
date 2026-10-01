@@ -229,6 +229,15 @@ export const api = {
   assignDoctorRep: (id, assignedRep) => request(`/doctors/${id}`, { method: "PATCH", body: JSON.stringify({ assignedRep }) }),
   getFollowUps: (params) => request(`/followups${qs(params)}`),
   updateFollowUp: (id, patch) => request(`/followups/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+
+  // ---------- My Schedule ----------
+  // getSchedule reuses GET /followups (same tab holds both check-in-driven
+  // follow-ups and manual meetings) with an optional from/to month range.
+  getSchedule: (params) => request(`/followups${qs(params)}`),
+  createMeeting: (payload) => request("/schedule/meetings", { method: "POST", body: JSON.stringify(payload) }),
+  completeActivity: (id) => request(`/schedule/${id}/complete`, { method: "PATCH" }),
+  rescheduleActivity: (id, payload) => request(`/schedule/${id}/reschedule`, { method: "PATCH", body: JSON.stringify(payload) }),
+  cancelActivity: (id) => request(`/schedule/${id}/cancel`, { method: "PATCH" }),
   getManagerNotes: (repName) => request(`/manager-notes${qs({ repName })}`),
   addManagerNote: (note) => request("/manager-notes", { method: "POST", body: JSON.stringify(note) }),
 

@@ -12,11 +12,12 @@ import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
   TrendingDown, TrendingUp, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
   Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar as RadarIcon, Search, BookOpen,
-  GraduationCap, Boxes, History, Brain, ClipboardList, CheckCircle2, ChevronDown, Phone, Bell,
+  GraduationCap, Boxes, History, Brain, ClipboardList, CheckCircle2, ChevronDown, Phone, Bell, CalendarDays,
 } from "lucide-react";
 import { api } from "./api.js";
 import { TrainingVideosView, TrainingStudiesView } from "./TrainingView.jsx";
 import { RecallView } from "./RecallView.jsx";
+import { ScheduleView } from "./ScheduleView.jsx";
 import {
   daysUntil, fmtDate, turnoverPct, zoneFor, isSlowMover, isAtRisk, effectiveSold90, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
   computeLeadScore, todayBeirutStr, beirutDateStrOfInstant, fmtDateOfInstant, fmtTime, fmtDateTime, addDaysToDateStr, weekdayOfDateStr,
@@ -500,13 +501,15 @@ export default function App() {
       {/* Ordered by when it gets used in the workday, not by role — the same
           list serves all three roles at once because each role's own tabs
           just fall out of the existing visibility gates below:
-            manager:    Dashboard, Performance, Orders, Locations, Outreach,
-                        Broadcast, Stock, Expiry, Pharmacies, Doctors,
-                        Competitors, Knowledge, Training, Settings
-            supervisor: Performance, Orders, Locations, Check-In, Stock,
-                        Expiry, Pharmacies, Competitors, Knowledge, Training
-            rep:        Check-In, Route, Stock, Expiry, Pharmacies, Doctors,
-                        Competitors, Knowledge, Training
+            manager:    Dashboard, Performance, Orders, Locations, My
+                        Schedule, Outreach, Broadcast, Stock, Expiry,
+                        Pharmacies, Doctors, Competitors, Knowledge, Training,
+                        Settings
+            supervisor: Performance, Orders, Locations, My Schedule,
+                        Check-In, Stock, Expiry, Pharmacies, Competitors,
+                        Knowledge, Training
+            rep:        Check-In, My Schedule, Route, Stock, Expiry,
+                        Pharmacies, Doctors, Competitors, Knowledge, Training
           Training itself has two sub-tabs (see TrainingTabView): the
           curriculum reader is hidden from supervisors as before, but the
           video/quiz tracker applies to every role, so the nav tab itself is
@@ -520,6 +523,10 @@ export default function App() {
         <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />
         {(role === "manager" || isSupervisor) && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
         {(role === "manager" || isSupervisor) && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<RadarIcon size={15} />} label="Locations" />}
+        {/* My Schedule — visible to every role: a rep always sees their own,
+            a manager/supervisor picks a rep to view team-wide (same
+            isTeamWide permission GET /api/followups already enforces). */}
+        <TabBtn active={tab === "schedule"} onClick={() => setTab("schedule")} icon={<CalendarDays size={15} />} label="My Schedule" />
         {/* Outreach/Broadcast tabs hidden for now (temporary — flip these
             back to role === "manager" to re-enable). Neither component nor
             its render block below is touched, so this is a one-line revert
@@ -586,6 +593,16 @@ export default function App() {
                 onAttachPendingOrder={attachPendingOrder}
                 competitors={competitors}
                 myLastPunch={myLastPunch}
+              />
+            )}
+            {tab === "schedule" && (
+              <ScheduleView
+                role={role}
+                repName={repName}
+                isSupervisor={isSupervisor}
+                repNames={repNames}
+                clients={clients}
+                doctors={doctors}
               />
             )}
             {tab === "stock" && <StockView products={sorted} />}
@@ -1241,7 +1258,7 @@ const inputStyle = { width: "100%", padding: "8px 10px", borderRadius: 7, border
 // stays fully local, so typing never waits on the parent's re-render.
 const SEARCHABLE_SELECT_MAX_RESULTS = 8;
 const SEARCHABLE_SELECT_COMMIT_DEBOUNCE_MS = 150;
-function SearchableSelect({ value, onChange, options, getLabel, placeholder, style, onFocus }) {
+export function SearchableSelect({ value, onChange, options, getLabel, placeholder, style, onFocus }) {
   const [query, setQuery] = useState(value || "");
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
@@ -1544,7 +1561,7 @@ function FieldChecklistModal({ icon, title, subtitle, sections, readOnlySection,
 // field below (Today's Objective, doctor need(s), reaction, concern,
 // commitment, call outcome, next action) — one component instead of seven
 // near-identical hand-rolled chip rows.
-function ChipPicker({ options, value, onChange, multi = false }) {
+export function ChipPicker({ options, value, onChange, multi = false }) {
   const isSelected = (key) => (multi ? value.includes(key) : value === key);
   const toggle = (key) => {
     if (multi) onChange(value.includes(key) ? value.filter((k) => k !== key) : [...value, key]);
@@ -9178,7 +9195,7 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
   );
 }
 
-function StatCard({ label, value, color, icon }) {
+export function StatCard({ label, value, color, icon }) {
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, color, marginBottom: 8 }}>{icon}</div>
@@ -11936,6 +11953,6 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
   );
 }
 
-function EmptyState({ text }) {
+export function EmptyState({ text }) {
   return <div style={{ textAlign: "center", padding: "30px 0", color: "#B7AF9E", fontSize: 13 }}>{text}</div>;
 }

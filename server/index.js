@@ -7,7 +7,7 @@ const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const multer = require("multer");
 const db = require("./sheetsDb");
 const telegram = require("./telegram");
-const { beirutDateStr, beirutWeekday, beirutHour, todayBeirutStr, beirutDateParts, daysUntilFromToday, addDaysToTodayStr, beirutMonthKeyOfInstant } = require("./dateUtils");
+const { beirutDateStr, beirutWeekday, beirutHour, todayBeirutStr, beirutDateParts, daysUntilFromToday, addDaysToTodayStr, beirutMonthKeyOfInstant, beirutWallClockToInstantMs } = require("./dateUtils");
 const { importedInventory, defaultTemplates } = require("./seedData");
 const { DAHIYEH_REFERENCE_PHARMACIES } = require("./dahiyehReference");
 const { MOUNT_LEBANON_REFERENCE_NAMES } = require("./mountLebanonReferenceNames");
@@ -2090,6 +2090,15 @@ app.post("/api/followups", async (req, res) => {
       // carried forward so the Telegram reminder when it comes due can
       // remind them what they committed to, not just that a visit is due.
       smartiObjective: entityType === "doctor" && smartiObjective ? String(smartiObjective).trim() : "",
+      // My Schedule defaults — every check-in-created follow-up is
+      // schedule-ready with no extra question asked during check-in: it
+      // always participates in the default "1 day before" Telegram digest
+      // (see checkTomorrowScheduleDigest) exactly like a manual meeting
+      // left at its own default reminder setting.
+      type: "FOLLOW_UP",
+      purpose: "Follow-up",
+      reminderEnabled: "true",
+      reminderOffset: "1d",
     };
     await db.appendRow("FollowUps", followUp);
 
@@ -2149,6 +2158,148 @@ app.post("/api/followups/stop", async (req, res) => {
     };
     await db.appendRow("FollowUps", followUp);
     res.json(followUp);
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- My Schedule (calendar + manual meetings) ----------
+// Manual meetings live in the SAME FollowUps tab as check-in-driven
+// follow-ups (type: "MEETING" vs "FOLLOW_UP") rather than a parallel table —
+// the calendar reads one list, not two. No visitId is ever attached here,
+// matching the spec's explicit "must NOT require a check-in."
+const MEETING_PURPOSES = new Set(["Product presentation", "Follow-up", "Meeting", "Order discussion", "New product introduction", "Other"]);
+const REMINDER_OFFSETS = new Set(["1d", "2d", "1h", "none"]);
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+app.post("/api/schedule/meetings", async (req, res) => {
+  try {
+    if (!req.repName) return res.status(403).json({ error: "Only reps can schedule meetings." });
+    const { entityName, entityType, date, time, purpose, notes, reminderEnabled, reminderOffset } = req.body;
+    if (!entityName || !String(entityName).trim()) return res.status(400).json({ error: "A contact name is required." });
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "A valid date is required." });
+    if (!time || !TIME_RE.test(time)) return res.status(400).json({ error: "A valid time (HH:MM) is required." });
+    const offset = REMINDER_OFFSETS.has(reminderOffset) ? reminderOffset : "1d";
+    const meeting = {
+      id: `fu${crypto.randomUUID()}`,
+      entityName: String(entityName).trim(),
+      // "other" covers the free-text fallback for a contact not found in
+      // Clients/Doctors — never validated against those tabs server-side,
+      // same as entityType already isn't for check-in-created follow-ups.
+      entityType: entityType || "other",
+      repName: req.repName,
+      dueDate: date,
+      dueTime: time,
+      status: "pending",
+      visitId: "",
+      createdAt: new Date().toISOString(),
+      type: "MEETING",
+      purpose: MEETING_PURPOSES.has(purpose) ? purpose : "Meeting",
+      notes: (notes || "").trim(),
+      reminderEnabled: reminderEnabled === false ? "false" : "true",
+      reminderOffset: offset,
+    };
+    await db.appendRow("FollowUps", meeting);
+    res.json(meeting);
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Shared by the in-app "Reschedule" action AND the Telegram snooze/preset-
+// reschedule buttons (handleFollowUpCallback) — marks the old row
+// "rescheduled", never "done", so a snoozed/rescheduled activity is never
+// miscounted as completed, and appends a new pending row carrying every
+// other field forward, linked back via rescheduledFromId for a queryable
+// audit chain.
+async function rescheduleFollowUp(oldRow, newDate, newTime) {
+  await db.updateRowById("FollowUps", oldRow.id, { status: "rescheduled" });
+  const newRow = {
+    id: `fu${crypto.randomUUID()}`,
+    entityName: oldRow.entityName,
+    entityType: oldRow.entityType,
+    repName: oldRow.repName,
+    dueDate: newDate,
+    dueTime: newTime || "",
+    status: "pending",
+    visitId: oldRow.visitId || "",
+    createdAt: new Date().toISOString(),
+    needsSample: oldRow.needsSample || "",
+    sampleItems: oldRow.sampleItems || "",
+    smartiObjective: oldRow.smartiObjective || "",
+    type: oldRow.type || "FOLLOW_UP",
+    purpose: oldRow.purpose || "",
+    notes: oldRow.notes || "",
+    reminderEnabled: oldRow.reminderEnabled || "true",
+    reminderOffset: oldRow.reminderOffset || "1d",
+    rescheduledFromId: oldRow.id,
+  };
+  await db.appendRow("FollowUps", newRow);
+  return newRow;
+}
+
+const SCHEDULE_RESOLVED_STATUSES = new Set(["done", "cancelled", "stopped", "rescheduled"]);
+
+// A rep can only act on their own schedule; a manager can act on any rep's
+// (same ownership rule as everywhere else activity-level data is touched).
+function canActOnFollowUp(req, row) {
+  return req.role === "manager" || (req.repName && row.repName === req.repName);
+}
+
+app.patch("/api/schedule/:id/complete", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("FollowUps");
+    const row = rows.find((f) => f.id === req.params.id);
+    if (!row) return res.status(404).json({ error: "Activity not found." });
+    if (!canActOnFollowUp(req, row)) return res.status(403).json({ error: "You can only act on your own schedule." });
+    if (SCHEDULE_RESOLVED_STATUSES.has(row.status)) return res.status(400).json({ error: "This activity is already resolved." });
+
+    let visit = null;
+    if (row.type === "MEETING") {
+      await db.updateRowById("FollowUps", row.id, { status: "done", completedAt: new Date().toISOString() });
+    } else {
+      // Same function the Telegram "Sign in" button already calls — this IS
+      // the connection to the existing check-in/visit workflow, not a
+      // reimplementation of it.
+      visit = await createVisitFromFollowUp(row);
+      await db.updateRowById("FollowUps", row.id, { status: "done", completedAt: new Date().toISOString(), visitId: visit.id });
+    }
+    res.json({ ok: true, visit });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/schedule/:id/reschedule", async (req, res) => {
+  try {
+    const { newDate, newTime } = req.body;
+    if (!newDate || !/^\d{4}-\d{2}-\d{2}$/.test(newDate)) return res.status(400).json({ error: "A valid new date is required." });
+    if (newTime && !TIME_RE.test(newTime)) return res.status(400).json({ error: "Invalid time format." });
+    const rows = await db.getAllRows("FollowUps");
+    const row = rows.find((f) => f.id === req.params.id);
+    if (!row) return res.status(404).json({ error: "Activity not found." });
+    if (!canActOnFollowUp(req, row)) return res.status(403).json({ error: "You can only act on your own schedule." });
+    if (SCHEDULE_RESOLVED_STATUSES.has(row.status)) return res.status(400).json({ error: "This activity is already resolved." });
+    const newRow = await rescheduleFollowUp(row, newDate, newTime);
+    res.json(newRow);
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/schedule/:id/cancel", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("FollowUps");
+    const row = rows.find((f) => f.id === req.params.id);
+    if (!row) return res.status(404).json({ error: "Activity not found." });
+    if (!canActOnFollowUp(req, row)) return res.status(403).json({ error: "You can only act on your own schedule." });
+    if (SCHEDULE_RESOLVED_STATUSES.has(row.status)) return res.status(400).json({ error: "This activity is already resolved." });
+    await db.updateRowById("FollowUps", row.id, { status: "cancelled", cancelledAt: new Date().toISOString() });
+    res.json({ ok: true });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
@@ -3788,6 +3939,11 @@ app.get("/api/followups", async (req, res) => {
     if (!isTeamWide) rows = rows.filter((f) => f.repName === req.repName);
     if (req.query.status) rows = rows.filter((f) => f.status === req.query.status);
     if (req.query.repName && isTeamWide) rows = rows.filter((f) => f.repName === req.query.repName);
+    // My Schedule's calendar month view — plain string range-filter on the
+    // already date-only dueDate, no Date parsing needed (and none wanted:
+    // "YYYY-MM-DD" strings compare correctly lexicographically).
+    if (req.query.from) rows = rows.filter((f) => f.dueDate && f.dueDate >= req.query.from);
+    if (req.query.to) rows = rows.filter((f) => f.dueDate && f.dueDate <= req.query.to);
     rows.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
     res.json({ followups: rows });
   } catch (e) {
@@ -10855,17 +11011,11 @@ async function handleFollowUpCallback(callbackQuery) {
   }
 
   if (action === "fusnooze") {
-    await db.updateRowById("FollowUps", followUp.id, { status: "done" });
-    await db.appendRow("FollowUps", {
-      id: `fu${crypto.randomUUID()}`,
-      entityName: followUp.entityName,
-      entityType: followUp.entityType,
-      repName: followUp.repName,
-      dueDate: addDaysToTodayStr(2),
-      status: "pending",
-      visitId: followUp.visitId,
-      createdAt: new Date().toISOString(),
-    });
+    // Shared with the in-app "Reschedule" action (server/index.js, My
+    // Schedule routes) — marks this row "rescheduled", never "done", so a
+    // snoozed follow-up is never miscounted as completed, and links the new
+    // row back via rescheduledFromId.
+    await rescheduleFollowUp(followUp, addDaysToTodayStr(2), "");
     await telegram.answerCallbackQuery(id, "Snoozed 2 days.");
     if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `Follow-up with ${followUp.entityName} snoozed — you'll hear again in 2 days.`);
     return;
@@ -10873,7 +11023,7 @@ async function handleFollowUpCallback(callbackQuery) {
 
   if (action === "fusignin") {
     const visit = await createVisitFromFollowUp(followUp);
-    await db.updateRowById("FollowUps", followUp.id, { status: "done", visitId: visit.id });
+    await db.updateRowById("FollowUps", followUp.id, { status: "done", completedAt: new Date().toISOString(), visitId: visit.id });
     await telegram.answerCallbackQuery(id, "Visit logged!");
     if (message?.chat?.id) {
       await telegram.sendMessage(
@@ -10895,6 +11045,10 @@ async function handleFollowUpCallback(callbackQuery) {
   const preset = FOLLOWUP_PRESETS[action.replace(/^fu/, "")];
   if (!preset) { await telegram.answerCallbackQuery(id, "Unknown action."); return; }
 
+  // NOT a reschedule — this button only ever appears after "Sign in" has
+  // already marked `followUp` done (see rescheduleButtons above), so this
+  // schedules a brand-new NEXT follow-up rather than replacing the
+  // just-completed one. Must not touch `followUp`'s own status/completedAt.
   await db.appendRow("FollowUps", {
     id: `fu${crypto.randomUUID()}`,
     entityName: followUp.entityName,
@@ -10904,12 +11058,107 @@ async function handleFollowUpCallback(callbackQuery) {
     status: "pending",
     visitId: followUp.visitId,
     createdAt: new Date().toISOString(),
+    type: followUp.type || "FOLLOW_UP",
+    purpose: followUp.purpose || "Follow-up",
+    reminderEnabled: "true",
+    reminderOffset: "1d",
   });
   await telegram.answerCallbackQuery(id, `Follow-up scheduled ${preset.label}.`);
   if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `Follow-up with ${followUp.entityName} scheduled ${preset.label}.`);
 }
 
 const FOLLOWUP_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+
+// --- My Schedule reminders -------------------------------------------------
+// Two distinct reminder shapes, confirmed with the manager before building:
+// the default "1 day before" offset (every check-in-created follow-up, and
+// any meeting left at its own default) batches into ONE "Tomorrow's
+// Schedule" Telegram message per rep, exactly matching the spec's own
+// example (a follow-up and a meeting together in one message); "2 days
+// before"/"1 hour before" (meeting-only options — a check-in follow-up
+// never exposes this selector) fire as individual, single-item reminders
+// instead, since batching across different lead times doesn't make sense.
+// Both reuse `reminderSentAt` as their own idempotency guard — the exact
+// same row-level "mark it sent, never re-query it" pattern `sampleReminded`
+// already established, so neither job needs separate "did I already run
+// today" tracking in Settings.
+const SCHEDULE_DIGEST_HOUR = 18; // 6pm Beirut — late enough in the day that "tomorrow" is unambiguous, early enough reps still see it that evening
+async function checkTomorrowScheduleDigest() {
+  if (!telegram.isConfigured()) return;
+  try {
+    const now = new Date();
+    if (beirutHour(now) < SCHEDULE_DIGEST_HOUR) return;
+    const tomorrow = addDaysToTodayStr(1);
+    const [rows, reps] = await Promise.all([db.getAllRows("FollowUps"), db.getAllRows("Reps")]);
+    const due = rows.filter((f) =>
+      (f.status === "pending" || f.status === "reminded") &&
+      f.reminderEnabled !== "false" &&
+      (f.reminderOffset || "1d") === "1d" &&
+      f.dueDate === tomorrow &&
+      !f.reminderSentAt
+    );
+    if (!due.length) return;
+    const byRep = new Map();
+    due.forEach((f) => {
+      if (!byRep.has(f.repName)) byRep.set(f.repName, []);
+      byRep.get(f.repName).push(f);
+    });
+    for (const [repName, items] of byRep) {
+      const rep = reps.find((r) => r.name === repName);
+      if (!rep?.telegramChatId) continue;
+      items.sort((a, b) => (a.dueTime || "99:99").localeCompare(b.dueTime || "99:99"));
+      const lines = items
+        .map((f) => `• ${f.dueTime || "Any time"} — ${escapeHtml(f.entityName)} — ${escapeHtml(f.type === "MEETING" ? (f.purpose || "Meeting") : "Follow-up")}`)
+        .join("\n");
+      try {
+        await telegram.sendMessage(
+          rep.telegramChatId,
+          `🔔 <b>Tomorrow's Schedule</b>\n\nYou have ${items.length} scheduled ${items.length === 1 ? "activity" : "activities"} tomorrow:\n\n${lines}\n\nPlease make sure to complete your scheduled visits.`
+        );
+        for (const f of items) await db.updateRowById("FollowUps", f.id, { reminderSentAt: new Date().toISOString() });
+      } catch (e) {
+        console.error(`failed to send tomorrow's schedule digest for ${repName}`, e);
+      }
+    }
+  } catch (e) {
+    console.error("checkTomorrowScheduleDigest failed", e);
+  }
+}
+
+const MEETING_REMINDER_OFFSET_MS = { "2d": 2 * 86400000, "1h": 60 * 60 * 1000 };
+async function checkUpcomingMeetingReminders() {
+  if (!telegram.isConfigured()) return;
+  try {
+    const [rows, reps] = await Promise.all([db.getAllRows("FollowUps"), db.getAllRows("Reps")]);
+    const candidates = rows.filter((f) =>
+      (f.status === "pending" || f.status === "reminded") &&
+      f.reminderEnabled !== "false" &&
+      (f.reminderOffset === "2d" || f.reminderOffset === "1h") &&
+      f.dueDate && f.dueTime &&
+      !f.reminderSentAt
+    );
+    if (!candidates.length) return;
+    const nowMs = Date.now();
+    for (const f of candidates) {
+      const triggerMs = beirutWallClockToInstantMs(f.dueDate, f.dueTime) - MEETING_REMINDER_OFFSET_MS[f.reminderOffset];
+      if (nowMs < triggerMs) continue;
+      const rep = reps.find((r) => r.name === f.repName);
+      if (!rep?.telegramChatId) continue;
+      try {
+        const offsetLabel = f.reminderOffset === "2d" ? "in 2 days" : "in 1 hour";
+        await telegram.sendMessage(
+          rep.telegramChatId,
+          `🔔 Upcoming ${offsetLabel}: <b>${escapeHtml(f.entityName)}</b> — ${escapeHtml(f.purpose || "Meeting")} on ${f.dueDate} at ${f.dueTime}.`
+        );
+        await db.updateRowById("FollowUps", f.id, { reminderSentAt: new Date().toISOString() });
+      } catch (e) {
+        console.error(`failed to send upcoming meeting reminder for ${f.entityName}`, e);
+      }
+    }
+  } catch (e) {
+    console.error("checkUpcomingMeetingReminders failed", e);
+  }
+}
 
 // --- Monthly visits + follow-ups summary ---------------------------------
 // Separate from the must-sell digest above (different topic, different
@@ -11112,12 +11361,16 @@ setInterval(asBackgroundJob(checkMissedPunchOuts), PUNCH_AUTO_CLOSE_CHECK_INTERV
 if (telegram.isConfigured()) {
   setTimeout(asBackgroundJob(checkMonthlyDigest), STARTUP_BACKGROUND_JOB_DELAY_MS);
   setTimeout(asBackgroundJob(checkFollowUpReminders), STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setTimeout(asBackgroundJob(checkTomorrowScheduleDigest), STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setTimeout(asBackgroundJob(checkUpcomingMeetingReminders), STARTUP_BACKGROUND_JOB_DELAY_MS);
   setTimeout(asBackgroundJob(checkSampleReminders), STARTUP_BACKGROUND_JOB_DELAY_MS);
   setTimeout(asBackgroundJob(checkMonthlyVisitsSummary), STARTUP_BACKGROUND_JOB_DELAY_MS);
   setTimeout(asBackgroundJob(checkInventoryUpdateReminder), STARTUP_BACKGROUND_JOB_DELAY_MS);
   setTimeout(asBackgroundJob(checkStockMovementReminder), STARTUP_BACKGROUND_JOB_DELAY_MS);
   setInterval(asBackgroundJob(checkMonthlyDigest), MONTHLY_DIGEST_CHECK_INTERVAL_MS);
   setInterval(asBackgroundJob(checkFollowUpReminders), FOLLOWUP_CHECK_INTERVAL_MS);
+  setInterval(asBackgroundJob(checkTomorrowScheduleDigest), FOLLOWUP_CHECK_INTERVAL_MS);
+  setInterval(asBackgroundJob(checkUpcomingMeetingReminders), FOLLOWUP_CHECK_INTERVAL_MS);
   setInterval(asBackgroundJob(checkSampleReminders), FOLLOWUP_CHECK_INTERVAL_MS);
   setInterval(asBackgroundJob(checkMonthlyVisitsSummary), MONTHLY_DIGEST_CHECK_INTERVAL_MS);
   setInterval(asBackgroundJob(checkInventoryUpdateReminder), MONTHLY_DIGEST_CHECK_INTERVAL_MS);

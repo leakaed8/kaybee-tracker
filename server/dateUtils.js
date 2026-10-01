@@ -54,6 +54,27 @@ function beirutMonthKeyOfInstant(isoString) {
   return beirutDateStr(new Date(isoString)).slice(0, 7);
 }
 
+// Converts a Beirut WALL-CLOCK date+time (e.g. a scheduled activity's
+// dueDate/dueTime, always Beirut by this app's standing convention — see
+// the top-of-file comment) into the real UTC instant it represents, for
+// comparing against Date.now() (e.g. "has the 1-hour-before threshold
+// passed yet"). Standard "guess as UTC, measure the actual Beirut offset at
+// that guess via Intl, correct once" technique — robust across DST since it
+// measures the real offset in effect at that moment rather than assuming a
+// fixed one.
+function beirutWallClockToInstantMs(dateStr, timeStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const [hh, mm] = timeStr.split(":").map(Number);
+  const guessMs = Date.UTC(y, m - 1, d, hh, mm);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(new Date(guessMs));
+  const get = (type) => Number(parts.find((p) => p.type === type).value);
+  const beirutHourPart = get("hour") === 24 ? 0 : get("hour"); // some ICU builds report midnight as "24"
+  const beirutAsUtcMs = Date.UTC(get("year"), get("month") - 1, get("day"), beirutHourPart, get("minute"));
+  return guessMs + (guessMs - beirutAsUtcMs);
+}
+
 module.exports = {
   TZ,
   beirutDateStr,
@@ -64,4 +85,5 @@ module.exports = {
   daysUntilFromToday,
   addDaysToTodayStr,
   beirutMonthKeyOfInstant,
+  beirutWallClockToInstantMs,
 };
