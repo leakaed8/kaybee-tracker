@@ -9402,6 +9402,10 @@ function RepPerformanceCard({
   // Manager Performance Management redesign — all optional/additive.
   doctors = [], repTarget = null, repRole = null, tierVisitFrequency = null, qualityCallRequiredFields = null,
   followUps = [], newAccountKeys = null, showManagerAttention = false,
+  // Historical month browsing — monthKey defaults to the current Beirut
+  // month when not passed (keeps every other caller of this component,
+  // e.g. ad-hoc usages elsewhere, working unchanged).
+  monthKey = null, isPastMonth = false,
 }) {
   const [expandedClient, setExpandedClient] = useState(null);
   const [markingId, setMarkingId] = useState(null);
@@ -9414,10 +9418,13 @@ function RepPerformanceCard({
   // in ManagerDashboard above for why this is bucketed by Beirut month-key
   // string rather than a device-local Date range.
   const todayStr = todayBeirutStr();
-  const [beirutYear, beirutMonth, beirutDay] = todayStr.split("-").map(Number);
-  const thisMonthKey = `${beirutYear}-${String(beirutMonth).padStart(2, "0")}`;
+  const thisMonthKey = monthKey || todayStr.slice(0, 7);
+  const [beirutYear, beirutMonth] = thisMonthKey.split("-").map(Number);
   const daysInMonth = new Date(Date.UTC(beirutYear, beirutMonth, 0)).getUTCDate();
-  const dayOfMonth = beirutDay;
+  // A past month is fully elapsed by definition — pace math only makes
+  // sense for the month still in progress.
+  const dayOfMonth = isPastMonth ? daysInMonth : Number(todayStr.split("-")[2]);
+  const monthLabel = new Date(Date.UTC(beirutYear, beirutMonth - 1, 1)).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
   const monthVisits = visits.filter((v) => beirutDateStrOfInstant(v.time).slice(0, 7) === thisMonthKey);
   // Visit ≠ Contact (Section 2): only in-person interactions count toward
   // the field-visit KPI/target/pace math. Legacy rows (no interactionType
@@ -9447,11 +9454,14 @@ function RepPerformanceCard({
   const qualityCallCount = doctorInPersonVisits.filter((v) => isQualityCall(v, qualityCallRequiredFields)).length;
   const qualityPct = doctorInPersonVisits.length ? Math.round((qualityCallCount / doctorInPersonVisits.length) * 100) : null;
 
-  // ---- Follow-up compliance % (Section 4/7) — this rep's scheduled follow-ups that aren't overdue-pending ----
+  // ---- Follow-up compliance % (Section 4/7) — this rep's scheduled follow-ups
+  // that aren't overdue-pending. This is inherently a live, "as of right now"
+  // snapshot (daysUntil compares to today), so it's only meaningful for the
+  // current month — hidden entirely for a past month. ----
   const relevantFollowUps = repNameFilter ? followUps.filter((f) => f.repName === repNameFilter) : followUps;
   const followUpOnTrack = relevantFollowUps.filter((f) => f.status !== "pending" || daysUntil(f.dueDate) >= 0).length;
-  const followUpPct = relevantFollowUps.length ? Math.round((followUpOnTrack / relevantFollowUps.length) * 100) : null;
-  const overdueFollowUpCount = relevantFollowUps.filter((f) => f.status === "pending" && daysUntil(f.dueDate) < 0).length;
+  const followUpPct = isPastMonth ? null : (relevantFollowUps.length ? Math.round((followUpOnTrack / relevantFollowUps.length) * 100) : null);
+  const overdueFollowUpCount = isPastMonth ? 0 : relevantFollowUps.filter((f) => f.status === "pending" && daysUntil(f.dueDate) < 0).length;
 
   const weeks = {};
   monthInPersonVisits.forEach((v) => {
@@ -9513,10 +9523,14 @@ function RepPerformanceCard({
   // own target profile where set, otherwise a sensible default so the
   // dashboard means something before targets are configured. ----
   const dims = repNameFilter ? {
-    activity: onPace,
+    // A past month has no "elapsed time" left to pace against — judge it by
+    // whether the full-month target was hit instead of pace-vs-today.
+    activity: isPastMonth ? visitsThisMonth >= effectiveTarget : onPace,
     coverage: (pharmacyCoveragePct ?? 100) >= (repTarget?.coverageTargetPct ?? 70) && (doctorCoveragePct ?? 100) >= (repTarget?.coverageTargetPct ?? 70),
     quality: qualityPct === null ? null : qualityPct >= (repTarget?.qualityCallTargetPct ?? 70),
-    followup: followUpPct === null ? null : followUpPct >= 80,
+    // Compliance % is a live snapshot, hidden for past months — so there's
+    // nothing to judge this dimension on.
+    followup: isPastMonth || followUpPct === null ? null : followUpPct >= 80,
     results: repTarget?.revenueTarget ? revenuePct >= 70 : conversionRate >= 15,
   } : null;
 
@@ -9559,13 +9573,19 @@ function RepPerformanceCard({
       {repRole && <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 10 }}>{repRole}{repTarget?.territory ? ` · ${repTarget.territory}` : ""}</div>}
 
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-        <span style={{ fontSize: 13, fontWeight: 600 }}>{visitsThisMonth} / {effectiveTarget} in-person visits this month</span>
-        <span style={{ fontSize: 12, color: onPace ? "#4C7A5E" : "#B33A3A", fontWeight: 500 }}>{onPace ? "On pace" : "Behind pace"}</span>
+        <span style={{ fontSize: 13, fontWeight: 600 }}>{visitsThisMonth} / {effectiveTarget} in-person visits {isPastMonth ? `in ${monthLabel}` : "this month"}</span>
+        {!isPastMonth && (
+          <span style={{ fontSize: 12, color: onPace ? "#4C7A5E" : "#B33A3A", fontWeight: 500 }}>{onPace ? "On pace" : "Behind pace"}</span>
+        )}
       </div>
       <div style={{ height: 8, background: "#F0EBE0", borderRadius: 4, overflow: "hidden", marginBottom: 4 }}>
-        <div style={{ height: "100%", width: `${pctOfTarget}%`, background: onPace ? "#4C7A5E" : "#D9A441", transition: "width .3s" }} />
+        <div style={{ height: "100%", width: `${pctOfTarget}%`, background: isPastMonth ? (pctOfTarget >= 100 ? "#4C7A5E" : "#8A8272") : (onPace ? "#4C7A5E" : "#D9A441"), transition: "width .3s" }} />
       </div>
-      <div className="kb-font-mono" style={{ fontSize: 10.5, color: "#8A8272", marginBottom: 14 }}>Day {dayOfMonth} of {daysInMonth} ({pctOfMonth}% of month elapsed)</div>
+      {isPastMonth ? (
+        <div className="kb-font-mono" style={{ fontSize: 10.5, color: "#8A8272", marginBottom: 14 }}>{monthLabel} — final total</div>
+      ) : (
+        <div className="kb-font-mono" style={{ fontSize: 10.5, color: "#8A8272", marginBottom: 14 }}>Day {dayOfMonth} of {daysInMonth} ({pctOfMonth}% of month elapsed)</div>
+      )}
 
       {/* 5 separate performance dimensions (Section 8) — never one blended
           score. Only shown for a single rep, not the "All reps combined" card.
@@ -9604,7 +9624,9 @@ function RepPerformanceCard({
         <StatCard label="Conversion rate" value={`${conversionRate}%`} color="#C17817" icon={<Target size={16} />} />
         {coveragePct !== null && <StatCard label="Pharmacy coverage" value={`${coveragePct}%`} color="#D9A441" icon={<MapPin size={16} />} />}
         {qualityPct !== null && <StatCard label="Quality calls" value={`${qualityPct}%`} color="#5B7A93" icon={<Check size={16} />} />}
-        <StatCard label="Overdue follow-ups" value={overdueFollowUpCount || overdueCount} color={(overdueFollowUpCount || overdueCount) > 3 ? "#B33A3A" : "#6B7280"} icon={<Clock size={16} />} />
+        {/* Follow-up overdue count is a live "as of today" snapshot — not
+            meaningful for a closed past month, so it's hidden there. */}
+        {!isPastMonth && <StatCard label="Overdue follow-ups" value={overdueFollowUpCount || overdueCount} color={(overdueFollowUpCount || overdueCount) > 3 ? "#B33A3A" : "#6B7280"} icon={<Clock size={16} />} />}
       </div>
       <div className="kb-font-mono" style={{ fontSize: 10.5, color: "#8A8272", marginBottom: 14 }}>
         {revenuePct}% of ${monthlyRevenueTarget.toLocaleString()} revenue target
@@ -9866,6 +9888,20 @@ function PerformanceView({
   const thisMonthKey = `${beirutYear}-${String(beirutMonth).padStart(2, "0")}`;
   const [subView, setSubView] = useState("overview"); // overview | targets
 
+  // Month picker for the per-rep performance cards below — lets a manager
+  // browse any past month's detailed stats, not just the current one.
+  const [viewMonthKey, setViewMonthKey] = useState(thisMonthKey);
+  const isPastMonth = viewMonthKey !== thisMonthKey;
+  const shiftMonthKey = (key, delta) => {
+    const [y, m] = key.split("-").map(Number);
+    const d = new Date(Date.UTC(y, m - 1 + delta, 1));
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  };
+  const monthKeyLabel = (key) => {
+    const [y, m] = key.split("-").map(Number);
+    return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
+  };
+
   // Fetched once when this tab is opened (manager/supervisor-only, not
   // polled) instead of the whole visits/orders history riding along in
   // every 30s bootstrap poll for every rep in the field.
@@ -10016,7 +10052,7 @@ function PerformanceView({
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 4px" }}>Performance</h2>
       <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>Manager view — Activity → Coverage → Quality → Results</p>
 
-      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
         <button onClick={() => setSubView("overview")} style={{ padding: "7px 16px", borderRadius: 16, fontSize: 12.5, fontWeight: 500, border: subView === "overview" ? "1px solid #1F2A24" : "1px solid #E5DFD3", background: subView === "overview" ? "#1F2A24" : "#fff", color: subView === "overview" ? "#FAF7F2" : "#5B5445" }}>
           Overview
         </button>
@@ -10024,6 +10060,21 @@ function PerformanceView({
           <button onClick={() => setSubView("targets")} style={{ padding: "7px 16px", borderRadius: 16, fontSize: 12.5, fontWeight: 500, border: subView === "targets" ? "1px solid #1F2A24" : "1px solid #E5DFD3", background: subView === "targets" ? "#1F2A24" : "#fff", color: subView === "targets" ? "#FAF7F2" : "#5B5445" }}>
             Targets
           </button>
+        )}
+        {subView === "overview" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
+            <button onClick={() => setViewMonthKey((k) => shiftMonthKey(k, -1))} aria-label="Previous month"
+              style={{ width: 28, height: 28, borderRadius: 14, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 15, cursor: "pointer" }}>
+              ‹
+            </button>
+            <div style={{ fontSize: 12.5, fontWeight: 600, minWidth: 120, textAlign: "center" }}>
+              {monthKeyLabel(viewMonthKey)}{!isPastMonth && <span style={{ color: "#8A8272", fontWeight: 500 }}> (current)</span>}
+            </div>
+            <button onClick={() => setViewMonthKey((k) => shiftMonthKey(k, 1))} disabled={!isPastMonth} aria-label="Next month"
+              style={{ width: 28, height: 28, borderRadius: 14, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 15, cursor: isPastMonth ? "pointer" : "default", opacity: isPastMonth ? 1 : 0.35 }}>
+              ›
+            </button>
+          </div>
         )}
       </div>
 
@@ -10074,7 +10125,7 @@ function PerformanceView({
       <RepPerformanceCard title="All reps combined" visits={visits} monthlyVisitTarget={monthlyVisitTarget}
         orders={orders} monthlyRevenueTarget={revenueTargetTotal} clients={clients} doctors={doctors}
         tierVisitFrequency={tierVisitFrequency} qualityCallRequiredFields={qualityCallRequiredFields}
-        followUps={followUps} newAccountKeys={newAccountKeys} />
+        followUps={followUps} newAccountKeys={newAccountKeys} monthKey={viewMonthKey} isPastMonth={isPastMonth} />
 
       {repNames.map((name) => (
         <RepPerformanceCard
@@ -10095,6 +10146,8 @@ function PerformanceView({
           qualityCallRequiredFields={qualityCallRequiredFields}
           followUps={followUps}
           newAccountKeys={newAccountKeys}
+          monthKey={viewMonthKey}
+          isPastMonth={isPastMonth}
         />
       ))}
 
