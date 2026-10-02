@@ -2664,7 +2664,7 @@ app.delete("/api/offers/:id", requireManager, async (req, res) => {
 // then pastes its object key (filename) here along with the quiz JSON.
 // This app never stores or serves the video itself, only that key and the
 // quiz.
-app.get("/api/training-videos", async (req, res) => {
+app.get("/api/training-videos", requireManager, async (req, res) => {
   try {
     const rows = await db.getAllRows("TrainingVideos");
     const videos = rows.map((v) => parseTrainingVideo(v)).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -2675,7 +2675,7 @@ app.get("/api/training-videos", async (req, res) => {
   }
 });
 
-app.get("/api/training-videos/:id", async (req, res) => {
+app.get("/api/training-videos/:id", requireManager, async (req, res) => {
   try {
     const rows = await db.getAllRows("TrainingVideos");
     const video = rows.find((v) => v.id === req.params.id);
@@ -2774,7 +2774,7 @@ app.delete("/api/admin/training-videos/:id", requireManager, async (req, res) =>
 // ONLY way to get a working URL at all: the token is short-lived and minted
 // fresh per request, tied to nothing but "someone with a valid session
 // asked for it right now."
-app.get("/api/training-videos/:id/playback-url", async (req, res) => {
+app.get("/api/training-videos/:id/playback-url", requireManager, async (req, res) => {
   try {
     const rows = await db.getAllRows("TrainingVideos");
     const video = rows.find((v) => v.id === req.params.id);
@@ -2787,7 +2787,7 @@ app.get("/api/training-videos/:id/playback-url", async (req, res) => {
   }
 });
 
-app.post("/api/training-videos/:id/complete", async (req, res) => {
+app.post("/api/training-videos/:id/complete", requireManager, async (req, res) => {
   try {
     if (!req.repName) return res.status(403).json({ error: "Employees only." });
     const videos = await db.getAllRows("TrainingVideos");
@@ -2819,7 +2819,7 @@ app.post("/api/training-videos/:id/complete", async (req, res) => {
 // own); managers/supervisors get the team-wide view needed to actually
 // track who completed what, matching the same access rule used for
 // Locations and Performance.
-app.get("/api/training-progress", async (req, res) => {
+app.get("/api/training-progress", requireManager, async (req, res) => {
   try {
     const rows = await db.getAllRows("TrainingProgress");
     let progress = rows.map(parseTrainingProgress);
@@ -2838,7 +2838,7 @@ app.get("/api/training-progress", async (req, res) => {
 // pages, etc.) reps can consult while pitching a product — no content is
 // hosted here, just a title, the URL, and an optional note on why it's
 // relevant.
-app.get("/api/training-studies", async (req, res) => {
+app.get("/api/training-studies", requireManager, async (req, res) => {
   try {
     const rows = await db.getAllRows("TrainingStudies");
     const studies = rows.map(parseTrainingStudy).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -2926,7 +2926,7 @@ app.delete("/api/admin/training-studies/:id", requireManager, async (req, res) =
 // nudge (below) know which studies a rep has already gotten to, the same
 // way TrainingProgress tracks video completion. One row per employee per
 // study; re-opening just bumps viewedAt rather than piling up duplicates.
-app.post("/api/training-studies/:id/viewed", async (req, res) => {
+app.post("/api/training-studies/:id/viewed", requireManager, async (req, res) => {
   try {
     if (!req.repName) return res.status(403).json({ error: "Employees only." });
     const studies = await db.getAllRows("TrainingStudies");
@@ -2952,7 +2952,7 @@ app.post("/api/training-studies/:id/viewed", async (req, res) => {
 // of the full (manager-only) edit below, specifically so the backlog of
 // untagged studies can get tagged quickly by whoever notices one, without
 // needing full edit rights over the title/URL/notes.
-app.patch("/api/training-studies/:id/nutrient", async (req, res) => {
+app.patch("/api/training-studies/:id/nutrient", requireManager, async (req, res) => {
   try {
     const { nutrient } = req.body;
     if (!nutrient || !String(nutrient).trim()) return res.status(400).json({ error: "nutrient is required" });
@@ -5034,7 +5034,7 @@ async function ensureRecallDosageFormsSeeded() {
   recallDosageFormsSeedChecked = true;
 }
 
-app.get("/api/recall/dosage-forms", async (req, res) => {
+app.get("/api/recall/dosage-forms", requireManager, async (req, res) => {
   try {
     await ensureRecallDosageFormsSeeded();
     const forms = await db.getAllRows("RecallDosageForms");
@@ -9329,7 +9329,7 @@ async function recomputeOurProductResearchStatus(linkId) {
 // One combined read per page load (categories + the three empty-for-now
 // knowledge tabs used to compute counts), rather than one Sheets call per
 // category — the whole point of Phase J's performance rule.
-app.get("/api/recall/categories", async (req, res) => {
+app.get("/api/recall/categories", requireManager, async (req, res) => {
   try {
     await ensureRecallCategoriesSeeded();
     await ensureRecallB12Seeded();
@@ -9385,7 +9385,7 @@ app.get("/api/recall/categories", async (req, res) => {
 // page needs, computed from currently-empty tables. Sections legitimately
 // show real empty arrays right now; the client renders each as an
 // empty-state message rather than fabricating placeholder content.
-app.get("/api/recall/categories/:id", async (req, res) => {
+app.get("/api/recall/categories/:id", requireManager, async (req, res) => {
   try {
     await ensureRecallCategoriesSeeded();
     await ensureRecallB12Seeded();
@@ -9580,7 +9580,7 @@ app.get("/api/recall/categories/:id", async (req, res) => {
 // has no "edit only your own record" concept anywhere, so that's the
 // existing pattern being followed here too, not a new rule invented for
 // this feature.
-app.post("/api/recall/features", uploadDocument.single("image"), async (req, res) => {
+app.post("/api/recall/features", requireManager, uploadDocument.single("image"), async (req, res) => {
   try {
     const { categoryId, productId, title, description } = req.body;
     if (!categoryId) return res.status(400).json({ error: "categoryId is required" });
@@ -9681,7 +9681,7 @@ app.patch("/api/recall/features/:id/differentiator", requireManager, async (req,
   }
 });
 
-app.get("/api/recall/features/:id/image-url", async (req, res) => {
+app.get("/api/recall/features/:id/image-url", requireManager, async (req, res) => {
   try {
     const rows = await db.getAllRows("RecallProductFeatures");
     const feature = rows.find((f) => f.id === req.params.id);
@@ -9694,7 +9694,7 @@ app.get("/api/recall/features/:id/image-url", async (req, res) => {
   }
 });
 
-app.post("/api/recall/benefits", async (req, res) => {
+app.post("/api/recall/benefits", requireManager, async (req, res) => {
   try {
     const { categoryId, productId, featureIds, title, description } = req.body;
     if (!categoryId) return res.status(400).json({ error: "categoryId is required" });
@@ -9799,7 +9799,7 @@ async function validateAdvantageProductIds(productIds) {
   return null;
 }
 
-app.post("/api/recall/advantages", async (req, res) => {
+app.post("/api/recall/advantages", requireManager, async (req, res) => {
   try {
     const { categoryId, feature, benefit, productIds, isKeyDifferentiator } = req.body;
     if (!categoryId) return res.status(400).json({ error: "categoryId is required" });
@@ -9870,7 +9870,7 @@ app.delete("/api/recall/advantages/:id", requireManager, async (req, res) => {
 // after approval visibly stops claiming to be the approved wording rather
 // than silently keeping a stale APPROVED badge. Upserts by categoryId (one
 // row per category), same shape as the RepTargets-by-repName upsert.
-app.put("/api/recall/categories/:id/usp", async (req, res) => {
+app.put("/api/recall/categories/:id/usp", requireManager, async (req, res) => {
   try {
     const { text } = req.body;
     if (!text || !String(text).trim()) return res.status(400).json({ error: "text is required" });
@@ -9960,7 +9960,7 @@ app.post("/api/recall/assignments", requireManager, async (req, res) => {
 // this is the actual enforcement of "approved sources," not just a comment.
 const APPROVED_RETAILERS = ["Skin Society", "Mazen Online", "Nicolas Care", "Sohati Care"];
 
-app.get("/api/recall/retailer-listings", async (req, res) => {
+app.get("/api/recall/retailer-listings", requireManager, async (req, res) => {
   try {
     const { competitorProductId } = req.query;
     const listings = await db.getAllRows("RecallRetailerListings");
@@ -9983,7 +9983,7 @@ app.get("/api/recall/retailer-listings", async (req, res) => {
 // this table only ever attaches to CompetitorProducts, never to our own
 // products, so it can't be used to touch the (still manager-only) Product
 // Catalog.
-app.post("/api/recall/retailer-listings", async (req, res) => {
+app.post("/api/recall/retailer-listings", requireManager, async (req, res) => {
   try {
     const { competitorProductId, retailer, sourceUrl, displayedPrice, currency, researchDate, notes } = req.body;
     if (!competitorProductId || !String(competitorProductId).trim()) return res.status(400).json({ error: "competitorProductId is required." });
@@ -10017,7 +10017,7 @@ app.post("/api/recall/retailer-listings", async (req, res) => {
   }
 });
 
-app.get("/api/recall/field-conflicts", async (req, res) => {
+app.get("/api/recall/field-conflicts", requireManager, async (req, res) => {
   try {
     const { entityType, entityId } = req.query;
     const conflicts = await db.getAllRows("RecallFieldConflicts");
@@ -10036,7 +10036,7 @@ app.get("/api/recall/field-conflicts", async (req, res) => {
 // Any employee can record a conflict found on COMPETITOR research (shared
 // task); a conflict on OUR products (ProductCatalog/RecallProductIngredients)
 // stays manager-only, same as editing those records directly.
-app.post("/api/recall/field-conflicts", async (req, res) => {
+app.post("/api/recall/field-conflicts", requireManager, async (req, res) => {
   try {
     const { entityType, entityId, fieldName, sourceALabel, sourceAValue, sourceBLabel, sourceBValue, notes } = req.body;
     if (!entityType || !entityId || !fieldName) return res.status(400).json({ error: "entityType, entityId, and fieldName are required." });
@@ -10073,7 +10073,7 @@ app.post("/api/recall/field-conflicts", async (req, res) => {
 // file); OUR products (Product Catalog) stay manager-only below.
 const RECALL_COMPETITOR_RESEARCH_FIELDS = ["genericName", "form", "dosage", "packSize", "manufacturer", "sku", "sourceLabel", "sourceUrl", "notes"];
 
-app.patch("/api/recall/competitor-research/:id", async (req, res) => {
+app.patch("/api/recall/competitor-research/:id", requireManager, async (req, res) => {
   try {
     const products = await db.getAllRows("CompetitorProducts");
     const existing = products.find((p) => p.id === req.params.id);
@@ -10196,7 +10196,7 @@ app.patch("/api/recall/our-products/:linkId", requireManager, async (req, res) =
 // creates a new one. Same allowlist-only field handling as the POST route
 // above, so a caller sending "availability"/"inStock"/etc. is silently
 // ignored, not stored. Open to any employee — see the POST route's comment.
-app.patch("/api/recall/retailer-listings/:id", async (req, res) => {
+app.patch("/api/recall/retailer-listings/:id", requireManager, async (req, res) => {
   try {
     const listings = await db.getAllRows("RecallRetailerListings");
     if (!listings.some((l) => l.id === req.params.id)) return res.status(404).json({ error: "Retailer listing not found." });
@@ -10225,7 +10225,7 @@ app.patch("/api/recall/retailer-listings/:id", async (req, res) => {
 // is kept (status flipped to RESOLVED, not deleted) so both original
 // source values stay visible as history. Any employee can resolve a
 // COMPETITOR conflict; a conflict on OUR products stays manager-only.
-app.patch("/api/recall/field-conflicts/:id/resolve", async (req, res) => {
+app.patch("/api/recall/field-conflicts/:id/resolve", requireManager, async (req, res) => {
   try {
     const { resolution } = req.body;
     if (resolution !== "A" && resolution !== "B") return res.status(400).json({ error: "resolution must be 'A' or 'B'." });
@@ -10266,7 +10266,7 @@ app.patch("/api/recall/field-conflicts/:id/resolve", async (req, res) => {
 // membership is defined entirely by its our-products, not by the
 // competitor product itself. Open to any employee, matching the shared
 // competitor-research editing rule.
-app.get("/api/recall/linkable-products", async (req, res) => {
+app.get("/api/recall/linkable-products", requireManager, async (req, res) => {
   try {
     const [links, catalog, ingredients, categories] = await Promise.all([
       db.getAllRows("RecallProductIngredients"),
@@ -10298,7 +10298,7 @@ app.get("/api/recall/linkable-products", async (req, res) => {
 // Every existing competitor<->our-product comparison link, enriched with
 // the category it puts the competitor product under — used by the
 // Competitors tab to show "Already in Recall under: <category>" per row.
-app.get("/api/recall/competitor-relationships", async (req, res) => {
+app.get("/api/recall/competitor-relationships", requireManager, async (req, res) => {
   try {
     const [rels, catalog, links, ingredients, categories] = await Promise.all([
       db.getAllRows("RecallCompetitorRelationships"),
@@ -10333,7 +10333,7 @@ app.get("/api/recall/competitor-relationships", async (req, res) => {
 // competitor product or category here — both must already exist. Open to
 // any employee: attaching research to a category is a research-completion
 // action, same as editing the competitor product's own fields.
-app.post("/api/recall/competitor-relationships", async (req, res) => {
+app.post("/api/recall/competitor-relationships", requireManager, async (req, res) => {
   try {
     const { competitorProductId, ourProductId, comparisonType, notes } = req.body;
     if (!competitorProductId || !ourProductId) {
