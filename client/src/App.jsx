@@ -519,8 +519,12 @@ export default function App() {
       <nav style={{ display: "flex", gap: 4, padding: "12px 24px 0", borderBottom: "1px solid #E5DFD3", overflowX: "auto" }}>
         {role === "manager" && <TabBtn active={tab === "dashboard"} onClick={() => setTab("dashboard")} icon={<LayoutDashboard size={15} />} label="Dashboard" />}
         {(role === "manager" || isSupervisor) && <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<Target size={15} />} label="Performance" />}
-        <TabBtn active={tab === "stock"} onClick={() => setTab("stock")} icon={<Boxes size={15} />} label="Stock" />
-        <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />
+        {/* Stock/Expiry Alerts are manager-only now — reps already see live
+            stock/batch/expiry info in the product picker while placing an
+            order, so the standalone browse-everything tab isn't "necessary"
+            for them and is hidden to keep their view minimal. */}
+        {role === "manager" && <TabBtn active={tab === "stock"} onClick={() => setTab("stock")} icon={<Boxes size={15} />} label="Stock" />}
+        {role === "manager" && <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />}
         {(role === "manager" || isSupervisor) && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
         {(role === "manager" || isSupervisor) && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<RadarIcon size={15} />} label="Locations" />}
         {/* My Schedule — visible to every role: a rep always sees their own,
@@ -542,9 +546,12 @@ export default function App() {
         {!medRepOnly && <TabBtn active={tab === "supplementStores"} onClick={() => setTab("supplementStores")} icon={<Boxes size={15} />} label="Supplement Stores" />}
         {!isSupervisor && !supplementStoresOnly && <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />}
         {(role === "manager" || role === "rep") && <TabBtn active={tab === "cadence"} onClick={() => setTab("cadence")} icon={<History size={15} />} label="Visit Cadence" />}
-        <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />
-        <TabBtn active={tab === "recall"} onClick={() => setTab("recall")} icon={<Brain size={15} />} label="Product Expert" />
-        <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />
+        {/* Knowledge/Product Expert/Training are manager-only now — reference
+            and training tools, not required for day-to-day check-ins, so
+            hidden from reps/supervisors to minimize their nav. */}
+        {role === "manager" && <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />}
+        {role === "manager" && <TabBtn active={tab === "recall"} onClick={() => setTab("recall")} icon={<Brain size={15} />} label="Product Expert" />}
+        {role === "manager" && <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />}
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
       </nav>
 
