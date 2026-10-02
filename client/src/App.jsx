@@ -120,7 +120,8 @@ function getCurrentPositionSafe(onResult, timeoutMs = 8000) {
 // a visit. Kept in sync with the nav order below (App() render).
 function defaultTabFor(role, isSupervisor) {
   if (role === "manager") return "dashboard";
-  if (isSupervisor) return "performance";
+  // Supervisors used to land on Performance, but that tab is hidden from
+  // them for now (see the nav above) — land on Check-In like a regular rep.
   return "checkin";
 }
 
@@ -518,7 +519,9 @@ export default function App() {
           above and with any future visibility-gate change. */}
       <nav style={{ display: "flex", gap: 4, padding: "12px 24px 0", borderBottom: "1px solid #E5DFD3", overflowX: "auto" }}>
         {role === "manager" && <TabBtn active={tab === "dashboard"} onClick={() => setTab("dashboard")} icon={<LayoutDashboard size={15} />} label="Dashboard" />}
-        {(role === "manager" || isSupervisor) && <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<Target size={15} />} label="Performance" />}
+        {/* Performance hidden from supervisors for now — flip back to
+            role === "manager" || isSupervisor to re-enable. */}
+        {role === "manager" && <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<Target size={15} />} label="Performance" />}
         {/* Stock/Expiry Alerts are manager-only now — reps already see live
             stock/batch/expiry info in the product picker while placing an
             order, so the standalone browse-everything tab isn't "necessary"
@@ -698,7 +701,7 @@ export default function App() {
                 onAddComment={addVisitComment}
               />
             )}
-            {tab === "performance" && (role === "manager" || isSupervisor) && (
+            {tab === "performance" && role === "manager" && (
               <PerformanceView
                 clients={clients}
                 doctors={doctors}
