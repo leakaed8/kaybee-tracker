@@ -139,7 +139,7 @@ async function callGoogleApi(fn, { maxRetries = 5, type = "write" } = {}) {
 // read-quota bucket above filling up under real traffic. Never applied to
 // high-churn tabs (Visits, Orders, Samples, PunchLog, ...) where a request
 // needs the true current state, not a few seconds behind.
-const CACHEABLE_TABS = new Set(["Products", "Clients", "Doctors", "Reps", "Offers", "Settings"]);
+const CACHEABLE_TABS = new Set(["Products", "Clients", "Doctors", "Nutritionists", "Reps", "Offers", "Settings"]);
 const READ_CACHE_TTL_MS = 20 * 1000;
 const readCache = new Map(); // tab -> { data, expiresAt }
 
@@ -204,6 +204,12 @@ const SCHEMAS = {
   // behavior, so per-rep doctor coverage/targets mean something. "" = doctor
   // is unassigned, matching every pre-existing row.
   Doctors: ["id", "name", "hospital", "area", "phone", "specialty", "tier", "registrationNumber", "address", "coordsLat", "coordsLng", "assignedRep"],
+  // Same pattern as Doctors (own roster, own tab, own entityType in
+  // Check-In), but unlike doctors a nutritionist/dietitian visit can end in
+  // an order — hence the extra discountRate, mirroring Clients.discountRate.
+  // "workplace" is Doctors' "hospital" renamed to fit a non-clinical
+  // practice (private clinic, gym, wellness center, etc.).
+  Nutritionists: ["id", "name", "workplace", "area", "phone", "specialty", "tier", "registrationNumber", "address", "coordsLat", "coordsLng", "assignedRep", "discountRate"],
   OutreachLog: ["id", "name", "date", "templateIndex"],
   Orders: ["id", "clientName", "visitId", "repName", "date", "items", "total", "status", "discountRate", "netTotal", "posEntered", "posEnteredAt", "posEnteredBy"],
   Reps: ["id", "name", "passcode", "email", "exportSheetId", "telegramChatId", "telegramLinkCode", "isSupervisor", "supplementStoresOnly", "medRepOnly"],

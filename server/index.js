@@ -1047,7 +1047,7 @@ app.post("/api/push/subscribe", async (req, res) => {
 // VisitComments, CompetitorProducts) is dropped entirely in favor of scoped,
 // on-demand endpoints fetched only by the specific view that needs them.
 const LIVE_BOOTSTRAP_TABS = ["Reps", "Offers", "Competitors", "PunchLog"];
-const REFERENCE_BOOTSTRAP_TABS = ["Products", "Clients", "Doctors", "ProductCatalog"];
+const REFERENCE_BOOTSTRAP_TABS = ["Products", "Clients", "Doctors", "Nutritionists", "ProductCatalog"];
 
 // See the comment above BOOTSTRAP_CACHE_TTL_MS's old location: this cache
 // lets concurrent sessions polling within the same few seconds share one
@@ -1107,7 +1107,7 @@ async function buildReferenceBootstrapPayload() {
     db.getAllRowsBatch(REFERENCE_BOOTSTRAP_TABS),
     db.getAllRows("StockMovement"),
   ]);
-  const { Products: products, Clients: clients, Doctors: doctors, ProductCatalog: productCatalog } = batch;
+  const { Products: products, Clients: clients, Doctors: doctors, Nutritionists: nutritionists, ProductCatalog: productCatalog } = batch;
   const movementIndex = buildMovementIndex(stockMovement);
   return {
     products: products.map((p) => ({
@@ -1117,6 +1117,7 @@ async function buildReferenceBootstrapPayload() {
     })),
     clients,
     doctors,
+    nutritionists,
     productCatalog,
   };
 }
@@ -1710,11 +1711,12 @@ app.post("/api/visits", async (req, res) => {
     // instead of three separate ones) since it's needed further down for
     // the rep's export-sheet id — a rep sitting on "Saving…" waiting for
     // this exact route feels every extra round trip here directly.
-    const { Clients: allClients, Doctors: allDoctors, Reps: allReps } = await db.getAllRowsBatch(["Clients", "Doctors", "Reps"]);
+    const { Clients: allClients, Doctors: allDoctors, Nutritionists: allNutritionists, Reps: allReps } = await db.getAllRowsBatch(["Clients", "Doctors", "Nutritionists", "Reps"]);
     const matchedClient = allClients.find((c) => c.name.toLowerCase().trim() === client.toLowerCase().trim());
     const matchedDoctor = allDoctors.find((d) => d.name.toLowerCase().trim() === client.toLowerCase().trim());
-    if (!matchedClient && !matchedDoctor) {
-      return res.status(400).json({ error: `"${client}" isn't in the system yet — add it in the Pharmacies or Doctors tab first.` });
+    const matchedNutritionist = allNutritionists.find((n) => n.name.toLowerCase().trim() === client.toLowerCase().trim());
+    if (!matchedClient && !matchedDoctor && !matchedNutritionist) {
+      return res.status(400).json({ error: `"${client}" isn't in the system yet — add it in the Pharmacies, Doctors, or Nutritionists/Dietitians tab first.` });
     }
     // Enforced here too, not just hidden in Check-In's toggle — a rep
     // restricted to supplement stores shouldn't be able to log a pharmacy
@@ -1726,8 +1728,9 @@ app.post("/api/visits", async (req, res) => {
       }
     }
     // Enforced here too, not just hidden in Check-In's toggle — a med rep
-    // restricted to doctors shouldn't be able to log a pharmacy or
-    // supplement store visit by calling the API directly either.
+    // restricted to doctors shouldn't be able to log a pharmacy, supplement
+    // store, or nutritionist/dietitian visit by calling the API directly
+    // either.
     if (req.medRepOnly && !matchedDoctor) {
       return res.status(403).json({ error: "Your account is limited to doctors." });
     }
@@ -1739,7 +1742,7 @@ app.post("/api/visits", async (req, res) => {
     // logic below does, and it's a live/drifting number by design; this is a
     // permanent historical record instead). Only meaningful for an in-person
     // visit against an entity that has its own saved coordinates.
-    const verifiedAgainst = matchedClient || matchedDoctor;
+    const verifiedAgainst = matchedClient || matchedDoctor || matchedNutritionist;
     let locationVerified = null;
     let distanceFromCustomerKm = null;
     if (isInPerson && coords?.lat && coords?.lng && verifiedAgainst?.coordsLat && verifiedAgainst?.coordsLng) {
@@ -1810,6 +1813,10 @@ app.post("/api/visits", async (req, res) => {
       // just leaves the original assignment alone with no separate alert.
       if (matchedDoctor && !matchedDoctor.assignedRep) {
         await db.updateRowAtPosition("Doctors", matchedDoctor._row, { ...matchedDoctor, assignedRep: req.repName });
+      }
+      // Same auto-claim behavior extended to Nutritionists/Dietitians.
+      if (matchedNutritionist && !matchedNutritionist.assignedRep) {
+        await db.updateRowAtPosition("Nutritionists", matchedNutritionist._row, { ...matchedNutritionist, assignedRep: req.repName });
       }
     }
 
@@ -2086,10 +2093,11 @@ app.post("/api/followups", async (req, res) => {
       status: "pending",
       visitId: visitId || "",
       createdAt: new Date().toISOString(),
-      // Doctors only — the rep's own stated goal for the *next* visit,
+      // Doctors and nutritionists/dietitians only (both get the same rich
+      // clinical flow) — the rep's own stated goal for the *next* visit,
       // carried forward so the Telegram reminder when it comes due can
       // remind them what they committed to, not just that a visit is due.
-      smartiObjective: entityType === "doctor" && smartiObjective ? String(smartiObjective).trim() : "",
+      smartiObjective: (entityType === "doctor" || entityType === "nutritionist") && smartiObjective ? String(smartiObjective).trim() : "",
       // My Schedule defaults — every check-in-created follow-up is
       // schedule-ready with no extra question asked during check-in: it
       // always participates in the default "1 day before" Telegram digest
@@ -2102,12 +2110,13 @@ app.post("/api/followups", async (req, res) => {
     };
     await db.appendRow("FollowUps", followUp);
 
-    // For doctors, pull whichever items the rep already tagged "Give next
-    // visit" in step 1 (Samples rows with status=next_visit) and stamp them
-    // onto the follow-up automatically — no separate question to the rep,
-    // since step 1's tagging already answered it. checkSampleReminders uses
-    // this to tell the manager what to have ready, 2 days out.
-    if (entityType === "doctor") {
+    // For doctors and nutritionists/dietitians, pull whichever items the rep
+    // already tagged "Give next visit" in step 1 (Samples rows with
+    // status=next_visit) and stamp them onto the follow-up automatically —
+    // no separate question to the rep, since step 1's tagging already
+    // answered it. checkSampleReminders uses this to tell the manager what
+    // to have ready, 2 days out.
+    if (entityType === "doctor" || entityType === "nutritionist") {
       const samples = await db.getAllRows("Samples");
       const matches = samples.filter((s) => s.doctorName.toLowerCase().trim() === entityName.toLowerCase().trim());
       const latestByProduct = new Map();
@@ -2316,6 +2325,54 @@ app.delete("/api/visits/:id", requireManager, async (req, res) => {
   }
 });
 
+// Lets a rep (or manager) discard a visit they're in the middle of logging,
+// or one they just saved and immediately regret — not just the manager-only
+// admin delete above. Cascade-deletes every row tied to this visit
+// (children first, the Visit row itself last) so a crash partway through
+// leaves the Visit row as an anchor a retried call can still find and finish
+// cleaning up from, rather than orphaning rows with no parent to locate them
+// by. A visit already gone (or never existed) is treated as success — from
+// the rep's perspective "it no longer exists" is exactly what Cancel wanted.
+async function deleteRowsByVisitId(tab, visitId) {
+  const rows = await db.getAllRows(tab);
+  for (const row of rows.filter((r) => r.visitId === visitId)) {
+    await db.deleteRowById(tab, row.id);
+  }
+}
+app.post("/api/visits/:id/cancel", async (req, res) => {
+  try {
+    const visits = await db.getAllRows("Visits");
+    const visit = visits.find((v) => v.id === req.params.id);
+    if (!visit) return res.json({ ok: true });
+    // Same ownership boundary as editing/deleting a visit elsewhere — a rep
+    // can discard their own just-logged visit, not someone else's.
+    if (req.role !== "manager" && visit.repName !== req.repName) {
+      return res.status(403).json({ error: "You can only cancel your own visits." });
+    }
+    const orders = (await db.getAllRows("Orders")).filter((o) => o.visitId === visit.id);
+    if (orders.some((o) => o.posEntered === "true")) {
+      return res.status(409).json({ error: "An order from this visit has already been entered in POS and can no longer be cancelled this way." });
+    }
+    await deleteRowsByVisitId("Samples", visit.id);
+    await deleteRowsByVisitId("FollowUps", visit.id);
+    await deleteRowsByVisitId("CompetitorSightings", visit.id);
+    await deleteRowsByVisitId("VisitComments", visit.id);
+    await deleteRowsByVisitId("Orders", visit.id);
+    await db.deleteRowById("Visits", visit.id);
+    if (visit.repName) {
+      notifyManagers({
+        title: "Visit cancelled",
+        body: `${visit.repName} cancelled a visit to ${visit.client} that was already logged.`,
+        url: "/",
+      });
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // A supervisor (or manager) can leave a note on any rep's visit — "you
 // should've asked about X here" — right from the Locations view where
 // they're already looking at who visited what. The visiting rep gets a push
@@ -2460,7 +2517,15 @@ app.post("/api/orders", async (req, res) => {
     if (discountRate === undefined || discountRate === null || discountRate === "") {
       const clients = await db.getAllRows("Clients");
       const matchedClient = clients.find((c) => c.name.toLowerCase().trim() === clientName.toLowerCase().trim());
-      appliedDiscountRate = matchedClient?.discountRate ? Number(matchedClient.discountRate) : 0;
+      if (matchedClient?.discountRate) {
+        appliedDiscountRate = Number(matchedClient.discountRate);
+      } else {
+        // Not a pharmacy/supplement store — check Nutritionists/Dietitians
+        // too, the only other entity type that can place orders.
+        const nutritionists = await db.getAllRows("Nutritionists");
+        const matchedNutritionist = nutritionists.find((n) => n.name.toLowerCase().trim() === clientName.toLowerCase().trim());
+        appliedDiscountRate = matchedNutritionist?.discountRate ? Number(matchedNutritionist.discountRate) : 0;
+      }
     }
     const netTotal = total * (1 - appliedDiscountRate / 100);
 
@@ -3661,6 +3726,62 @@ app.patch("/api/doctors/:id/complete-info", async (req, res) => {
   }
 });
 
+app.patch("/api/nutritionists/:id", requireManager, async (req, res) => {
+  try {
+    const patch = {};
+    if (req.body.assignedRep !== undefined) patch.assignedRep = req.body.assignedRep;
+    // discountRate is the one field Doctors never needed — it's what lets
+    // POST /api/orders resolve a rate for a nutritionist/dietitian order,
+    // same as Clients.discountRate does for pharmacies.
+    if (req.body.discountRate !== undefined) patch.discountRate = req.body.discountRate;
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
+    const nutritionists = await db.getAllRows("Nutritionists");
+    const previous = nutritionists.find((n) => n.id === req.params.id);
+    if (!previous) return res.status(404).json({ error: "Nutritionist/dietitian not found" });
+    await db.updateRowById("Nutritionists", req.params.id, patch);
+    if (patch.assignedRep !== undefined && (previous.assignedRep || "") !== patch.assignedRep) {
+      await writeAuditLog({
+        entityType: "customer_assignment", entityId: req.params.id, field: "assignedRep",
+        oldValue: previous.assignedRep, newValue: patch.assignedRep, changedBy: req.repName || "Manager",
+      });
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+const NUTRITIONIST_FILLABLE_FIELDS = ["name", "phone", "address", "registrationNumber", "area", "workplace", "specialty"];
+app.patch("/api/nutritionists/:id/complete-info", async (req, res) => {
+  try {
+    if (!req.repName) return res.status(403).json({ error: "Reps only." });
+    const nutritionists = await db.getAllRows("Nutritionists");
+    const existing = nutritionists.find((n) => n.id === req.params.id);
+    if (!existing) return res.status(404).json({ error: "Nutritionist/dietitian not found" });
+    const patch = {};
+    for (const field of NUTRITIONIST_FILLABLE_FIELDS) {
+      if (req.body[field] === undefined) continue;
+      const value = String(req.body[field]).trim();
+      if (value) patch[field] = value;
+    }
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
+    const oldName = existing.name;
+    await db.updateRowById("Nutritionists", existing.id, patch);
+    if (patch.name && patch.name !== oldName) {
+      // Unlike doctors, nutritionists/dietitians can place orders — a rename
+      // must also repoint Orders.clientName or historical orders would
+      // silently stop showing up under the corrected name.
+      await renameEntityAcrossHistory(oldName, patch.name, { includeOrders: true });
+      await writeAuditLog({ entityType: "nutritionist_rename", entityId: existing.id, field: "name", oldValue: oldName, newValue: patch.name, changedBy: req.repName, reason: "Corrected via Edit info" });
+    }
+    res.json({ ok: true, patch });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get("/api/reps", requireManager, async (req, res) => {
   try {
     const reps = await db.getAllRows("Reps");
@@ -4595,6 +4716,81 @@ app.post("/api/doctors", async (req, res) => {
   }
 });
 
+app.post("/api/nutritionists", async (req, res) => {
+  try {
+    const { name, workplace, area, phone, specialty, tier, registrationNumber, address, coordsLat, coordsLng, assignedRep, discountRate } = req.body;
+    if (!name) return res.status(400).json({ error: "name is required" });
+    const coords = coordsLat && coordsLng ? { lat: coordsLat, lng: coordsLng } : await geocodeAddress(address);
+    const resolvedAssignedRep = req.repName ? req.repName : (assignedRep || "");
+    const nutritionist = {
+      id: `nut${crypto.randomUUID()}`,
+      name,
+      workplace: workplace || "",
+      area: area || "",
+      phone: phone || "",
+      specialty: specialty || "",
+      tier: tier || "B",
+      registrationNumber: registrationNumber || "",
+      address: address || "",
+      coordsLat: coords ? coords.lat : "",
+      coordsLng: coords ? coords.lng : "",
+      assignedRep: resolvedAssignedRep,
+      discountRate: discountRate || "",
+    };
+    await db.appendRow("Nutritionists", nutritionist);
+    res.json(nutritionist);
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/nutritionists/import-bulk", requireManager, async (req, res) => {
+  try {
+    const { toAdd } = req.body;
+    const addList = Array.isArray(toAdd) ? toAdd : [];
+    const existing = await db.getAllRows("Nutritionists");
+    const existingNames = new Set(existing.map((n) => n.name.toLowerCase().trim()));
+    const seenInRequest = new Set();
+
+    const newNutritionists = [];
+    let skipped = 0;
+    addList.filter((n) => n.name).forEach((n) => {
+      const key = String(n.name).toLowerCase().trim();
+      if (existingNames.has(key) || seenInRequest.has(key)) { skipped++; return; }
+      seenInRequest.add(key);
+      newNutritionists.push({
+        id: `nut${crypto.randomUUID()}`,
+        name: String(n.name).trim(),
+        workplace: n.workplace || "",
+        area: n.area || "",
+        phone: n.phone || "",
+        specialty: n.specialty || "",
+        tier: n.tier || "B",
+        registrationNumber: n.registrationNumber || "",
+        address: n.address || "",
+      });
+    });
+
+    if (newNutritionists.length > 0) await db.appendRows("Nutritionists", newNutritionists);
+
+    res.json({ ok: true, added: newNutritionists.length, skipped });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/nutritionists/:id", async (req, res) => {
+  try {
+    await db.deleteRowById("Nutritionists", req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/doctors/import-bulk", requireManager, async (req, res) => {
   try {
     const { toAdd } = req.body;
@@ -4644,10 +4840,13 @@ app.delete("/api/doctors/:id", async (req, res) => {
   }
 });
 
-// Same idea as /api/clients/visit-stats: DoctorsView needs last-visit and
-// the "give next visit" sample badge per doctor currently on screen, in one
-// scan instead of one request per row.
-app.post("/api/doctors/visit-stats", async (req, res) => {
+// Same idea as /api/clients/visit-stats: DoctorsView/NutritionistsView both
+// need last-visit and the "give next visit" sample badge per row currently
+// on screen, in one scan instead of one request per row. Entity-name-generic
+// already (keys purely off whatever names are passed in), so one handler is
+// registered under both /api/doctors/visit-stats and
+// /api/nutritionists/visit-stats rather than duplicating it.
+async function handleEntityVisitStats(req, res) {
   try {
     const names = Array.isArray(req.body.names) ? req.body.names.map((n) => String(n).toLowerCase().trim()) : [];
     if (names.length === 0) return res.json({ stats: {} });
@@ -4678,7 +4877,9 @@ app.post("/api/doctors/visit-stats", async (req, res) => {
     logErr(e);
     res.status(500).json({ error: e.message });
   }
-});
+}
+app.post("/api/doctors/visit-stats", handleEntityVisitStats);
+app.post("/api/nutritionists/visit-stats", handleEntityVisitStats);
 
 // ---------- Doctor Memory / Timeline (doctor-visit redesign) ----------
 // Builds the "Last Conversation" card shown before a visit starts. Falls
@@ -4797,6 +4998,20 @@ app.get("/api/doctors/:name/profile", async (req, res) => {
     const doctor = doctors.find((d) => d.name.toLowerCase().trim() === name);
     if (!doctor) return res.status(404).json({ error: "Doctor not found." });
     res.json(await buildEntityProfile(doctor, "doctor", name));
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/nutritionists/:name/profile", async (req, res) => {
+  try {
+    const name = String(req.params.name || "").toLowerCase().trim();
+    if (!name) return res.status(400).json({ error: "Nutritionist/dietitian name is required." });
+    const nutritionists = await db.getAllRows("Nutritionists");
+    const nutritionist = nutritionists.find((n) => n.name.toLowerCase().trim() === name);
+    if (!nutritionist) return res.status(404).json({ error: "Nutritionist/dietitian not found." });
+    res.json(await buildEntityProfile(nutritionist, "nutritionist", name));
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });

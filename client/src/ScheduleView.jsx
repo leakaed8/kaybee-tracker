@@ -135,7 +135,7 @@ function ActivityRow({ row, expanded, onToggle, onComplete, onReschedule, onCanc
   );
 }
 
-function AddMeetingForm({ clients, doctors, onClose, onSaved }) {
+function AddMeetingForm({ clients, doctors, nutritionists = [], onClose, onSaved }) {
   const [contactQuery, setContactQuery] = useState("");
   const [useFreeText, setUseFreeText] = useState(false);
   const [date, setDate] = useState(todayBeirutStr());
@@ -146,7 +146,7 @@ function AddMeetingForm({ clients, doctors, onClose, onSaved }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  const contactOptions = useMemo(() => [...clients, ...doctors], [clients, doctors]);
+  const contactOptions = useMemo(() => [...clients, ...doctors, ...nutritionists], [clients, doctors, nutritionists]);
   const matchedContact = contactOptions.find((c) => c.name.toLowerCase().trim() === contactQuery.toLowerCase().trim());
 
   const save = async () => {
@@ -158,7 +158,9 @@ function AddMeetingForm({ clients, doctors, onClose, onSaved }) {
     try {
       await api.createMeeting({
         entityName: contactQuery.trim(),
-        entityType: matchedContact ? (matchedContact.type || (doctors.includes(matchedContact) ? "doctor" : "pharmacy")) : "other",
+        entityType: matchedContact
+          ? (matchedContact.type || (doctors.includes(matchedContact) ? "doctor" : nutritionists.includes(matchedContact) ? "nutritionist" : "pharmacy"))
+          : "other",
         date,
         time,
         purpose,
@@ -326,7 +328,7 @@ function MonthCalendar({ monthKey, rowsByDate, onPickDate, todayStr }) {
   );
 }
 
-export function ScheduleView({ role, repName, isSupervisor, repNames, clients, doctors }) {
+export function ScheduleView({ role, repName, isSupervisor, repNames, clients, doctors, nutritionists = [] }) {
   const canSeeTeam = role === "manager" || isSupervisor;
   const [viewingRep, setViewingRep] = useState(canSeeTeam ? "" : repName);
   const [monthKey, setMonthKey] = useState(todayBeirutStr().slice(0, 7));
@@ -503,6 +505,7 @@ export function ScheduleView({ role, repName, isSupervisor, repNames, clients, d
         <AddMeetingForm
           clients={clients}
           doctors={doctors}
+          nutritionists={nutritionists}
           onClose={() => setShowAddMeeting(false)}
           onSaved={() => { setShowAddMeeting(false); load(); }}
         />

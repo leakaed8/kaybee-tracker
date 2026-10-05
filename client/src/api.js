@@ -90,6 +90,8 @@ export const api = {
   // brief (lastVisit/memory) + full Timeline. Distinct from the batch
   // getDoctorVisitStats above, which is only for DoctorsView's list rows.
   getDoctorProfile: (name) => request(`/doctors/${encodeURIComponent(name)}/profile`),
+  getNutritionistVisitStats: (names) => request("/nutritionists/visit-stats", { method: "POST", body: JSON.stringify({ names }) }),
+  getNutritionistProfile: (name) => request(`/nutritionists/${encodeURIComponent(name)}/profile`),
   // Pharmacy/supplement-store equivalent (Manager Performance Management
   // redesign) — same shape as getDoctorProfile, used by ClientsView's
   // History-toggle upgrade.
@@ -105,6 +107,7 @@ export const api = {
   addVisit: (visit) => request("/visits", { method: "POST", body: JSON.stringify(visit) }),
   updateVisit: (id, patch) => request(`/visits/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   removeVisit: (id) => request(`/visits/${id}`, { method: "DELETE" }),
+  cancelVisit: (id) => request(`/visits/${id}/cancel`, { method: "POST" }),
   punch: (type, coords) => request("/punch", { method: "POST", body: JSON.stringify({ type, coords }) }),
   createOrder: (order) => request("/orders", { method: "POST", body: JSON.stringify(order) }),
   updateOrder: (id, patch) => request(`/orders/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
@@ -140,6 +143,10 @@ export const api = {
   addDoctor: (doctor) => request("/doctors", { method: "POST", body: JSON.stringify(doctor) }),
   importDoctorsBulk: (payload) => request("/doctors/import-bulk", { method: "POST", body: JSON.stringify(payload) }),
   removeDoctor: (id) => request(`/doctors/${id}`, { method: "DELETE" }),
+  completeNutritionistInfo: (id, patch) => request(`/nutritionists/${id}/complete-info`, { method: "PATCH", body: JSON.stringify(patch) }),
+  addNutritionist: (nutritionist) => request("/nutritionists", { method: "POST", body: JSON.stringify(nutritionist) }),
+  importNutritionistsBulk: (payload) => request("/nutritionists/import-bulk", { method: "POST", body: JSON.stringify(payload) }),
+  removeNutritionist: (id) => request(`/nutritionists/${id}`, { method: "DELETE" }),
   getReps: () => request("/reps"),
   addRep: (rep) => request("/reps", { method: "POST", body: JSON.stringify(rep) }),
   updateRep: (id, patch) => request(`/reps/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
@@ -227,6 +234,8 @@ export const api = {
   getRepTargets: () => request("/rep-targets"),
   saveRepTarget: (repName, patch) => request(`/rep-targets/${encodeURIComponent(repName)}`, { method: "PUT", body: JSON.stringify(patch) }),
   assignDoctorRep: (id, assignedRep) => request(`/doctors/${id}`, { method: "PATCH", body: JSON.stringify({ assignedRep }) }),
+  assignNutritionistRep: (id, assignedRep) => request(`/nutritionists/${id}`, { method: "PATCH", body: JSON.stringify({ assignedRep }) }),
+  updateNutritionistDiscount: (id, discountRate) => request(`/nutritionists/${id}`, { method: "PATCH", body: JSON.stringify({ discountRate }) }),
   getFollowUps: (params) => request(`/followups${qs(params)}`),
   updateFollowUp: (id, patch) => request(`/followups/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
 

@@ -12,7 +12,7 @@ import {
   MapPin, Package, LayoutDashboard, Settings, Plus, Send, Clock, AlertTriangle,
   TrendingDown, TrendingUp, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
   Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar as RadarIcon, Search, BookOpen,
-  GraduationCap, Boxes, History, Brain, ClipboardList, CheckCircle2, ChevronDown, Phone, Bell, CalendarDays,
+  GraduationCap, Boxes, History, Brain, ClipboardList, CheckCircle2, ChevronDown, Phone, Bell, CalendarDays, Apple,
 } from "lucide-react";
 import { api } from "./api.js";
 import { TrainingVideosView, TrainingStudiesView } from "./TrainingView.jsx";
@@ -149,6 +149,7 @@ export default function App() {
   const [products, setProducts] = useState(() => loadReferenceCache().products || []);
   const [clients, setClients] = useState(() => loadReferenceCache().clients || []);
   const [doctors, setDoctors] = useState(() => loadReferenceCache().doctors || []);
+  const [nutritionists, setNutritionists] = useState(() => loadReferenceCache().nutritionists || []);
   const [productCatalog, setProductCatalog] = useState(() => loadReferenceCache().productCatalog || []);
   // "Live" tier — small, polled every 30s as before.
   const [repNames, setRepNames] = useState([]);
@@ -208,12 +209,14 @@ export default function App() {
       const products = data.products || [];
       const clients = data.clients || [];
       const doctors = data.doctors || [];
+      const nutritionists = data.nutritionists || [];
       const productCatalog = data.productCatalog || [];
       setProducts(products);
       setClients(clients);
       setDoctors(doctors);
+      setNutritionists(nutritionists);
       setProductCatalog(productCatalog);
-      saveReferenceCache({ products, clients, doctors, productCatalog });
+      saveReferenceCache({ products, clients, doctors, nutritionists, productCatalog });
     } catch (e) {
       setLoadError(e.message);
     }
@@ -277,6 +280,14 @@ export default function App() {
     pending.push(visit);
     savePendingVisits(pending);
     setPendingVisitCount(pending.length);
+  }, []);
+
+  // Removes a visit that was queued offline (never seen by the server) so
+  // Cancel can discard it — the server has nothing to clean up here.
+  const cancelPendingVisit = useCallback((localKey) => {
+    const remaining = loadPendingVisits().filter((v) => v.localKey !== localKey);
+    savePendingVisits(remaining);
+    setPendingVisitCount(remaining.length);
   }, []);
 
   const queueOrderOffline = useCallback((order) => {
@@ -391,6 +402,7 @@ export default function App() {
   const addVisit = (visit) => withSync(() => api.addVisit(visit), { touchesReference: true }); // can silently set a client's assignedRep server-side
   const updateVisit = (id, patch) => withSync(() => api.updateVisit(id, patch));
   const removeVisit = (id) => withSync(() => api.removeVisit(id));
+  const cancelSavedVisit = (id) => withSync(() => api.cancelVisit(id));
   const punch = (type, coords) => withSync(() => api.punch(type, coords));
   const createOrder = (order) => withSync(() => api.createOrder(order));
   const updateOrder = (id, patch) => withSync(() => api.updateOrder(id, patch));
@@ -409,6 +421,11 @@ export default function App() {
   const addDoctor = (doctor) => withSync(() => api.addDoctor(doctor), { touchesReference: true });
   const removeDoctor = (id) => withSync(() => api.removeDoctor(id), { touchesReference: true });
   const bulkImportDoctors = (payload) => withSync(() => api.importDoctorsBulk(payload), { touchesReference: true });
+  const completeNutritionistInfo = (id, patch) => withSync(() => api.completeNutritionistInfo(id, patch), { touchesReference: true });
+  const addNutritionist = (nutritionist) => withSync(() => api.addNutritionist(nutritionist), { touchesReference: true });
+  const removeNutritionist = (id) => withSync(() => api.removeNutritionist(id), { touchesReference: true });
+  const bulkImportNutritionists = (payload) => withSync(() => api.importNutritionistsBulk(payload), { touchesReference: true });
+  const updateNutritionistDiscount = (id, discountRate) => withSync(() => api.updateNutritionistDiscount(id, discountRate), { touchesReference: true });
   const logOutreach = (entry) => withSync(() => api.logOutreach(entry));
   const deleteOrder = (id) => withSync(() => api.deleteOrder(id));
   const requestDeleteOrder = (id) => withSync(() => api.requestDeleteOrder(id));
@@ -548,6 +565,11 @@ export default function App() {
         {!supplementStoresOnly && !medRepOnly && <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />}
         {!medRepOnly && <TabBtn active={tab === "supplementStores"} onClick={() => setTab("supplementStores")} icon={<Boxes size={15} />} label="Supplement Stores" />}
         {!isSupervisor && !supplementStoresOnly && <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />}
+        {/* Same gating as Doctors, plus excluded for medRepOnly — a med rep
+            restricted to doctors-only shouldn't gain a second detailing
+            category (consistent with Check-In's entity-type toggle, which
+            already hides nutritionist from medRepOnly reps too). */}
+        {!isSupervisor && !supplementStoresOnly && !medRepOnly && <TabBtn active={tab === "nutritionists"} onClick={() => setTab("nutritionists")} icon={<Apple size={15} />} label="Nutritionists/Dietitians" />}
         {(role === "manager" || role === "rep") && <TabBtn active={tab === "cadence"} onClick={() => setTab("cadence")} icon={<History size={15} />} label="Visit Cadence" />}
         {/* Knowledge/Product Expert/Training are manager-only now — reference
             and training tools, not required for day-to-day check-ins, so
@@ -584,6 +606,7 @@ export default function App() {
               <CheckInView
                 clients={clients}
                 doctors={doctors}
+                nutritionists={nutritionists}
                 products={products}
                 offers={offers}
                 repName={repName}
@@ -592,6 +615,8 @@ export default function App() {
                 medRepOnly={medRepOnly}
                 onAddVisit={addVisit}
                 onUpdateVisit={updateVisit}
+                onCancelSavedVisit={cancelSavedVisit}
+                onCancelPendingVisit={cancelPendingVisit}
                 onCreateOrder={createOrder}
                 onUpdateOrder={updateOrder}
                 onRequestDeleteOrder={requestDeleteOrder}
@@ -613,6 +638,7 @@ export default function App() {
                 repNames={repNames}
                 clients={clients}
                 doctors={doctors}
+                nutritionists={nutritionists}
               />
             )}
             {tab === "stock" && <StockView products={sorted} />}
@@ -662,6 +688,17 @@ export default function App() {
                 onCompleteInfo={completeDoctorInfo}
               />
             )}
+            {tab === "nutritionists" && !isSupervisor && !supplementStoresOnly && !medRepOnly && (
+              <NutritionistsView
+                nutritionists={nutritionists}
+                role={role}
+                onAdd={addNutritionist}
+                onRemove={removeNutritionist}
+                onBulkImport={bulkImportNutritionists}
+                onCompleteInfo={completeNutritionistInfo}
+                onUpdateDiscount={updateNutritionistDiscount}
+              />
+            )}
             {tab === "cadence" && (role === "manager" || role === "rep") && (
               <VisitCadenceView role={role} isSupervisor={isSupervisor} repNames={repNames} />
             )}
@@ -684,6 +721,7 @@ export default function App() {
                 products={products}
                 offers={offers}
                 clients={clients}
+                nutritionists={nutritionists}
                 onDelete={deleteOrder}
                 onApproveDelete={approveDeleteOrder}
                 onDenyDelete={denyDeleteOrder}
@@ -705,6 +743,7 @@ export default function App() {
               <PerformanceView
                 clients={clients}
                 doctors={doctors}
+                nutritionists={nutritionists}
                 repNames={repNames}
                 monthlyVisitTarget={settings.monthlyVisitTarget}
                 setMonthlyVisitTarget={(v) => updateSettingsField({ monthlyVisitTarget: v })}
@@ -1443,6 +1482,60 @@ function BackStepButton({ onClick }) {
   );
 }
 
+// Lets a rep discard a visit at any point while logging it — before
+// anything's saved (pure client reset), while queued offline (removed from
+// the local queue), or already saved to the sheet (cascade-deleted
+// server-side, see POST /api/visits/:id/cancel). Same inline boolean-confirm
+// pattern used everywhere else in this app (e.g. ProductRow's "Remove this
+// product?" above) rather than a modal — there's only ever one visit in
+// progress here.
+function CancelVisitButton({ onConfirm, disabled }) {
+  const [confirming, setConfirming] = useState(false);
+  const [canceling, setCanceling] = useState(false);
+  const [error, setError] = useState("");
+
+  if (confirming) {
+    return (
+      <div style={{ marginBottom: 14, padding: 10, background: "#FBF3F0", borderRadius: 8, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <span style={{ fontSize: 12.5, color: "#7A3B3B" }}>Discard this visit? {error && <span style={{ color: "#B33A3A" }}> {error}</span>}</span>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            type="button"
+            disabled={canceling}
+            onClick={async () => {
+              setError("");
+              setCanceling(true);
+              try {
+                await onConfirm();
+              } catch (e) {
+                setError(e?.message || "Couldn't discard this visit.");
+              } finally {
+                setCanceling(false);
+              }
+            }}
+            style={{ fontSize: 12, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 6, padding: "5px 10px" }}
+          >
+            {canceling ? "Discarding…" : "Yes, discard"}
+          </button>
+          <button type="button" disabled={canceling} onClick={() => { setConfirming(false); setError(""); }} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "5px 10px" }}>
+            Keep editing
+          </button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => setConfirming(true)}
+      style={{ fontSize: 12, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "5px 10px", marginBottom: 14, cursor: "pointer" }}
+    >
+      Cancel visit
+    </button>
+  );
+}
+
 // ---------- Pre-Call / Post-Call field checklists (doctor visits) ----------
 // Pure reference/self-check tools for the rep, not saved anywhere — the
 // checkbox state exists only while the modal is open, so re-opening always
@@ -1847,7 +1940,7 @@ function DoctorHistoryModal({ visits, onClose }) {
 }
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ clients, doctors, products, offers, repName, isSupervisor, supplementStoresOnly, medRepOnly, onAddVisit, onUpdateVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, onQueueOrderOffline, pendingOrderCount, onAttachPendingOrder, competitors, myLastPunch }) {
+function CheckInView({ clients, doctors, nutritionists = [], products, offers, repName, isSupervisor, supplementStoresOnly, medRepOnly, onAddVisit, onUpdateVisit, onCancelSavedVisit, onCancelPendingVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, onQueueOrderOffline, pendingOrderCount, onAttachPendingOrder, competitors, myLastPunch }) {
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
   // Doctor-visit self-coaching tool — pure client-side reminders, nothing
@@ -1871,8 +1964,17 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   // most branches below just check "is this a doctor" rather than
   // special-casing every non-doctor type individually.
   const isDoctorEntity = entityType === "doctor";
-  const entityTypeLabel = entityType === "doctor" ? "Doctor" : entityType === "supplement_store" ? "Supplement store" : "Pharmacy";
-  const entityTabLabel = entityType === "doctor" ? "Doctors" : entityType === "supplement_store" ? "Supplement Stores" : "Pharmacies";
+  // Nutritionists/Dietitians get the SAME rich clinical flow doctors do
+  // (pre-call objective, during-call reaction/concern/commitment, post-call
+  // close-visit fields) — but unlike a real doctor, a nutritionist visit can
+  // end in an order. isDoctorStyleEntity is used everywhere the intent is
+  // "show the clinical flow"; isDoctorEntity stays scoped to things that are
+  // specifically about an actual doctor (med-rep-only restriction, no
+  // orders at all, etc.) and is never widened.
+  const isNutritionistEntity = entityType === "nutritionist";
+  const isDoctorStyleEntity = isDoctorEntity || isNutritionistEntity;
+  const entityTypeLabel = entityType === "doctor" ? "Doctor" : entityType === "supplement_store" ? "Supplement store" : entityType === "nutritionist" ? "Nutritionist/Dietitian" : "Pharmacy";
+  const entityTabLabel = entityType === "doctor" ? "Doctors" : entityType === "supplement_store" ? "Supplement Stores" : entityType === "nutritionist" ? "Nutritionists/Dietitians" : "Pharmacies";
   const [client, setClient] = useState("");
   const [notes, setNotes] = useState("");
   const [coords, setCoords] = useState(null);
@@ -1906,13 +2008,13 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   // visit) is preserved byte-for-byte on that branch.
   const canGoBack = stepHistoryRef.current.length > 0 && (
     stepHistoryRef.current[stepHistoryRef.current.length - 1] !== "checkin" ||
-    (isDoctorEntity ? true : Boolean(lastVisit && lastVisit.id && !lastVisit.pending))
+    (isDoctorStyleEntity ? true : Boolean(lastVisit && lastVisit.id && !lastVisit.pending))
   );
   const [editingSavedVisit, setEditingSavedVisit] = useState(false);
   const goBack = () => {
     if (!canGoBack) return;
     const prev = stepHistoryRef.current.pop();
-    if (prev === "checkin" && !isDoctorEntity) setEditingSavedVisit(true);
+    if (prev === "checkin" && !isDoctorStyleEntity) setEditingSavedVisit(true);
     setStep(prev);
   };
   const [followUpStatus, setFollowUpStatus] = useState(null); // null | "set" | "stopped"
@@ -2040,28 +2142,30 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   // the same Clients list (a "type" field tells them apart), so each is
   // searched within just its own slice, never mixed with the other.
   const clientsOfCurrentType = clients.filter((c) => (c.type || "pharmacy") === entityType);
-  const nameOptionsSource = isDoctorEntity ? doctors : clientsOfCurrentType;
+  const nameOptionsSource = isDoctorEntity ? doctors : isNutritionistEntity ? nutritionists : clientsOfCurrentType;
 
   // Pharmacies/supplement stores are auto-assigned to whichever rep logs
   // their first visit. If this one already belongs to someone else, flag
   // it before the rep submits — visiting another rep's account is
   // sometimes legitimate (covering, shared territory) but should never
   // happen silently.
-  const matchedClient = !isDoctorEntity
+  const matchedClient = !isDoctorStyleEntity
     ? clientsOfCurrentType.find((c) => c.name.toLowerCase().trim() === client.toLowerCase().trim())
     : null;
   const otherRepWarning = matchedClient && matchedClient.assignedRep && matchedClient.assignedRep !== repName
     ? matchedClient.assignedRep
     : null;
 
-  // A visit must point at a real Pharmacies/Doctors/Supplement Stores
-  // record, not just whatever string got typed — otherwise it logs
-  // against a name with no tier, address, or assigned rep behind it. New
-  // entities get added properly (with full details) via their own tab,
-  // not invented here.
-  const matchedEntity = !isDoctorEntity
-    ? matchedClient
-    : doctors.find((d) => d.name.toLowerCase().trim() === client.toLowerCase().trim());
+  // A visit must point at a real Pharmacies/Doctors/Nutritionists/
+  // Supplement Stores record, not just whatever string got typed —
+  // otherwise it logs against a name with no tier, address, or assigned rep
+  // behind it. New entities get added properly (with full details) via
+  // their own tab, not invented here.
+  const matchedEntity = isDoctorEntity
+    ? doctors.find((d) => d.name.toLowerCase().trim() === client.toLowerCase().trim())
+    : isNutritionistEntity
+    ? nutritionists.find((n) => n.name.toLowerCase().trim() === client.toLowerCase().trim())
+    : matchedClient;
   const unknownEntity = client.trim().length > 0 && !matchedEntity;
 
   // The last couple of visits to whoever's just been picked — a memory
@@ -2071,23 +2175,26 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
   // history held in state — the server already sorts newest-first.
   const [recentVisitsForEntity, setRecentVisitsForEntity] = useState([]);
   useEffect(() => {
-    if (isDoctorEntity || !matchedEntity) { setRecentVisitsForEntity([]); return; }
+    if (isDoctorStyleEntity || !matchedEntity) { setRecentVisitsForEntity([]); return; }
     api.getVisits({ client: matchedEntity.name, limit: 3 })
       .then((data) => setRecentVisitsForEntity(data.visits || []))
       .catch(() => setRecentVisitsForEntity([]));
-  }, [matchedEntity?.name, isDoctorEntity]);
+  }, [matchedEntity?.name, isDoctorStyleEntity]);
 
   // Doctor-visit redesign: the richer Pre-Call brief replaces the plain
-  // "last 3 visits" list above for doctors only — one combined read
-  // (lastVisit + memory + timeline) instead of a raw visits fetch.
+  // "last 3 visits" list above for doctors AND nutritionists/dietitians
+  // (same clinical flow) — one combined read (lastVisit + memory + timeline)
+  // instead of a raw visits fetch. Which profile endpoint to call still
+  // depends on the real entity type, not just "is this doctor-style."
   useEffect(() => {
-    if (!isDoctorEntity || !matchedEntity) { setDoctorProfile(null); return; }
+    if (!isDoctorStyleEntity || !matchedEntity) { setDoctorProfile(null); return; }
     setDoctorProfileLoading(true);
-    api.getDoctorProfile(matchedEntity.name)
+    const fetchProfile = isDoctorEntity ? api.getDoctorProfile : api.getNutritionistProfile;
+    fetchProfile(matchedEntity.name)
       .then(setDoctorProfile)
       .catch(() => setDoctorProfile(null))
       .finally(() => setDoctorProfileLoading(false));
-  }, [matchedEntity?.name, isDoctorEntity]);
+  }, [matchedEntity?.name, isDoctorStyleEntity, isDoctorEntity]);
 
   // Pre-fills the "postcall" step's "What did I learn?" field from the
   // during-call doctor-insight quote, the first time that step is reached
@@ -2282,7 +2389,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
         entityType,
         presetKey,
         visitId: targetVisit.id,
-        smartiObjective: isDoctorEntity ? smartiObjective.trim() : "",
+        smartiObjective: isDoctorStyleEntity ? smartiObjective.trim() : "",
       });
       setFollowUpStatus("set");
       setStep("done");
@@ -2308,7 +2415,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
         entityType,
         days,
         visitId: targetVisit.id,
-        smartiObjective: isDoctorEntity ? smartiObjective.trim() : "",
+        smartiObjective: isDoctorStyleEntity ? smartiObjective.trim() : "",
       });
       setFollowUpStatus("set");
       setStep("done");
@@ -2366,6 +2473,16 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
       });
       setLastVisit(created);
       loadTodayVisits();
+      // Unlike a doctor visit, a nutritionist/dietitian visit isn't finished
+      // once saved — it can still take an order. Follow-up scheduling is
+      // deferred to the shared "followup" step after order/sample, instead
+      // of being decided here (showStopFollowUp/followUpChoice are never
+      // set for this entity type — that section is hidden in postcall, see
+      // above).
+      if (isNutritionistEntity) {
+        goToStep("orderPrompt");
+        return;
+      }
       if (showStopFollowUp) {
         await stopFollowUp(created);
       } else if (followUpChoice === "custom") {
@@ -2400,8 +2517,8 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
     try {
       const created = await onAddVisit({
         client, notes, coords: null, mentionedItems: [], interactionType,
-        callOutcome: isDoctorEntity ? callOutcome : "",
-        commitment: isDoctorEntity ? commitment : "",
+        callOutcome: isDoctorStyleEntity ? callOutcome : "",
+        commitment: isDoctorStyleEntity ? commitment : "",
       });
       setLastVisit(created);
       loadTodayVisits();
@@ -2446,16 +2563,42 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
     setStep("checkin");
   };
 
+  // Discards whatever visit is currently in progress, wherever in the
+  // wizard the rep is — three cases, same reset at the end either way:
+  // nothing saved yet (pure client reset), queued offline (drop it from the
+  // local queue), or already saved (cascade-deleted server-side first).
+  const cancelCurrentVisit = async () => {
+    if (lastVisit?.pending) {
+      onCancelPendingVisit(lastVisit.localKey);
+    } else if (lastVisit?.id) {
+      await onCancelSavedVisit(lastVisit.id);
+    }
+    startNewVisit();
+  };
+
   // Pharmacies and supplement stores place orders, so they get
   // order -> sample -> follow-up (byte-identical to before this redesign).
   // Doctors: pre-call + during-call both live inside "checkin" (gated by
   // visitStarted), then a single "postcall" step (Close Visit + Save Visit)
   // replaces the old bare "followup" step — nothing is saved until Save
   // Visit there, so there's no separate post-save follow-up step to show.
-  const STEP_KEYS = !isDoctorEntity
+  // Nutritionists/dietitians get the same pre-call/during-call/postcall
+  // clinical flow as doctors, but — since they CAN place orders — postcall's
+  // Save continues into the same orderPrompt -> order/sample -> followup
+  // steps pharmacies use, instead of finishing on the spot.
+  const STEP_KEYS = isNutritionistEntity
+    ? ["checkin", "postcall", "orderPrompt", "order", "sample", "followup"]
+    : !isDoctorEntity
     ? ["checkin", "orderPrompt", "order", "sample", "followup"]
     : ["checkin", "postcall"];
-  const STEP_INFO = !isDoctorEntity ? {
+  const STEP_INFO = isNutritionistEntity ? {
+    checkin: { n: 1, title: "Log the visit" },
+    postcall: { n: 2, title: "Close the visit" },
+    orderPrompt: { n: 3, title: "Did they place an order?" },
+    order: { n: 4, title: "Order details" },
+    sample: { n: 5, title: "Did you give a sample?" },
+    followup: { n: 6, title: "Schedule a follow-up" },
+  } : !isDoctorEntity ? {
     checkin: { n: 1, title: "Log the visit" },
     orderPrompt: { n: 2, title: "Did they place an order?" },
     order: { n: 3, title: "Order details" },
@@ -2525,6 +2668,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               <div key={s} style={{ flex: 1, height: 4, borderRadius: 2, background: STEP_INFO[s].n <= STEP_INFO[step].n ? "#4C7A5E" : "#E5DFD3" }} />
             ))}
           </div>
+          {(client || lastVisit) && <CancelVisitButton onConfirm={cancelCurrentVisit} />}
         </>
       )}
 
@@ -2545,24 +2689,30 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
             </div>
           )}
           {!editingSavedVisit && !supplementStoresOnly && !medRepOnly && (
-            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
               <button onClick={() => { setEntityType("pharmacy"); setClient(""); }} style={{
-                flex: 1, padding: "8px 14px", borderRadius: 8, border: entityType === "pharmacy" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+                flex: 1, minWidth: 110, padding: "8px 14px", borderRadius: 8, border: entityType === "pharmacy" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
                 background: entityType === "pharmacy" ? "#4C7A5E" : "#fff", color: entityType === "pharmacy" ? "#FAF7F2" : "#1F2A24",
               }}>
                 Pharmacy
               </button>
               <button onClick={() => { setEntityType("supplement_store"); setClient(""); }} style={{
-                flex: 1, padding: "8px 14px", borderRadius: 8, border: entityType === "supplement_store" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+                flex: 1, minWidth: 110, padding: "8px 14px", borderRadius: 8, border: entityType === "supplement_store" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
                 background: entityType === "supplement_store" ? "#4C7A5E" : "#fff", color: entityType === "supplement_store" ? "#FAF7F2" : "#1F2A24",
               }}>
                 Supplement store
               </button>
               <button onClick={() => { setEntityType("doctor"); setClient(""); }} style={{
-                flex: 1, padding: "8px 14px", borderRadius: 8, border: entityType === "doctor" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+                flex: 1, minWidth: 110, padding: "8px 14px", borderRadius: 8, border: entityType === "doctor" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
                 background: entityType === "doctor" ? "#4C7A5E" : "#fff", color: entityType === "doctor" ? "#FAF7F2" : "#1F2A24",
               }}>
                 Doctor
+              </button>
+              <button onClick={() => { setEntityType("nutritionist"); setClient(""); }} style={{
+                flex: 1, minWidth: 110, padding: "8px 14px", borderRadius: 8, border: entityType === "nutritionist" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+                background: entityType === "nutritionist" ? "#4C7A5E" : "#fff", color: entityType === "nutritionist" ? "#FAF7F2" : "#1F2A24",
+              }}>
+                Nutritionist/Dietitian
               </button>
             </div>
           )}
@@ -2591,7 +2741,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                 onChange={setClient}
                 options={nameOptionsSource}
                 getLabel={(c) => c.name}
-                placeholder={isDoctorEntity ? "e.g. Dr. Nour Khalil" : entityType === "supplement_store" ? "e.g. Vitamin World Hamra" : "e.g. Pharmacie Al Nour"}
+                placeholder={isDoctorEntity ? "e.g. Dr. Nour Khalil" : isNutritionistEntity ? "e.g. Maya Fares" : entityType === "supplement_store" ? "e.g. Vitamin World Hamra" : "e.g. Pharmacie Al Nour"}
                 style={{ ...inputStyle, marginBottom: 10 }}
               />
               )}
@@ -2603,7 +2753,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
             )}
             {unknownEntity && (
               <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", color: "#7A5B2E", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 10, fontWeight: 500 }}>
-                ⚠ "{client}" isn't in the system yet. Go to the {entityTabLabel} tab and add it there first (with full details{!isDoctorEntity ? ", including registration number" : ""}), then come back to check in.
+                ⚠ "{client}" isn't in the system yet. Go to the {entityTabLabel} tab and add it there first (with full details{!isDoctorStyleEntity ? ", including registration number" : ""}), then come back to check in.
               </div>
             )}
 
@@ -2636,7 +2786,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               </Field>
             )}
 
-            {!isDoctorEntity && !isRemoteContact && recentVisitsForEntity.length > 0 && (
+            {!isDoctorStyleEntity && !isRemoteContact && recentVisitsForEntity.length > 0 && (
               <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, marginBottom: 10 }}>
                 <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", marginBottom: 6 }}>Last time — a quick refresher</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -2655,7 +2805,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               </div>
             )}
 
-            {!isRemoteContact && isDoctorEntity && matchedEntity && !visitStarted && (
+            {!isRemoteContact && isDoctorStyleEntity && matchedEntity && !visitStarted && (
               <DoctorBrief
                 profile={doctorProfile}
                 loading={doctorProfileLoading}
@@ -2673,16 +2823,16 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               />
             )}
 
-            {!isRemoteContact && (!isDoctorEntity || visitStarted) && (
-              <Field label={isDoctorEntity ? "Additional notes (optional)" : "Visit notes"}>
+            {!isRemoteContact && (!isDoctorStyleEntity || visitStarted) && (
+              <Field label={isDoctorStyleEntity ? "Additional notes (optional)" : "Visit notes"}>
                 <textarea
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
-                  placeholder={isDoctorEntity ? "Anything else worth remembering…" : "What was discussed, orders taken, objections…"}
-                  rows={isDoctorEntity ? 2 : 3}
+                  placeholder={isDoctorStyleEntity ? "Anything else worth remembering…" : "What was discussed, orders taken, objections…"}
+                  rows={isDoctorStyleEntity ? 2 : 3}
                   style={{ ...inputStyle, marginBottom: 8, resize: "vertical" }}
                 />
-                {!isDoctorEntity && (
+                {!isDoctorStyleEntity && (
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
                     {NOTE_TEMPLATES.map((t) => (
                       <button
@@ -2699,11 +2849,11 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               </Field>
             )}
 
-            {!isRemoteContact && (!isDoctorEntity || visitStarted) && (
+            {!isRemoteContact && (!isDoctorStyleEntity || visitStarted) && (
               <Field label="Competitors">
                 <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#5B5445", marginBottom: sawCompetitor ? 8 : 0 }}>
                   <input type="checkbox" checked={sawCompetitor} onChange={(e) => setSawCompetitor(e.target.checked)} />
-                  {isDoctorEntity ? "Did a competitor come up in the conversation?" : "Any competitor brands on the shelf here?"}
+                  {isDoctorStyleEntity ? "Did a competitor come up in the conversation?" : "Any competitor brands on the shelf here?"}
                 </label>
                 {sawCompetitor && (
                   <>
@@ -2728,7 +2878,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               </Field>
             )}
 
-            {!isRemoteContact && entityType === "doctor" && visitStarted && (
+            {!isRemoteContact && isDoctorStyleEntity && visitStarted && (
               <Field label="Products discussed">
                 <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                   <input
@@ -2803,7 +2953,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               </Field>
             )}
 
-            {!isRemoteContact && isDoctorEntity && visitStarted && (
+            {!isRemoteContact && isDoctorStyleEntity && visitStarted && (
               <>
                 <Field label="What did the doctor need?">
                   <ChipPicker options={DOCTOR_NEED_OPTIONS} value={doctorNeeds} onChange={setDoctorNeeds} multi />
@@ -2859,7 +3009,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               </>
             )}
 
-            {!isRemoteContact && (!isDoctorEntity || visitStarted) && (
+            {!isRemoteContact && (!isDoctorStyleEntity || visitStarted) && (
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
                   <button onClick={getLocation} disabled={locating} style={{
@@ -2897,18 +3047,18 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                     — a temporary exception while Rabih's phone location permissions
                     get sorted out. Remove the isSupervisor carve-out below (both here
                     and server-side in POST /api/visits) once that's fixed. */}
-                {!editingSavedVisit && !coords && !isSupervisor && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>{isDoctorEntity ? "Capture your GPS location before closing the visit" : "Capture your GPS location before saving"} — this is how a visit gets confirmed as real.</div>}
+                {!editingSavedVisit && !coords && !isSupervisor && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>{isDoctorStyleEntity ? "Capture your GPS location before closing the visit" : "Capture your GPS location before saving"} — this is how a visit gets confirmed as real.</div>}
                 {!editingSavedVisit && !coords && isSupervisor && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 12 }}>Location isn't required for your account right now — you can save without it.</div>}
 
                 <button
-                  disabled={isDoctorEntity ? (!client || !matchedEntity) : (editingSavedVisit ? saving : (!client || (!coords && !isSupervisor) || !matchedEntity || saving))}
-                  onClick={isDoctorEntity ? () => goToStep("postcall") : (editingSavedVisit ? submitEdit : submit)}
+                  disabled={isDoctorStyleEntity ? (!client || !matchedEntity) : (editingSavedVisit ? saving : (!client || (!coords && !isSupervisor) || !matchedEntity || saving))}
+                  onClick={isDoctorStyleEntity ? () => goToStep("postcall") : (editingSavedVisit ? submitEdit : submit)}
                   style={{
                     padding: "9px 18px", borderRadius: 8, border: "none",
-                    background: (isDoctorEntity ? (client && matchedEntity) : (editingSavedVisit ? !saving : (client && (coords || isSupervisor) && matchedEntity && !saving))) ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500,
+                    background: (isDoctorStyleEntity ? (client && matchedEntity) : (editingSavedVisit ? !saving : (client && (coords || isSupervisor) && matchedEntity && !saving))) ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500,
                   }}
                 >
-                  {isDoctorEntity ? "Continue to Close Visit" : (saving ? "Saving…" : editingSavedVisit ? "Save changes" : "Save visit & continue")}
+                  {isDoctorStyleEntity ? "Continue to Close Visit" : (saving ? "Saving…" : editingSavedVisit ? "Save changes" : "Save visit & continue")}
                 </button>
               </>
             )}
@@ -2924,7 +3074,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                     style={{ ...inputStyle, marginBottom: 14, resize: "vertical" }}
                   />
                 </Field>
-                {isDoctorEntity && (
+                {isDoctorStyleEntity && (
                   <>
                     <Field label="Call outcome (optional)">
                       <ChipPicker options={CALL_OUTCOME_OPTIONS} value={callOutcome} onChange={setCallOutcome} />
@@ -3022,54 +3172,65 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
             </>
           )}
 
-          <Field label="Follow up">
-            <ChipPicker
-              options={[...FOLLOWUP_PRESETS, { key: "custom", label: "Custom" }]}
-              value={followUpChoice}
-              onChange={setFollowUpChoice}
-            />
-          </Field>
-          {followUpChoice === "custom" && (
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 10 }}>
-              <input
-                type="number" min="1" max="365" value={customFollowUpDays}
-                onChange={(e) => setCustomFollowUpDays(e.target.value)}
-                placeholder="e.g. 10"
-                style={{ ...inputStyle, width: 80, padding: "6px 8px", fontSize: 12.5 }}
-              />
-              <span style={{ fontSize: 12.5, color: "#5B5445" }}>days</span>
-            </div>
-          )}
-          <div style={{ height: 14 }} />
+          {/* Doctors only — scheduling their follow-up (and the "stop
+              visiting" option) happens right here, inline, since
+              saveVisitAndFollowUp saves AND finishes in one step for them.
+              Nutritionists/dietitians save here too, but their follow-up is
+              deferred to the shared "followup" step after the order
+              question — see the isNutritionistEntity branch in
+              saveVisitAndFollowUp below. */}
+          {isDoctorEntity && (
+            <>
+              <Field label="Follow up">
+                <ChipPicker
+                  options={[...FOLLOWUP_PRESETS, { key: "custom", label: "Custom" }]}
+                  value={followUpChoice}
+                  onChange={setFollowUpChoice}
+                />
+              </Field>
+              {followUpChoice === "custom" && (
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 10 }}>
+                  <input
+                    type="number" min="1" max="365" value={customFollowUpDays}
+                    onChange={(e) => setCustomFollowUpDays(e.target.value)}
+                    placeholder="e.g. 10"
+                    style={{ ...inputStyle, width: 80, padding: "6px 8px", fontSize: 12.5 }}
+                  />
+                  <span style={{ fontSize: 12.5, color: "#5B5445" }}>days</span>
+                </div>
+              )}
+              <div style={{ height: 14 }} />
 
-          {!showStopFollowUp ? (
-            <button
-              type="button"
-              disabled={saving}
-              onClick={() => setShowStopFollowUp(true)}
-              style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#B33A3A", fontSize: 12.5, marginBottom: 14 }}
-            >
-              🚫 Stop visiting this doctor
-            </button>
-          ) : (
-            <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, marginBottom: 14 }}>
-              <div style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 6 }}>
-                Why are you stopping? (optional, but helps later — e.g. "no budget", "switched supplier", "closed down")
-              </div>
-              <textarea
-                value={stopFollowUpReason}
-                onChange={(e) => setStopFollowUpReason(e.target.value)}
-                rows={2}
-                style={{ ...inputStyle, width: "100%", resize: "vertical", marginBottom: 8 }}
-              />
-              <button
-                type="button"
-                onClick={() => { setShowStopFollowUp(false); setStopFollowUpReason(""); }}
-                style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}
-              >
-                Cancel
-              </button>
-            </div>
+              {!showStopFollowUp ? (
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => setShowStopFollowUp(true)}
+                  style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#B33A3A", fontSize: 12.5, marginBottom: 14 }}
+                >
+                  🚫 Stop visiting this doctor
+                </button>
+              ) : (
+                <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, marginBottom: 14 }}>
+                  <div style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 6 }}>
+                    Why are you stopping? (optional, but helps later — e.g. "no budget", "switched supplier", "closed down")
+                  </div>
+                  <textarea
+                    value={stopFollowUpReason}
+                    onChange={(e) => setStopFollowUpReason(e.target.value)}
+                    rows={2}
+                    style={{ ...inputStyle, width: "100%", resize: "vertical", marginBottom: 8 }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => { setShowStopFollowUp(false); setStopFollowUpReason(""); }}
+                    style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </>
           )}
 
           {(!coords && !isSupervisor) && (
@@ -3118,7 +3279,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
             visitId={lastVisit.id}
             products={products}
             offers={offers}
-            clients={clients}
+            clients={isNutritionistEntity ? nutritionists : clients}
             onCreateOrder={onCreateOrder}
             onQueueOrderOffline={onQueueOrderOffline}
             pendingVisitLocalKey={lastVisit.pending ? lastVisit.localKey : null}
@@ -3147,12 +3308,14 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
             Schedule a follow-up for <strong>{lastVisit.client}</strong>?
           </div>
 
-          {isDoctorEntity && (
+          {isDoctorStyleEntity && (
             <Field label="Next SMARTI Objective (included in your Telegram reminder for this follow-up)">
               <textarea
                 value={smartiObjective}
                 onChange={(e) => setSmartiObjective(e.target.value)}
-                placeholder={`e.g. Move Dr. ${lastVisit.client.replace(/^Dr\.?\s*/i, "")} from 3 to 5 patients on SITAVITAE PLUS`}
+                placeholder={isDoctorEntity
+                  ? `e.g. Move Dr. ${lastVisit.client.replace(/^Dr\.?\s*/i, "")} from 3 to 5 patients on SITAVITAE PLUS`
+                  : `e.g. Get ${lastVisit.client} recommending SITAVITAE PLUS to 3 more patients`}
                 rows={2}
                 style={{ ...inputStyle, resize: "vertical", marginBottom: 14 }}
               />
@@ -3242,9 +3405,12 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
           <div style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 16 }}>
             It'll sync automatically once you have a GPS signal or connection — no need to redo anything. Keep the app open occasionally so it can try. You'll see it appear in Today's visits once synced.
           </div>
-          <button onClick={startNewVisit} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
-            Log another visit
-          </button>
+          <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
+            <button onClick={startNewVisit} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
+              Log another visit
+            </button>
+            <CancelVisitButton onConfirm={cancelCurrentVisit} />
+          </div>
         </div>
       )}
       {step === "done" && lastVisit && !lastVisit.pending && (
@@ -3271,9 +3437,12 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
               Check pharmacy stock →
             </button>
           )}
-          <button onClick={startNewVisit} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
-            Log another visit
-          </button>
+          <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
+            <button onClick={startNewVisit} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
+              Log another visit
+            </button>
+            <CancelVisitButton onConfirm={cancelCurrentVisit} />
+          </div>
         </div>
       )}
 
@@ -3283,6 +3452,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
         {todayVisits.map((v) => {
           const isExpanded = expandedTodayVisitId === v.id;
           const isPharmacyVisit = clients.some((c) => c.name.toLowerCase().trim() === v.client.toLowerCase().trim());
+          const isNutritionistVisit = nutritionists.some((n) => n.name.toLowerCase().trim() === v.client.toLowerCase().trim());
           const existingOrder = todayOrders.find((o) => o.visitId === v.id);
           const samples = samplesByVisitId[v.id];
           return (
@@ -3322,7 +3492,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                         visitId={v.id}
                         products={products}
                         offers={offers}
-                        clients={clients}
+                        clients={isNutritionistVisit ? nutritionists : clients}
                         editOrder={existingOrder}
                         onUpdateOrder={onUpdateOrder}
                         onDone={() => { loadRecentOrders(); loadTodayOrders(); setEditingOrderId(null); }}
@@ -3352,7 +3522,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                         visitId={v.id}
                         products={products}
                         offers={offers}
-                        clients={clients}
+                        clients={isNutritionistVisit ? nutritionists : clients}
                         onCreateOrder={onCreateOrder}
                         onQueueOrderOffline={onQueueOrderOffline}
                         onDone={() => { loadRecentOrders(); loadTodayOrders(); setAddingOrderForVisitId(null); }}
@@ -3367,7 +3537,7 @@ function CheckInView({ clients, doctors, products, offers, repName, isSupervisor
                     )}
                   </div>
 
-                  {isPharmacyVisit && (
+                  {(isPharmacyVisit || isNutritionistVisit) && (
                     <div>
                       <div style={{ fontSize: 11, fontWeight: 600, color: "#8A8272", marginBottom: 4 }}>SAMPLE</div>
                       {samples === undefined ? (
@@ -4431,7 +4601,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
 // endpoint, kept as separate compact screens rather than one giant table
 // with everything in it — a pill toggle switches between them, both live
 // under the same "Orders" nav slot.
-function OrdersTabView({ role, isSupervisor, repNames, products, offers, clients, onDelete, onApproveDelete, onDenyDelete, onUpdateOrder }) {
+function OrdersTabView({ role, isSupervisor, repNames, products, offers, clients, nutritionists = [], onDelete, onApproveDelete, onDenyDelete, onUpdateOrder }) {
   const [subTab, setSubTab] = useState("history"); // history | pending
 
   return (
@@ -4460,7 +4630,7 @@ function OrdersTabView({ role, isSupervisor, repNames, products, offers, clients
       </div>
       {subTab === "history" ? (
         <OrderHistoryView
-          role={role} repNames={repNames} products={products} offers={offers} clients={clients}
+          role={role} repNames={repNames} products={products} offers={offers} clients={clients} nutritionists={nutritionists}
           onDelete={onDelete} onApproveDelete={onApproveDelete} onDenyDelete={onDenyDelete} onUpdateOrder={onUpdateOrder}
         />
       ) : (
@@ -4476,7 +4646,7 @@ function OrdersTabView({ role, isSupervisor, repNames, products, offers, clients
 // every open session on a timer was exactly the pattern that made Excel
 // imports (and, over time, this table itself) slow the whole app down.
 const ORDER_HISTORY_PAGE_SIZE = 25;
-function OrderHistoryView({ role, repNames, products, offers, clients, onDelete, onApproveDelete, onDenyDelete, onUpdateOrder }) {
+function OrderHistoryView({ role, repNames, products, offers, clients, nutritionists = [], onDelete, onApproveDelete, onDenyDelete, onUpdateOrder }) {
   const [confirmIds, setConfirmIds] = useState(new Set());
   const [editingOrderId, setEditingOrderId] = useState(null);
   const [repFilter, setRepFilter] = useState("");
@@ -4602,7 +4772,7 @@ function OrderHistoryView({ role, repNames, products, offers, clients, onDelete,
                   clientName={o.clientName}
                   products={products}
                   offers={offers}
-                  clients={clients}
+                  clients={nutritionists.some((n) => n.name.toLowerCase().trim() === o.clientName.toLowerCase().trim()) ? nutritionists : clients}
                   editOrder={o}
                   onUpdateOrder={onUpdateOrder}
                   onDone={() => { setEditingOrderId(null); load(); }}
@@ -8034,6 +8204,492 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
   );
 }
 
+// ---------- Nutritionists/Dietitians View — cloned from DoctorsView above,
+// with "hospital" renamed to "workplace" and a manager-only discountRate
+// editor added (the one field Doctors never needed, since unlike doctors a
+// nutritionist/dietitian visit can end in an order). ----------
+function NutritionistExcelImportSection({ existingNutritionists, onImport, onDone }) {
+  const [sheetNames, setSheetNames] = useState([]);
+  const [selectedSheet, setSelectedSheet] = useState("");
+  const [workbook, setWorkbook] = useState(null);
+  const [headers, setHeaders] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [mapping, setMapping] = useState({ name: "", workplace: "", area: "", phone: "", specialty: "", address: "", registrationNumber: "" });
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const [progress, setProgress] = useState(null); // { done, total }
+  const fileInputRef = useRef(null);
+
+  const readSheet = (wb, sheetName) => {
+    const ws = wb.Sheets[sheetName];
+    const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+    const headerRow = (json[0] || []).map((h, i) => (h === "" ? `Column ${i + 1}` : String(h)));
+    const dataRows = json.slice(1).filter((r) => r.some((cell) => cell !== ""));
+    setHeaders(headerRow);
+    setRows(dataRows);
+  };
+
+  const resetMapping = () => setMapping({ name: "", workplace: "", area: "", phone: "", specialty: "", address: "", registrationNumber: "" });
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setError("");
+    setResult(null);
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: "array", cellDates: true });
+        setWorkbook(wb);
+        setSheetNames(wb.SheetNames);
+        setSelectedSheet(wb.SheetNames[0]);
+        readSheet(wb, wb.SheetNames[0]);
+        resetMapping();
+      } catch (err) {
+        setError("Couldn't read that file. Make sure it's a valid Excel (.xlsx) file.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const changeSheet = (name) => {
+    setSelectedSheet(name);
+    readSheet(workbook, name);
+    resetMapping();
+  };
+
+  const { newNutritionists, skippedCount } = useMemo(() => {
+    if (!mapping.name) return { newNutritionists: [], skippedCount: 0 };
+    const nameIdx = headers.indexOf(mapping.name);
+    const workplaceIdx = headers.indexOf(mapping.workplace);
+    const areaIdx = headers.indexOf(mapping.area);
+    const phoneIdx = headers.indexOf(mapping.phone);
+    const specialtyIdx = headers.indexOf(mapping.specialty);
+    const addressIdx = headers.indexOf(mapping.address);
+    const regIdx = headers.indexOf(mapping.registrationNumber);
+
+    const existingNames = new Set(existingNutritionists.map((n) => n.name.toLowerCase().trim()));
+    const seenInFile = new Set();
+    const fresh = [];
+    let skipped = 0;
+
+    rows.forEach((r) => {
+      const name = String(r[nameIdx] ?? "").trim();
+      if (!name) return;
+      const key = name.toLowerCase().trim();
+      if (existingNames.has(key) || seenInFile.has(key)) { skipped++; return; }
+      seenInFile.add(key);
+      fresh.push({
+        name,
+        workplace: workplaceIdx >= 0 ? String(r[workplaceIdx] ?? "").trim() : "",
+        area: areaIdx >= 0 ? String(r[areaIdx] ?? "").trim() : "",
+        phone: phoneIdx >= 0 ? String(r[phoneIdx] ?? "").trim() : "",
+        specialty: specialtyIdx >= 0 ? String(r[specialtyIdx] ?? "").trim() : "",
+        address: addressIdx >= 0 ? String(r[addressIdx] ?? "").trim() : "",
+        registrationNumber: regIdx >= 0 ? String(r[regIdx] ?? "").trim() : "",
+      });
+    });
+
+    return { newNutritionists: fresh, skippedCount: skipped };
+  }, [mapping, rows, headers, existingNutritionists]);
+
+  const doImport = async () => {
+    setError("");
+    setImporting(true);
+    setProgress({ done: 0, total: newNutritionists.length });
+    try {
+      let added = 0;
+      let serverSkipped = 0;
+      for (let i = 0; i < newNutritionists.length; i += IMPORT_CHUNK_SIZE) {
+        const chunk = newNutritionists.slice(i, i + IMPORT_CHUNK_SIZE);
+        const data = await importChunkWithRetry(() => api.importNutritionistsBulk({ toAdd: chunk }));
+        added += data?.added ?? chunk.length;
+        serverSkipped += data?.skipped ?? 0;
+        setProgress({ done: Math.min(i + IMPORT_CHUNK_SIZE, newNutritionists.length), total: newNutritionists.length });
+      }
+      await onImport({ toAdd: [] });
+      setResult({ added, skipped: skippedCount + serverSkipped });
+      setWorkbook(null);
+      setHeaders([]);
+      setRows([]);
+      setSheetNames([]);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    } catch (e) {
+      setError(e.message || "Import failed. Whatever made it in before this error is already saved — reopen the file and re-import to pick up where it left off (already-added names get skipped automatically).");
+    } finally {
+      setImporting(false);
+      setProgress(null);
+    }
+  };
+
+  const fieldSelect = (field, label, required) => (
+    <div>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>
+        {label}{required ? " *" : " (optional)"}
+      </label>
+      <select value={mapping[field]} onChange={(e) => setMapping((m) => ({ ...m, [field]: e.target.value }))} style={inputStyle}>
+        <option value="">{required ? "— select a column —" : "— none —"}</option>
+        {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+      </select>
+    </div>
+  );
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Import nutritionists/dietitians from Excel</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Upload an .xlsx file — handles files with tens of thousands of rows. Names that already exist in the system are skipped automatically; only new names get added.
+      </p>
+
+      <button
+        onClick={() => fileInputRef.current?.click()}
+        style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500, marginBottom: 10 }}
+      >
+        <Upload size={15} /> Choose Excel file
+      </button>
+      <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ display: "none" }} />
+
+      {error && <div style={{ fontSize: 12.5, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
+      {result && (
+        <div style={{ fontSize: 12.5, color: "#4C7A5E", display: "flex", alignItems: "center", gap: 5, marginBottom: 10 }}>
+          <Check size={14} /> Added {result.added} new nutritionist{result.added === 1 ? "" : "s"}{result.skipped > 0 ? `, skipped ${result.skipped} already in the system` : ""}.
+        </div>
+      )}
+
+      {headers.length > 0 && (
+        <div style={{ padding: 12, background: "#FAF7F2", borderRadius: 8 }}>
+          {sheetNames.length > 1 && (
+            <div style={{ marginBottom: 10 }}>
+              <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>Sheet / tab</label>
+              <select value={selectedSheet} onChange={(e) => changeSheet(e.target.value)} style={inputStyle}>
+                {sheetNames.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {fieldSelect("name", "Name column", true)}
+            {fieldSelect("workplace", "Clinic / workplace column", false)}
+            {fieldSelect("area", "Area column", false)}
+            {fieldSelect("phone", "Phone column", false)}
+            {fieldSelect("specialty", "Specialty column", false)}
+            {fieldSelect("address", "Address column", false)}
+            {fieldSelect("registrationNumber", "Registration number column", false)}
+          </div>
+
+          {mapping.name && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 12, color: "#5B5445", marginBottom: 10 }}>
+                {newNutritionists.length} new nutritionist{newNutritionists.length === 1 ? "" : "s"} will be added
+                {skippedCount > 0 ? `, ${skippedCount} already exist and will be skipped` : ""}.
+              </div>
+
+              {newNutritionists.length > 0 && (
+                <div style={{ overflowX: "auto", marginBottom: 10 }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+                    <thead>
+                      <tr style={{ textAlign: "left", color: "#8A8272" }}>
+                        <th style={{ padding: "4px 6px" }}>Name</th>
+                        <th style={{ padding: "4px 6px" }}>Workplace</th>
+                        <th style={{ padding: "4px 6px" }}>Area</th>
+                        <th style={{ padding: "4px 6px" }}>Specialty</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {newNutritionists.slice(0, 5).map((n, i) => (
+                        <tr key={i} style={{ borderTop: "1px solid #E5DFD3" }}>
+                          <td style={{ padding: "4px 6px" }}>{n.name}</td>
+                          <td style={{ padding: "4px 6px" }}>{n.workplace || "—"}</td>
+                          <td style={{ padding: "4px 6px" }}>{n.area || "—"}</td>
+                          <td style={{ padding: "4px 6px" }}>{n.specialty || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {newNutritionists.length > 5 && <div style={{ fontSize: 11, color: "#8A8272", marginTop: 4 }}>...and {newNutritionists.length - 5} more</div>}
+                </div>
+              )}
+
+              {progress && (
+                <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>
+                  Importing {progress.done.toLocaleString()} / {progress.total.toLocaleString()}…
+                </div>
+              )}
+
+              <button
+                disabled={importing || newNutritionists.length === 0}
+                onClick={doImport}
+                style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: !importing && newNutritionists.length > 0 ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+              >
+                {importing ? "Importing…" : `Import ${newNutritionists.length} new nutritionist${newNutritionists.length === 1 ? "" : "s"}`}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const NUTRITIONIST_FILLABLE_FIELDS = [
+  { key: "name", label: "Name" },
+  { key: "phone", label: "Phone" },
+  { key: "area", label: "Area" },
+  { key: "workplace", label: "Clinic / workplace" },
+  { key: "specialty", label: "Specialty" },
+  { key: "address", label: "Address" },
+  { key: "registrationNumber", label: "Registration number" },
+];
+
+function NutritionistsView({ nutritionists, role, onAdd, onRemove, onBulkImport, onCompleteInfo, onUpdateDiscount }) {
+  const [completingId, setCompletingId] = useState(null);
+  const [historyId, setHistoryId] = useState(null);
+  const [historyProfile, setHistoryProfile] = useState(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+  const [name, setName] = useState("");
+  const [workplace, setWorkplace] = useState("");
+  const [area, setArea] = useState("");
+  const [phone, setPhone] = useState("");
+  const [specialty, setSpecialty] = useState("");
+  const [tier, setTier] = useState("B");
+  const [address, setAddress] = useState("");
+  const [registrationNumber, setRegistrationNumber] = useState("");
+  const [search, setSearch] = useState("");
+  const [coords, setCoords] = useState(null);
+  const [locating, setLocating] = useState(false);
+  const [locError, setLocError] = useState("");
+  const [statsByName, setStatsByName] = useState({});
+
+  useEffect(() => {
+    if (!historyId) { setHistoryProfile(null); return; }
+    const n = nutritionists.find((nu) => nu.id === historyId);
+    if (!n) return;
+    api.getNutritionistProfile(n.name).then(setHistoryProfile).catch(() => setHistoryProfile(null));
+  }, [historyId, nutritionists]);
+
+  const getLocation = () => {
+    setLocating(true);
+    setLocError("");
+    getCurrentPositionSafe((coords) => {
+      setLocating(false);
+      if (coords) { setCoords(coords); return; }
+      setLocError("Couldn't get location. Check permissions.");
+    });
+  };
+
+  const addNutritionist = () => {
+    if (!name) return;
+    onAdd({ name, workplace, area, phone, specialty, tier, address, registrationNumber, coordsLat: coords?.lat || "", coordsLng: coords?.lng || "" });
+    setName(""); setWorkplace(""); setArea(""); setPhone(""); setSpecialty(""); setTier("B"); setAddress(""); setRegistrationNumber(""); setCoords(null); setLocError("");
+    setShowAdd(false);
+  };
+
+  const q = search.toLowerCase().trim();
+  const nameMatches = q
+    ? nutritionists.filter((n) =>
+        n.name.toLowerCase().includes(q) ||
+        (n.specialty || "").toLowerCase().includes(q) ||
+        (n.area || "").toLowerCase().includes(q) ||
+        (n.workplace || "").toLowerCase().includes(q) ||
+        (n.phone || "").toLowerCase().includes(q) ||
+        (n.registrationNumber || "").toLowerCase().includes(q)
+      )
+    : [];
+  const statsTargets = nameMatches.slice(0, LIST_DISPLAY_CAP * 2);
+  const statsKey = statsTargets.map((n) => n.name).join("|");
+
+  useEffect(() => {
+    if (statsTargets.length === 0) { setStatsByName({}); return; }
+    api.getNutritionistVisitStats(statsTargets.map((n) => n.name))
+      .then((data) => setStatsByName(data.stats || {}))
+      .catch(() => setStatsByName({}));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statsKey]);
+
+  const filteredRows = statsTargets
+    .map((n) => {
+      const stat = statsByName[n.name.toLowerCase().trim()] || { lastVisit: null, pendingSamples: [] };
+      const days = stat.lastVisit ? daysSince(stat.lastVisit) : null;
+      const cadence = TIER_CADENCE[n.tier] || 30;
+      const overdue = days === null || days > cadence;
+      const pendingSamples = stat.pendingSamples || [];
+      const leadScore = computeLeadScore({ tier: n.tier, days, cadence, engagement: pendingSamples.length });
+      return { ...n, days, overdue, cadence, pendingSamples, leadScore };
+    })
+    .sort((a, b) => b.leadScore - a.leadScore);
+  const shownRows = filteredRows.slice(0, LIST_DISPLAY_CAP);
+  const tierColor = { A: "#B33A3A", B: "#D9A441", C: "#6B7280" };
+  const scoreColor = (s) => (s >= 65 ? "#B33A3A" : s >= 40 ? "#C17817" : "#6B7280");
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 18, flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Nutritionists/Dietitians & follow-up</h2>
+          <p style={{ fontSize: 13, color: "#8A8272", margin: "4px 0 0" }}>
+            Same cadence system as doctors/pharmacies — Tier A: every {TIER_CADENCE.A}d · B: {TIER_CADENCE.B}d · C: {TIER_CADENCE.C}d. Unlike doctors, a visit here can end in an order — set a discount rate below so pricing resolves correctly.
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {role === "manager" && (
+            <button onClick={() => { setShowImport((v) => !v); setShowAdd(false); }} style={{
+              display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
+              background: "#fff", color: "#1F2A24", border: "1px solid #E5DFD3", fontSize: 13, fontWeight: 500,
+            }}>
+              <Upload size={15} /> Import from Excel
+            </button>
+          )}
+          <button onClick={() => { setShowAdd((v) => !v); setShowImport(false); }} style={{
+            display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
+            background: "#1F2A24", color: "#FAF7F2", border: "none", fontSize: 13, fontWeight: 500,
+          }}>
+            <Plus size={15} /> Add nutritionist/dietitian
+          </button>
+        </div>
+      </div>
+
+      {role === "manager" && showImport && <NutritionistExcelImportSection existingNutritionists={nutritionists} onImport={onBulkImport} onDone={() => setShowImport(false)} />}
+
+      {showAdd && (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 18 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+            <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Nour Khalil" style={inputStyle} /></Field>
+            <Field label="Clinic / workplace"><input value={workplace} onChange={(e) => setWorkplace(e.target.value)} placeholder="e.g. Wellness Clinic" style={inputStyle} /></Field>
+            <Field label="Area"><input value={area} onChange={(e) => setArea(e.target.value)} placeholder="e.g. Jbeil" style={inputStyle} /></Field>
+            <Field label="Phone"><input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+961 xx xxx xxx" style={inputStyle} /></Field>
+            <Field label="Specialty"><input value={specialty} onChange={(e) => setSpecialty(e.target.value)} placeholder="e.g. Sports nutrition" style={inputStyle} /></Field>
+            <Field label="Tier">
+              <select value={tier} onChange={(e) => setTier(e.target.value)} style={inputStyle}>
+                <option value="A">A — high value, visit every 14d</option>
+                <option value="B">B — standard, visit every 30d</option>
+                <option value="C">C — low priority, visit every 60d</option>
+              </select>
+            </Field>
+            <Field label="Address (optional)"><input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Full street address" style={inputStyle} /></Field>
+            <Field label="Registration number (optional)"><input value={registrationNumber} onChange={(e) => setRegistrationNumber(e.target.value)} style={inputStyle} /></Field>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+            <button type="button" onClick={getLocation} disabled={locating} style={{
+              display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
+              border: "1px solid #E5DFD3", background: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
+            }}>
+              {locating ? <Loader2 size={14} className="spin" /> : <MapPin size={14} />}
+              {locating ? "Locating…" : coords ? "Update GPS location" : "Capture GPS location (optional, more accurate than the address above)"}
+            </button>
+            {coords && <span className="kb-font-mono" style={{ fontSize: 11.5, color: "#4C7A5E" }}><Check size={12} style={{ verticalAlign: -1 }} /> {coords.lat}, {coords.lng}</span>}
+          </div>
+          {locError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{locError}</div>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button disabled={!name} onClick={addNutritionist} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: name ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>Add nutritionist/dietitian</button>
+            <button onClick={() => setShowAdd(false)} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ position: "relative", marginBottom: 14 }}>
+        <Search size={15} style={{ position: "absolute", left: 12, top: 10, color: "#8A8272" }} />
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search by name, specialty, area, workplace, or phone…"
+          style={{ ...inputStyle, paddingLeft: 34 }}
+        />
+      </div>
+
+      {filteredRows.length > LIST_DISPLAY_CAP && (
+        <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>
+          Showing {LIST_DISPLAY_CAP} of {filteredRows.length.toLocaleString()} — use search to narrow the list.
+        </div>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {shownRows.map((n) => (
+          <div key={n.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+                  <span style={{ fontWeight: 600, fontSize: 13.5 }}>{n.name}</span>
+                  <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 7px", borderRadius: 5, background: `${tierColor[n.tier]}1A`, color: tierColor[n.tier] }}>Tier {n.tier}</span>
+                  <span title="Priority score — tier, overdue-ness, and sample engagement combined" style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 7px", borderRadius: 5, background: `${scoreColor(n.leadScore)}1A`, color: scoreColor(n.leadScore) }}>
+                    Priority {n.leadScore}
+                  </span>
+                  {role === "manager" ? (
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: "#5B5445" }}>
+                      Discount
+                      <input
+                        type="number" min="0" max="100" step="0.5"
+                        defaultValue={n.discountRate || ""}
+                        onBlur={(e) => {
+                          const v = e.target.value;
+                          if (v !== String(n.discountRate || "")) onUpdateDiscount(n.id, v);
+                        }}
+                        placeholder="0"
+                        style={{ width: 50, padding: "2px 4px", fontSize: 11, borderRadius: 5, border: "1px solid #E5DFD3" }}
+                      />%
+                    </span>
+                  ) : n.discountRate ? (
+                    <span style={{ fontSize: 11, color: "#5B5445" }}>{n.discountRate}% discount</span>
+                  ) : null}
+                </div>
+                <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 3 }}>
+                  {n.workplace || "no workplace set"} · {n.area || "no area"} {n.phone ? `· ${n.phone}` : ""}
+                </div>
+                {n.address && <div style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>{n.address}</div>}
+                {n.specialty && <div style={{ fontSize: 11.5, color: "#5B5445", marginTop: 3 }}>{n.specialty}</div>}
+                {n.pendingSamples.length > 0 && (
+                  <div style={{ fontSize: 11, color: "#C17817", marginTop: 3, fontWeight: 500 }}>
+                    Give next visit: {n.pendingSamples.map((s) => s.productName).join(", ")}
+                  </div>
+                )}
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: n.overdue ? "#B33A3A" : "#4C7A5E" }}>
+                  {n.days === null ? "never visited" : `${n.days}d since visit`}
+                </div>
+                {n.overdue && <div style={{ fontSize: 10.5, color: "#B33A3A" }}>overdue (cadence {n.cadence}d)</div>}
+              </div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 14, marginTop: 6 }}>
+              <a href={mapsLinkFor(n)} target="_blank" rel="noreferrer" style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#4C7A5E", textDecoration: "none" }}>
+                <MapPin size={11} /> Get directions
+              </a>
+              {role === "rep" && (
+                <button onClick={() => setCompletingId(completingId === n.id ? null : n.id)} style={{ background: "none", border: "none", color: "#C17817", fontSize: 11, fontWeight: 500 }}>
+                  {completingId === n.id ? "Cancel" : "Edit info"}
+                </button>
+              )}
+              <button onClick={() => setHistoryId(historyId === n.id ? null : n.id)} style={{ background: "none", border: "none", color: "#5B5445", fontSize: 11, fontWeight: 500 }}>
+                {historyId === n.id ? "Hide history" : "History"}
+              </button>
+              <button onClick={() => onRemove(n.id)} style={{ background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
+            </div>
+            {historyId === n.id && (
+              <div style={{ marginTop: 8 }}>
+                {historyProfile ? <DoctorTimeline visits={historyProfile.timeline} /> : <EmptyState text="Loading…" />}
+              </div>
+            )}
+            {role === "rep" && completingId === n.id && (
+              <CompleteInfoForm
+                fields={NUTRITIONIST_FILLABLE_FIELDS}
+                currentValues={n}
+                onSave={(values) => onCompleteInfo(n.id, values)}
+                onCancel={() => setCompletingId(null)}
+              />
+            )}
+          </div>
+        ))}
+        {!q && nutritionists.length > 0 && (
+          <EmptyState text={`Search above to find a nutritionist/dietitian — ${nutritionists.length.toLocaleString()} in the system.`} />
+        )}
+        {q && filteredRows.length === 0 && <EmptyState text="No nutritionists/dietitians match your search." />}
+        {!q && nutritionists.length === 0 && <EmptyState text="No nutritionists/dietitians added yet." />}
+      </div>
+    </div>
+  );
+}
+
 // ---------- Knowledge View (rep reference: talking points + drug/nutrient depletion) ----------
 function KnowledgeView() {
   const [section, setSection] = useState("specialty"); // specialty | condition | drugs | reference
@@ -9412,6 +10068,10 @@ function RepPerformanceCard({
   // Manager Performance Management redesign — all optional/additive.
   doctors = [], repTarget = null, repRole = null, tierVisitFrequency = null, qualityCallRequiredFields = null,
   followUps = [], newAccountKeys = null, showManagerAttention = false,
+  // Nutritionists/Dietitians — a third roster, distinct from both doctors
+  // and pharmacies, so "pharmacy visits" (derived by subtraction below) no
+  // longer silently absorbs them.
+  nutritionists = [],
   // Historical month browsing — monthKey defaults to the current Beirut
   // month when not passed (keeps every other caller of this component,
   // e.g. ad-hoc usages elsewhere, working unchanged).
@@ -9449,8 +10109,13 @@ function RepPerformanceCard({
 
   // ---- Visit Breakdown (Section 10) — the distinction must be visually obvious ----
   const isDoctorName = (name) => doctors.some((d) => d.name.toLowerCase().trim() === name.toLowerCase().trim());
+  const isNutritionistName = (name) => nutritionists.some((n) => n.name.toLowerCase().trim() === name.toLowerCase().trim());
   const inPersonDoctorVisits = monthInPersonVisits.filter((v) => isDoctorName(v.client)).length;
-  const inPersonPharmacyVisits = monthInPersonVisits.length - inPersonDoctorVisits;
+  const inPersonNutritionistVisits = monthInPersonVisits.filter((v) => isNutritionistName(v.client)).length;
+  // Derived by subtraction rather than a third "is this a pharmacy" lookup,
+  // same convention this line always used — just subtracting one more
+  // known-non-pharmacy bucket now that nutritionists exist too.
+  const inPersonPharmacyVisits = monthInPersonVisits.length - inPersonDoctorVisits - inPersonNutritionistVisits;
   const phoneCalls = monthVisits.filter((v) => effectiveInteractionType(v) === "phone").length;
   const whatsappCount = monthVisits.filter((v) => effectiveInteractionType(v) === "whatsapp").length;
   const videoCalls = monthVisits.filter((v) => effectiveInteractionType(v) === "video").length;
@@ -9648,6 +10313,7 @@ function RepPerformanceCard({
         <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", textTransform: "uppercase", marginBottom: 8 }}>Visit breakdown</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 6, fontSize: 12.5, marginBottom: 10 }}>
           <div>In-person doctor visits: <strong>{inPersonDoctorVisits}</strong></div>
+          <div>In-person nutritionist/dietitian visits: <strong>{inPersonNutritionistVisits}</strong></div>
           <div>In-person pharmacy visits: <strong>{inPersonPharmacyVisits}</strong></div>
           <div>Phone calls: <strong>{phoneCalls}</strong></div>
           <div>WhatsApp / messages: <strong>{whatsappCount}</strong></div>
@@ -9888,7 +10554,7 @@ function RepActivityToday({ repNames }) {
 }
 
 function PerformanceView({
-  clients, doctors, repNames, monthlyVisitTarget, setMonthlyVisitTarget, monthlyRevenueTarget, setMonthlyRevenueTarget, isSupervisor,
+  clients, doctors, nutritionists = [], repNames, monthlyVisitTarget, setMonthlyVisitTarget, monthlyRevenueTarget, setMonthlyRevenueTarget, isSupervisor,
   role, qualityCallRequiredFields, tierVisitFrequency,
 }) {
   // Beirut's calendar month — see the comment on the analogous block in
@@ -10133,7 +10799,7 @@ function PerformanceView({
       <RepActivityToday repNames={repNames} />
 
       <RepPerformanceCard title="All reps combined" visits={visits} monthlyVisitTarget={monthlyVisitTarget}
-        orders={orders} monthlyRevenueTarget={revenueTargetTotal} clients={clients} doctors={doctors}
+        orders={orders} monthlyRevenueTarget={revenueTargetTotal} clients={clients} doctors={doctors} nutritionists={nutritionists}
         tierVisitFrequency={tierVisitFrequency} qualityCallRequiredFields={qualityCallRequiredFields}
         followUps={followUps} newAccountKeys={newAccountKeys} monthKey={viewMonthKey} isPastMonth={isPastMonth} />
 
@@ -10147,6 +10813,7 @@ function PerformanceView({
           monthlyRevenueTarget={monthlyRevenueTarget}
           clients={clients}
           doctors={doctors}
+          nutritionists={nutritionists}
           repNameFilter={name}
           isSupervisor={isSupervisor}
           onMarkPosEntered={markPosEntered}
