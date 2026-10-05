@@ -793,6 +793,7 @@ export default function App() {
                 onUpdateCompetitorProduct={updateCompetitorProduct}
                 onRemoveCompetitorProduct={removeCompetitorProduct}
                 onImportCompetitorProducts={importCompetitorProductsBulk}
+                repNames={repNames}
               />
             )}
           </>
@@ -12585,8 +12586,334 @@ function PharmacyPickupImportSection() {
   );
 }
 
+// ---------- Discount Audit ----------
+// Reads the weekly/monthly POS "exercise" export (one row per invoice line)
+// and surfaces every client whose EFFECTIVE discount — list price minus what
+// was actually collected, counting free/bonus units from an offer as part of
+// the giveaway — is 35% or higher. The export has no "offer" column, but it
+// doesn't need one: PPPrice (a product's real list price, confirmed constant
+// per product across the whole file, including on free lines) and
+// InvoiceTitTtc (the invoice's real total collected, confirmed constant
+// across every line of that invoice) together give the true effective %
+// directly — a stated 22.5% line discount plus a generous buy-X-get-Y offer
+// shows up here exactly as it should, without reading the offer at all.
+//   effective % = 1 − (collected ÷ Σ(qty × list price) across every line,
+//   paid or free, in that client's invoices)
+// Entirely client-side and ephemeral — only the manager's reason per client
+// is persisted (DiscountAuditReasons), which is what keeps an already-
+// explained client from being re-flagged on every future import.
+const DISCOUNT_AUDIT_THRESHOLD = 35;
+function tierForEffectivePct(pct) {
+  if (pct >= 50) return "50%+";
+  if (pct >= 40) return "40–49%";
+  if (pct >= DISCOUNT_AUDIT_THRESHOLD) return "35–39%";
+  return null;
+}
+
+function DiscountAuditSection({ repNames }) {
+  const [reasonsByClient, setReasonsByClient] = useState(new Map()); // normalized name -> {id, reason, addedBy, addedAt}
+  const [reasonsLoading, setReasonsLoading] = useState(true);
+  const [reasonsError, setReasonsError] = useState("");
+  const [repLabel, setRepLabel] = useState("");
+
+  const [headers, setHeaders] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [clientCol, setClientCol] = useState("");
+  const [numberCol, setNumberCol] = useState("");
+  const [qtyCol, setQtyCol] = useState("");
+  const [priceCol, setPriceCol] = useState("");
+  const [totalCol, setTotalCol] = useState("");
+  const [parseError, setParseError] = useState("");
+
+  const [results, setResults] = useState(null); // [{ name, listValue, collected, units, invoiceCount, effectivePct, tier }]
+  const [draftReasons, setDraftReasons] = useState({}); // normalized name -> text being typed
+  const [savingFor, setSavingFor] = useState(null);
+  const [saveError, setSaveError] = useState("");
+
+  const loadReasons = () => {
+    setReasonsLoading(true);
+    api.getDiscountAuditReasons()
+      .then((data) => {
+        const map = new Map();
+        (data.reasons || []).forEach((r) => map.set(r.clientName.toLowerCase().trim(), r));
+        setReasonsByClient(map);
+      })
+      .catch((e) => setReasonsError(e.message))
+      .finally(() => setReasonsLoading(false));
+  };
+  useEffect(loadReasons, []);
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setParseError(""); setResults(null);
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: "array", cellDates: true });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+        const headerRow = (json[0] || []).map((h, i) => (h === "" ? `Column ${i + 1}` : String(h)));
+        const dataRows = json.slice(1).filter((r) => r.some((cell) => cell !== ""));
+        setHeaders(headerRow);
+        setRows(dataRows);
+        setClientCol(guessColumn(headerRow, ["client", "client name", "customer", "customer name"]));
+        setNumberCol(guessColumn(headerRow, ["number", "invoice", "invoice number", "invoice no"]));
+        setQtyCol(guessColumn(headerRow, ["quantity", "qty"]));
+        setPriceCol(guessColumn(headerRow, ["ppprice", "pp price", "price"]));
+        setTotalCol(guessColumn(headerRow, ["invoicetitttc", "invoice total", "invoice ttc", "total ttc"]));
+      } catch (err) {
+        setParseError("Couldn't read that file. Make sure it's a valid Excel file.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const canAnalyze = clientCol && numberCol && qtyCol && priceCol && totalCol && rows.length > 0;
+
+  const analyze = () => {
+    const cIdx = headers.indexOf(clientCol);
+    const nIdx = headers.indexOf(numberCol);
+    const qIdx = headers.indexOf(qtyCol);
+    const pIdx = headers.indexOf(priceCol);
+    const tIdx = headers.indexOf(totalCol);
+
+    // Pass 1 — per invoice: list value (every line, paid or free) and the
+    // one true collected total (repeated identically on every line of that
+    // invoice in this export, so the first value seen is as good as any).
+    const invoices = new Map();
+    rows.forEach((r) => {
+      const number = r[nIdx];
+      const client = String(r[cIdx] ?? "").trim();
+      if (!client || number === "" || number === undefined || number === null) return;
+      const qty = Number(r[qIdx]) || 0;
+      const price = Number(r[pIdx]) || 0;
+      if (!invoices.has(number)) invoices.set(number, { client, listValue: 0, units: 0, collected: Number(r[tIdx]) || 0 });
+      const inv = invoices.get(number);
+      inv.listValue += qty * price;
+      inv.units += qty;
+    });
+
+    // Pass 2 — roll invoices up into clients (case-insensitive/trimmed, same
+    // name-identity convention this app always uses).
+    const clients = new Map();
+    invoices.forEach((inv) => {
+      const key = inv.client.toLowerCase();
+      if (!clients.has(key)) clients.set(key, { name: inv.client, listValue: 0, collected: 0, units: 0, invoiceCount: 0 });
+      const c = clients.get(key);
+      c.listValue += inv.listValue;
+      c.collected += inv.collected;
+      c.units += inv.units;
+      c.invoiceCount += 1;
+    });
+
+    const flagged = [...clients.values()]
+      .map((c) => ({ ...c, effectivePct: c.listValue > 0 ? (1 - c.collected / c.listValue) * 100 : 0 }))
+      .map((c) => ({ ...c, tier: tierForEffectivePct(c.effectivePct) }))
+      .filter((c) => c.tier)
+      .sort((a, b) => b.effectivePct - a.effectivePct);
+
+    setResults(flagged);
+  };
+
+  const saveReason = async (clientName) => {
+    const key = clientName.toLowerCase().trim();
+    const text = (draftReasons[key] || "").trim();
+    if (!text) return;
+    setSavingFor(key);
+    setSaveError("");
+    try {
+      await api.saveDiscountAuditReason(clientName, text);
+      loadReasons();
+      setDraftReasons((prev) => { const next = { ...prev }; delete next[key]; return next; });
+    } catch (e) {
+      setSaveError(e.message);
+    } finally {
+      setSavingFor(null);
+    }
+  };
+
+  const resetReason = async (reasonRow) => {
+    setSavingFor(reasonRow.clientName.toLowerCase().trim());
+    setSaveError("");
+    try {
+      await api.removeDiscountAuditReason(reasonRow.id);
+      loadReasons();
+    } catch (e) {
+      setSaveError(e.message);
+    } finally {
+      setSavingFor(null);
+    }
+  };
+
+  const needsReview = (results || []).filter((c) => !reasonsByClient.has(c.name.toLowerCase().trim()));
+  const alreadyReasoned = (results || []).filter((c) => reasonsByClient.has(c.name.toLowerCase().trim()));
+
+  const tierOrder = ["35–39%", "40–49%", "50%+"];
+  const tierSummary = tierOrder.map((tier) => {
+    const inTier = (results || []).filter((c) => c.tier === tier);
+    return {
+      tier,
+      clients: inTier.length,
+      units: inTier.reduce((s, c) => s + c.units, 0),
+      collected: inTier.reduce((s, c) => s + c.collected, 0),
+    };
+  });
+
+  const money = (n) => `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Discount audit — flag clients at 35%+ effective discount</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Upload the POS "exercise" export (invoice lines with client, quantity, list price, and invoice total). This computes each client's TRUE effective discount — including free/bonus units from an offer, not just the stated line discount — and flags anyone at 35% or higher. Check it weekly against whatever's exported so far this month; re-uploading just re-analyzes the latest file, nothing is kept except the reasons you give below.
+      </p>
+
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <Field label="Which rep is this? (optional — labels the results only)">
+          <select value={repLabel} onChange={(e) => setRepLabel(e.target.value)} style={{ ...inputStyle, minWidth: 180 }}>
+            <option value="">— unspecified —</option>
+            {repNames.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </Field>
+      </div>
+
+      {parseError && <div style={{ fontSize: 12.5, color: "#B33A3A", marginBottom: 10 }}>{parseError}</div>}
+      <input type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ fontSize: 12.5, marginBottom: 10 }} />
+
+      {headers.length > 0 && (
+        <div style={{ padding: 12, background: "#FAF7F2", borderRadius: 8, marginBottom: 10 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(160px,1fr))", gap: 10, marginBottom: 10 }}>
+            <Field label="Client column">
+              <select value={clientCol} onChange={(e) => setClientCol(e.target.value)} style={inputStyle}>
+                <option value="">Select…</option>
+                {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </Field>
+            <Field label="Invoice number column">
+              <select value={numberCol} onChange={(e) => setNumberCol(e.target.value)} style={inputStyle}>
+                <option value="">Select…</option>
+                {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </Field>
+            <Field label="Quantity column">
+              <select value={qtyCol} onChange={(e) => setQtyCol(e.target.value)} style={inputStyle}>
+                <option value="">Select…</option>
+                {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </Field>
+            <Field label="List price column (e.g. PPPrice)">
+              <select value={priceCol} onChange={(e) => setPriceCol(e.target.value)} style={inputStyle}>
+                <option value="">Select…</option>
+                {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </Field>
+            <Field label="Invoice total collected column (e.g. InvoiceTitTtc)">
+              <select value={totalCol} onChange={(e) => setTotalCol(e.target.value)} style={inputStyle}>
+                <option value="">Select…</option>
+                {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+              </select>
+            </Field>
+          </div>
+          <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 10 }}>{rows.length.toLocaleString()} rows detected in the file.</div>
+          <button disabled={!canAnalyze} onClick={analyze} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: canAnalyze ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+            Analyze
+          </button>
+        </div>
+      )}
+
+      {results && (
+        <>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 16 }}>
+            <StatCard label="Clients flagged (35%+)" value={results.length} color="#B33A3A" icon={<AlertTriangle size={16} />} />
+            {tierSummary.map((t) => (
+              <StatCard key={t.tier} label={`${t.tier} — ${t.clients} client${t.clients === 1 ? "" : "s"}`} value={`${t.units.toLocaleString()} units · ${money(t.collected)}`} color="#C17817" icon={<TrendingDown size={16} />} />
+            ))}
+          </div>
+
+          {saveError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>{saveError}</div>}
+
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Needs review ({needsReview.length})</div>
+          {reasonsLoading && <EmptyState text="Loading saved reasons…" />}
+          {!reasonsLoading && needsReview.length === 0 && <EmptyState text="Nothing new — every flagged client already has a reason on file." />}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+            {needsReview.map((c) => {
+              const key = c.name.toLowerCase().trim();
+              return (
+                <div key={key} style={{ background: "#FBF0F0", border: "1px solid #E5B8B0", borderRadius: 10, padding: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+                    <div>
+                      <span style={{ fontWeight: 600, fontSize: 13.5 }}>{c.name}</span>
+                      <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 999, background: "#B33A3A1A", color: "#B33A3A" }}>{c.tier}</span>
+                    </div>
+                    <div className="kb-font-mono" style={{ fontSize: 11.5, color: "#7A3B3B" }}>
+                      {c.effectivePct.toFixed(1)}% effective off · {c.units.toLocaleString()} units · {money(c.collected)} collected ({c.invoiceCount} invoice{c.invoiceCount === 1 ? "" : "s"})
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <input
+                      value={draftReasons[key] || ""}
+                      onChange={(e) => setDraftReasons((prev) => ({ ...prev, [key]: e.target.value }))}
+                      placeholder="Why does this client get this discount? (saved permanently — won't be flagged again)"
+                      style={{ ...inputStyle, flex: 1, minWidth: 220 }}
+                    />
+                    <button
+                      disabled={!(draftReasons[key] || "").trim() || savingFor === key}
+                      onClick={() => saveReason(c.name)}
+                      style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: (draftReasons[key] || "").trim() ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
+                    >
+                      {savingFor === key ? "Saving…" : "Save reason"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {alreadyReasoned.length > 0 && (
+            <details>
+              <summary style={{ fontSize: 12.5, fontWeight: 600, color: "#5B5445", cursor: "pointer", marginBottom: 8 }}>
+                Already reasoned ({alreadyReasoned.length})
+              </summary>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                {alreadyReasoned.map((c) => {
+                  const key = c.name.toLowerCase().trim();
+                  const reasonRow = reasonsByClient.get(key);
+                  return (
+                    <div key={key} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
+                        <div>
+                          <span style={{ fontWeight: 600, fontSize: 13.5 }}>{c.name}</span>
+                          <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 999, background: "#6B72801A", color: "#6B7280" }}>{c.tier}</span>
+                          <div style={{ fontSize: 12.5, color: "#5B5445", marginTop: 4 }}>{reasonRow?.reason}</div>
+                          <div className="kb-font-mono" style={{ fontSize: 10.5, color: "#8A8272", marginTop: 2 }}>
+                            {reasonRow?.addedBy}, {reasonRow?.addedAt ? new Date(reasonRow.addedAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" }) : ""}
+                          </div>
+                        </div>
+                        <button
+                          disabled={savingFor === key}
+                          onClick={() => resetReason(reasonRow)}
+                          style={{ fontSize: 11.5, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "5px 10px", whiteSpace: "nowrap" }}
+                        >
+                          {savingFor === key ? "…" : "Reset (flag again)"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </details>
+          )}
+        </>
+      )}
+      {reasonsError && <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 10 }}>{reasonsError}</div>}
+    </div>
+  );
+}
+
 // ---------- Settings ----------
-function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts, competitors, onAddCompetitor, onUpdateCompetitor, onRemoveCompetitor, onAddCompetitorProduct, onUpdateCompetitorProduct, onRemoveCompetitorProduct, onImportCompetitorProducts }) {
+function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts, competitors, onAddCompetitor, onUpdateCompetitor, onRemoveCompetitor, onAddCompetitorProduct, onUpdateCompetitorProduct, onRemoveCompetitorProduct, onImportCompetitorProducts, repNames = [] }) {
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Settings</h2>
@@ -12633,6 +12960,7 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
       {role === "manager" && <StockMovementImportSection />}
 
       {role === "manager" && <PharmacyPickupImportSection />}
+      {role === "manager" && <DiscountAuditSection repNames={repNames} />}
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
         <Field label={`Slow-mover threshold: flag if turnover falls below ${slowThreshold}% of stock sold per 90 days`}>
           <input type="range" min="5" max="40" value={slowThreshold} onChange={(e) => setSlowThreshold(Number(e.target.value))} style={{ width: "100%" }} />

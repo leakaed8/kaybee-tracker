@@ -1678,6 +1678,54 @@ app.post("/api/pharmacy-sales/import", requireManager, async (req, res) => {
   }
 });
 
+// Discount Audit — the weekly/monthly "exercise" Excel is parsed and
+// analyzed entirely client-side (effective discount %, tier bucketing);
+// the only thing persisted here is the manager's standing reason per
+// client, which is what suppresses that client from being re-flagged on
+// every future import.
+app.get("/api/discount-audit/reasons", requireManager, async (req, res) => {
+  try {
+    const rows = await db.getAllRows("DiscountAuditReasons");
+    res.json({ reasons: rows });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/discount-audit/reasons", requireManager, async (req, res) => {
+  try {
+    const { clientName, reason } = req.body;
+    if (!clientName || !String(clientName).trim()) return res.status(400).json({ error: "clientName is required" });
+    if (!reason || !String(reason).trim()) return res.status(400).json({ error: "reason is required" });
+    const cleanName = String(clientName).trim();
+    const key = cleanName.toLowerCase();
+    const rows = await db.getAllRows("DiscountAuditReasons");
+    const existing = rows.find((r) => r.clientName.toLowerCase().trim() === key);
+    const patch = { reason: String(reason).trim(), addedBy: req.repName || "Manager", addedAt: new Date().toISOString() };
+    if (existing) {
+      await db.updateRowById("DiscountAuditReasons", existing.id, patch);
+      return res.json({ ok: true, id: existing.id });
+    }
+    const row = { id: `dar${crypto.randomUUID()}`, clientName: cleanName, ...patch };
+    await db.appendRow("DiscountAuditReasons", row);
+    res.json({ ok: true, id: row.id });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/discount-audit/reasons/:id", requireManager, async (req, res) => {
+  try {
+    await db.deleteRowById("DiscountAuditReasons", req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/visits", async (req, res) => {
   const startedAt = Date.now();
   try {

@@ -210,6 +210,12 @@ const SCHEMAS = {
   // "workplace" is Doctors' "hospital" renamed to fit a non-clinical
   // practice (private clinic, gym, wellness center, etc.).
   Nutritionists: ["id", "name", "workplace", "area", "phone", "specialty", "tier", "registrationNumber", "address", "coordsLat", "coordsLng", "assignedRep", "discountRate"],
+  // One standing row per client — the manager's permanent explanation for why
+  // that client's weekly/monthly discount-audit exercise shows an effective
+  // discount of 35%+ (see POST /api/discount-audit/reasons). Having a row
+  // here is what suppresses a client from being re-flagged on every future
+  // import; deleting it re-opens that client to being flagged again.
+  DiscountAuditReasons: ["id", "clientName", "reason", "addedBy", "addedAt"],
   OutreachLog: ["id", "name", "date", "templateIndex"],
   Orders: ["id", "clientName", "visitId", "repName", "date", "items", "total", "status", "discountRate", "netTotal", "posEntered", "posEnteredAt", "posEnteredBy"],
   Reps: ["id", "name", "passcode", "email", "exportSheetId", "telegramChatId", "telegramLinkCode", "isSupervisor", "supplementStoresOnly", "medRepOnly"],
