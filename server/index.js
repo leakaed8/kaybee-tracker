@@ -1758,10 +1758,12 @@ app.post("/api/pharmacy-sales/import", requireManager, async (req, res) => {
 });
 
 // Discount Audit — the weekly/monthly "exercise" Excel is parsed and
-// analyzed entirely client-side (effective discount %, tier bucketing);
-// the only thing persisted here is the manager's standing reason per
-// client, which is what suppresses that client from being re-flagged on
-// every future import.
+// analyzed entirely client-side (effective discount %, tier bucketing).
+// Two things get persisted here: the manager's standing reason per client
+// (suppresses that client from being re-flagged on every future import),
+// and the last analysis's flagged-client results (so reopening this section
+// shows where things stood without re-uploading the Excel again) — not the
+// raw ~1,000+ invoice-line rows themselves, which are never saved.
 app.get("/api/discount-audit/reasons", requireManager, async (req, res) => {
   try {
     const rows = await db.getAllRows("DiscountAuditReasons");
@@ -1799,6 +1801,45 @@ app.delete("/api/discount-audit/reasons/:id", requireManager, async (req, res) =
   try {
     await db.deleteRowById("DiscountAuditReasons", req.params.id);
     res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/discount-audit/results", requireManager, async (req, res) => {
+  try {
+    const rows = await db.getAllRows("DiscountAuditResults");
+    res.json({ results: rows });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Replaces the whole saved set on every new analysis — this is always a
+// fresh "here's where things stand as of this upload" snapshot, not
+// something to merge with a prior one (a client who drops off the flagged
+// list this week should disappear, not linger from an old upload).
+app.post("/api/discount-audit/results", requireManager, async (req, res) => {
+  try {
+    const { results } = req.body;
+    if (!Array.isArray(results)) return res.status(400).json({ error: "results is required" });
+    const analyzedAt = new Date().toISOString();
+    const cleanRows = results
+      .filter((r) => r.clientName && String(r.clientName).trim())
+      .map((r) => ({
+        id: `dares${crypto.randomUUID()}`,
+        clientName: String(r.clientName).trim(),
+        effectivePct: Number(r.effectivePct) || 0,
+        units: Number(r.units) || 0,
+        collected: Number(r.collected) || 0,
+        listValue: Number(r.listValue) || 0,
+        invoiceCount: Number(r.invoiceCount) || 0,
+        lastAnalyzedAt: analyzedAt,
+      }));
+    await db.replaceAllRows("DiscountAuditResults", cleanRows);
+    res.json({ ok: true, count: cleanRows.length, lastAnalyzedAt: analyzedAt });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });

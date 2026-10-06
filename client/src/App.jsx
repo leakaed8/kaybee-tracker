@@ -12705,6 +12705,8 @@ function DiscountAuditSection({ repNames }) {
   const [parseError, setParseError] = useState("");
 
   const [results, setResults] = useState(null); // [{ name, listValue, collected, units, invoiceCount, effectivePct, tier }]
+  const [resultsLoading, setResultsLoading] = useState(true);
+  const [lastAnalyzedAt, setLastAnalyzedAt] = useState(null);
   const [draftReasons, setDraftReasons] = useState({}); // normalized name -> text being typed
   const [savingFor, setSavingFor] = useState(null);
   const [saveError, setSaveError] = useState("");
@@ -12721,6 +12723,32 @@ function DiscountAuditSection({ repNames }) {
       .finally(() => setReasonsLoading(false));
   };
   useEffect(loadReasons, []);
+
+  // Picks the last saved analysis back up on open, so the manager isn't
+  // forced to re-upload the Excel just to see where things stood — only a
+  // fresh upload + Analyze replaces it (see analyze() below).
+  useEffect(() => {
+    api.getDiscountAuditResults()
+      .then((data) => {
+        const saved = data.results || [];
+        if (saved.length === 0) return;
+        const restored = saved
+          .map((r) => ({
+            name: r.clientName,
+            listValue: Number(r.listValue) || 0,
+            collected: Number(r.collected) || 0,
+            units: Number(r.units) || 0,
+            invoiceCount: Number(r.invoiceCount) || 0,
+            effectivePct: Number(r.effectivePct) || 0,
+          }))
+          .map((c) => ({ ...c, tier: tierForEffectivePct(c.effectivePct) }))
+          .sort((a, b) => b.effectivePct - a.effectivePct);
+        setResults(restored);
+        setLastAnalyzedAt(saved[0].lastAnalyzedAt || null);
+      })
+      .catch(() => {}) // no saved analysis yet — just show the upload prompt
+      .finally(() => setResultsLoading(false));
+  }, []);
 
   const handleFile = (e) => {
     const file = e.target.files[0];
@@ -12794,6 +12822,15 @@ function DiscountAuditSection({ repNames }) {
       .sort((a, b) => b.effectivePct - a.effectivePct);
 
     setResults(flagged);
+    // Persisted so reopening this section later (even a fresh page load)
+    // shows this analysis without re-uploading — replaces whatever analysis
+    // was saved before, since this is always "here's where things stand as
+    // of this upload," not something to merge with an older one.
+    api.saveDiscountAuditResults(flagged.map((c) => ({
+      clientName: c.name, effectivePct: c.effectivePct, units: c.units, collected: c.collected, listValue: c.listValue, invoiceCount: c.invoiceCount,
+    })))
+      .then((data) => setLastAnalyzedAt(data.lastAnalyzedAt || new Date().toISOString()))
+      .catch((e) => setSaveError(`Analysis ran, but saving it for next time failed: ${e.message}`));
   };
 
   const saveReason = async (clientName) => {
@@ -12846,8 +12883,14 @@ function DiscountAuditSection({ repNames }) {
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
       <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Discount audit — flag clients at 35%+ effective discount</label>
       <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
-        Upload the POS "exercise" export (invoice lines with client, quantity, list price, and invoice total). This computes each client's TRUE effective discount — including free/bonus units from an offer, not just the stated line discount — and flags anyone at 35% or higher. Check it weekly against whatever's exported so far this month; re-uploading just re-analyzes the latest file, nothing is kept except the reasons you give below.
+        Upload the POS "exercise" export (invoice lines with client, quantity, list price, and invoice total). This computes each client's TRUE effective discount — including free/bonus units from an offer, not just the stated line discount — and flags anyone at 35% or higher. The flagged list below stays saved, so reopening this section shows it without re-uploading; check weekly by uploading the latest export, which replaces it with a fresh analysis.
       </p>
+      {resultsLoading && <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>Loading last saved analysis…</div>}
+      {!resultsLoading && lastAnalyzedAt && (
+        <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 10 }}>
+          Last analyzed {new Date(lastAnalyzedAt).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Beirut" })}
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
         <Field label="Which rep is this? (optional — labels the results only)">
@@ -13048,38 +13091,90 @@ function TabVisibilitySection({ tabVisibility, setTabVisibility }) {
   );
 }
 
+// Collapsed by default so the manager sees a scannable list of section
+// titles instead of every section's full content stacked one after another
+// — click a title to open just that one. Each section keeps its own
+// internal styling/title (unchanged); this just wraps it in a disclosure
+// so collapsing it hides everything below the title bar.
+function CollapsibleSection({ title, defaultOpen = false, children }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "12px 16px", background: "#fff", border: "1px solid #E5DFD3",
+          borderRadius: open ? "10px 10px 0 0" : 10, fontSize: 13.5, fontWeight: 600, color: "#1F2A24",
+          textAlign: "left", cursor: "pointer",
+        }}
+      >
+        {title}
+        <ChevronDown size={16} color="#8A8272" style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }} />
+      </button>
+      {open && (
+        <div style={{ border: "1px solid #E5DFD3", borderTop: "none", borderRadius: "0 0 10px 10px", background: "#FAF7F2", padding: 12 }}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------- Settings ----------
 function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts, competitors, onAddCompetitor, onUpdateCompetitor, onRemoveCompetitor, onAddCompetitorProduct, onUpdateCompetitorProduct, onRemoveCompetitorProduct, onImportCompetitorProducts, repNames = [], tabVisibility, setTabVisibility }) {
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Settings</h2>
 
-      <PushNotificationSetup />
-
-      {role === "manager" && <ManagerTelegramLinkSection />}
-
-      {role === "manager" && <RepsManagementSection onRepsChanged={onRepsChanged} />}
-
-      {role === "manager" && <TabVisibilitySection tabVisibility={tabVisibility} setTabVisibility={setTabVisibility} />}
+      <CollapsibleSection title="Push notifications">
+        <PushNotificationSetup />
+      </CollapsibleSection>
 
       {role === "manager" && (
-        <OffersManagementSection offers={offers} onAdd={onAddOffer} onToggleActive={onToggleOfferActive} onRemove={onRemoveOffer} />
-      )}
-
-      {role === "manager" && <ExcelImportSection onImport={onBulkImport} productCount={productCount} />}
-
-      {role === "manager" && (
-        <ProductCatalogSection
-          products={productCatalog}
-          onAdd={onAddCatalogProduct}
-          onUpdate={onUpdateCatalogProduct}
-          onRemove={onRemoveCatalogProduct}
-          onImportBulk={onBulkImportCatalogProducts}
-        />
+        <CollapsibleSection title="Manager Telegram alerts">
+          <ManagerTelegramLinkSection />
+        </CollapsibleSection>
       )}
 
       {role === "manager" && (
-        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+        <CollapsibleSection title="Sales reps">
+          <RepsManagementSection onRepsChanged={onRepsChanged} />
+        </CollapsibleSection>
+      )}
+
+      {role === "manager" && (
+        <CollapsibleSection title="Tab visibility by role">
+          <TabVisibilitySection tabVisibility={tabVisibility} setTabVisibility={setTabVisibility} />
+        </CollapsibleSection>
+      )}
+
+      {role === "manager" && (
+        <CollapsibleSection title="Discounts & offers">
+          <OffersManagementSection offers={offers} onAdd={onAddOffer} onToggleActive={onToggleOfferActive} onRemove={onRemoveOffer} />
+        </CollapsibleSection>
+      )}
+
+      {role === "manager" && (
+        <CollapsibleSection title="Import products (Excel)">
+          <ExcelImportSection onImport={onBulkImport} productCount={productCount} />
+        </CollapsibleSection>
+      )}
+
+      {role === "manager" && (
+        <CollapsibleSection title="Product catalog">
+          <ProductCatalogSection
+            products={productCatalog}
+            onAdd={onAddCatalogProduct}
+            onUpdate={onUpdateCatalogProduct}
+            onRemove={onRemoveCatalogProduct}
+            onImportBulk={onBulkImportCatalogProducts}
+          />
+        </CollapsibleSection>
+      )}
+
+      {role === "manager" && (
+        <CollapsibleSection title="Competitors">
           <CompetitorsView
             canEdit={role === "manager"}
             competitors={competitors}
@@ -13092,37 +13187,52 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
             onRemoveProduct={onRemoveCompetitorProduct}
             onImportProducts={onImportCompetitorProducts}
           />
-        </div>
+        </CollapsibleSection>
       )}
 
-      {role === "manager" && <StockMovementImportSection />}
+      {role === "manager" && (
+        <CollapsibleSection title="Stock movement import">
+          <StockMovementImportSection />
+        </CollapsibleSection>
+      )}
 
-      {role === "manager" && <PharmacyPickupImportSection />}
-      {role === "manager" && <DiscountAuditSection repNames={repNames} />}
-      <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+      {role === "manager" && (
+        <CollapsibleSection title="Pharmacy pick-up list source">
+          <PharmacyPickupImportSection />
+        </CollapsibleSection>
+      )}
+
+      {role === "manager" && (
+        <CollapsibleSection title="Discount audit">
+          <DiscountAuditSection repNames={repNames} />
+        </CollapsibleSection>
+      )}
+
+      <CollapsibleSection title="Slow-mover threshold">
         <Field label={`Slow-mover threshold: flag if turnover falls below ${slowThreshold}% of stock sold per 90 days`}>
           <input type="range" min="5" max="40" value={slowThreshold} onChange={(e) => setSlowThreshold(Number(e.target.value))} style={{ width: "100%" }} />
         </Field>
         <p style={{ fontSize: 11.5, color: "#8A8272", marginTop: 6 }}>
           Formula: (average monthly movement × 3 ÷ units in stock) × 100. Uses real Stock Movement history where uploaded, otherwise falls back to the last 90 days of sales. Below this % is flagged slow-moving, regardless of expiry date.
         </p>
-      </div>
-      <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+      </CollapsibleSection>
+
+      <CollapsibleSection title="Rep WhatsApp number">
         <Field label="Rep WhatsApp number (for expiry nudges, include country code)">
           <input value={repPhone} onChange={(e) => setRepPhone(e.target.value)} placeholder="+961 xx xxx xxx" style={inputStyle} />
         </Field>
-      </div>
+      </CollapsibleSection>
 
-      <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+      <CollapsibleSection title="Daily outreach goal">
         <Field label={`Daily new-pharmacy outreach goal: ${dailyTarget} contacts/day`}>
           <input type="range" min="1" max="10" value={dailyTarget} onChange={(e) => setDailyTarget(Number(e.target.value))} style={{ width: "100%" }} />
         </Field>
         <p style={{ fontSize: 11.5, color: "#8A8272", marginTop: 6 }}>
           Keep this modest (2–4/day) — spacing out first-contact messages avoids WhatsApp spam flags.
         </p>
-      </div>
+      </CollapsibleSection>
 
-      <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16 }}>
+      <CollapsibleSection title="Outreach message templates">
         <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>
           Outreach message variations (use {"{name}"} to insert the contact's name)
         </label>
@@ -13144,7 +13254,7 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
           style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 500, color: "#C17817", background: "none", border: "none", padding: "4px 0" }}>
           <Plus size={14} /> Add variation
         </button>
-      </div>
+      </CollapsibleSection>
     </div>
   );
 }

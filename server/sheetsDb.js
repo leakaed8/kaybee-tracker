@@ -216,6 +216,13 @@ const SCHEMAS = {
   // here is what suppresses a client from being re-flagged on every future
   // import; deleting it re-opens that client to being flagged again.
   DiscountAuditReasons: ["id", "clientName", "reason", "addedBy", "addedAt"],
+  // The last analysis's flagged-client results (effective % >= 35 only —
+  // same filter the client already applies before this gets saved), so
+  // reopening Discount Audit shows where things stood without re-uploading
+  // the Excel every time. Replaced wholesale on every new analysis (see
+  // POST /api/discount-audit/results), same pattern as PharmacySales — not
+  // the ~1,000+ raw invoice-line rows, just one row per flagged client.
+  DiscountAuditResults: ["id", "clientName", "effectivePct", "units", "collected", "listValue", "invoiceCount", "lastAnalyzedAt"],
   OutreachLog: ["id", "name", "date", "templateIndex"],
   Orders: ["id", "clientName", "visitId", "repName", "date", "items", "total", "status", "discountRate", "netTotal", "posEntered", "posEnteredAt", "posEnteredBy"],
   Reps: ["id", "name", "passcode", "email", "exportSheetId", "telegramChatId", "telegramLinkCode", "isSupervisor", "supplementStoresOnly", "medRepOnly"],
