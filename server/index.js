@@ -179,15 +179,63 @@ function requireManager(req, res, next) {
 // specific med reps — plus any "test" account used for QA — get it back,
 // matched the same case-insensitive/trimmed way every other name-identity
 // check in this app works. Mirrors client/src/App.jsx's
-// isProductExpertUnlockedRep — keep both in sync. Nothing else (Training,
-// Settings, etc.) is affected.
+// isProductExpertUnlockedRep — keep both in sync. This stacks on top of (not
+// instead of) the general manager-configurable tab-visibility toggle below.
 const PRODUCT_EXPERT_ALLOWED_REPS = ["zahraa", "rayan"];
 function isProductExpertUnlockedRep(repName) {
   const name = (repName || "").trim().toLowerCase();
   return PRODUCT_EXPERT_ALLOWED_REPS.includes(name) || name.startsWith("test");
 }
-function requireManagerOrProductExpertRep(req, res, next) {
+
+// Manager-configurable per-role nav visibility (Settings → Tab visibility on
+// the client). Dashboard/Check-In/Settings aren't here — see the identical
+// comment on client/src/App.jsx's copy of this object for why. Keep this
+// object, and isTabVisibleFor below, byte-for-byte in sync with App.jsx's
+// copy: one gates the nav button, the other gates the API route, and a
+// mismatch between them would show a tab that 403s or hide one that works.
+const DEFAULT_TAB_VISIBILITY = {
+  performance: { manager: true, rep: false, supervisor: false },
+  stock: { manager: true, rep: false, supervisor: false },
+  expiry: { manager: true, rep: false, supervisor: false },
+  orders: { manager: true, rep: false, supervisor: true },
+  locations: { manager: true, rep: false, supervisor: true },
+  cadence: { manager: true, rep: true, supervisor: true },
+  knowledge: { manager: true, rep: false, supervisor: false },
+  recall: { manager: true, rep: false, supervisor: false },
+  training: { manager: true, rep: false, supervisor: false },
+};
+function isTabVisibleFor(tabVisibility, tabKey, role, isSupervisor) {
+  const v = (tabVisibility && tabVisibility[tabKey]) || DEFAULT_TAB_VISIBILITY[tabKey];
+  if (!v) return false;
+  if (role === "manager") return !!v.manager;
+  if (isSupervisor) return !!v.supervisor;
+  return !!v.rep;
+}
+
+// Settings reads go through db's own read cache (see getAllRowsRaw in
+// sheetsDb.js), so calling this per-request to check live tab-visibility
+// settings doesn't add real Sheets API load.
+function requireTabAccess(tabKey) {
+  return async (req, res, next) => {
+    if (req.role === "manager") return next();
+    try {
+      const settings = parseSettings(await db.getSettings());
+      if (isTabVisibleFor(settings.tabVisibility, tabKey, req.role, req.isSupervisor)) return next();
+    } catch (e) {
+      logErr(e); // fail closed below on a settings-read error
+    }
+    res.status(403).json({ error: "Not available for your role." });
+  };
+}
+
+async function requireManagerOrProductExpertRep(req, res, next) {
   if (req.role === "manager" || isProductExpertUnlockedRep(req.repName)) return next();
+  try {
+    const settings = parseSettings(await db.getSettings());
+    if (isTabVisibleFor(settings.tabVisibility, "recall", req.role, req.isSupervisor)) return next();
+  } catch (e) {
+    logErr(e);
+  }
   res.status(403).json({ error: "Managers only." });
 }
 
@@ -208,7 +256,20 @@ const DEFAULT_SETTINGS = {
   // so the already-shipped overdue-badge feature can't regress.
   qualityCallRequiredFields: ["reaction", "commitment", "callOutcome"],
   tierVisitFrequency: { A: { perMonth: 2 }, B: { perMonth: 1 }, C: { perMonth: 0.4 } },
+  tabVisibility: DEFAULT_TAB_VISIBILITY,
 };
+
+// A saved tabVisibility JSON might predate a tab added to
+// DEFAULT_TAB_VISIBILITY later — merge per-tab against the defaults instead
+// of trusting the saved object to have every key, so a new tab defaults to
+// its intended visibility instead of silently vanishing for everyone.
+function mergeTabVisibility(saved) {
+  const merged = {};
+  for (const tabKey of Object.keys(DEFAULT_TAB_VISIBILITY)) {
+    merged[tabKey] = { ...DEFAULT_TAB_VISIBILITY[tabKey], ...(saved && saved[tabKey]) };
+  }
+  return merged;
+}
 
 function parseSettings(raw) {
   return {
@@ -224,6 +285,7 @@ function parseSettings(raw) {
       ? JSON.parse(raw.qualityCallRequiredFields) : DEFAULT_SETTINGS.qualityCallRequiredFields,
     tierVisitFrequency: raw.tierVisitFrequency
       ? JSON.parse(raw.tierVisitFrequency) : DEFAULT_SETTINGS.tierVisitFrequency,
+    tabVisibility: raw.tabVisibility ? mergeTabVisibility(JSON.parse(raw.tabVisibility)) : DEFAULT_SETTINGS.tabVisibility,
   };
 }
 
@@ -2793,7 +2855,7 @@ app.delete("/api/offers/:id", requireManager, async (req, res) => {
 // then pastes its object key (filename) here along with the quiz JSON.
 // This app never stores or serves the video itself, only that key and the
 // quiz.
-app.get("/api/training-videos", requireManager, async (req, res) => {
+app.get("/api/training-videos", requireTabAccess("training"), async (req, res) => {
   try {
     const rows = await db.getAllRows("TrainingVideos");
     const videos = rows.map((v) => parseTrainingVideo(v)).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -2804,7 +2866,7 @@ app.get("/api/training-videos", requireManager, async (req, res) => {
   }
 });
 
-app.get("/api/training-videos/:id", requireManager, async (req, res) => {
+app.get("/api/training-videos/:id", requireTabAccess("training"), async (req, res) => {
   try {
     const rows = await db.getAllRows("TrainingVideos");
     const video = rows.find((v) => v.id === req.params.id);
@@ -2903,7 +2965,7 @@ app.delete("/api/admin/training-videos/:id", requireManager, async (req, res) =>
 // ONLY way to get a working URL at all: the token is short-lived and minted
 // fresh per request, tied to nothing but "someone with a valid session
 // asked for it right now."
-app.get("/api/training-videos/:id/playback-url", requireManager, async (req, res) => {
+app.get("/api/training-videos/:id/playback-url", requireTabAccess("training"), async (req, res) => {
   try {
     const rows = await db.getAllRows("TrainingVideos");
     const video = rows.find((v) => v.id === req.params.id);
@@ -2916,7 +2978,7 @@ app.get("/api/training-videos/:id/playback-url", requireManager, async (req, res
   }
 });
 
-app.post("/api/training-videos/:id/complete", requireManager, async (req, res) => {
+app.post("/api/training-videos/:id/complete", requireTabAccess("training"), async (req, res) => {
   try {
     if (!req.repName) return res.status(403).json({ error: "Employees only." });
     const videos = await db.getAllRows("TrainingVideos");
@@ -2948,7 +3010,7 @@ app.post("/api/training-videos/:id/complete", requireManager, async (req, res) =
 // own); managers/supervisors get the team-wide view needed to actually
 // track who completed what, matching the same access rule used for
 // Locations and Performance.
-app.get("/api/training-progress", requireManager, async (req, res) => {
+app.get("/api/training-progress", requireTabAccess("training"), async (req, res) => {
   try {
     const rows = await db.getAllRows("TrainingProgress");
     let progress = rows.map(parseTrainingProgress);
@@ -2967,7 +3029,7 @@ app.get("/api/training-progress", requireManager, async (req, res) => {
 // pages, etc.) reps can consult while pitching a product — no content is
 // hosted here, just a title, the URL, and an optional note on why it's
 // relevant.
-app.get("/api/training-studies", requireManager, async (req, res) => {
+app.get("/api/training-studies", requireTabAccess("training"), async (req, res) => {
   try {
     const rows = await db.getAllRows("TrainingStudies");
     const studies = rows.map(parseTrainingStudy).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
@@ -3055,7 +3117,7 @@ app.delete("/api/admin/training-studies/:id", requireManager, async (req, res) =
 // nudge (below) know which studies a rep has already gotten to, the same
 // way TrainingProgress tracks video completion. One row per employee per
 // study; re-opening just bumps viewedAt rather than piling up duplicates.
-app.post("/api/training-studies/:id/viewed", requireManager, async (req, res) => {
+app.post("/api/training-studies/:id/viewed", requireTabAccess("training"), async (req, res) => {
   try {
     if (!req.repName) return res.status(403).json({ error: "Employees only." });
     const studies = await db.getAllRows("TrainingStudies");
@@ -3081,7 +3143,7 @@ app.post("/api/training-studies/:id/viewed", requireManager, async (req, res) =>
 // of the full (manager-only) edit below, specifically so the backlog of
 // untagged studies can get tagged quickly by whoever notices one, without
 // needing full edit rights over the title/URL/notes.
-app.patch("/api/training-studies/:id/nutrient", requireManager, async (req, res) => {
+app.patch("/api/training-studies/:id/nutrient", requireTabAccess("training"), async (req, res) => {
   try {
     const { nutrient } = req.body;
     if (!nutrient || !String(nutrient).trim()) return res.status(400).json({ error: "nutrient is required" });
@@ -5217,10 +5279,15 @@ app.post("/api/outreach-log", async (req, res) => {
   }
 });
 
-app.patch("/api/settings", async (req, res) => {
+// requireManager: every caller (client/src/App.jsx's updateSettingsField) is
+// manager-only UI already, and this route can write tabVisibility — a rep
+// hitting it directly without this guard could grant themselves access to
+// any tab, so the gap is worth closing now that this route controls that.
+app.patch("/api/settings", requireManager, async (req, res) => {
   try {
     const patch = { ...req.body };
     if (patch.templates) patch.templates = JSON.stringify(patch.templates);
+    if (patch.tabVisibility) patch.tabVisibility = JSON.stringify(patch.tabVisibility);
     await db.setSettings(patch);
     const raw = await db.getSettings();
     res.json(parseSettings(raw));

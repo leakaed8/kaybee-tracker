@@ -136,6 +136,43 @@ function isProductExpertUnlockedRep(repName) {
   return PRODUCT_EXPERT_ALLOWED_REPS.includes(name) || name.startsWith("test");
 }
 
+// Manager-configurable per-role nav visibility (Settings → Tab visibility).
+// Dashboard/Check-In/Settings aren't in this list on purpose — those are
+// each role's own home tab, and letting a role's only landing tab be hidden
+// (or letting a manager hide their own way back into this settings panel)
+// would be a self-lockout, not a useful toggle. Keep this object's shape
+// (and the defaults below, which match the hardcoded behavior this feature
+// replaced) in sync with the identical copy in server/index.js.
+const TAB_VISIBILITY_TABS = [
+  { key: "performance", label: "Performance", icon: Target },
+  { key: "stock", label: "Stock", icon: Boxes },
+  { key: "expiry", label: "Expiry Alerts", icon: Package },
+  { key: "orders", label: "Orders", icon: ShoppingCart },
+  { key: "locations", label: "Locations", icon: RadarIcon },
+  { key: "cadence", label: "Visit Cadence", icon: History },
+  { key: "knowledge", label: "Knowledge", icon: BookOpen },
+  { key: "recall", label: "Product Expert", icon: Brain },
+  { key: "training", label: "Training", icon: GraduationCap },
+];
+const DEFAULT_TAB_VISIBILITY = {
+  performance: { manager: true, rep: false, supervisor: false },
+  stock: { manager: true, rep: false, supervisor: false },
+  expiry: { manager: true, rep: false, supervisor: false },
+  orders: { manager: true, rep: false, supervisor: true },
+  locations: { manager: true, rep: false, supervisor: true },
+  cadence: { manager: true, rep: true, supervisor: true },
+  knowledge: { manager: true, rep: false, supervisor: false },
+  recall: { manager: true, rep: false, supervisor: false },
+  training: { manager: true, rep: false, supervisor: false },
+};
+function isTabVisibleFor(tabVisibility, tabKey, role, isSupervisor) {
+  const v = (tabVisibility && tabVisibility[tabKey]) || DEFAULT_TAB_VISIBILITY[tabKey];
+  if (!v) return false;
+  if (role === "manager") return !!v.manager;
+  if (isSupervisor) return !!v.supervisor;
+  return !!v.rep;
+}
+
 // ---------- main app ----------
 export default function App() {
   const [authState, setAuthState] = useState("checking"); // checking | out | in
@@ -172,6 +209,7 @@ export default function App() {
     slowThreshold: 15, repPhone: "", dailyTarget: 3, monthlyVisitTarget: 60, monthlyRevenueTarget: 10000, templates: [],
     qualityCallRequiredFields: ["reaction", "commitment", "callOutcome"],
     tierVisitFrequency: { A: { perMonth: 2 }, B: { perMonth: 1 }, C: { perMonth: 0.4 } },
+    tabVisibility: DEFAULT_TAB_VISIBILITY,
   });
   const [loaded, setLoaded] = useState(false);
   const [syncStatus, setSyncStatus] = useState("");
@@ -485,6 +523,14 @@ export default function App() {
     return <PunchInGate repName={repName} onPunch={punch} onLogout={logout} />;
   }
 
+  // Shared by the nav and each configurable tab's content render below, so
+  // a live settings change mid-session can't leave a rep on a tab whose
+  // button just disappeared. Product Expert's hardcoded allowlist stacks on
+  // top of (doesn't replace) the general per-role toggle.
+  const canSeeTab = (tabKey) =>
+    isTabVisibleFor(settings.tabVisibility, tabKey, role, isSupervisor) ||
+    (tabKey === "recall" && isProductExpertUnlockedRep(repName));
+
   return (
     <div style={{ minHeight: "100vh", background: "#FAF7F2", fontFamily: "'IBM Plex Sans', system-ui, sans-serif", color: "#1F2A24" }}>
       <style>{`
@@ -527,37 +573,24 @@ export default function App() {
         </div>
       </header>
 
-      {/* Ordered by when it gets used in the workday, not by role — the same
-          list serves all three roles at once because each role's own tabs
-          just fall out of the existing visibility gates below:
-            manager:    Dashboard, Performance, Orders, Locations, My
-                        Schedule, Outreach, Broadcast, Stock, Expiry,
-                        Pharmacies, Doctors, Competitors, Knowledge, Training,
-                        Settings
-            supervisor: Performance, Orders, Locations, My Schedule,
-                        Check-In, Stock, Expiry, Pharmacies, Competitors,
-                        Knowledge, Training
-            rep:        Check-In, My Schedule, Route, Stock, Expiry,
-                        Pharmacies, Doctors, Competitors, Knowledge, Training
-          Training itself has two sub-tabs (see TrainingTabView): the
-          curriculum reader is hidden from supervisors as before, but the
-          video/quiz tracker applies to every role, so the nav tab itself is
-          no longer gated on !isSupervisor.
-          Keep this comment's per-role lists in sync with defaultTabFor()
-          above and with any future visibility-gate change. */}
+      {/* Ordered by when it gets used in the workday, not by role. Most tabs
+          below are manager-configurable per role from Settings → Tab
+          visibility (canSeeTab reads settings.tabVisibility) — see
+          DEFAULT_TAB_VISIBILITY above for the defaults (which match this
+          nav's original hardcoded behavior) and TabVisibilitySection for the
+          toggle UI. Dashboard/Check-In/Settings aren't configurable (each
+          role's own home tab); Pharmacies/Supplement Stores/Doctors/
+          Nutritionists/Route/Outreach/Broadcast stay on their existing
+          per-rep-account flags (supplementStoresOnly/medRepOnly/isSupervisor
+          or a hardcoded `false`), since those aren't a role-visibility
+          question. */}
       <nav style={{ display: "flex", gap: 4, padding: "12px 24px 0", borderBottom: "1px solid #E5DFD3", overflowX: "auto" }}>
         {role === "manager" && <TabBtn active={tab === "dashboard"} onClick={() => setTab("dashboard")} icon={<LayoutDashboard size={15} />} label="Dashboard" />}
-        {/* Performance hidden from supervisors for now — flip back to
-            role === "manager" || isSupervisor to re-enable. */}
-        {role === "manager" && <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<Target size={15} />} label="Performance" />}
-        {/* Stock/Expiry Alerts are manager-only now — reps already see live
-            stock/batch/expiry info in the product picker while placing an
-            order, so the standalone browse-everything tab isn't "necessary"
-            for them and is hidden to keep their view minimal. */}
-        {role === "manager" && <TabBtn active={tab === "stock"} onClick={() => setTab("stock")} icon={<Boxes size={15} />} label="Stock" />}
-        {role === "manager" && <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />}
-        {(role === "manager" || isSupervisor) && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
-        {(role === "manager" || isSupervisor) && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<RadarIcon size={15} />} label="Locations" />}
+        {canSeeTab("performance") && <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<Target size={15} />} label="Performance" />}
+        {canSeeTab("stock") && <TabBtn active={tab === "stock"} onClick={() => setTab("stock")} icon={<Boxes size={15} />} label="Stock" />}
+        {canSeeTab("expiry") && <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />}
+        {canSeeTab("orders") && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
+        {canSeeTab("locations") && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<RadarIcon size={15} />} label="Locations" />}
         {/* My Schedule — visible to every role: a rep always sees their own,
             a manager/supervisor picks a rep to view team-wide (same
             isTeamWide permission GET /api/followups already enforces). */}
@@ -581,14 +614,13 @@ export default function App() {
             category (consistent with Check-In's entity-type toggle, which
             already hides nutritionist from medRepOnly reps too). */}
         {!isSupervisor && !supplementStoresOnly && !medRepOnly && <TabBtn active={tab === "nutritionists"} onClick={() => setTab("nutritionists")} icon={<Apple size={15} />} label="Nutritionists/Dietitians" />}
-        {(role === "manager" || role === "rep") && <TabBtn active={tab === "cadence"} onClick={() => setTab("cadence")} icon={<History size={15} />} label="Visit Cadence" />}
-        {/* Knowledge/Product Expert/Training are manager-only now — reference
-            and training tools, not required for day-to-day check-ins, so
-            hidden from reps/supervisors to minimize their nav. Product
-            Expert is reopened for a short allowlist of reps above. */}
-        {role === "manager" && <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />}
-        {(role === "manager" || isProductExpertUnlockedRep(repName)) && <TabBtn active={tab === "recall"} onClick={() => setTab("recall")} icon={<Brain size={15} />} label="Product Expert" />}
-        {role === "manager" && <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />}
+        {canSeeTab("cadence") && <TabBtn active={tab === "cadence"} onClick={() => setTab("cadence")} icon={<History size={15} />} label="Visit Cadence" />}
+        {canSeeTab("knowledge") && <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />}
+        {/* Product Expert is also always open to the hardcoded allowlist
+            (Zahraa, Rayan, any "test" account) regardless of this toggle —
+            see isProductExpertUnlockedRep. */}
+        {canSeeTab("recall") && <TabBtn active={tab === "recall"} onClick={() => setTab("recall")} icon={<Brain size={15} />} label="Product Expert" />}
+        {canSeeTab("training") && <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />}
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
       </nav>
 
@@ -605,7 +637,7 @@ export default function App() {
         )}
         {loaded && (
           <>
-            {tab === "expiry" && (
+            {tab === "expiry" && canSeeTab("expiry") && (
               <ExpiryView
                 role={role}
                 sorted={sorted}
@@ -653,7 +685,7 @@ export default function App() {
                 nutritionists={nutritionists}
               />
             )}
-            {tab === "stock" && <StockView products={sorted} />}
+            {tab === "stock" && canSeeTab("stock") && <StockView products={sorted} />}
             {tab === "clients" && !supplementStoresOnly && !medRepOnly && (
               <ClientsView
                 clients={clients}
@@ -711,21 +743,21 @@ export default function App() {
                 onUpdateDiscount={updateNutritionistDiscount}
               />
             )}
-            {tab === "cadence" && (role === "manager" || role === "rep") && (
+            {tab === "cadence" && canSeeTab("cadence") && (
               <VisitCadenceView role={role} isSupervisor={isSupervisor} repNames={repNames} />
             )}
-            {tab === "knowledge" && <KnowledgeView />}
-            {tab === "training" && (
+            {tab === "knowledge" && canSeeTab("knowledge") && <KnowledgeView />}
+            {tab === "training" && canSeeTab("training") && (
               <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
             )}
-            {tab === "recall" && (
+            {tab === "recall" && canSeeTab("recall") && (
               <RecallView role={role} repName={repName} repNames={repNames} products={products} catalogProducts={productCatalog} />
             )}
             {tab === "route" && role === "rep" && !isSupervisor && <RouteView clients={clients} doctors={doctors} />}
             {tab === "dashboard" && role === "manager" && (
               <DashboardView zoned={zoned} clients={clients} doctors={doctors} repNames={repNames} settings={settings} onNavigate={setTab} />
             )}
-            {tab === "orders" && (role === "manager" || isSupervisor) && (
+            {tab === "orders" && canSeeTab("orders") && (
               <OrdersTabView
                 role={role}
                 isSupervisor={isSupervisor}
@@ -740,7 +772,7 @@ export default function App() {
                 onUpdateOrder={updateOrder}
               />
             )}
-            {tab === "locations" && (role === "manager" || isSupervisor) && (
+            {tab === "locations" && canSeeTab("locations") && (
               <LocationsView
                 role={role}
                 isSupervisor={isSupervisor}
@@ -751,7 +783,7 @@ export default function App() {
                 onAddComment={addVisitComment}
               />
             )}
-            {tab === "performance" && role === "manager" && (
+            {tab === "performance" && canSeeTab("performance") && (
               <PerformanceView
                 clients={clients}
                 doctors={doctors}
@@ -806,6 +838,8 @@ export default function App() {
                 onRemoveCompetitorProduct={removeCompetitorProduct}
                 onImportCompetitorProducts={importCompetitorProductsBulk}
                 repNames={repNames}
+                tabVisibility={settings.tabVisibility}
+                setTabVisibility={(v) => updateSettingsField({ tabVisibility: v })}
               />
             )}
           </>
@@ -12924,8 +12958,66 @@ function DiscountAuditSection({ repNames }) {
   );
 }
 
+// Lets the manager pick, per tab, which of Manager/Rep/Supervisor can see it
+// in the nav — replaces what used to be hardcoded role checks scattered
+// through App()'s nav/render blocks (see TAB_VISIBILITY_TABS/
+// DEFAULT_TAB_VISIBILITY/isTabVisibleFor/canSeeTab above). Dashboard/
+// Check-In/Settings aren't listed here on purpose (see canSeeTab's comment).
+function TabVisibilitySection({ tabVisibility, setTabVisibility }) {
+  const v = tabVisibility || DEFAULT_TAB_VISIBILITY;
+  const toggle = (tabKey, roleKey) => {
+    const current = v[tabKey] || DEFAULT_TAB_VISIBILITY[tabKey];
+    setTabVisibility({ ...v, [tabKey]: { ...current, [roleKey]: !current[roleKey] } });
+  };
+  const roleCols = [
+    { key: "manager", label: "Manager" },
+    { key: "rep", label: "Rep" },
+    { key: "supervisor", label: "Supervisor" },
+  ];
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>Tab visibility by role</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Choose which roles see each tab in the nav. Dashboard, Check-In, and Settings always stay with their own role and aren't listed here.
+      </p>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid #E5DFD3" }}>
+              <th style={{ textAlign: "left", padding: "6px 8px", color: "#8A8272", fontWeight: 500 }}>Tab</th>
+              {roleCols.map((r) => (
+                <th key={r.key} style={{ padding: "6px 8px", color: "#8A8272", fontWeight: 500 }}>{r.label}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {TAB_VISIBILITY_TABS.map(({ key, label, icon: Icon }) => {
+              const row = v[key] || DEFAULT_TAB_VISIBILITY[key];
+              return (
+                <tr key={key} style={{ borderBottom: "1px solid #F1EDE3" }}>
+                  <td style={{ padding: "8px", display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+                    <Icon size={14} color="#8A8272" />{label}
+                  </td>
+                  {roleCols.map((r) => (
+                    <td key={r.key} style={{ textAlign: "center", padding: "8px" }}>
+                      <input type="checkbox" checked={!!row[r.key]} onChange={() => toggle(key, r.key)} />
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p style={{ fontSize: 11, color: "#8A8272", marginTop: 10 }}>
+        Product Expert is also always open to Zahraa, Rayan, and any "test" account, regardless of this toggle.
+      </p>
+    </div>
+  );
+}
+
 // ---------- Settings ----------
-function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts, competitors, onAddCompetitor, onUpdateCompetitor, onRemoveCompetitor, onAddCompetitorProduct, onUpdateCompetitorProduct, onRemoveCompetitorProduct, onImportCompetitorProducts, repNames = [] }) {
+function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts, competitors, onAddCompetitor, onUpdateCompetitor, onRemoveCompetitor, onAddCompetitorProduct, onUpdateCompetitorProduct, onRemoveCompetitorProduct, onImportCompetitorProducts, repNames = [], tabVisibility, setTabVisibility }) {
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Settings</h2>
@@ -12935,6 +13027,8 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
       {role === "manager" && <ManagerTelegramLinkSection />}
 
       {role === "manager" && <RepsManagementSection onRepsChanged={onRepsChanged} />}
+
+      {role === "manager" && <TabVisibilitySection tabVisibility={tabVisibility} setTabVisibility={setTabVisibility} />}
 
       {role === "manager" && (
         <OffersManagementSection offers={offers} onAdd={onAddOffer} onToggleActive={onToggleOfferActive} onRemove={onRemoveOffer} />
