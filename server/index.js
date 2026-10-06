@@ -178,41 +178,39 @@ function requireManager(req, res, next) {
   next();
 }
 
-// Product Expert (/api/recall/*) was locked to managers only, but these
-// specific med reps — plus any "test" account used for QA — get it back,
-// matched the same case-insensitive/trimmed way every other name-identity
-// check in this app works. Mirrors client/src/App.jsx's
-// isProductExpertUnlockedRep — keep both in sync. This stacks on top of (not
-// instead of) the general manager-configurable tab-visibility toggle below.
-const PRODUCT_EXPERT_ALLOWED_REPS = ["zahraa", "rayan"];
-function isProductExpertUnlockedRep(repName) {
-  const name = (repName || "").trim().toLowerCase();
-  return PRODUCT_EXPERT_ALLOWED_REPS.includes(name) || name.startsWith("test");
-}
-
 // Manager-configurable per-role nav visibility (Settings → Tab visibility on
-// the client). Dashboard/Check-In/Settings aren't here — see the identical
-// comment on client/src/App.jsx's copy of this object for why. Keep this
-// object, and isTabVisibleFor below, byte-for-byte in sync with App.jsx's
-// copy: one gates the nav button, the other gates the API route, and a
-// mismatch between them would show a tab that 403s or hide one that works.
+// the client) — the ONLY thing that decides which roles see which tab.
+// Nothing overrides it (there used to be a hardcoded Product Expert
+// allowlist stacked on top of this; removed per the manager's explicit
+// request that this toggle be the sole authority). Dashboard/Check-In/
+// Settings aren't here — see the identical comment on client/src/App.jsx's
+// copy of this object for why. Sales Rep and Med Rep are independent
+// columns, not a single "Rep" bucket — a rep who's both sees a tab if
+// either column is checked (see isTabVisibleFor). Keep this object, and
+// isTabVisibleFor below, byte-for-byte in sync with App.jsx's copy: one
+// gates the nav button, the other gates the API route, and a mismatch
+// between them would show a tab that 403s or hide one that works.
 const DEFAULT_TAB_VISIBILITY = {
-  performance: { manager: true, rep: false, supervisor: false },
-  stock: { manager: true, rep: false, supervisor: false },
-  expiry: { manager: true, rep: false, supervisor: false },
-  orders: { manager: true, rep: false, supervisor: true },
-  locations: { manager: true, rep: false, supervisor: true },
-  cadence: { manager: true, rep: true, supervisor: true },
-  knowledge: { manager: true, rep: false, supervisor: false },
-  recall: { manager: true, rep: false, supervisor: false },
-  training: { manager: true, rep: false, supervisor: false },
+  performance: { manager: true, salesRep: false, medRep: false, supervisor: false },
+  stock: { manager: true, salesRep: false, medRep: false, supervisor: false },
+  expiry: { manager: true, salesRep: false, medRep: false, supervisor: false },
+  orders: { manager: true, salesRep: false, medRep: false, supervisor: true },
+  locations: { manager: true, salesRep: false, medRep: false, supervisor: true },
+  cadence: { manager: true, salesRep: true, medRep: true, supervisor: true },
+  knowledge: { manager: true, salesRep: false, medRep: false, supervisor: false },
+  recall: { manager: true, salesRep: false, medRep: false, supervisor: false },
+  training: { manager: true, salesRep: false, medRep: false, supervisor: false },
 };
-function isTabVisibleFor(tabVisibility, tabKey, role, isSupervisor) {
+function isTabVisibleFor(tabVisibility, tabKey, role, isSupervisor, isSalesRep, isMedRep) {
   const v = (tabVisibility && tabVisibility[tabKey]) || DEFAULT_TAB_VISIBILITY[tabKey];
   if (!v) return false;
   if (role === "manager") return !!v.manager;
   if (isSupervisor) return !!v.supervisor;
-  return !!v.rep;
+  // Neither sales nor med flag set means this rep hasn't been categorized
+  // yet — treated as full access, same convention as the customer-category
+  // split (see requireAuth's comment on isSalesRep/isMedRep).
+  if (!isSalesRep && !isMedRep) return !!v.salesRep || !!v.medRep;
+  return (!!isSalesRep && !!v.salesRep) || (!!isMedRep && !!v.medRep);
 }
 
 // Settings reads go through db's own read cache (see getAllRowsRaw in
@@ -223,23 +221,12 @@ function requireTabAccess(tabKey) {
     if (req.role === "manager") return next();
     try {
       const settings = parseSettings(await db.getSettings());
-      if (isTabVisibleFor(settings.tabVisibility, tabKey, req.role, req.isSupervisor)) return next();
+      if (isTabVisibleFor(settings.tabVisibility, tabKey, req.role, req.isSupervisor, req.isSalesRep, req.isMedRep)) return next();
     } catch (e) {
       logErr(e); // fail closed below on a settings-read error
     }
     res.status(403).json({ error: "Not available for your role." });
   };
-}
-
-async function requireManagerOrProductExpertRep(req, res, next) {
-  if (req.role === "manager" || isProductExpertUnlockedRep(req.repName)) return next();
-  try {
-    const settings = parseSettings(await db.getSettings());
-    if (isTabVisibleFor(settings.tabVisibility, "recall", req.role, req.isSupervisor)) return next();
-  } catch (e) {
-    logErr(e);
-  }
-  res.status(403).json({ error: "Managers only." });
 }
 
 const DEFAULT_SETTINGS = {
@@ -265,11 +252,18 @@ const DEFAULT_SETTINGS = {
 // A saved tabVisibility JSON might predate a tab added to
 // DEFAULT_TAB_VISIBILITY later — merge per-tab against the defaults instead
 // of trusting the saved object to have every key, so a new tab defaults to
-// its intended visibility instead of silently vanishing for everyone.
+// its intended visibility instead of silently vanishing for everyone. Also
+// migrates a tab saved under the old single "rep" column (from before Sales
+// Rep/Med Rep were split apart) into both new columns at that same value,
+// preserving whatever a manager had already explicitly configured.
 function mergeTabVisibility(saved) {
   const merged = {};
   for (const tabKey of Object.keys(DEFAULT_TAB_VISIBILITY)) {
-    merged[tabKey] = { ...DEFAULT_TAB_VISIBILITY[tabKey], ...(saved && saved[tabKey]) };
+    const savedTab = saved && saved[tabKey];
+    const migrated = savedTab && savedTab.rep !== undefined && savedTab.salesRep === undefined && savedTab.medRep === undefined
+      ? { ...savedTab, salesRep: savedTab.rep, medRep: savedTab.rep }
+      : savedTab;
+    merged[tabKey] = { ...DEFAULT_TAB_VISIBILITY[tabKey], ...migrated };
   }
   return merged;
 }
@@ -5388,7 +5382,7 @@ async function ensureRecallDosageFormsSeeded() {
   recallDosageFormsSeedChecked = true;
 }
 
-app.get("/api/recall/dosage-forms", requireManagerOrProductExpertRep, async (req, res) => {
+app.get("/api/recall/dosage-forms", requireTabAccess("recall"), async (req, res) => {
   try {
     await ensureRecallDosageFormsSeeded();
     const forms = await db.getAllRows("RecallDosageForms");
@@ -9683,7 +9677,7 @@ async function recomputeOurProductResearchStatus(linkId) {
 // One combined read per page load (categories + the three empty-for-now
 // knowledge tabs used to compute counts), rather than one Sheets call per
 // category — the whole point of Phase J's performance rule.
-app.get("/api/recall/categories", requireManagerOrProductExpertRep, async (req, res) => {
+app.get("/api/recall/categories", requireTabAccess("recall"), async (req, res) => {
   try {
     await ensureRecallCategoriesSeeded();
     await ensureRecallB12Seeded();
@@ -9739,7 +9733,7 @@ app.get("/api/recall/categories", requireManagerOrProductExpertRep, async (req, 
 // page needs, computed from currently-empty tables. Sections legitimately
 // show real empty arrays right now; the client renders each as an
 // empty-state message rather than fabricating placeholder content.
-app.get("/api/recall/categories/:id", requireManagerOrProductExpertRep, async (req, res) => {
+app.get("/api/recall/categories/:id", requireTabAccess("recall"), async (req, res) => {
   try {
     await ensureRecallCategoriesSeeded();
     await ensureRecallB12Seeded();
@@ -9934,7 +9928,7 @@ app.get("/api/recall/categories/:id", requireManagerOrProductExpertRep, async (r
 // has no "edit only your own record" concept anywhere, so that's the
 // existing pattern being followed here too, not a new rule invented for
 // this feature.
-app.post("/api/recall/features", requireManagerOrProductExpertRep, uploadDocument.single("image"), async (req, res) => {
+app.post("/api/recall/features", requireTabAccess("recall"), uploadDocument.single("image"), async (req, res) => {
   try {
     const { categoryId, productId, title, description } = req.body;
     if (!categoryId) return res.status(400).json({ error: "categoryId is required" });
@@ -9971,7 +9965,7 @@ app.post("/api/recall/features", requireManagerOrProductExpertRep, uploadDocumen
   }
 });
 
-app.patch("/api/recall/features/:id", requireManagerOrProductExpertRep, uploadDocument.single("image"), async (req, res) => {
+app.patch("/api/recall/features/:id", requireTabAccess("recall"), uploadDocument.single("image"), async (req, res) => {
   try {
     const rows = await db.getAllRows("RecallProductFeatures");
     const feature = rows.find((f) => f.id === req.params.id);
@@ -10012,7 +10006,7 @@ app.patch("/api/recall/features/:id", requireManagerOrProductExpertRep, uploadDo
   }
 });
 
-app.delete("/api/recall/features/:id", requireManagerOrProductExpertRep, async (req, res) => {
+app.delete("/api/recall/features/:id", requireTabAccess("recall"), async (req, res) => {
   try {
     const ok = await db.deleteRowById("RecallProductFeatures", req.params.id);
     if (!ok) return res.status(404).json({ error: "Feature not found" });
@@ -10023,7 +10017,7 @@ app.delete("/api/recall/features/:id", requireManagerOrProductExpertRep, async (
   }
 });
 
-app.patch("/api/recall/features/:id/differentiator", requireManagerOrProductExpertRep, async (req, res) => {
+app.patch("/api/recall/features/:id/differentiator", requireTabAccess("recall"), async (req, res) => {
   try {
     const { isKeyDifferentiator } = req.body;
     const ok = await db.updateRowById("RecallProductFeatures", req.params.id, { isKeyDifferentiator: isKeyDifferentiator ? "true" : "" });
@@ -10035,7 +10029,7 @@ app.patch("/api/recall/features/:id/differentiator", requireManagerOrProductExpe
   }
 });
 
-app.get("/api/recall/features/:id/image-url", requireManagerOrProductExpertRep, async (req, res) => {
+app.get("/api/recall/features/:id/image-url", requireTabAccess("recall"), async (req, res) => {
   try {
     const rows = await db.getAllRows("RecallProductFeatures");
     const feature = rows.find((f) => f.id === req.params.id);
@@ -10048,7 +10042,7 @@ app.get("/api/recall/features/:id/image-url", requireManagerOrProductExpertRep, 
   }
 });
 
-app.post("/api/recall/benefits", requireManagerOrProductExpertRep, async (req, res) => {
+app.post("/api/recall/benefits", requireTabAccess("recall"), async (req, res) => {
   try {
     const { categoryId, productId, featureIds, title, description } = req.body;
     if (!categoryId) return res.status(400).json({ error: "categoryId is required" });
@@ -10078,7 +10072,7 @@ app.post("/api/recall/benefits", requireManagerOrProductExpertRep, async (req, r
   }
 });
 
-app.patch("/api/recall/benefits/:id", requireManagerOrProductExpertRep, async (req, res) => {
+app.patch("/api/recall/benefits/:id", requireTabAccess("recall"), async (req, res) => {
   try {
     const rows = await db.getAllRows("RecallProductBenefits");
     const benefit = rows.find((b) => b.id === req.params.id);
@@ -10113,7 +10107,7 @@ app.patch("/api/recall/benefits/:id", requireManagerOrProductExpertRep, async (r
   }
 });
 
-app.delete("/api/recall/benefits/:id", requireManagerOrProductExpertRep, async (req, res) => {
+app.delete("/api/recall/benefits/:id", requireTabAccess("recall"), async (req, res) => {
   try {
     const ok = await db.deleteRowById("RecallProductBenefits", req.params.id);
     if (!ok) return res.status(404).json({ error: "Benefit not found" });
@@ -10124,7 +10118,7 @@ app.delete("/api/recall/benefits/:id", requireManagerOrProductExpertRep, async (
   }
 });
 
-app.patch("/api/recall/benefits/:id/differentiator", requireManagerOrProductExpertRep, async (req, res) => {
+app.patch("/api/recall/benefits/:id/differentiator", requireTabAccess("recall"), async (req, res) => {
   try {
     const { isKeyDifferentiator } = req.body;
     const ok = await db.updateRowById("RecallProductBenefits", req.params.id, { isKeyDifferentiator: isKeyDifferentiator ? "true" : "" });
@@ -10153,7 +10147,7 @@ async function validateAdvantageProductIds(productIds) {
   return null;
 }
 
-app.post("/api/recall/advantages", requireManagerOrProductExpertRep, async (req, res) => {
+app.post("/api/recall/advantages", requireTabAccess("recall"), async (req, res) => {
   try {
     const { categoryId, feature, benefit, productIds, isKeyDifferentiator } = req.body;
     if (!categoryId) return res.status(400).json({ error: "categoryId is required" });
@@ -10177,7 +10171,7 @@ app.post("/api/recall/advantages", requireManagerOrProductExpertRep, async (req,
   }
 });
 
-app.patch("/api/recall/advantages/:id", requireManagerOrProductExpertRep, async (req, res) => {
+app.patch("/api/recall/advantages/:id", requireTabAccess("recall"), async (req, res) => {
   try {
     const rows = await db.getAllRows("RecallProductAdvantages");
     const advantage = rows.find((a) => a.id === req.params.id);
@@ -10208,7 +10202,7 @@ app.patch("/api/recall/advantages/:id", requireManagerOrProductExpertRep, async 
   }
 });
 
-app.delete("/api/recall/advantages/:id", requireManagerOrProductExpertRep, async (req, res) => {
+app.delete("/api/recall/advantages/:id", requireTabAccess("recall"), async (req, res) => {
   try {
     const ok = await db.deleteRowById("RecallProductAdvantages", req.params.id);
     if (!ok) return res.status(404).json({ error: "Product advantage not found" });
@@ -10224,7 +10218,7 @@ app.delete("/api/recall/advantages/:id", requireManagerOrProductExpertRep, async
 // after approval visibly stops claiming to be the approved wording rather
 // than silently keeping a stale APPROVED badge. Upserts by categoryId (one
 // row per category), same shape as the RepTargets-by-repName upsert.
-app.put("/api/recall/categories/:id/usp", requireManagerOrProductExpertRep, async (req, res) => {
+app.put("/api/recall/categories/:id/usp", requireTabAccess("recall"), async (req, res) => {
   try {
     const { text } = req.body;
     if (!text || !String(text).trim()) return res.status(400).json({ error: "text is required" });
@@ -10251,7 +10245,7 @@ app.put("/api/recall/categories/:id/usp", requireManagerOrProductExpertRep, asyn
   }
 });
 
-app.patch("/api/recall/categories/:id/usp/approve", requireManagerOrProductExpertRep, async (req, res) => {
+app.patch("/api/recall/categories/:id/usp/approve", requireTabAccess("recall"), async (req, res) => {
   try {
     const rows = await db.getAllRows("RecallCategoryUsp");
     const existing = rows.find((u) => u.categoryId === req.params.id);
@@ -10267,7 +10261,7 @@ app.patch("/api/recall/categories/:id/usp/approve", requireManagerOrProductExper
   }
 });
 
-app.get("/api/recall/assignments", requireManagerOrProductExpertRep, async (req, res) => {
+app.get("/api/recall/assignments", requireTabAccess("recall"), async (req, res) => {
   try {
     const { repName } = req.query;
     if (!repName) return res.status(400).json({ error: "repName is required" });
@@ -10284,7 +10278,7 @@ app.get("/api/recall/assignments", requireManagerOrProductExpertRep, async (req,
 // uses (pick a rep, check/uncheck boxes, Save) — simpler and less
 // error-prone than separate add/remove endpoints, and only ever touches
 // this one rep's rows; every other rep's assignments are left untouched.
-app.post("/api/recall/assignments", requireManagerOrProductExpertRep, async (req, res) => {
+app.post("/api/recall/assignments", requireTabAccess("recall"), async (req, res) => {
   try {
     const { repName, categoryIds } = req.body;
     if (!repName) return res.status(400).json({ error: "repName is required" });
@@ -10314,7 +10308,7 @@ app.post("/api/recall/assignments", requireManagerOrProductExpertRep, async (req
 // this is the actual enforcement of "approved sources," not just a comment.
 const APPROVED_RETAILERS = ["Skin Society", "Mazen Online", "Nicolas Care", "Sohati Care"];
 
-app.get("/api/recall/retailer-listings", requireManagerOrProductExpertRep, async (req, res) => {
+app.get("/api/recall/retailer-listings", requireTabAccess("recall"), async (req, res) => {
   try {
     const { competitorProductId } = req.query;
     const listings = await db.getAllRows("RecallRetailerListings");
@@ -10337,7 +10331,7 @@ app.get("/api/recall/retailer-listings", requireManagerOrProductExpertRep, async
 // this table only ever attaches to CompetitorProducts, never to our own
 // products, so it can't be used to touch the (still manager-only) Product
 // Catalog.
-app.post("/api/recall/retailer-listings", requireManagerOrProductExpertRep, async (req, res) => {
+app.post("/api/recall/retailer-listings", requireTabAccess("recall"), async (req, res) => {
   try {
     const { competitorProductId, retailer, sourceUrl, displayedPrice, currency, researchDate, notes } = req.body;
     if (!competitorProductId || !String(competitorProductId).trim()) return res.status(400).json({ error: "competitorProductId is required." });
@@ -10371,7 +10365,7 @@ app.post("/api/recall/retailer-listings", requireManagerOrProductExpertRep, asyn
   }
 });
 
-app.get("/api/recall/field-conflicts", requireManagerOrProductExpertRep, async (req, res) => {
+app.get("/api/recall/field-conflicts", requireTabAccess("recall"), async (req, res) => {
   try {
     const { entityType, entityId } = req.query;
     const conflicts = await db.getAllRows("RecallFieldConflicts");
@@ -10390,7 +10384,7 @@ app.get("/api/recall/field-conflicts", requireManagerOrProductExpertRep, async (
 // Any employee can record a conflict found on COMPETITOR research (shared
 // task); a conflict on OUR products (ProductCatalog/RecallProductIngredients)
 // stays manager-only, same as editing those records directly.
-app.post("/api/recall/field-conflicts", requireManagerOrProductExpertRep, async (req, res) => {
+app.post("/api/recall/field-conflicts", requireTabAccess("recall"), async (req, res) => {
   try {
     const { entityType, entityId, fieldName, sourceALabel, sourceAValue, sourceBLabel, sourceBValue, notes } = req.body;
     if (!entityType || !entityId || !fieldName) return res.status(400).json({ error: "entityType, entityId, and fieldName are required." });
@@ -10427,7 +10421,7 @@ app.post("/api/recall/field-conflicts", requireManagerOrProductExpertRep, async 
 // file); OUR products (Product Catalog) stay manager-only below.
 const RECALL_COMPETITOR_RESEARCH_FIELDS = ["genericName", "form", "dosage", "packSize", "manufacturer", "sku", "sourceLabel", "sourceUrl", "notes"];
 
-app.patch("/api/recall/competitor-research/:id", requireManagerOrProductExpertRep, async (req, res) => {
+app.patch("/api/recall/competitor-research/:id", requireTabAccess("recall"), async (req, res) => {
   try {
     const products = await db.getAllRows("CompetitorProducts");
     const existing = products.find((p) => p.id === req.params.id);
@@ -10468,7 +10462,7 @@ const RECALL_OUR_PRODUCT_CATALOG_FIELDS = ["name", "price", "form", "packSize", 
 // to be added under Settings -> Product Catalog first, same "add it at the
 // source screen first" rule already used for competitor products. Manager-
 // only, matching every other our-product edit/delete on this route.
-app.post("/api/recall/product-links", requireManagerOrProductExpertRep, async (req, res) => {
+app.post("/api/recall/product-links", requireTabAccess("recall"), async (req, res) => {
   try {
     const { ingredientId, productId } = req.body;
     if (!ingredientId || !productId) return res.status(400).json({ error: "ingredientId and productId are required." });
@@ -10500,7 +10494,7 @@ app.post("/api/recall/product-links", requireManagerOrProductExpertRep, async (r
   }
 });
 
-app.delete("/api/recall/product-links/:linkId", requireManagerOrProductExpertRep, async (req, res) => {
+app.delete("/api/recall/product-links/:linkId", requireTabAccess("recall"), async (req, res) => {
   try {
     await db.deleteRowById("RecallProductIngredients", req.params.linkId);
     res.json({ ok: true });
@@ -10510,7 +10504,7 @@ app.delete("/api/recall/product-links/:linkId", requireManagerOrProductExpertRep
   }
 });
 
-app.patch("/api/recall/our-products/:linkId", requireManagerOrProductExpertRep, async (req, res) => {
+app.patch("/api/recall/our-products/:linkId", requireTabAccess("recall"), async (req, res) => {
   try {
     const links = await db.getAllRows("RecallProductIngredients");
     const link = links.find((l) => l.id === req.params.linkId);
@@ -10550,7 +10544,7 @@ app.patch("/api/recall/our-products/:linkId", requireManagerOrProductExpertRep, 
 // creates a new one. Same allowlist-only field handling as the POST route
 // above, so a caller sending "availability"/"inStock"/etc. is silently
 // ignored, not stored. Open to any employee — see the POST route's comment.
-app.patch("/api/recall/retailer-listings/:id", requireManagerOrProductExpertRep, async (req, res) => {
+app.patch("/api/recall/retailer-listings/:id", requireTabAccess("recall"), async (req, res) => {
   try {
     const listings = await db.getAllRows("RecallRetailerListings");
     if (!listings.some((l) => l.id === req.params.id)) return res.status(404).json({ error: "Retailer listing not found." });
@@ -10579,7 +10573,7 @@ app.patch("/api/recall/retailer-listings/:id", requireManagerOrProductExpertRep,
 // is kept (status flipped to RESOLVED, not deleted) so both original
 // source values stay visible as history. Any employee can resolve a
 // COMPETITOR conflict; a conflict on OUR products stays manager-only.
-app.patch("/api/recall/field-conflicts/:id/resolve", requireManagerOrProductExpertRep, async (req, res) => {
+app.patch("/api/recall/field-conflicts/:id/resolve", requireTabAccess("recall"), async (req, res) => {
   try {
     const { resolution } = req.body;
     if (resolution !== "A" && resolution !== "B") return res.status(400).json({ error: "resolution must be 'A' or 'B'." });
@@ -10620,7 +10614,7 @@ app.patch("/api/recall/field-conflicts/:id/resolve", requireManagerOrProductExpe
 // membership is defined entirely by its our-products, not by the
 // competitor product itself. Open to any employee, matching the shared
 // competitor-research editing rule.
-app.get("/api/recall/linkable-products", requireManagerOrProductExpertRep, async (req, res) => {
+app.get("/api/recall/linkable-products", requireTabAccess("recall"), async (req, res) => {
   try {
     const [links, catalog, ingredients, categories] = await Promise.all([
       db.getAllRows("RecallProductIngredients"),
@@ -10652,7 +10646,7 @@ app.get("/api/recall/linkable-products", requireManagerOrProductExpertRep, async
 // Every existing competitor<->our-product comparison link, enriched with
 // the category it puts the competitor product under — used by the
 // Competitors tab to show "Already in Recall under: <category>" per row.
-app.get("/api/recall/competitor-relationships", requireManagerOrProductExpertRep, async (req, res) => {
+app.get("/api/recall/competitor-relationships", requireTabAccess("recall"), async (req, res) => {
   try {
     const [rels, catalog, links, ingredients, categories] = await Promise.all([
       db.getAllRows("RecallCompetitorRelationships"),
@@ -10687,7 +10681,7 @@ app.get("/api/recall/competitor-relationships", requireManagerOrProductExpertRep
 // competitor product or category here — both must already exist. Open to
 // any employee: attaching research to a category is a research-completion
 // action, same as editing the competitor product's own fields.
-app.post("/api/recall/competitor-relationships", requireManagerOrProductExpertRep, async (req, res) => {
+app.post("/api/recall/competitor-relationships", requireTabAccess("recall"), async (req, res) => {
   try {
     const { competitorProductId, ourProductId, comparisonType, notes } = req.body;
     if (!competitorProductId || !ourProductId) {
@@ -10725,7 +10719,7 @@ app.post("/api/recall/competitor-relationships", requireManagerOrProductExpertRe
 // competitor product's own research fields, which stays open to all
 // employees). This never deletes the competitor product itself, only the
 // link putting it under this category.
-app.delete("/api/recall/competitor-relationships/:id", requireManagerOrProductExpertRep, async (req, res) => {
+app.delete("/api/recall/competitor-relationships/:id", requireTabAccess("recall"), async (req, res) => {
   try {
     const rels = await db.getAllRows("RecallCompetitorRelationships");
     if (!rels.some((r) => r.id === req.params.id)) return res.status(404).json({ error: "Link not found." });

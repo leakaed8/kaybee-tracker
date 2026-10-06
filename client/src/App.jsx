@@ -125,24 +125,19 @@ function defaultTabFor(role, isSupervisor) {
   return "checkin";
 }
 
-// Product Expert (recall) was locked to managers only (see the nav below),
-// but these specific med reps — plus any "test" account used for QA — get
-// it back, by name, same case-insensitive/trimmed identity match used
-// everywhere else in this app. Everything else manager-only (Training,
-// Settings, etc.) is untouched.
-const PRODUCT_EXPERT_ALLOWED_REPS = ["zahraa", "rayan"];
-function isProductExpertUnlockedRep(repName) {
-  const name = (repName || "").trim().toLowerCase();
-  return PRODUCT_EXPERT_ALLOWED_REPS.includes(name) || name.startsWith("test");
-}
-
-// Manager-configurable per-role nav visibility (Settings → Tab visibility).
-// Dashboard/Check-In/Settings aren't in this list on purpose — those are
-// each role's own home tab, and letting a role's only landing tab be hidden
-// (or letting a manager hide their own way back into this settings panel)
-// would be a self-lockout, not a useful toggle. Keep this object's shape
-// (and the defaults below, which match the hardcoded behavior this feature
-// replaced) in sync with the identical copy in server/index.js.
+// Manager-configurable per-role nav visibility (Settings → Tab visibility) —
+// the ONLY thing that decides which roles see which tab. Nothing overrides
+// it (there used to be a hardcoded Product Expert allowlist stacked on top
+// of this; removed per the manager's explicit request that this toggle be
+// the sole authority). Dashboard/Check-In/Settings aren't in this list on
+// purpose — those are each role's own home tab, and letting a role's only
+// landing tab be hidden (or letting a manager hide their own way back into
+// this settings panel) would be a self-lockout, not a useful toggle. Sales
+// Rep and Med Rep are independent columns, not a single "Rep" bucket — a
+// rep who's both sees a tab if either column is checked (see
+// isTabVisibleFor). Keep this object's shape (and the defaults below, which
+// match the hardcoded behavior this feature replaced) in sync with the
+// identical copy in server/index.js.
 const TAB_VISIBILITY_TABS = [
   { key: "performance", label: "Performance", icon: Target },
   { key: "stock", label: "Stock", icon: Boxes },
@@ -155,22 +150,26 @@ const TAB_VISIBILITY_TABS = [
   { key: "training", label: "Training", icon: GraduationCap },
 ];
 const DEFAULT_TAB_VISIBILITY = {
-  performance: { manager: true, rep: false, supervisor: false },
-  stock: { manager: true, rep: false, supervisor: false },
-  expiry: { manager: true, rep: false, supervisor: false },
-  orders: { manager: true, rep: false, supervisor: true },
-  locations: { manager: true, rep: false, supervisor: true },
-  cadence: { manager: true, rep: true, supervisor: true },
-  knowledge: { manager: true, rep: false, supervisor: false },
-  recall: { manager: true, rep: false, supervisor: false },
-  training: { manager: true, rep: false, supervisor: false },
+  performance: { manager: true, salesRep: false, medRep: false, supervisor: false },
+  stock: { manager: true, salesRep: false, medRep: false, supervisor: false },
+  expiry: { manager: true, salesRep: false, medRep: false, supervisor: false },
+  orders: { manager: true, salesRep: false, medRep: false, supervisor: true },
+  locations: { manager: true, salesRep: false, medRep: false, supervisor: true },
+  cadence: { manager: true, salesRep: true, medRep: true, supervisor: true },
+  knowledge: { manager: true, salesRep: false, medRep: false, supervisor: false },
+  recall: { manager: true, salesRep: false, medRep: false, supervisor: false },
+  training: { manager: true, salesRep: false, medRep: false, supervisor: false },
 };
-function isTabVisibleFor(tabVisibility, tabKey, role, isSupervisor) {
+function isTabVisibleFor(tabVisibility, tabKey, role, isSupervisor, isSalesRep, isMedRep) {
   const v = (tabVisibility && tabVisibility[tabKey]) || DEFAULT_TAB_VISIBILITY[tabKey];
   if (!v) return false;
   if (role === "manager") return !!v.manager;
   if (isSupervisor) return !!v.supervisor;
-  return !!v.rep;
+  // Neither sales nor med flag set means this rep hasn't been categorized
+  // yet — treated as full access, same convention as the customer-category
+  // split (see the isSalesRep/isMedRep state comment below).
+  if (!isSalesRep && !isMedRep) return !!v.salesRep || !!v.medRep;
+  return (!!isSalesRep && !!v.salesRep) || (!!isMedRep && !!v.medRep);
 }
 
 // ---------- main app ----------
@@ -524,11 +523,9 @@ export default function App() {
 
   // Shared by the nav and each configurable tab's content render below, so
   // a live settings change mid-session can't leave a rep on a tab whose
-  // button just disappeared. Product Expert's hardcoded allowlist stacks on
-  // top of (doesn't replace) the general per-role toggle.
+  // button just disappeared.
   const canSeeTab = (tabKey) =>
-    isTabVisibleFor(settings.tabVisibility, tabKey, role, isSupervisor) ||
-    (tabKey === "recall" && isProductExpertUnlockedRep(repName));
+    isTabVisibleFor(settings.tabVisibility, tabKey, role, isSupervisor, isSalesRep, isMedRep);
 
   // Sales rep (Pharmacies + Supplement Stores) and med rep (Doctors +
   // Nutritionists/Dietitians) are independent, combinable flags — a rep can
@@ -624,9 +621,6 @@ export default function App() {
         {!isSupervisor && canMed && <TabBtn active={tab === "nutritionists"} onClick={() => setTab("nutritionists")} icon={<Apple size={15} />} label="Nutritionists/Dietitians" />}
         {canSeeTab("cadence") && <TabBtn active={tab === "cadence"} onClick={() => setTab("cadence")} icon={<History size={15} />} label="Visit Cadence" />}
         {canSeeTab("knowledge") && <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />}
-        {/* Product Expert is also always open to the hardcoded allowlist
-            (Zahraa, Rayan, any "test" account) regardless of this toggle —
-            see isProductExpertUnlockedRep. */}
         {canSeeTab("recall") && <TabBtn active={tab === "recall"} onClick={() => setTab("recall")} icon={<Brain size={15} />} label="Product Expert" />}
         {canSeeTab("training") && <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />}
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
@@ -12997,9 +12991,10 @@ function DiscountAuditSection({ repNames }) {
   );
 }
 
-// Lets the manager pick, per tab, which of Manager/Rep/Supervisor can see it
-// in the nav — replaces what used to be hardcoded role checks scattered
-// through App()'s nav/render blocks (see TAB_VISIBILITY_TABS/
+// Lets the manager pick, per tab, which of Manager/Sales Rep/Med Rep/
+// Supervisor can see it in the nav — the ONLY thing that decides this,
+// nothing overrides it. Replaces what used to be hardcoded role checks
+// scattered through App()'s nav/render blocks (see TAB_VISIBILITY_TABS/
 // DEFAULT_TAB_VISIBILITY/isTabVisibleFor/canSeeTab above). Dashboard/
 // Check-In/Settings aren't listed here on purpose (see canSeeTab's comment).
 function TabVisibilitySection({ tabVisibility, setTabVisibility }) {
@@ -13010,14 +13005,15 @@ function TabVisibilitySection({ tabVisibility, setTabVisibility }) {
   };
   const roleCols = [
     { key: "manager", label: "Manager" },
-    { key: "rep", label: "Rep" },
+    { key: "salesRep", label: "Sales Rep" },
+    { key: "medRep", label: "Med Rep" },
     { key: "supervisor", label: "Supervisor" },
   ];
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
       <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>Tab visibility by role</label>
       <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
-        Choose which roles see each tab in the nav. Dashboard, Check-In, and Settings always stay with their own role and aren't listed here.
+        Choose which roles see each tab in the nav. Sales Rep and Med Rep are independent — a rep who's both sees a tab if either is checked. Dashboard, Check-In, and Settings always stay with their own role and aren't listed here.
       </p>
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
@@ -13048,9 +13044,6 @@ function TabVisibilitySection({ tabVisibility, setTabVisibility }) {
           </tbody>
         </table>
       </div>
-      <p style={{ fontSize: 11, color: "#8A8272", marginTop: 10 }}>
-        Product Expert is also always open to Zahraa, Rayan, and any "test" account, regardless of this toggle.
-      </p>
     </div>
   );
 }
