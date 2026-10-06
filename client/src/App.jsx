@@ -125,6 +125,17 @@ function defaultTabFor(role, isSupervisor) {
   return "checkin";
 }
 
+// Product Expert (recall) was locked to managers only (see the nav below),
+// but these specific med reps — plus any "test" account used for QA — get
+// it back, by name, same case-insensitive/trimmed identity match used
+// everywhere else in this app. Everything else manager-only (Training,
+// Settings, etc.) is untouched.
+const PRODUCT_EXPERT_ALLOWED_REPS = ["zahraa", "rayan"];
+function isProductExpertUnlockedRep(repName) {
+  const name = (repName || "").trim().toLowerCase();
+  return PRODUCT_EXPERT_ALLOWED_REPS.includes(name) || name.startsWith("test");
+}
+
 // ---------- main app ----------
 export default function App() {
   const [authState, setAuthState] = useState("checking"); // checking | out | in
@@ -573,9 +584,10 @@ export default function App() {
         {(role === "manager" || role === "rep") && <TabBtn active={tab === "cadence"} onClick={() => setTab("cadence")} icon={<History size={15} />} label="Visit Cadence" />}
         {/* Knowledge/Product Expert/Training are manager-only now — reference
             and training tools, not required for day-to-day check-ins, so
-            hidden from reps/supervisors to minimize their nav. */}
+            hidden from reps/supervisors to minimize their nav. Product
+            Expert is reopened for a short allowlist of reps above. */}
         {role === "manager" && <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />}
-        {role === "manager" && <TabBtn active={tab === "recall"} onClick={() => setTab("recall")} icon={<Brain size={15} />} label="Product Expert" />}
+        {(role === "manager" || isProductExpertUnlockedRep(repName)) && <TabBtn active={tab === "recall"} onClick={() => setTab("recall")} icon={<Brain size={15} />} label="Product Expert" />}
         {role === "manager" && <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />}
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
       </nav>
