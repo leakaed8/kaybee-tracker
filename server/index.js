@@ -138,8 +138,8 @@ function requireAuth(req, res, next) {
     req.role = "manager";
     req.repName = null;
     req.isSupervisor = false;
-    req.supplementStoresOnly = false;
-    req.medRepOnly = false;
+    req.isSalesRep = false;
+    req.isMedRep = false;
   } else if (payload.startsWith("rep|")) {
     // A supervisor is a normal rep account with an extra flag set in
     // Settings — full rep experience (Check-In, Route, punch in/out, own
@@ -156,14 +156,17 @@ function requireAuth(req, res, next) {
     req.role = "rep";
     req.repName = decodeURIComponent(encodedName);
     req.isSupervisor = flags.includes("sup");
-    // A rep restricted to supplement stores only — no pharmacy or doctor
-    // access anywhere (Check-In, the Pharmacies/Doctors tabs, or the
-    // underlying write routes).
-    req.supplementStoresOnly = flags.includes("ssonly");
-    // A "med rep" restricted to doctors only — no pharmacy or supplement
-    // store access anywhere (Check-In, the Pharmacies/Supplement Stores
-    // tabs, or the underlying write routes).
-    req.medRepOnly = flags.includes("docsonly");
+    // Sales rep — visits Pharmacies + Supplement Stores — and med rep —
+    // visits Doctors + Nutritionists/Dietitians — are independent flags, not
+    // mutually exclusive: a rep can be both at once. Cookie flag codes
+    // ("ssonly"/"docsonly") are unchanged from before this app had the full
+    // combinable model (they used to mean "ONLY this one category"); only
+    // what they're interpreted to grant has changed, so no re-login or data
+    // migration was needed when this model shipped. Neither flag set means
+    // this rep hasn't been categorized yet — treated as full access to every
+    // category below, same as every rep's default before this split existed.
+    req.isSalesRep = flags.includes("ssonly");
+    req.isMedRep = flags.includes("docsonly");
   } else {
     return res.status(401).json({ error: "Please log in." });
   }
@@ -1017,11 +1020,15 @@ app.post("/api/login", async (req, res) => {
     const matched = reps.find((r) => r.passcode === passcode);
     if (matched) {
       const isSupervisor = matched.isSupervisor === "true";
-      const supplementStoresOnly = matched.supplementStoresOnly === "true";
-      const medRepOnly = matched.medRepOnly === "true";
-      const flags = [isSupervisor ? "sup" : "", supplementStoresOnly ? "ssonly" : "", medRepOnly ? "docsonly" : ""].filter(Boolean).join(",");
+      // Stored Reps sheet columns keep their original names (supplementStoresOnly/
+      // medRepOnly) — only what they mean to the rest of the app changed, from
+      // "restricted to ONLY this one category" to "has this category" (combinable).
+      // See requireAuth's comment for the full explanation.
+      const isSalesRep = matched.supplementStoresOnly === "true";
+      const isMedRep = matched.medRepOnly === "true";
+      const flags = [isSupervisor ? "sup" : "", isSalesRep ? "ssonly" : "", isMedRep ? "docsonly" : ""].filter(Boolean).join(",");
       setSessionCookie(res, signPayload(`rep|${encodeURIComponent(matched.name)}|${flags}`), 60 * 60 * 24 * 30);
-      return res.json({ ok: true, role: "rep", repName: matched.name, isSupervisor, supplementStoresOnly, medRepOnly });
+      return res.json({ ok: true, role: "rep", repName: matched.name, isSupervisor, isSalesRep, isMedRep });
     }
 
     res.status(401).json({ error: "Incorrect passcode." });
@@ -1083,7 +1090,7 @@ app.post("/api/telegram/webhook", async (req, res) => {
 
 app.use("/api", requireAuth);
 
-app.get("/api/session", (req, res) => res.json({ role: req.role, repName: req.repName, isSupervisor: !!req.isSupervisor, supplementStoresOnly: !!req.supplementStoresOnly, medRepOnly: !!req.medRepOnly }));
+app.get("/api/session", (req, res) => res.json({ role: req.role, repName: req.repName, isSupervisor: !!req.isSupervisor, isSalesRep: !!req.isSalesRep, isMedRep: !!req.isMedRep }));
 
 app.get("/api/push/vapid-public-key", (req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY || "" }));
 
@@ -1844,21 +1851,18 @@ app.post("/api/visits", async (req, res) => {
     if (!matchedClient && !matchedDoctor && !matchedNutritionist) {
       return res.status(400).json({ error: `"${client}" isn't in the system yet — add it in the Pharmacies, Doctors, or Nutritionists/Dietitians tab first.` });
     }
-    // Enforced here too, not just hidden in Check-In's toggle — a rep
-    // restricted to supplement stores shouldn't be able to log a pharmacy
-    // or doctor visit by calling the API directly either.
-    if (req.supplementStoresOnly) {
-      const isAllowed = matchedClient && (matchedClient.type || "pharmacy") === "supplement_store";
-      if (!isAllowed) {
-        return res.status(403).json({ error: "Your account is limited to supplement stores." });
-      }
+    // Enforced here too, not just hidden in Check-In's entity-type toggle —
+    // a sales rep (Pharmacies + Supplement Stores) or med rep (Doctors +
+    // Nutritionists/Dietitians) shouldn't be able to log a visit outside
+    // their category by calling the API directly either. Neither flag set
+    // means this rep hasn't been categorized — allowed everywhere, same as
+    // every rep before the sales/med split existed.
+    const repHasAnyType = req.isSalesRep || req.isMedRep;
+    if (matchedClient && repHasAnyType && !req.isSalesRep) {
+      return res.status(403).json({ error: "Your account doesn't include pharmacy/supplement store visits." });
     }
-    // Enforced here too, not just hidden in Check-In's toggle — a med rep
-    // restricted to doctors shouldn't be able to log a pharmacy, supplement
-    // store, or nutritionist/dietitian visit by calling the API directly
-    // either.
-    if (req.medRepOnly && !matchedDoctor) {
-      return res.status(403).json({ error: "Your account is limited to doctors." });
+    if ((matchedDoctor || matchedNutritionist) && repHasAnyType && !req.isMedRep) {
+      return res.status(403).json({ error: "Your account doesn't include doctor/nutritionist visits." });
     }
 
     // Location verification (Manager Performance Management redesign) is
@@ -2611,20 +2615,26 @@ app.post("/api/orders", async (req, res) => {
     if (!clientName || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "clientName and at least one item are required" });
     }
-    // Same restriction as visit creation — a rep limited to supplement
-    // stores can't place an order against a pharmacy via the API either.
-    if (req.supplementStoresOnly) {
-      const allClients = await db.getAllRows("Clients");
-      const matchedClient = allClients.find((c) => c.name.toLowerCase().trim() === clientName.toLowerCase().trim());
-      const isAllowed = matchedClient && (matchedClient.type || "pharmacy") === "supplement_store";
-      if (!isAllowed) {
-        return res.status(403).json({ error: "Your account is limited to supplement stores." });
+    // Resolved once, up front — used both for the sales/med-rep permission
+    // check right below and for discount resolution further down.
+    const allClients = await db.getAllRows("Clients");
+    const matchedClient = allClients.find((c) => c.name.toLowerCase().trim() === clientName.toLowerCase().trim());
+
+    // Enforced here too, not just hidden in Check-In's entity-type toggle —
+    // a sales rep (Pharmacies + Supplement Stores) or med rep (Doctors +
+    // Nutritionists/Dietitians — doctors don't take orders, so this only
+    // ever means Nutritionists here) can't place an order outside their
+    // category via the API directly either. Neither flag set means this rep
+    // hasn't been categorized — allowed everywhere, same as before the
+    // sales/med split existed.
+    const repHasAnyType = req.isSalesRep || req.isMedRep;
+    if (repHasAnyType) {
+      if (matchedClient && !req.isSalesRep) {
+        return res.status(403).json({ error: "Your account doesn't include pharmacy/supplement store orders." });
       }
-    }
-    // A med rep restricted to doctors never has a pharmacy/supplement store
-    // to place an order against — doctors don't take orders at all.
-    if (req.medRepOnly) {
-      return res.status(403).json({ error: "Your account is limited to doctors and can't place orders." });
+      if (!matchedClient && !req.isMedRep) {
+        return res.status(403).json({ error: "Your account doesn't include nutritionist orders." });
+      }
     }
     const cleanItems = buildCleanOrderItems(items);
 
@@ -2641,8 +2651,6 @@ app.post("/api/orders", async (req, res) => {
     // (an exception) by sending a different discountRate explicitly.
     let appliedDiscountRate = Number(discountRate) || 0;
     if (discountRate === undefined || discountRate === null || discountRate === "") {
-      const clients = await db.getAllRows("Clients");
-      const matchedClient = clients.find((c) => c.name.toLowerCase().trim() === clientName.toLowerCase().trim());
       if (matchedClient?.discountRate) {
         appliedDiscountRate = Number(matchedClient.discountRate);
       } else {
@@ -3947,16 +3955,16 @@ app.patch("/api/reps/:id", requireManager, async (req, res) => {
     const patch = {};
     if (req.body.email !== undefined) patch.email = req.body.email.trim();
     if (req.body.isSupervisor !== undefined) patch.isSupervisor = req.body.isSupervisor ? "true" : "false";
-    // Mutually exclusive — a rep restricted to supplement stores only can't
-    // also be restricted to doctors only, since that would leave nothing
-    // they're allowed to visit. Turning one on clears the other.
+    // Independent, combinable flags, not mutually exclusive — a rep can be
+    // both a sales rep (Pharmacies + Supplement Stores) and a med rep
+    // (Doctors + Nutritionists/Dietitians) at once. Column names kept as-is
+    // (supplementStoresOnly/medRepOnly) to avoid a sheet migration; see
+    // requireAuth's comment in this file for what they mean now.
     if (req.body.supplementStoresOnly !== undefined) {
       patch.supplementStoresOnly = req.body.supplementStoresOnly ? "true" : "false";
-      if (req.body.supplementStoresOnly) patch.medRepOnly = "false";
     }
     if (req.body.medRepOnly !== undefined) {
       patch.medRepOnly = req.body.medRepOnly ? "true" : "false";
-      if (req.body.medRepOnly) patch.supplementStoresOnly = "false";
     }
     const ok = await db.updateRowById("Reps", req.params.id, patch);
     if (!ok) return res.status(404).json({ error: "Rep not found" });

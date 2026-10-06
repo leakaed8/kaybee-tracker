@@ -179,14 +179,13 @@ export default function App() {
   const [role, setRole] = useState("manager");
   const [repName, setRepName] = useState("");
   const [isSupervisor, setIsSupervisor] = useState(false);
-  // A rep account restricted to supplement stores only — no pharmacy or
-  // doctor access anywhere in the app (Check-In, the Pharmacies/Doctors
-  // tabs, or the write routes underneath them). Set per-rep in Settings.
-  const [supplementStoresOnly, setSupplementStoresOnly] = useState(false);
-  // A "med rep" account restricted to doctors only — no pharmacy or
-  // supplement store access anywhere (Check-In, those two tabs, or the
-  // write routes underneath them). Mutually exclusive with the above.
-  const [medRepOnly, setMedRepOnly] = useState(false);
+  // Sales rep — visits Pharmacies + Supplement Stores — and med rep —
+  // visits Doctors + Nutritionists/Dietitians — are independent, combinable
+  // flags set per-rep in Settings (a rep can be both). Neither set means
+  // this rep hasn't been categorized yet, which this app treats as full
+  // access to every category, same as every rep before this split existed.
+  const [isSalesRep, setIsSalesRep] = useState(false);
+  const [isMedRep, setIsMedRep] = useState(false);
   const [tab, setTab] = useState("expiry");
   // "Reference" tier — Products/Clients/Doctors — loaded once at login, then
   // refreshed on a slow timer (see REFERENCE_POLL_INTERVAL_MS below), not
@@ -220,7 +219,7 @@ export default function App() {
 
   useEffect(() => {
     api.getSession()
-      .then((data) => { setRole(data.role); setRepName(data.repName || ""); setIsSupervisor(!!data.isSupervisor); setSupplementStoresOnly(!!data.supplementStoresOnly); setMedRepOnly(!!data.medRepOnly); setTab(defaultTabFor(data.role, !!data.isSupervisor)); setAuthState("in"); })
+      .then((data) => { setRole(data.role); setRepName(data.repName || ""); setIsSupervisor(!!data.isSupervisor); setIsSalesRep(!!data.isSalesRep); setIsMedRep(!!data.isMedRep); setTab(defaultTabFor(data.role, !!data.isSupervisor)); setAuthState("in"); })
       .catch(() => setAuthState("out"));
   }, []);
 
@@ -504,7 +503,7 @@ export default function App() {
   }
 
   if (authState === "out") {
-    return <LoginView onSuccess={(r, rn, sup, ssOnly, docsOnly) => { setRole(r); setRepName(rn || ""); setIsSupervisor(!!sup); setSupplementStoresOnly(!!ssOnly); setMedRepOnly(!!docsOnly); setTab(defaultTabFor(r, !!sup)); setAuthState("in"); }} />;
+    return <LoginView onSuccess={(r, rn, sup, sales, med) => { setRole(r); setRepName(rn || ""); setIsSupervisor(!!sup); setIsSalesRep(!!sales); setIsMedRep(!!med); setTab(defaultTabFor(r, !!sup)); setAuthState("in"); }} />;
   }
 
   // Derived from myLastPunch (the current rep's own last punch row — see
@@ -530,6 +529,15 @@ export default function App() {
   const canSeeTab = (tabKey) =>
     isTabVisibleFor(settings.tabVisibility, tabKey, role, isSupervisor) ||
     (tabKey === "recall" && isProductExpertUnlockedRep(repName));
+
+  // Sales rep (Pharmacies + Supplement Stores) and med rep (Doctors +
+  // Nutritionists/Dietitians) are independent, combinable flags — a rep can
+  // be both. Neither flag set means not yet categorized, which this app
+  // treats as full access to every category (repHasRepType false short-
+  // circuits both checks to true below).
+  const repHasRepType = isSalesRep || isMedRep;
+  const canSales = !repHasRepType || isSalesRep;
+  const canMed = !repHasRepType || isMedRep;
 
   return (
     <div style={{ minHeight: "100vh", background: "#FAF7F2", fontFamily: "'IBM Plex Sans', system-ui, sans-serif", color: "#1F2A24" }}>
@@ -580,9 +588,9 @@ export default function App() {
           nav's original hardcoded behavior) and TabVisibilitySection for the
           toggle UI. Dashboard/Check-In/Settings aren't configurable (each
           role's own home tab); Pharmacies/Supplement Stores/Doctors/
-          Nutritionists/Route/Outreach/Broadcast stay on their existing
-          per-rep-account flags (supplementStoresOnly/medRepOnly/isSupervisor
-          or a hardcoded `false`), since those aren't a role-visibility
+          Nutritionists stay on the per-rep sales/med category flags
+          (canSales/canMed, isSupervisor), and Route/Outreach/Broadcast stay
+          on a hardcoded `false`, since none of those are a role-visibility
           question. */}
       <nav style={{ display: "flex", gap: 4, padding: "12px 24px 0", borderBottom: "1px solid #E5DFD3", overflowX: "auto" }}>
         {role === "manager" && <TabBtn active={tab === "dashboard"} onClick={() => setTab("dashboard")} icon={<LayoutDashboard size={15} />} label="Dashboard" />}
@@ -606,14 +614,14 @@ export default function App() {
             role === "rep" && !isSupervisor to re-enable). RouteView and its
             render block below are untouched, so this is a one-line revert. */}
         {false && role === "rep" && !isSupervisor && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
-        {!supplementStoresOnly && !medRepOnly && <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />}
-        {!medRepOnly && <TabBtn active={tab === "supplementStores"} onClick={() => setTab("supplementStores")} icon={<Boxes size={15} />} label="Supplement Stores" />}
-        {!isSupervisor && !supplementStoresOnly && <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />}
-        {/* Same gating as Doctors, plus excluded for medRepOnly — a med rep
-            restricted to doctors-only shouldn't gain a second detailing
-            category (consistent with Check-In's entity-type toggle, which
-            already hides nutritionist from medRepOnly reps too). */}
-        {!isSupervisor && !supplementStoresOnly && !medRepOnly && <TabBtn active={tab === "nutritionists"} onClick={() => setTab("nutritionists")} icon={<Apple size={15} />} label="Nutritionists/Dietitians" />}
+        {canSales && <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />}
+        {canSales && <TabBtn active={tab === "supplementStores"} onClick={() => setTab("supplementStores")} icon={<Boxes size={15} />} label="Supplement Stores" />}
+        {!isSupervisor && canMed && <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />}
+        {/* Same gating as Doctors — a supervisor doesn't get this detailing
+            category, and a rep whose account doesn't include the med
+            category (consistent with Check-In's entity-type toggle) doesn't
+            either. */}
+        {!isSupervisor && canMed && <TabBtn active={tab === "nutritionists"} onClick={() => setTab("nutritionists")} icon={<Apple size={15} />} label="Nutritionists/Dietitians" />}
         {canSeeTab("cadence") && <TabBtn active={tab === "cadence"} onClick={() => setTab("cadence")} icon={<History size={15} />} label="Visit Cadence" />}
         {canSeeTab("knowledge") && <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />}
         {/* Product Expert is also always open to the hardcoded allowlist
@@ -655,8 +663,8 @@ export default function App() {
                 offers={offers}
                 repName={repName}
                 isSupervisor={isSupervisor}
-                supplementStoresOnly={supplementStoresOnly}
-                medRepOnly={medRepOnly}
+                isSalesRep={isSalesRep}
+                isMedRep={isMedRep}
                 onAddVisit={addVisit}
                 onUpdateVisit={updateVisit}
                 onCancelSavedVisit={cancelSavedVisit}
@@ -686,7 +694,7 @@ export default function App() {
               />
             )}
             {tab === "stock" && canSeeTab("stock") && <StockView products={sorted} />}
-            {tab === "clients" && !supplementStoresOnly && !medRepOnly && (
+            {tab === "clients" && canSales && (
               <ClientsView
                 clients={clients}
                 kind="pharmacy"
@@ -706,7 +714,7 @@ export default function App() {
                 onCompleteInfo={completeClientInfo}
               />
             )}
-            {tab === "supplementStores" && !medRepOnly && (
+            {tab === "supplementStores" && canSales && (
               <ClientsView
                 clients={clients}
                 kind="supplement_store"
@@ -722,7 +730,7 @@ export default function App() {
                 onCompleteInfo={completeClientInfo}
               />
             )}
-            {tab === "doctors" && !isSupervisor && !supplementStoresOnly && (
+            {tab === "doctors" && !isSupervisor && canMed && (
               <DoctorsView
                 doctors={doctors}
                 role={role}
@@ -732,7 +740,7 @@ export default function App() {
                 onCompleteInfo={completeDoctorInfo}
               />
             )}
-            {tab === "nutritionists" && !isSupervisor && !supplementStoresOnly && !medRepOnly && (
+            {tab === "nutritionists" && !isSupervisor && canMed && (
               <NutritionistsView
                 nutritionists={nutritionists}
                 role={role}
@@ -860,7 +868,7 @@ function LoginView({ onSuccess }) {
     setLoading(true);
     try {
       const data = await api.login(passcode);
-      onSuccess(data.role, data.repName, data.isSupervisor, data.supplementStoresOnly, data.medRepOnly);
+      onSuccess(data.role, data.repName, data.isSupervisor, data.isSalesRep, data.isMedRep);
     } catch (err) {
       setError("Incorrect passcode.");
     } finally {
@@ -1987,7 +1995,15 @@ function DoctorHistoryModal({ visits, onClose }) {
 }
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ clients, doctors, nutritionists = [], products, offers, repName, isSupervisor, supplementStoresOnly, medRepOnly, onAddVisit, onUpdateVisit, onCancelSavedVisit, onCancelPendingVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, onQueueOrderOffline, pendingOrderCount, onAttachPendingOrder, competitors, myLastPunch }) {
+function CheckInView({ clients, doctors, nutritionists = [], products, offers, repName, isSupervisor, isSalesRep, isMedRep, onAddVisit, onUpdateVisit, onCancelSavedVisit, onCancelPendingVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, onQueueOrderOffline, pendingOrderCount, onAttachPendingOrder, competitors, myLastPunch }) {
+  // Sales rep (Pharmacies + Supplement Stores) and med rep (Doctors +
+  // Nutritionists/Dietitians) are independent, combinable flags — a rep can
+  // be both, in which case every entity type below is available. Neither
+  // flag set means not yet categorized, treated as full access (matches
+  // App()'s canSales/canMed — see its comment for why).
+  const repHasRepType = isSalesRep || isMedRep;
+  const canSales = !repHasRepType || isSalesRep;
+  const canMed = !repHasRepType || isMedRep;
   const [punching, setPunching] = useState(false);
   const [punchError, setPunchError] = useState("");
   // Doctor-visit self-coaching tool — pure client-side reminders, nothing
@@ -1998,7 +2014,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   // A rep restricted to supplement stores only (or a med rep restricted to
   // doctors only) never sees the other options at all, so they land
   // directly on the one type they can use.
-  const [entityType, setEntityType] = useState(supplementStoresOnly ? "supplement_store" : medRepOnly ? "doctor" : "pharmacy"); // pharmacy | doctor | supplement_store
+  const [entityType, setEntityType] = useState(!canSales && canMed ? "doctor" : "pharmacy"); // pharmacy | doctor | supplement_store | nutritionist
   // Manager Performance Management redesign — Visit ≠ Contact. Required on
   // every new visit; only "in_person" counts toward the field-visit KPI.
   // Defaults to "in_person" so a rep restarting a visit (startNewVisit)
@@ -2735,32 +2751,45 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
               </button>
             </div>
           )}
-          {!editingSavedVisit && !supplementStoresOnly && !medRepOnly && (
+          {!editingSavedVisit && (
+            // Every combination of canSales/canMed grants at least two entity
+            // types now (sales = pharmacy+supplement store, med = doctor+
+            // nutritionist, both/neither = all four) — unlike the old
+            // mutually-exclusive "only" flags, there's never a single fixed
+            // type left to skip this toggle for, only which buttons show.
             <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-              <button onClick={() => { setEntityType("pharmacy"); setClient(""); }} style={{
-                flex: 1, minWidth: 110, padding: "8px 14px", borderRadius: 8, border: entityType === "pharmacy" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
-                background: entityType === "pharmacy" ? "#4C7A5E" : "#fff", color: entityType === "pharmacy" ? "#FAF7F2" : "#1F2A24",
-              }}>
-                Pharmacy
-              </button>
-              <button onClick={() => { setEntityType("supplement_store"); setClient(""); }} style={{
-                flex: 1, minWidth: 110, padding: "8px 14px", borderRadius: 8, border: entityType === "supplement_store" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
-                background: entityType === "supplement_store" ? "#4C7A5E" : "#fff", color: entityType === "supplement_store" ? "#FAF7F2" : "#1F2A24",
-              }}>
-                Supplement store
-              </button>
-              <button onClick={() => { setEntityType("doctor"); setClient(""); }} style={{
-                flex: 1, minWidth: 110, padding: "8px 14px", borderRadius: 8, border: entityType === "doctor" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
-                background: entityType === "doctor" ? "#4C7A5E" : "#fff", color: entityType === "doctor" ? "#FAF7F2" : "#1F2A24",
-              }}>
-                Doctor
-              </button>
-              <button onClick={() => { setEntityType("nutritionist"); setClient(""); }} style={{
-                flex: 1, minWidth: 110, padding: "8px 14px", borderRadius: 8, border: entityType === "nutritionist" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
-                background: entityType === "nutritionist" ? "#4C7A5E" : "#fff", color: entityType === "nutritionist" ? "#FAF7F2" : "#1F2A24",
-              }}>
-                Nutritionist/Dietitian
-              </button>
+              {canSales && (
+                <button onClick={() => { setEntityType("pharmacy"); setClient(""); }} style={{
+                  flex: 1, minWidth: 110, padding: "8px 14px", borderRadius: 8, border: entityType === "pharmacy" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+                  background: entityType === "pharmacy" ? "#4C7A5E" : "#fff", color: entityType === "pharmacy" ? "#FAF7F2" : "#1F2A24",
+                }}>
+                  Pharmacy
+                </button>
+              )}
+              {canSales && (
+                <button onClick={() => { setEntityType("supplement_store"); setClient(""); }} style={{
+                  flex: 1, minWidth: 110, padding: "8px 14px", borderRadius: 8, border: entityType === "supplement_store" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+                  background: entityType === "supplement_store" ? "#4C7A5E" : "#fff", color: entityType === "supplement_store" ? "#FAF7F2" : "#1F2A24",
+                }}>
+                  Supplement store
+                </button>
+              )}
+              {canMed && (
+                <button onClick={() => { setEntityType("doctor"); setClient(""); }} style={{
+                  flex: 1, minWidth: 110, padding: "8px 14px", borderRadius: 8, border: entityType === "doctor" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+                  background: entityType === "doctor" ? "#4C7A5E" : "#fff", color: entityType === "doctor" ? "#FAF7F2" : "#1F2A24",
+                }}>
+                  Doctor
+                </button>
+              )}
+              {canMed && (
+                <button onClick={() => { setEntityType("nutritionist"); setClient(""); }} style={{
+                  flex: 1, minWidth: 110, padding: "8px 14px", borderRadius: 8, border: entityType === "nutritionist" ? "1px solid #4C7A5E" : "1px solid #1F2A24", fontSize: 12.5, fontWeight: 500,
+                  background: entityType === "nutritionist" ? "#4C7A5E" : "#fff", color: entityType === "nutritionist" ? "#FAF7F2" : "#1F2A24",
+                }}>
+                  Nutritionist/Dietitian
+                </button>
+              )}
             </div>
           )}
 
@@ -3472,7 +3501,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
               ? "Marked as stopped — no more reminders for this one."
               : "No follow-up scheduled for this visit."}
           </div>
-          {isDoctorEntity && nextAction === "check_pharmacy_stock" && !medRepOnly && (
+          {isDoctorEntity && nextAction === "check_pharmacy_stock" && canSales && (
             // The one next-action with a natural next step in this app —
             // rather than a mid-postcall button that could abandon an
             // unsaved visit, this only appears once the visit is already
@@ -9931,11 +9960,17 @@ function effectiveInteractionType(v) {
 function isInPersonVisit(v) {
   return effectiveInteractionType(v) === "in_person";
 }
+// Sales (Pharmacies + Supplement Stores) and med (Doctors + Nutritionists)
+// are independent, combinable flags — see requireAuth's comment in
+// server/index.js. Stored field names (rep.supplementStoresOnly/medRepOnly)
+// are unchanged from before that split; only what they mean did.
 function repRoleLabel(rep) {
-  if (!rep) return "Doctors + Pharmacies";
-  if (rep.medRepOnly) return "Doctors";
-  if (rep.supplementStoresOnly) return "Supplement stores";
-  return "Doctors + Pharmacies";
+  if (!rep) return "All categories";
+  const sales = !!rep.supplementStoresOnly;
+  const med = !!rep.medRepOnly;
+  if (sales && !med) return "Pharmacies + Supplement stores";
+  if (med && !sales) return "Doctors + Nutritionists";
+  return "All categories"; // both set, or neither (not yet categorized)
 }
 // Monthly target = daily target × expected field days, UNLESS the manager
 // set an explicit override — never assumes every rep works the same number
@@ -11879,7 +11914,11 @@ function RepsManagementSection({ onRepsChanged }) {
     }
   };
 
-  const toggleSupplementStoresOnly = async (rep) => {
+  // Independent, combinable flags (a rep can be both) — payload field names
+  // (supplementStoresOnly/medRepOnly) match the stored Reps sheet columns,
+  // unchanged from before this app had the full sales/med split; only the
+  // function/label names here reflect the current terminology.
+  const toggleSalesRep = async (rep) => {
     try {
       await api.updateRep(rep.id, { supplementStoresOnly: !rep.supplementStoresOnly });
       await load();
@@ -11888,7 +11927,7 @@ function RepsManagementSection({ onRepsChanged }) {
     }
   };
 
-  const toggleMedRepOnly = async (rep) => {
+  const toggleMedRep = async (rep) => {
     try {
       await api.updateRep(rep.id, { medRepOnly: !rep.medRepOnly });
       await load();
@@ -11933,7 +11972,7 @@ function RepsManagementSection({ onRepsChanged }) {
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
       <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Sales reps</label>
       <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
-        Give each rep their own name, passcode, and Google account email. Their own personal Google Sheet of their visits is created and shared with them automatically — no other rep can see it. Once added, you can assign pharmacies to them in the Pharmacies tab.
+        Give each rep their own name, passcode, and Google account email. Their own personal Google Sheet of their visits is created and shared with them automatically — no other rep can see it. Once added, you can assign pharmacies to them in the Pharmacies tab. Check "Sales rep" and/or "Med rep" below for each person — someone who does both jobs can have both checked. Leaving both unchecked gives them every category until you categorize them.
       </p>
 
       {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
@@ -11950,13 +11989,13 @@ function RepsManagementSection({ onRepsChanged }) {
                     <input type="checkbox" checked={!!r.isSupervisor} onChange={() => toggleSupervisor(r)} />
                     Supervisor
                   </label>
-                  <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, color: "#5B5445" }} title="No Pharmacy or Doctor access anywhere — Check-In, the Pharmacies/Doctors tabs, and the underlying routes are all blocked. Only Supplement Stores.">
-                    <input type="checkbox" checked={!!r.supplementStoresOnly} onChange={() => toggleSupplementStoresOnly(r)} />
-                    Supplement stores only
+                  <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, color: "#5B5445" }} title="Check-In, the Pharmacies and Supplement Stores tabs, and the underlying routes. Combinable with Med rep — check both if this person does both jobs.">
+                    <input type="checkbox" checked={!!r.supplementStoresOnly} onChange={() => toggleSalesRep(r)} />
+                    Sales rep (Pharmacies + Supplement Stores)
                   </label>
-                  <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, color: "#5B5445" }} title="No Pharmacy or Supplement Store access anywhere — Check-In, those two tabs, and the underlying routes are all blocked. Only Doctors.">
-                    <input type="checkbox" checked={!!r.medRepOnly} onChange={() => toggleMedRepOnly(r)} />
-                    Med rep (doctors only)
+                  <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, color: "#5B5445" }} title="Check-In, the Doctors and Nutritionists/Dietitians tabs, and the underlying routes. Combinable with Sales rep — check both if this person does both jobs.">
+                    <input type="checkbox" checked={!!r.medRepOnly} onChange={() => toggleMedRep(r)} />
+                    Med rep (Doctors + Nutritionists)
                   </label>
                   <button onClick={() => removeRep(r.id)} style={{ background: "none", border: "none", color: "#B33A3A", fontSize: 11.5 }}>Remove</button>
                 </div>
