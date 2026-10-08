@@ -3319,14 +3319,18 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
 
               {isDoctorEntity && (
                 <>
-                  <Field label="Request samples for next visit">
+                  <div style={{ background: "#FBF3E8", border: "1.5px solid #E9C88A", borderRadius: 10, padding: 12, marginBottom: 14 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                      <Package size={15} style={{ color: "#C17817", flexShrink: 0 }} />
+                      <span style={{ fontSize: 13.5, fontWeight: 700, color: "#7A5B2E" }}>Request samples for next visit</span>
+                    </div>
                     <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                       <input
                         list="sample-request-options"
                         value={sampleRequestQuery}
                         onChange={(e) => setSampleRequestQuery(e.target.value)}
                         placeholder="Search a product…"
-                        style={{ ...inputStyle, flex: 1 }}
+                        style={{ ...inputStyle, flex: 1, background: "#fff" }}
                       />
                       <datalist id="sample-request-options">
                         {sampleRequestItemOptions.map((p) => <option key={p.id} value={p.name} />)}
@@ -3337,18 +3341,18 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                         disabled={!matchedSampleRequestItem}
                         style={{
                           padding: "8px 14px", borderRadius: 8, border: "none", whiteSpace: "nowrap",
-                          background: matchedSampleRequestItem ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
+                          background: matchedSampleRequestItem ? "#C17817" : "#E9DCC4", color: "#fff", fontSize: 12.5, fontWeight: 600,
                         }}
                       >
                         Add
                       </button>
                     </div>
-                    {requestedSampleItems.length > 0 && (
+                    {requestedSampleItems.length > 0 ? (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                         {requestedSampleItems.map((it) => (
                           <div key={it.productId} style={{
                             display: "flex", alignItems: "center", gap: 6, fontSize: 12,
-                            background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 10, padding: "5px 6px 5px 10px",
+                            background: "#fff", border: "1px solid #E9C88A", borderRadius: 10, padding: "5px 6px 5px 10px",
                           }}>
                             <span style={{ fontWeight: 500 }}>{it.name}</span>
                             <button
@@ -3362,9 +3366,10 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                           </div>
                         ))}
                       </div>
+                    ) : (
+                      <div style={{ fontSize: 11.5, color: "#7A5B2E" }}>Nothing requested yet — the manager gets a Telegram the moment you add one.</div>
                     )}
-                  </Field>
-                  <div style={{ height: 14 }} />
+                  </div>
 
                   <Field label="What do you plan for next time? (included in your Telegram reminder for this follow-up)">
                     <textarea
@@ -3533,14 +3538,18 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
           )}
 
           {isReturnVisit && (
-            <Field label="Request samples for next visit">
+            <div style={{ background: "#FBF3E8", border: "1.5px solid #E9C88A", borderRadius: 10, padding: 12, marginBottom: 14 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                <Package size={15} style={{ color: "#C17817", flexShrink: 0 }} />
+                <span style={{ fontSize: 13.5, fontWeight: 700, color: "#7A5B2E" }}>Request samples for next visit</span>
+              </div>
               <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                 <input
                   list="sample-request-options-followup"
                   value={sampleRequestQuery}
                   onChange={(e) => setSampleRequestQuery(e.target.value)}
                   placeholder="Search a product…"
-                  style={{ ...inputStyle, flex: 1 }}
+                  style={{ ...inputStyle, flex: 1, background: "#fff" }}
                 />
                 <datalist id="sample-request-options-followup">
                   {sampleRequestItemOptions.map((p) => <option key={p.id} value={p.name} />)}
@@ -3551,18 +3560,18 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                   disabled={!matchedSampleRequestItem}
                   style={{
                     padding: "8px 14px", borderRadius: 8, border: "none", whiteSpace: "nowrap",
-                    background: matchedSampleRequestItem ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
+                    background: matchedSampleRequestItem ? "#C17817" : "#E9DCC4", color: "#fff", fontSize: 12.5, fontWeight: 600,
                   }}
                 >
                   Add
                 </button>
               </div>
-              {requestedSampleItems.length > 0 && (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
+              {requestedSampleItems.length > 0 ? (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {requestedSampleItems.map((it) => (
                     <div key={it.productId} style={{
                       display: "flex", alignItems: "center", gap: 6, fontSize: 12,
-                      background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 10, padding: "5px 6px 5px 10px",
+                      background: "#fff", border: "1px solid #E9C88A", borderRadius: 10, padding: "5px 6px 5px 10px",
                     }}>
                       <span style={{ fontWeight: 500 }}>{it.name}</span>
                       <button
@@ -3576,8 +3585,10 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                     </div>
                   ))}
                 </div>
+              ) : (
+                <div style={{ fontSize: 11.5, color: "#7A5B2E" }}>Nothing requested yet — the manager gets a Telegram the moment you add one.</div>
               )}
-            </Field>
+            </div>
           )}
 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
