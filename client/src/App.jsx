@@ -9838,20 +9838,23 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
   // ---- Section 4: Product Performance (zoned = same expiry/slow-mover data StockView/ExpiryView already compute) ----
   const urgentExpiry = zoned.filter((p) => p.zone.key === "red");
   const slowMovers = zoned.filter((p) => p.slowMover);
-  const productRevenueFor = (rangeOrders) => {
+  // Ranked by units moved, not revenue — a high-volume low-price product
+  // (e.g. a sample-size SKU) should show up as "top" the same as a
+  // high-price low-volume one, which $-ranking was burying.
+  const productQtyFor = (rangeOrders) => {
     const map = {};
     rangeOrders.forEach((o) => (o.items || []).forEach((it) => {
       if (it.isFree) return;
-      map[it.name] = (map[it.name] || 0) + Number(it.qty || 0) * Number(it.unitPrice || 0);
+      map[it.name] = (map[it.name] || 0) + Number(it.qty || 0);
     }));
     return map;
   };
-  const thisMonthProductRevenue = productRevenueFor(monthOrders);
-  const lastMonthProductRevenue = productRevenueFor(lastMonthOrders);
-  const topProducts = Object.entries(thisMonthProductRevenue).sort((a, b) => b[1] - a[1]).slice(0, 5);
-  const decliningProducts = Object.entries(thisMonthProductRevenue)
-    .filter(([name, rev]) => lastMonthProductRevenue[name] && rev < lastMonthProductRevenue[name])
-    .map(([name, rev]) => ({ name, pctChange: pctChange(rev, lastMonthProductRevenue[name]) }));
+  const thisMonthProductQty = productQtyFor(monthOrders);
+  const lastMonthProductQty = productQtyFor(lastMonthOrders);
+  const topProducts = Object.entries(thisMonthProductQty).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const decliningProducts = Object.entries(thisMonthProductQty)
+    .filter(([name, qty]) => lastMonthProductQty[name] && qty < lastMonthProductQty[name])
+    .map(([name, qty]) => ({ name, pctChange: pctChange(qty, lastMonthProductQty[name]) }));
   const avgDecliningPct = decliningProducts.length
     ? Math.round(decliningProducts.reduce((s, p) => s + p.pctChange, 0) / decliningProducts.length)
     : 0;
@@ -9996,10 +9999,10 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
                 <div style={{ fontSize: 12, color: DASH.sub }}>No orders yet this month.</div>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  {topProducts.map(([name, rev], i) => (
+                  {topProducts.map(([name, qty], i) => (
                     <div key={name} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
                       <span>{i + 1}. {name}</span>
-                      <span className="kb-font-mono" style={{ color: DASH.sub }}>${Math.round(rev).toLocaleString()}</span>
+                      <span className="kb-font-mono" style={{ color: DASH.sub }}>{Math.round(qty).toLocaleString()} units</span>
                     </div>
                   ))}
                 </div>
