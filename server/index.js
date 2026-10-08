@@ -1419,6 +1419,7 @@ app.get("/api/competitor-products", async (req, res) => {
     await ensurePhase3CategoriesSeeded();
     await ensurePhase4CategoriesSeeded();
     await ensurePhase5CategoriesSeeded();
+    await ensurePhase6CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const { q, limit } = req.query;
@@ -7373,6 +7374,11 @@ const COMPETITOR_GENERIC_NAME_KEYWORDS = [
   [/saw\s*palmetto/i, "Saw palmetto"],
   [/methylcobalamin/i, "Methylcobalamin"],
   [/cyanocobalamin/i, "Cyanocobalamin"],
+  [/\bdhea\b|dehydroepiandrosterone/i, "DHEA"],
+  [/horny\s*goat\s*weed|epimedium|icariin/i, "Horny Goat Weed"],
+  [/guarana/i, "Guarana"],
+  [/\bmaca\b/i, "Maca"],
+  [/glucosamine.{0,20}chondroitin|chondroitin.{0,20}glucosamine/i, "Glucosamine & Chondroitin"],
 ];
 // Tier 1: words that unambiguously name a physical dosage-unit form. Tier 2:
 // words that often double as an INGREDIENT descriptor rather than the
@@ -10115,6 +10121,319 @@ async function ensurePhase5CategoriesSeeded() {
   phase5CategoriesSeedChecked = true;
 }
 
+// ---------- Men's Health / Brain-Cognitive / Joint-Bone-Mobility
+// (Recall Phase 6) ----------
+// Same sourcing discipline as every prior phase. Several ingredients below
+// (Horny Goat Weed, Guarana, Maca) come from the same product -- ALFA Libi
+// Max, a multi-ingredient aphrodisiac blend -- split into their 3 headline
+// actives per the user's explicit decision, rather than treated as one
+// vague "blend" ingredient.
+const PHASE6_SOURCES_SEED = [
+  { id: "src-pmid-12649580", sourceType: "Clinical study", sourceName: "PubMed",
+    title: "Adrenopause and dehydroepiandrosterone: pharmacological therapy versus replacement therapy",
+    pmid: "12649580", doi: "10.1159/000069165", journal: "Gynakologisch-geburtshilfliche Rundschau", publicationYear: "2003",
+    url: "https://pubmed.ncbi.nlm.nih.gov/12649580/", sourceQuality: "Dose-finding study, 100 men + 100 women" },
+  { id: "src-pmid-9660430", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Postmenopausal dehydroepiandrosterone administration increases free insulin-like growth factor-I and decreases high-density lipoprotein",
+    pmid: "9660430", doi: "10.1016/s0015-0282(98)00121-6", journal: "Fertility and Sterility", publicationYear: "1998",
+    url: "https://pubmed.ncbi.nlm.nih.gov/9660430/", sourceQuality: "Double-blind RCT, 6-month trial" },
+  { id: "src-pmid-15636426", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Effects of dehydroepiandrosterone (DHEA) supplementation on hormonal, metabolic and behavioral status in patients with hypoadrenalism",
+    pmid: "15636426", doi: "10.1007/BF03347515", journal: "Journal of Endocrinological Investigation", publicationYear: "2004",
+    url: "https://pubmed.ncbi.nlm.nih.gov/15636426/", sourceQuality: "Placebo-controlled RCT, n=20" },
+  { id: "src-pmid-42480876", sourceType: "Pharmacovigilance study", sourceName: "PubMed",
+    title: "Post-marketing safety profile and potential aspirin interaction of Serenoa repens extract: A real-world study using FAERS and network toxicology",
+    pmid: "42480876", doi: "10.1016/j.jep.2026.122221", journal: "Journal of Ethnopharmacology", publicationYear: "2026",
+    url: "https://pubmed.ncbi.nlm.nih.gov/42480876/", sourceQuality: "FAERS real-world pharmacovigilance study, 634 reports" },
+  { id: "src-pmid-25233607", sourceType: "Review", sourceName: "PubMed",
+    title: "Warfarin interactions with medicinal herbs",
+    pmid: "25233607", journal: "Natural Product Communications", publicationYear: "2014",
+    url: "https://pubmed.ncbi.nlm.nih.gov/25233607/", sourceQuality: "Narrative review of case reports" },
+  { id: "src-pmid-20359149", sourceType: "Review", sourceName: "PubMed",
+    title: "Under-hyped and over-hyped drug-dietary supplement interactions and issues",
+    pmid: "20359149", journal: "Urologic Nursing", publicationYear: "2010",
+    url: "https://pubmed.ncbi.nlm.nih.gov/20359149/", sourceQuality: "Narrative review/commentary" },
+  { id: "src-pmid-33137431", sourceType: "Review", sourceName: "PubMed",
+    title: "Medicinal plants as a potential source of Phosphodiesterase-5 inhibitors: A review",
+    pmid: "33137431", doi: "10.1016/j.jep.2020.113536", journal: "Journal of Ethnopharmacology", publicationYear: "2020",
+    url: "https://pubmed.ncbi.nlm.nih.gov/33137431/", sourceQuality: "Narrative review" },
+  { id: "src-pmid-36587222", sourceType: "Laboratory study", sourceName: "PubMed",
+    title: "Isolation, bioassay and 3D-QSAR analysis of 8-isopentenyl flavonoids from Epimedium sagittatum as PDE5A inhibitors",
+    pmid: "36587222", doi: "10.1186/s13020-022-00705-5", journal: "Chinese Medicine", publicationYear: "2022",
+    url: "https://pubmed.ncbi.nlm.nih.gov/36587222/", sourceQuality: "Preclinical/cellular mechanism study" },
+  { id: "src-pmid-20633025", sourceType: "Review", sourceName: "PubMed",
+    title: "Safety of herbal supplements: a guide for cardiologists",
+    pmid: "20633025", doi: "10.1111/j.1755-5922.2010.00193.x", journal: "Cardiovascular Therapeutics", publicationYear: "2010",
+    url: "https://pubmed.ncbi.nlm.nih.gov/20633025/", sourceQuality: "Clinical review" },
+  { id: "src-pmid-21037046", sourceType: "Review", sourceName: "PubMed",
+    title: "Energy beverages: content and safety",
+    pmid: "21037046", doi: "10.4065/mcp.2010.0381", journal: "Mayo Clinic Proceedings", publicationYear: "2010",
+    url: "https://pubmed.ncbi.nlm.nih.gov/21037046/", sourceQuality: "Narrative review" },
+  { id: "src-pmid-18054420", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Maca (Lepidium meyenii) and yacon (Smallanthus sonchifolius) in combination with silymarin as food supplements: in vivo safety assessment",
+    pmid: "18054420", doi: "10.1016/j.fct.2007.10.031", journal: "Food and Chemical Toxicology", publicationYear: "2007",
+    url: "https://pubmed.ncbi.nlm.nih.gov/18054420/", sourceQuality: "Placebo-controlled 90-day RCT" },
+  { id: "src-pmid-32478963", sourceType: "Systematic review", sourceName: "PubMed",
+    title: "Warfarin and food, herbal or dietary supplement interactions: A systematic review",
+    pmid: "32478963", doi: "10.1111/bcp.14404", journal: "British Journal of Clinical Pharmacology", publicationYear: "2020",
+    url: "https://pubmed.ncbi.nlm.nih.gov/32478963/", sourceQuality: "Systematic review, 149 articles / 78 herbs" },
+  { id: "src-pmid-29196903", sourceType: "Systematic review", sourceName: "PubMed",
+    title: "Concurrent Use of Prescription Drugs and Herbal Medicinal Products in Older Adults: A Systematic Review",
+    pmid: "29196903", doi: "10.1007/s40266-017-0501-7", journal: "Drugs & Aging", publicationYear: "2017",
+    url: "https://pubmed.ncbi.nlm.nih.gov/29196903/", sourceQuality: "Systematic review, 22 studies" },
+  { id: "src-pmid-12020172", sourceType: "Systematic review", sourceName: "PubMed",
+    title: "Panax ginseng: a systematic review of adverse effects and drug interactions",
+    pmid: "12020172", doi: "10.2165/00002018-200225050-00003", journal: "Drug Safety", publicationYear: "2002",
+    url: "https://pubmed.ncbi.nlm.nih.gov/12020172/", sourceQuality: "Systematic review" },
+  { id: "src-pmid-35024906", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Efficacy and safety of the combination of glucosamine and chondroitin for knee osteoarthritis",
+    pmid: "35024906", doi: "10.1007/s00402-021-04326-9", journal: "Archives of Orthopaedic and Trauma Surgery", publicationYear: "2022",
+    url: "https://pubmed.ncbi.nlm.nih.gov/35024906/", sourceQuality: "Meta-analysis of 8 RCTs, n=3793" },
+];
+
+const PHASE6_INGREDIENTS_SEED = [
+  {
+    id: "mens-multivitamin", categoryId: "mens-health", name: "Men's Multivitamin", commonName: "Multivitamin (men's formula)", scientificName: "",
+    description: "A multivitamin/multimineral blend formulated for men, distinct from a general-purpose multivitamin mainly in its micronutrient dosing.",
+    evidenceLevel: "NOT_VERIFIED",
+    productMatches: [
+      { productName: "ALFA Multi Men 100 Tabs", chemicalForm: "Multivitamin/mineral blend", compoundAmount: "", activeAmount: "", unit: "", servingSize: "1 tablet", notes: "Contains Vitamin A, C, D, E, K, B1, B2, B3, B6, folate, B12, biotin, pantothenic acid, calcium, iron, phosphorus, iodine, magnesium, zinc, selenium, copper, manganese, chromium, molybdenum, and boron per the product's own ingredient text." },
+    ],
+  },
+  {
+    id: "dhea", categoryId: "mens-health", name: "DHEA", commonName: "Dehydroepiandrosterone", scientificName: "Dehydroepiandrosterone",
+    description: "A hormone precursor supplement, converted in the body toward androgens (e.g. testosterone) and estrogens.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "A dose-finding study in 100 men and 100 women found that an un-individualized, fixed DHEA dose produced side effects including acne/hirsutism, hair thinning (effluvium), sleepiness, restlessness, headache, and odor in a meaningful minority of women, which dropped sharply once the dose was adjusted down to the individual's actual deficiency (Rommler, Gynakol Geburtshilfliche Rundsch 2003, PMID 12649580). A 6-month RCT of oral DHEA in postmenopausal women found a decrease in HDL cholesterol and apolipoprotein A1 by the end of the trial (Casson et al., Fertil Steril 1998, PMID 9660430). A placebo-controlled RCT in patients with hypoadrenalism found DHEA 50mg/day significantly raised testosterone and androstenedione levels in women (though not in men) (Libe et al., J Endocrinol Invest 2004, PMID 15636426).",
+    repQuickTakeaway: [
+      "What it is: a hormone precursor that the body converts toward androgens (like testosterone) and estrogens.",
+      "Real effect in women specifically: a placebo-controlled trial found DHEA 50mg/day significantly raised testosterone and androstenedione levels in women (not in men) (PMID 15636426) — this is a genuine androgenic effect, not a marketing claim.",
+      "Side effects seen at non-individualized dosing: acne/hirsutism, hair thinning, sleepiness, restlessness, headache, and odor in a meaningful share of women in a 200-person dose-finding study, dropping sharply once dosed down to the person's actual need (PMID 12649580).",
+      "Lipid effect: a 6-month RCT in postmenopausal women found a decrease in HDL cholesterol with oral DHEA (PMID 9660430).",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is this patient female? The androgenic effects (and associated side effects like acne/hirsutism) were specifically demonstrated in women in the cited trials.",
+      "Does the patient have any hormone-sensitive condition? This wasn't specifically tested in the cited trials, but the demonstrated androgen/estrogen-precursor mechanism is worth flagging for discussion with the prescribing doctor.",
+      "Check cholesterol panel history — a measurable HDL decrease was observed in one RCT.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim DHEA has no hormonal effect in women — a controlled trial found it significantly raised testosterone and androstenedione.",
+      "Do not claim DHEA has no effect on cholesterol — an RCT found a measurable HDL decrease.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Dhea 50 Mg 60 Caps.", chemicalForm: "DHEA", compoundAmount: 50, unit: "mg", servingSize: "2 capsules", notes: "Per label: DHEA 50mg per 2-capsule serving." },
+    ],
+  },
+  {
+    id: "saw-palmetto", categoryId: "mens-health", name: "Saw Palmetto", commonName: "Saw Palmetto", scientificName: "Serenoa repens",
+    description: "An herbal extract widely used for benign prostatic hyperplasia (BPH)/urinary symptom support in men.",
+    evidenceLevel: "NOT_VERIFIED",
+    drugInteractionSummary: "A 2026 real-world pharmacovigilance study using the FDA Adverse Event Reporting System (634 reports) found significant hepatobiliary and hematologic safety signals for saw palmetto, with age 75+ and concomitant aspirin use associated with significantly elevated reporting odds for hemorrhage (OR 3.89) and fatal outcomes (OR 2.87-7.26) (Guo et al., J Ethnopharmacol 2026, PMID 42480876). A review of warfarin-herb interactions lists Serenoa repens among herbs with case reports of severe bleeding when combined with warfarin (Milic et al., Nat Prod Commun 2014, PMID 25233607). A counterpoint review argues saw palmetto's adverse-interaction potential, along with several other common supplements, may have been overstated relative to the actual evidence (Moyad, Urol Nurs 2010, PMID 20359149) — so the honest picture is a real, elevated-risk signal in older/aspirin-using patients specifically, not a universal alarm.",
+    repQuickTakeaway: [
+      "What it is: an herbal extract widely used for BPH/urinary symptom support in men.",
+      "Important real-world safety signal: a 2026 FDA adverse-event database study found significantly elevated bleeding and fatal-outcome reporting specifically in patients 75+ who were also taking aspirin (PMID 42480876) — this is a specific, identifiable risk group, not a vague caution.",
+      "Context: one review flags saw palmetto among herbs with warfarin bleeding case reports (PMID 25233607), while a separate review argues such interaction concerns for saw palmetto specifically may be overstated (PMID 20359149) — the honest takeaway is real risk is concentrated in older, aspirin/anticoagulant-using patients.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is the patient 75 or older AND taking aspirin or another antiplatelet/anticoagulant? This is the specific combination flagged with a significantly elevated bleeding/fatality reporting odds in a 2026 real-world database study.",
+      "Ask about any new bruising, bleeding, or liver-related symptoms (jaundice, dark urine) given the hepatobiliary signal in the same study.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim saw palmetto has no bleeding risk — a large real-world adverse-event database study found a significantly elevated hemorrhage/fatality signal in older aspirin users specifically.",
+      "Do not present this as a universal, high-probability danger for every user either — a separate review argues the interaction risk for saw palmetto specifically has been overstated relative to the evidence; the honest framing is 'real risk in a specific, identifiable group.'",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Saw Palmetto 60 capsules", chemicalForm: "Saw palmetto extract + powder", compoundAmount: 300, unit: "mg", servingSize: "2 capsules", notes: "Per label: saw palmetto extract 200mg + saw palmetto powder 100mg per 2-capsule serving." },
+    ],
+  },
+  {
+    id: "horny-goat-weed", categoryId: "mens-health", name: "Horny Goat Weed", commonName: "Horny Goat Weed", scientificName: "Epimedium (icariin)",
+    description: "An herb whose active compound, icariin, has been identified as a PDE5-inhibitor — the same mechanism class as prescription erectile-dysfunction medications (e.g. sildenafil) — used in libido/aphrodisiac blends.",
+    evidenceLevel: "NOT_VERIFIED",
+    drugInteractionSummary: "A review of medicinal plants as PDE5 inhibitors identifies icariin (from Epimedium/horny goat weed) as the most effective natural PDE5 inhibitor identified to date from any plant source (Anand Ganapathy et al., J Ethnopharmacol 2020, PMID 33137431), and a laboratory study confirmed icariin and related compounds activate the same cGMP/PKG signaling pathway targeted by prescription PDE5 inhibitors (Li et al., Chin Med 2022, PMID 36587222). This is a mechanistic finding, not a clinical drug-interaction trial, but the shared mechanism with sildenafil-class medications and with nitrates (used for angina) is a real pharmacological basis for caution, not a theoretical one invented for this entry.",
+    repQuickTakeaway: [
+      "What it is: the active ingredient (icariin) in horny goat weed acts as a PDE5 inhibitor — the SAME mechanism class as prescription ED medications like sildenafil, confirmed in laboratory studies (PMID 33137431, PMID 36587222).",
+      "Why this matters: this isn't a theoretical concern — it's a real shared mechanism, which is the basis for caution combining it with nitrate medications (used for angina) or prescription PDE5 inhibitors, even though a dedicated clinical drug-interaction trial wasn't found in this review.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is the patient on a nitrate medication (for angina) or a prescription PDE5 inhibitor (sildenafil, tadalafil, etc.)? The shared mechanism is a real pharmacological basis for caution.",
+      "Is the patient's reason for use overlapping with what a doctor is already treating with a prescription ED medication? Worth surfacing so it's not taken in addition without the doctor knowing.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim horny goat weed has no relationship to prescription ED medications — its active compound shares the exact same PDE5-inhibitor mechanism, confirmed in laboratory studies.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Libi Max 30 Caps", chemicalForm: "Horny goat weed (part of proprietary blend)", compoundAmount: "", activeAmount: "", unit: "", servingSize: "1 capsule", notes: "Per label, one component of an 800mg proprietary blend (horny goat weed, guarana extract, maca, hydrolyzed collagen/amino acids); individual horny goat weed amount not disclosed on label." },
+    ],
+  },
+  {
+    id: "guarana", categoryId: "mens-health", name: "Guarana", commonName: "Guarana", scientificName: "Paullinia cupana",
+    description: "A caffeine-containing seed extract used as a stimulant in energy, weight-management, and libido products.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "A cardiology review of herbal supplement safety lists guarana among the herbal stimulants (alongside bitter orange, ephedra, and caffeine) most commonly linked to adverse cardiovascular effects and interactions with cardiovascular medications (Cohen & Ernst, Cardiovasc Ther 2010, PMID 20633025). A review of energy-beverage safety likewise notes that the long-term cardiovascular safety of guarana/caffeine-containing products has not been fully established (Higgins et al., Mayo Clin Proc 2010, PMID 21037046).",
+    repQuickTakeaway: [
+      "What it is: a caffeine-containing seed extract used as a stimulant in energy, weight-management, and libido products.",
+      "Safety point: a cardiology review names guarana among the herbal stimulants most commonly linked to adverse cardiovascular effects and interactions with heart medications (PMID 20633025); a separate review notes long-term cardiovascular safety for guarana/caffeine products isn't fully established (PMID 21037046).",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Add up the patient's total caffeine exposure across all sources (coffee, energy drinks, other supplements) when this product is one of several caffeine-containing items they use.",
+      "Is the patient on any cardiovascular medication? Guarana is specifically named among stimulant herbs flagged for cardiovascular medication interactions.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim guarana's long-term cardiovascular safety is established — a published review states it specifically has not been.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Libi Max 30 Caps", chemicalForm: "Guarana extract (part of proprietary blend)", compoundAmount: "", activeAmount: "", unit: "", servingSize: "1 capsule", notes: "Per label, one component of an 800mg proprietary blend; individual guarana amount not disclosed on label." },
+      { productName: "Mason Natural Fat Burner 60 Tab", chemicalForm: "Guarana seed extract", compoundAmount: 40, unit: "mg", servingSize: "2 tablets", notes: "Per label: guarana seed extract amount not individually stated, but supplies 40mg caffeine per 2-tablet serving." },
+    ],
+  },
+  {
+    id: "maca", categoryId: "mens-health", name: "Maca", commonName: "Maca", scientificName: "Lepidium meyenii",
+    description: "An Andean root vegetable marketed as an adaptogen for energy and libido.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "A placebo-controlled 90-day RCT testing maca (in combination with silymarin) found a moderate AST (liver enzyme) elevation and an increase in diastolic blood pressure in the group receiving 0.6g/day maca, an effect the study authors note should be considered when using high doses of maca powder (Valentova et al., Food Chem Toxicol 2007, PMID 18054420). The same study found no adverse effects in groups using silymarin alone or silymarin+yacon.",
+    repQuickTakeaway: [
+      "What it is: an Andean root vegetable marketed as an adaptogen for energy and libido — often assumed to be essentially risk-free.",
+      "Real finding worth knowing: a 90-day controlled trial found a moderate liver-enzyme (AST) elevation and a diastolic blood pressure increase specifically in the higher-dose maca group (0.6g/day), an effect the study authors say should be considered at high maca doses (PMID 18054420).",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Ask about the daily dose — the liver-enzyme and blood-pressure signal was observed at a specific higher dose (0.6g/day) in the cited trial.",
+      "Consider baseline liver function and blood pressure for patients using maca regularly at higher doses.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim maca is risk-free at all doses — a controlled trial found a measurable liver-enzyme and blood-pressure effect at a specific higher dose.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Libi Max 30 Caps", chemicalForm: "Maca root (part of proprietary blend)", compoundAmount: "", activeAmount: "", unit: "", servingSize: "1 capsule", notes: "Per label, one component of an 800mg proprietary blend; individual maca amount not disclosed on label." },
+    ],
+  },
+  {
+    id: "ginkgo-biloba", categoryId: "brain-cognitive-health-memory", name: "Ginkgo Biloba", commonName: "Ginkgo Biloba", scientificName: "Ginkgo biloba",
+    description: "An herbal extract marketed for cognitive/circulatory support, among the most-studied herb-drug interaction cases in the literature.",
+    evidenceLevel: "NOT_VERIFIED",
+    drugInteractionSummary: "A systematic review of warfarin-herb interactions specifically names Ginkgo biloba among the herbs associated with bleeding events ranging from minor (purpura, gum bleeding) to major, including intracranial bleeding that led to death in reported cases (Tan & Lee, Br J Clin Pharmacol 2020, PMID 32478963). A separate systematic review of concurrent prescription and herbal medicine use in older adults found that bleeding risk from Ginkgo biloba, garlic, or ginseng combined with aspirin or warfarin was the single most frequently reported herb-drug interaction (Agbabiaka et al., Drugs Aging 2017, PMID 29196903).",
+    repQuickTakeaway: [
+      "What it is: an herbal extract marketed for cognitive/circulatory support.",
+      "This is the most serious documented interaction risk in this category: a systematic review of warfarin-herb interactions specifically names Ginkgo among herbs linked to bleeding events up to and including fatal intracranial bleeding (PMID 32478963). A separate review of older-adult prescription+herbal use found Ginkgo+aspirin/warfarin to be the single most frequently reported herb-drug interaction of all (PMID 29196903).",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is the patient on warfarin, a DOAC, or an antiplatelet drug (aspirin, clopidogrel)? This is the single most important question for this ingredient — it's the most frequently reported herb-drug interaction in the literature on older adults.",
+      "Is the patient scheduled for any surgical or dental procedure? The same bleeding-risk logic applies to the standard pre-procedure herbal-supplement-discontinuation recommendation.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not minimize Ginkgo's bleeding-interaction risk — a systematic review documents cases up to and including fatal intracranial bleeding with concurrent warfarin use.",
+      "Do not claim this interaction is rare or theoretical — it's reported as the single most common herb-drug interaction involving anticoagulants/antiplatelets in a systematic review of older adults.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Ginkgo Biloba 120 Mg 60 Caps.", chemicalForm: "Ginkgo biloba extract", compoundAmount: 120, unit: "mg", servingSize: "1 capsule", notes: "Per label: Ginkgo biloba extract 120mg/capsule." },
+      { productName: "ALFA Ginseng & Ginkgo Biloba 90 Caps", chemicalForm: "Ginkgo biloba extract (combination product)", compoundAmount: "", activeAmount: "", unit: "", servingSize: "", notes: "Combination product with Korean ginseng; individual Ginkgo amount not captured from label text." },
+      { productName: "ALFA Memorin 60 Caps.", chemicalForm: "Ginkgo biloba powder (component)", compoundAmount: 300, unit: "mg", servingSize: "2 capsules", notes: "Per label, one component of a combination memory-support formula (also contains B-vitamins, glutamic acid, choline bitartrate): Ginkgo biloba powder 300mg per 2-capsule serving." },
+    ],
+  },
+  {
+    id: "ginseng", categoryId: "brain-cognitive-health-memory", name: "Ginseng", commonName: "Korean Ginseng", scientificName: "Panax ginseng",
+    description: "An herb traditionally used for vitality, cognitive, and physical performance support.",
+    evidenceLevel: "NOT_VERIFIED",
+    drugInteractionSummary: "A systematic review found that Panax ginseng monopreparations are rarely associated with adverse events (incidence similar to placebo in trials; the most common reported effects are headache, sleep disturbance, and GI upset), but documented drug interactions have been reported with warfarin, phenelzine (an MAOI), and alcohol — combination products containing ginseng alongside other ingredients were more often linked to serious adverse events, though causality for those is harder to pin on ginseng specifically (Coon & Ernst, Drug Saf 2002, PMID 12020172).",
+    repQuickTakeaway: [
+      "What it is: an herb traditionally used for vitality, cognitive, and physical-performance support.",
+      "Honest safety picture: a systematic review found ginseng alone (not combined with other herbs) is rarely linked to adverse events — similar incidence to placebo — but real drug interactions are documented with warfarin, phenelzine (an MAOI), and alcohol (PMID 12020172). Combination products (ginseng mixed with other actives) were more often linked to serious adverse events.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is the patient on warfarin? A documented interaction.",
+      "Is the patient on an MAOI (phenelzine or similar)? A documented interaction.",
+      "Is this a ginseng-only product, or a combination product with other actives? The safety profile differs — combination products are more often linked to serious adverse events.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim ginseng has no drug interactions — documented interactions exist with warfarin, MAOIs, and alcohol.",
+      "Do not extend the 'ginseng alone is low-risk' finding to combination products — those were more often linked to serious adverse events in the same review.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Korean Ginseng 1000 mg 60 Caps", chemicalForm: "Korean ginseng", compoundAmount: 1000, unit: "mg", servingSize: "2 capsules", notes: "Per label: Korean ginseng 1,000mg per 2-capsule serving." },
+      { productName: "Mason Natural Korean Ginseng 100 Caps", chemicalForm: "Korean ginseng", compoundAmount: "", activeAmount: "", unit: "", servingSize: "", notes: "Amount not captured from label text." },
+      { productName: "ALFA Ginseng & Ginkgo Biloba 90 Caps", chemicalForm: "Korean ginseng (combination product)", compoundAmount: "", activeAmount: "", unit: "", servingSize: "", notes: "Combination product with Ginkgo biloba; individual ginseng amount not captured from label text." },
+    ],
+  },
+  {
+    id: "glucosamine-chondroitin", categoryId: "joint-bone-mobility", name: "Glucosamine & Chondroitin", commonName: "Glucosamine & Chondroitin", scientificName: "Glucosamine sulfate / Chondroitin sulfate",
+    description: "A combination joint-support supplement, most commonly used for knee osteoarthritis symptom management.",
+    evidenceLevel: "NOT_VERIFIED",
+    evidenceSummary: "A meta-analysis of 8 RCTs (3,793 patients) found glucosamine+chondroitin combination therapy produced a statistically significant improvement in WOMAC osteoarthritis symptom scores versus placebo, with safety analysis showing no significant difference in adverse events compared with placebo or other comparator treatments (Meng et al., Arch Orthop Trauma Surg 2022, PMID 35024906).",
+    repQuickTakeaway: [
+      "What it is: a combination joint-support supplement, most commonly used for knee osteoarthritis.",
+      "Evidence picture: a meta-analysis of 8 RCTs (3,793 patients) found a real, statistically significant symptom improvement versus placebo, with no significant difference in adverse events compared to placebo or other treatments (PMID 35024906) — one of the better-supported combination supplements in this whole project.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Set expectations on timeline: osteoarthritis supplements in this class are generally understood to take several weeks to show benefit, not immediate relief.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim glucosamine/chondroitin works faster than it does, or claim it's proven for anything beyond osteoarthritis symptom management — the cited meta-analysis is specific to knee osteoarthritis.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Alflexil 60 Caps", chemicalForm: "Glucosamine sulfate + Chondroitin sulfate", compoundAmount: 1500, unit: "mg", servingSize: "1 capsule", notes: "Per label: glucosamine sulfate 1500mg + chondroitin sulfate 750mg + MSM 300mg + collagen hydrolysate 300mg + hyaluronic acid 10mg per capsule; glucosamine amount shown here, see notes for the full combination." },
+    ],
+  },
+];
+
+let phase6CategoriesSeedChecked = false;
+async function ensurePhase6CategoriesSeeded() {
+  if (phase6CategoriesSeedChecked) return;
+  await ensureRecallCategoriesSeeded();
+  await ensureOurProductsMasterDataSeeded();
+  await ensurePhase1CategoriesSeeded();
+  await ensurePhase2CategoriesSeeded();
+  await ensurePhase3CategoriesSeeded();
+  await ensurePhase4CategoriesSeeded();
+  await ensurePhase5CategoriesSeeded();
+
+  const existingIngredients = await db.getAllRows("RecallIngredients");
+  const existingIngredientIds = new Set(existingIngredients.map((i) => i.id));
+  const missingIngredientDefs = PHASE6_INGREDIENTS_SEED.filter((def) => !existingIngredientIds.has(def.id));
+  if (missingIngredientDefs.length === 0) { phase6CategoriesSeedChecked = true; return; }
+
+  const existingSources = await db.getAllRows("RecallResearchSources");
+  const existingSourceIds = new Set(existingSources.map((s) => s.id));
+  const newSources = PHASE6_SOURCES_SEED.filter((s) => !existingSourceIds.has(s.id));
+  if (newSources.length) {
+    await db.appendRows("RecallResearchSources", newSources.map((s) => ({
+      id: s.id, sourceType: s.sourceType, sourceName: s.sourceName, title: s.title, authors: "",
+      journal: s.journal || "", pmid: s.pmid || "", pmcid: "", doi: s.doi || "", url: s.url || "",
+      publicationYear: s.publicationYear || "", sourceDate: "", sourceQuality: s.sourceQuality || "", notes: "",
+    })));
+  }
+
+  const catalog = await db.getAllRows("ProductCatalog");
+  const catalogByName = new Map(catalog.map((p) => [p.name, p]));
+  const newIngredientRows = [];
+  const newLinkRows = [];
+
+  for (const def of missingIngredientDefs) {
+    newIngredientRows.push({
+      id: def.id, categoryId: def.categoryId, name: def.name, commonName: def.commonName || "", scientificName: def.scientificName || "",
+      description: def.description || "", physiologicalRole: "", clinicalUses: "",
+      evidenceSummary: def.evidenceSummary || "", evidenceLevel: def.evidenceLevel || "NOT_VERIFIED",
+      precautions: def.precautions || "", contraindications: "", drugInteractionSummary: def.drugInteractionSummary || "",
+      clinicalCheckpoints: def.clinicalCheckpoints || "", repQuickTakeaway: def.repQuickTakeaway || "", whatNotToClaim: def.whatNotToClaim || "", lastReviewed: "",
+      absorptionTimingNotes: "", repTakeawayQuestions: "", repTakeaway30Second: "",
+    });
+    for (const m of def.productMatches || []) {
+      const product = catalogByName.get(m.productName);
+      if (!product) continue; // never invents a product — only links one that's already in the catalog
+      newLinkRows.push({
+        id: `rpi-${def.id}-${crypto.randomUUID()}`, productId: product.id, ingredientId: def.id,
+        chemicalForm: m.chemicalForm || "", compoundAmount: m.compoundAmount ?? "", activeAmount: m.activeAmount ?? "", unit: m.unit || "",
+        servingSize: m.servingSize || "", dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "PARTIALLY_VERIFIED",
+        notes: m.notes || "", missingFields: "", sku: "", manufacturer: "", sourceLabel: "Product catalog import", sourceUrl: "",
+      });
+    }
+  }
+
+  if (newIngredientRows.length) await db.appendRows("RecallIngredients", newIngredientRows);
+  if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
+
+  phase6CategoriesSeedChecked = true;
+}
+
 // ---------- Recall: auto-link ANY competitor product into its matching
 // category, by shared ingredient ----------
 // Not a one-time seed step like the functions above — a competitor product
@@ -10337,6 +10656,7 @@ app.get("/api/recall/categories", requireTabAccess("recall"), async (req, res) =
     await ensurePhase3CategoriesSeeded();
     await ensurePhase4CategoriesSeeded();
     await ensurePhase5CategoriesSeeded();
+    await ensurePhase6CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
@@ -10395,6 +10715,7 @@ app.get("/api/recall/categories/:id", requireTabAccess("recall"), async (req, re
     await ensurePhase3CategoriesSeeded();
     await ensurePhase4CategoriesSeeded();
     await ensurePhase5CategoriesSeeded();
+    await ensurePhase6CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources, features, benefits, uspRows, advantageRows] = await Promise.all([
