@@ -2087,6 +2087,11 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   const [showMyVisits, setShowMyVisits] = useState(false);
   const [mentionedItems, setMentionedItems] = useState([]);
   const [itemQuery, setItemQuery] = useState("");
+  // Separate input from itemQuery above — this one only ever appears on a
+  // return visit's condensed postcall/followup step, never alongside the
+  // during-call "Products discussed" search, but kept distinct so the two
+  // can't ever clobber each other's typed text.
+  const [sampleRequestQuery, setSampleRequestQuery] = useState("");
   const [sampleMenuFor, setSampleMenuFor] = useState(null);
   const [sawCompetitor, setSawCompetitor] = useState(false);
   const [competitorName, setCompetitorName] = useState("");
@@ -2120,6 +2125,14 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   const [doctorProfile, setDoctorProfile] = useState(null);
   const [doctorProfileLoading, setDoctorProfileLoading] = useState(false);
   const [showFullHistory, setShowFullHistory] = useState(false);
+  // Once this doctor/nutritionist has at least one prior visit (by anyone,
+  // not just this rep — doctorProfile.lastVisit is null only when the
+  // relationship itself is brand new, same signal DoctorBrief already uses
+  // for "No previous visits yet — this will be your first."), the postcall
+  // deep-profiling questions collapse into two open fields plus a sample
+  // request, instead of asking the same five questions on every visit
+  // forever. See the postcall/followup steps below.
+  const isReturnVisit = isDoctorStyleEntity && !!doctorProfile?.lastVisit;
   // Which follow-up timing chip is picked in the "postcall" step — "" means
   // none picked yet (Save Visit still works, just with no follow-up
   // scheduled), a FOLLOWUP_PRESETS key, or "custom" (reveals the existing
@@ -2288,6 +2301,29 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
     setMentionedItems((prev) => prev.map((it) => (it.productId === productId ? { ...it, sampleStatus: status } : it)));
     setSampleMenuFor(null);
   };
+
+  // Return-visit postcall/followup "Request samples for next visit" control
+  // — feeds the exact same mentionedItems/sampleStatus mechanism the
+  // during-call "Give next visit" tagging already uses, so POST /api/visits
+  // and POST /api/followups need no changes to pick this up: a product
+  // added here is indistinguishable from one tagged "next_visit" live
+  // during the call.
+  const matchedSampleRequestItem = products.find((p) => p.name.toLowerCase().trim() === sampleRequestQuery.toLowerCase().trim());
+  const sampleRequestItemOptions = (sampleRequestQuery.trim()
+    ? products.filter((p) => p.name.toLowerCase().includes(sampleRequestQuery.toLowerCase().trim()))
+    : products
+  ).slice(0, 50);
+  const addSampleRequestItem = () => {
+    if (!matchedSampleRequestItem) return;
+    setMentionedItems((prev) => {
+      if (prev.some((it) => it.productId === matchedSampleRequestItem.id)) {
+        return prev.map((it) => (it.productId === matchedSampleRequestItem.id ? { ...it, sampleStatus: "next_visit" } : it));
+      }
+      return [...prev, { productId: matchedSampleRequestItem.id, name: matchedSampleRequestItem.name, sampleStatus: "next_visit" }];
+    });
+    setSampleRequestQuery("");
+  };
+  const requestedSampleItems = mentionedItems.filter((it) => it.sampleStatus === "next_visit");
 
   const lastPunch = myLastPunch;
   const isPunchedIn = lastPunch?.type === "in";
@@ -3198,47 +3234,134 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
           {canGoBack && <BackStepButton onClick={goBack} />}
           <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 14 }}>Close the visit</div>
 
-          <Field label="How did the call go?">
-            <ChipPicker options={CALL_OUTCOME_OPTIONS} value={callOutcome} onChange={setCallOutcome} />
-          </Field>
-          <div style={{ height: 14 }} />
-
-          <Field label="What did I learn? (one sentence)">
-            <textarea
-              value={keyLearning}
-              onChange={(e) => setKeyLearning(e.target.value)}
-              placeholder="e.g. Doctor is interested in sublingual B12 mainly for patients who dislike swallowing tablets."
-              rows={2}
-              style={{ ...inputStyle, resize: "vertical" }}
-            />
-          </Field>
-          <div style={{ height: 14 }} />
-
-          <Field label="What did the doctor commit to?">
-            <ChipPicker options={COMMITMENT_OPTIONS} value={commitment} onChange={(v) => { setCommitment(v); if (v !== "will_try") setPatientsToTry(""); }} />
-          </Field>
-          <div style={{ height: 14 }} />
-
-          <Field label="Next action">
-            <ChipPicker options={NEXT_ACTION_OPTIONS} value={nextAction} onChange={setNextAction} />
-          </Field>
-          <div style={{ height: 14 }} />
-
-          {isDoctorEntity && (
+          {/* Full deep-profiling flow — first visit to this doctor/
+              nutritionist only. Once they have any prior visit (isReturnVisit),
+              this collapses to the condensed branch right below instead. */}
+          {!isReturnVisit && (
             <>
-              <Field label="Next SMARTI Objective (included in your Telegram reminder for this follow-up)">
+              <Field label="How did the call go?">
+                <ChipPicker options={CALL_OUTCOME_OPTIONS} value={callOutcome} onChange={setCallOutcome} />
+              </Field>
+              <div style={{ height: 14 }} />
+
+              <Field label="What did I learn? (one sentence)">
                 <textarea
-                  value={smartiObjective}
-                  onChange={(e) => setSmartiObjective(e.target.value)}
-                  placeholder={
-                    commitment || nextAction
-                      ? `e.g. ${nextAction ? `${optionLabel(NEXT_ACTION_OPTIONS, nextAction)} — ` : ""}${commitment ? `follow up on "${optionLabel(COMMITMENT_OPTIONS, commitment)}"` : ""}`
-                      : `e.g. Move Dr. ${client.replace(/^Dr\.?\s*/i, "")} from 3 to 5 patients on SITAVITAE PLUS`
-                  }
+                  value={keyLearning}
+                  onChange={(e) => setKeyLearning(e.target.value)}
+                  placeholder="e.g. Doctor is interested in sublingual B12 mainly for patients who dislike swallowing tablets."
                   rows={2}
-                  style={{ ...inputStyle, resize: "vertical", marginBottom: 14 }}
+                  style={{ ...inputStyle, resize: "vertical" }}
                 />
               </Field>
+              <div style={{ height: 14 }} />
+
+              <Field label="What did the doctor commit to?">
+                <ChipPicker options={COMMITMENT_OPTIONS} value={commitment} onChange={(v) => { setCommitment(v); if (v !== "will_try") setPatientsToTry(""); }} />
+              </Field>
+              <div style={{ height: 14 }} />
+
+              <Field label="Next action">
+                <ChipPicker options={NEXT_ACTION_OPTIONS} value={nextAction} onChange={setNextAction} />
+              </Field>
+              <div style={{ height: 14 }} />
+
+              {isDoctorEntity && (
+                <Field label="Next SMARTI Objective (included in your Telegram reminder for this follow-up)">
+                  <textarea
+                    value={smartiObjective}
+                    onChange={(e) => setSmartiObjective(e.target.value)}
+                    placeholder={
+                      commitment || nextAction
+                        ? `e.g. ${nextAction ? `${optionLabel(NEXT_ACTION_OPTIONS, nextAction)} — ` : ""}${commitment ? `follow up on "${optionLabel(COMMITMENT_OPTIONS, commitment)}"` : ""}`
+                        : `e.g. Move Dr. ${client.replace(/^Dr\.?\s*/i, "")} from 3 to 5 patients on SITAVITAE PLUS`
+                    }
+                    rows={2}
+                    style={{ ...inputStyle, resize: "vertical", marginBottom: 14 }}
+                  />
+                </Field>
+              )}
+            </>
+          )}
+
+          {/* Condensed flow for every visit after the first — two open
+              questions instead of five, plus (doctors only, inline here)
+              requesting samples for the next visit. Nutritionists get the
+              same two-question condensing here, but their sample request
+              and "what's next" planning stay in the later shared "followup"
+              step below, where their follow-up date already lives today. */}
+          {isReturnVisit && (
+            <>
+              <Field label="What happened this time?">
+                <textarea
+                  value={keyLearning}
+                  onChange={(e) => setKeyLearning(e.target.value)}
+                  placeholder="e.g. Still prescribing to the same patients, no new concerns raised."
+                  rows={2}
+                  style={{ ...inputStyle, resize: "vertical" }}
+                />
+              </Field>
+              <div style={{ height: 14 }} />
+
+              {isDoctorEntity && (
+                <>
+                  <Field label="Request samples for next visit">
+                    <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                      <input
+                        list="sample-request-options"
+                        value={sampleRequestQuery}
+                        onChange={(e) => setSampleRequestQuery(e.target.value)}
+                        placeholder="Search a product…"
+                        style={{ ...inputStyle, flex: 1 }}
+                      />
+                      <datalist id="sample-request-options">
+                        {sampleRequestItemOptions.map((p) => <option key={p.id} value={p.name} />)}
+                      </datalist>
+                      <button
+                        type="button"
+                        onClick={addSampleRequestItem}
+                        disabled={!matchedSampleRequestItem}
+                        style={{
+                          padding: "8px 14px", borderRadius: 8, border: "none", whiteSpace: "nowrap",
+                          background: matchedSampleRequestItem ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
+                        }}
+                      >
+                        Add
+                      </button>
+                    </div>
+                    {requestedSampleItems.length > 0 && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {requestedSampleItems.map((it) => (
+                          <div key={it.productId} style={{
+                            display: "flex", alignItems: "center", gap: 6, fontSize: 12,
+                            background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 10, padding: "5px 6px 5px 10px",
+                          }}>
+                            <span style={{ fontWeight: 500 }}>{it.name}</span>
+                            <button
+                              type="button"
+                              onClick={() => removeMentionedItem(it.productId)}
+                              style={{ border: "none", background: "none", cursor: "pointer", display: "flex", padding: 2, color: "#8A8272" }}
+                              aria-label={`Remove ${it.name}`}
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </Field>
+                  <div style={{ height: 14 }} />
+
+                  <Field label="What do you plan for next time? (included in your Telegram reminder for this follow-up)">
+                    <textarea
+                      value={smartiObjective}
+                      onChange={(e) => setSmartiObjective(e.target.value)}
+                      placeholder="e.g. Check if they've started recommending it to new patients, address any leftover concerns."
+                      rows={2}
+                      style={{ ...inputStyle, resize: "vertical", marginBottom: 14 }}
+                    />
+                  </Field>
+                </>
+              )}
             </>
           )}
 
@@ -3379,16 +3502,66 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
           </div>
 
           {isDoctorStyleEntity && (
-            <Field label="Next SMARTI Objective (included in your Telegram reminder for this follow-up)">
+            <Field label={isReturnVisit ? "What do you plan for next time? (included in your Telegram reminder for this follow-up)" : "Next SMARTI Objective (included in your Telegram reminder for this follow-up)"}>
               <textarea
                 value={smartiObjective}
                 onChange={(e) => setSmartiObjective(e.target.value)}
-                placeholder={isDoctorEntity
+                placeholder={isReturnVisit
+                  ? `e.g. Check if they've started recommending it to new patients, address any leftover concerns.`
+                  : isDoctorEntity
                   ? `e.g. Move Dr. ${lastVisit.client.replace(/^Dr\.?\s*/i, "")} from 3 to 5 patients on SITAVITAE PLUS`
                   : `e.g. Get ${lastVisit.client} recommending SITAVITAE PLUS to 3 more patients`}
                 rows={2}
                 style={{ ...inputStyle, resize: "vertical", marginBottom: 14 }}
               />
+            </Field>
+          )}
+
+          {isReturnVisit && (
+            <Field label="Request samples for next visit">
+              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                <input
+                  list="sample-request-options-followup"
+                  value={sampleRequestQuery}
+                  onChange={(e) => setSampleRequestQuery(e.target.value)}
+                  placeholder="Search a product…"
+                  style={{ ...inputStyle, flex: 1 }}
+                />
+                <datalist id="sample-request-options-followup">
+                  {sampleRequestItemOptions.map((p) => <option key={p.id} value={p.name} />)}
+                </datalist>
+                <button
+                  type="button"
+                  onClick={addSampleRequestItem}
+                  disabled={!matchedSampleRequestItem}
+                  style={{
+                    padding: "8px 14px", borderRadius: 8, border: "none", whiteSpace: "nowrap",
+                    background: matchedSampleRequestItem ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500,
+                  }}
+                >
+                  Add
+                </button>
+              </div>
+              {requestedSampleItems.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
+                  {requestedSampleItems.map((it) => (
+                    <div key={it.productId} style={{
+                      display: "flex", alignItems: "center", gap: 6, fontSize: 12,
+                      background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 10, padding: "5px 6px 5px 10px",
+                    }}>
+                      <span style={{ fontWeight: 500 }}>{it.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeMentionedItem(it.productId)}
+                        style={{ border: "none", background: "none", cursor: "pointer", display: "flex", padding: 2, color: "#8A8272" }}
+                        aria-label={`Remove ${it.name}`}
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </Field>
           )}
 

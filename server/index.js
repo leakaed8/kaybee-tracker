@@ -2297,6 +2297,24 @@ app.post("/api/followups", async (req, res) => {
           needsSample: "true",
           sampleItems: JSON.stringify(items),
         });
+        // Immediate heads-up, in addition to checkSampleReminders' later 0-2-day
+        // nudge — gives the manager real lead time to prepare/order samples
+        // instead of only a couple of days' notice.
+        (async () => {
+          try {
+            if (!telegram.isConfigured()) return;
+            const settings = await db.getSettings();
+            if (!settings.managerTelegramChatId) return;
+            const itemsText = items.map((it) => it.name).join(", ");
+            await telegram.sendMessage(
+              settings.managerTelegramChatId,
+              `📋 Sample request — <b>${escapeHtml(req.repName)}</b> asked to bring <b>${escapeHtml(itemsText)}</b> for the next visit to <b>${escapeHtml(entityName)}</b>, planned for ${followUp.dueDate}. Please start preparing.`
+            );
+            notifyManagers({ title: "Sample request", body: `${req.repName} needs ${itemsText} ready for ${entityName} on ${followUp.dueDate}`, url: "/" }).catch(() => {});
+          } catch (e) {
+            console.error("immediate sample-request telegram notify failed", e);
+          }
+        })();
       }
     }
 
