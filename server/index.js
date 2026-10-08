@@ -1423,6 +1423,7 @@ app.get("/api/competitor-products", async (req, res) => {
     await ensurePhase7CategoriesSeeded();
     await ensurePhase8CategoriesSeeded();
     await ensurePhase9CategoriesSeeded();
+    await ensureIngredientImportanceEnriched();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const { q, limit } = req.query;
@@ -11044,6 +11045,244 @@ async function ensurePhase9CategoriesSeeded() {
   phase9CategoriesSeedChecked = true;
 }
 
+// ---------- Recall: Phase 10 — ingredient "importance"/efficacy enrichment
+// ----------
+// Phases 4-9 focused on precautions, contraindications, and drug
+// interactions (the user's original "doctors need more safety information"
+// request). This phase adds the complementary half: real PubMed/NCBI
+// evidence for WHY each ingredient is used — its actual efficacy data —
+// for ingredients whose existing entries were safety-only.
+//
+// Unlike every phase above, this one does not create new ingredients or
+// categories — it UPDATES existing RecallIngredients rows via
+// db.batchUpdateRows(), so it has no missing-id-filter + appendRows pattern.
+// Idempotency instead works by checking whether the importance text is
+// already present in repQuickTakeaway before appending to it (appending
+// twice is the real risk here, since this never inserts new rows).
+//
+// RecallView.jsx only renders repQuickTakeaway, clinicalCheckpoints, and
+// whatNotToClaim — evidenceSummary is stored but not shown in the current
+// UI. So the efficacy text is appended to repQuickTakeaway (preserving
+// whatever safety content is already there) rather than only filling the
+// unrendered evidenceSummary field.
+const PHASE10_SOURCES_SEED = [
+  { id: "src-pmid-38888087", sourceType: "Meta-analysis", sourceName: "PubMed",
+    title: "Optimizing the Time and Dose of Melatonin as a Sleep-Promoting Drug: A Systematic Review of Randomized Controlled Trials and Dose-Response Meta-Analysis",
+    pmid: "38888087", doi: "10.1111/jpi.12985", journal: "Journal of Pineal Research", publicationYear: "2024",
+    url: "https://pubmed.ncbi.nlm.nih.gov/38888087/", sourceQuality: "Dose-response meta-analysis of 26 RCTs, n=1689" },
+  { id: "src-pmid-36179487", sourceType: "Meta-analysis", sourceName: "PubMed",
+    title: "Efficacy of melatonin for chronic insomnia: Systematic reviews and meta-analyses",
+    pmid: "36179487", doi: "10.1016/j.smrv.2022.101692", journal: "Sleep Medicine Reviews", publicationYear: "2022",
+    url: "https://pubmed.ncbi.nlm.nih.gov/36179487/", sourceQuality: "Meta-analysis of 24 RCTs" },
+  { id: "src-pmid-33420602", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Efficacy of Valerian Extract on Sleep Quality after Coronary Artery Bypass Graft Surgery: A Triple-Blind Randomized Controlled Trial",
+    pmid: "33420602", doi: "10.1007/s11655-020-2727-1", journal: "Chinese Journal of Integrative Medicine", publicationYear: "2021",
+    url: "https://pubmed.ncbi.nlm.nih.gov/33420602/", sourceQuality: "Triple-blind RCT, n=72" },
+  { id: "src-pmid-40580481", sourceType: "Meta-analysis", sourceName: "PubMed",
+    title: "Effects of Garlic Supplementation on Cardiovascular Risk Factors in Adults: A Comprehensive Updated Systematic Review and Meta-Analysis of Randomized Controlled Trials",
+    pmid: "40580481", doi: "10.1093/nutrit/nuaf090", journal: "Nutrition Reviews", publicationYear: "2026",
+    url: "https://pubmed.ncbi.nlm.nih.gov/40580481/", sourceQuality: "Meta-analysis of 108 RCTs, n=7137" },
+  { id: "src-pmid-39683546", sourceType: "Systematic review", sourceName: "PubMed",
+    title: "Polyphenol Intervention Ameliorates Non-Alcoholic Fatty Liver Disease: An Updated Comprehensive Systematic Review",
+    pmid: "39683546", doi: "10.3390/nu16234150", journal: "Nutrients", publicationYear: "2024",
+    url: "https://pubmed.ncbi.nlm.nih.gov/39683546/", sourceQuality: "Systematic review of 29 RCTs, n=1840" },
+  { id: "src-pmid-28723522", sourceType: "Meta-analysis", sourceName: "PubMed",
+    title: "Efficacy and Safety of Hexanic Lipidosterolic Extract of Serenoa repens (Permixon) in the Treatment of Lower Urinary Tract Symptoms Due to Benign Prostatic Hyperplasia",
+    pmid: "28723522", doi: "10.1016/j.euf.2016.04.002", journal: "European Urology Focus", publicationYear: "2016",
+    url: "https://pubmed.ncbi.nlm.nih.gov/28723522/", sourceQuality: "Meta-analysis of 12 RCTs, extract-specific" },
+  { id: "src-pmid-32418876", sourceType: "Letter/commentary", sourceName: "PubMed",
+    title: "New Evidence Changing Clinical Practice or Misunderstanding of Statistical Analyses? The Case of Serenoa repens and alpha-Blockers",
+    pmid: "32418876", doi: "10.1016/j.euf.2020.03.011", journal: "European Urology Focus", publicationYear: "2020",
+    url: "https://pubmed.ncbi.nlm.nih.gov/32418876/", sourceQuality: "Commentary citing Cochrane/network meta-analysis findings" },
+  { id: "src-pmid-36728740", sourceType: "Umbrella review", sourceName: "PubMed",
+    title: "Efficacy and safety of herbal medicine on dementia and cognitive function: An umbrella review of systematic reviews and meta-analysis",
+    pmid: "36728740", doi: "10.1002/ptr.7759", journal: "Phytotherapy Research", publicationYear: "2023",
+    url: "https://pubmed.ncbi.nlm.nih.gov/36728740/", sourceQuality: "Umbrella review of 37 articles covering 13 herbal medicines" },
+  { id: "src-pmid-42322087", sourceType: "Umbrella review", sourceName: "PubMed",
+    title: "Treatment of Nausea and Vomiting With Zingiber officinale in Pregnancy: An Umbrella Review of Systematic Reviews With Meta-Synthesis",
+    pmid: "42322087", doi: "10.1002/ptr.70405", journal: "Phytotherapy Research", publicationYear: "2026",
+    url: "https://pubmed.ncbi.nlm.nih.gov/42322087/", sourceQuality: "Umbrella review of 18 systematic reviews" },
+  { id: "src-pmid-36969661", sourceType: "Meta-analysis", sourceName: "PubMed",
+    title: "The efficacy and safety of complementary and alternative medicine in the treatment of nausea and vomiting during pregnancy: A systematic review and meta-analysis",
+    pmid: "36969661", doi: "10.3389/fpubh.2023.1108756", journal: "Frontiers in Public Health", publicationYear: "2023",
+    url: "https://pubmed.ncbi.nlm.nih.gov/36969661/", sourceQuality: "Meta-analysis of 33 RCTs" },
+  { id: "src-pmid-42765482", sourceType: "Meta-analysis", sourceName: "PubMed",
+    title: "Resistance training combined with creatine supplementation: a three-level meta-analysis of multidimensional outcomes from strength enhancement to body composition remodeling",
+    pmid: "42765482", doi: "10.1080/15502783.2026.2718316", journal: "Journal of the International Society of Sports Nutrition", publicationYear: "2026",
+    url: "https://pubmed.ncbi.nlm.nih.gov/42765482/", sourceQuality: "Meta-analysis of 63 studies, n=1489" },
+  { id: "src-pmid-40944139", sourceType: "Meta-analysis", sourceName: "PubMed",
+    title: "The Effects of Creatine Supplementation on Upper- and Lower-Body Strength and Power: A Systematic Review and Meta-Analysis",
+    pmid: "40944139", doi: "10.3390/nu17172748", journal: "Nutrients", publicationYear: "2025",
+    url: "https://pubmed.ncbi.nlm.nih.gov/40944139/", sourceQuality: "Meta-analysis of 69 studies, n=1937" },
+  { id: "src-pmid-23775705", sourceType: "Systematic review (Cochrane)", sourceName: "Cochrane",
+    title: "Zinc for the common cold",
+    pmid: "23775705", doi: "10.1002/14651858.CD001364.pub4", journal: "Cochrane Database of Systematic Reviews", publicationYear: "2013",
+    url: "https://pubmed.ncbi.nlm.nih.gov/23775705/", sourceQuality: "Cochrane review, 16 therapeutic + 2 preventive trials" },
+  { id: "src-pmid-34385227", sourceType: "Meta-analysis", sourceName: "PubMed",
+    title: "Probiotics for the prevention of antibiotic-associated diarrhoea: a systematic review and meta-analysis",
+    pmid: "34385227", doi: "10.1136/bmjopen-2020-043054", journal: "BMJ Open", publicationYear: "2021",
+    url: "https://pubmed.ncbi.nlm.nih.gov/34385227/", sourceQuality: "Meta-analysis of 42 RCTs, n=11,305" },
+  { id: "src-pmid-33234881", sourceType: "Meta-analysis", sourceName: "PubMed",
+    title: "Probiotics for the Prevention of Antibiotic-associated Diarrhea in Adults: A Meta-Analysis of Randomized Placebo-Controlled Trials",
+    pmid: "33234881", doi: "10.1097/MCG.0000000000001464", journal: "Journal of Clinical Gastroenterology", publicationYear: "2021",
+    url: "https://pubmed.ncbi.nlm.nih.gov/33234881/", sourceQuality: "Meta-analysis of 36 RCTs, n=9312" },
+  { id: "src-pmid-28879195", sourceType: "Systematic review", sourceName: "PubMed",
+    title: "A Review of the Use of Biotin for Hair Loss",
+    pmid: "28879195", doi: "10.1159/000462981", journal: "Skin Appendage Disorders", publicationYear: "2017",
+    url: "https://pubmed.ncbi.nlm.nih.gov/28879195/", sourceQuality: "Systematic review of case reports and RCTs" },
+  { id: "src-pmid-28628687", sourceType: "Review", sourceName: "PubMed",
+    title: "The Infatuation With Biotin Supplementation: Is There Truth Behind Its Rising Popularity?",
+    pmid: "28628687", doi: "", journal: "Journal of Drugs in Dermatology", publicationYear: "2017",
+    url: "https://pubmed.ncbi.nlm.nih.gov/28628687/", sourceQuality: "Comparative literature review" },
+  { id: "src-pmid-25287168", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Lipase Supplementation before a High-Fat Meal Reduces Perceptions of Fullness in Healthy Subjects",
+    pmid: "25287168", doi: "10.5009/gnl14005", journal: "Gut and Liver", publicationYear: "2015",
+    url: "https://pubmed.ncbi.nlm.nih.gov/25287168/", sourceQuality: "Double-blind placebo-controlled crossover RCT, n=16" },
+  { id: "src-pmid-30938579", sourceType: "Meta-analysis", sourceName: "PubMed",
+    title: "Effect of Branched-Chain Amino Acid Supplementation on Muscle Soreness following Exercise: A Meta-Analysis",
+    pmid: "30938579", doi: "10.1024/0300-9831/a000543", journal: "International Journal for Vitamin and Nutrition Research", publicationYear: "2019",
+    url: "https://pubmed.ncbi.nlm.nih.gov/30938579/", sourceQuality: "Meta-analysis of 8 studies" },
+  { id: "src-pmid-34842765", sourceType: "Meta-analysis", sourceName: "PubMed",
+    title: "Clinical Effects of L-Carnitine Supplementation on Physical Performance in Healthy Subjects",
+    pmid: "34842765", doi: "10.3390/jfmk6040093", journal: "Journal of Functional Morphology and Kinesiology", publicationYear: "2021",
+    url: "https://pubmed.ncbi.nlm.nih.gov/34842765/", sourceQuality: "Systematic review and meta-analysis of 30 publications" },
+  { id: "src-pmid-18801111", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "A double-blind, randomized, pilot dose-finding study of maca root (L. meyenii) for the management of SSRI-induced sexual dysfunction",
+    pmid: "18801111", doi: "10.1111/j.1755-5949.2008.00052.x", journal: "CNS Neuroscience & Therapeutics", publicationYear: "2008",
+    url: "https://pubmed.ncbi.nlm.nih.gov/18801111/", sourceQuality: "Double-blind pilot RCT, n=20" },
+  { id: "src-pmid-38931247", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Effects of Acute Guarana Ingestion on Mental Performance and Vagal Modulation Compared to a Low Dose of Caffeine",
+    pmid: "38931247", doi: "10.3390/nu16121892", journal: "Nutrients", publicationYear: "2024",
+    url: "https://pubmed.ncbi.nlm.nih.gov/38931247/", sourceQuality: "Double-blind crossover RCT, n=20" },
+  { id: "src-pmid-38555190", sourceType: "Meta-analysis", sourceName: "PubMed",
+    title: "N-acetylcysteine Treatment in Chronic Obstructive Pulmonary Disease (COPD) and Chronic Bronchitis/Pre-COPD: Distinct Meta-analyses",
+    pmid: "38555190", doi: "10.1016/j.arbres.2024.03.010", journal: "Archivos de Bronconeumologia", publicationYear: "2024",
+    url: "https://pubmed.ncbi.nlm.nih.gov/38555190/", sourceQuality: "Meta-analysis of 20 studies" },
+];
+
+const INGREDIENT_IMPORTANCE_ENRICHMENT = [
+  {
+    id: "melatonin",
+    evidenceSummary: "A dose-response meta-analysis of 26 RCTs found melatonin reduces sleep onset latency and increases total sleep time, peaking around 4mg/day taken ~3 hours before desired bedtime (PMID 38888087). A separate meta-analysis of 24 RCTs found melatonin was not significantly effective for sleep onset latency, total sleep time, or sleep efficiency in adults specifically with chronic insomnia, though it was effective in children/adolescents and in insomnia comorbid with another condition (PMID 36179487).",
+    importanceAddition: "Why this matters (efficacy evidence), told honestly: a 2024 dose-response meta-analysis of 26 RCTs found melatonin reduces sleep onset latency and increases total sleep time, with effects peaking around 4mg/day taken about 3 hours before the desired bedtime (PMID 38888087). But a separate meta-analysis of 24 RCTs found melatonin was NOT significantly effective for sleep onset latency, total sleep time, or sleep efficiency in adults specifically with chronic insomnia — it was only clearly effective in children/adolescents and in insomnia comorbid with another condition (PMID 36179487). Melatonin's real-world benefit in healthy adults with simple insomnia is more modest than its popularity suggests.",
+  },
+  {
+    id: "valerian",
+    evidenceSummary: "A triple-blind RCT in post-cardiac-surgery patients found 530mg of valerian root extract nightly for 30 nights significantly improved total sleep quality, sleep latency, sleep duration, sleep efficiency, and daytime dysfunction on the Pittsburgh Sleep Quality Index versus placebo, with no effect on coagulation markers (PMID 33420602).",
+    importanceAddition: "Why this matters (efficacy evidence): a triple-blind randomized controlled trial in post-cardiac-surgery patients found 530mg of valerian root extract nightly for 30 nights significantly improved total sleep quality, sleep latency, sleep duration, sleep efficiency, and daytime dysfunction versus placebo, with no measurable effect on coagulation markers (PMID 33420602).",
+  },
+  {
+    id: "garlic",
+    evidenceSummary: "A 2026 meta-analysis of 108 RCTs (7,137 participants) found garlic supplementation significantly improved triglycerides, total and LDL cholesterol, HDL cholesterol, fasting glucose, insulin resistance, systolic/diastolic blood pressure, and inflammatory/oxidative-stress markers, though it did not significantly affect ALT, BMI, or several other markers (PMID 40580481).",
+    importanceAddition: "Why this matters (efficacy evidence): a large 2026 meta-analysis of 108 randomized controlled trials (7,137 participants) found garlic supplementation significantly improved triglycerides, total and LDL cholesterol, HDL cholesterol, fasting glucose, insulin resistance, blood pressure, and inflammatory/oxidative-stress markers (PMID 40580481) — the evidence base behind garlic's cardiovascular-support positioning, separate from the antiplatelet/bleeding-risk caution already noted for this ingredient.",
+  },
+  {
+    id: "milk-thistle",
+    evidenceSummary: "A 2024 systematic review of polyphenol supplements for non-alcoholic fatty liver disease found most trials of silymarin (milk thistle's active compound) showed reductions in liver enzymes and improved lipid profile, though no consistent change in inflammatory cytokine levels (PMID 39683546).",
+    importanceAddition: "Why this matters (efficacy evidence): a 2024 systematic review of polyphenol supplements for non-alcoholic fatty liver disease found most trials of silymarin (milk thistle's active compound) showed reductions in liver enzymes and improved lipid profile, though no consistent change in inflammatory cytokine levels (PMID 39683546) — evidence for silymarin as an adjunct in existing liver conditions, not a general-population liver \"cleanse.\"",
+  },
+  {
+    id: "saw-palmetto",
+    evidenceSummary: "A meta-analysis of 12 RCTs found the specific hexanic lipidosterolic extract \"Permixon\" significantly reduced BPH symptoms and improved urinary flow versus placebo, performing as well as tamsulosin or short-term finasteride with fewer sexual side effects (PMID 28723522). A separate Cochrane-level analysis found generic Serenoa repens extracts overall showed no significant benefit over placebo (PMID 32418876) — the effect appears extract-specific, not universal to the ingredient name.",
+    importanceAddition: "Why this matters (efficacy evidence), told honestly: the evidence is extract-specific, not universal to all saw palmetto products. A meta-analysis of 12 RCTs found the specific hexanic lipidosterolic extract \"Permixon\" significantly reduced BPH urinary symptoms and improved flow rate versus placebo, performing as well as tamsulosin or short-term finasteride with notably fewer sexual side effects (PMID 28723522). But a separate Cochrane-level analysis found generic Serenoa repens extracts overall showed no significant benefit over placebo (PMID 32418876) — which extract/formulation a patient uses matters more than the ingredient name alone.",
+  },
+  {
+    id: "ginkgo-biloba",
+    evidenceSummary: "A 2023 umbrella review grading evidence across 13 herbal medicines for dementia/cognitive function rated Ginkgo biloba's evidence as only \"weak\" — it was not among the 3 herbs the review found \"suggestive\" evidence for (PMID 36728740).",
+    importanceAddition: "Why this matters (efficacy evidence), told honestly: a 2023 umbrella review grading evidence across 13 herbal medicines for dementia/cognitive function rated Ginkgo biloba's evidence as only \"weak\" — it was NOT among the 3 herbs the same review found \"suggestive\" evidence for (PMID 36728740). Don't oversell Ginkgo's cognitive benefit; the best current evidence synthesis does not place it among the stronger-evidence herbal options for cognition.",
+  },
+  {
+    id: "ginger",
+    evidenceSummary: "Two recent systematic reviews/meta-analyses (18 and 33 studies respectively) found ginger supplementation (typically 450-1950mg/day) significantly reduces the severity and frequency of nausea and vomiting of pregnancy, with efficacy comparable to vitamin B6 and conventional antiemetics and no increased risk of adverse effects such as miscarriage (PMID 42322087, PMID 36969661).",
+    importanceAddition: "Why this matters (efficacy evidence): ginger's best-supported real-world use is nausea and vomiting in pregnancy. Two recent systematic reviews/meta-analyses (18 and 33 studies respectively) found ginger supplementation, typically 450-1950mg/day, significantly reduces the severity and frequency of nausea and vomiting of pregnancy, with efficacy comparable to vitamin B6 and conventional antiemetics and no increased risk of adverse effects such as miscarriage (PMID 42322087, PMID 36969661).",
+  },
+  {
+    id: "creatine",
+    evidenceSummary: "Two large, recent meta-analyses (63 studies/1,489 participants and 69 studies/1,937 participants) confirm creatine combined with resistance training produces measurable increases in upper- and lower-body strength, muscular power, and lean body mass versus resistance training alone, with effects strongest in younger adults and males (PMID 42765482, PMID 40944139).",
+    importanceAddition: "Why this matters (efficacy evidence): this is one of the best-evidenced ingredients in this entire catalog. Two large, recent meta-analyses (63 studies/1,489 participants and 69 studies/1,937 participants) confirm that creatine combined with resistance training produces real, measurable increases in upper- and lower-body strength, muscular power, and lean body mass compared to resistance training alone, with effects strongest in younger adults and males (PMID 42765482, PMID 40944139).",
+  },
+  {
+    id: "zinc",
+    evidenceSummary: "A Cochrane systematic review of 16 therapeutic trials found zinc taken within 24 hours of cold-symptom onset significantly reduced the duration of common cold symptoms by about 1 day on average, though it did not significantly reduce symptom severity (PMID 23775705).",
+    importanceAddition: "Why this matters (efficacy evidence): a Cochrane systematic review of 16 therapeutic trials found zinc taken within 24 hours of cold-symptom onset significantly reduced the duration of common cold symptoms by about 1 day on average, though it did not significantly reduce symptom severity (PMID 23775705). This benefit must be weighed against zinc's own adverse effects — bad taste and nausea were also significantly more common than placebo in the same review.",
+  },
+  {
+    id: "probiotic",
+    evidenceSummary: "Two independent meta-analyses (42 studies/11,305 patients, and 36 studies/9,312 patients) found that taking a probiotic alongside antibiotics reduces the risk of antibiotic-associated diarrhea in adults by roughly 37-38%, with no significant increase in adverse events (PMID 34385227, PMID 33234881).",
+    importanceAddition: "Why this matters (efficacy evidence): this is one of the best-supported uses for probiotics. Two independent meta-analyses (42 studies/11,305 patients, and 36 studies/9,312 patients) both found that taking a probiotic alongside antibiotics reduces the risk of antibiotic-associated diarrhea in adults by roughly 37-38%, with no significant increase in adverse events — benefit was strongest with Lactobacillus/Bifidobacterium strains at higher doses, started early in the antibiotic course (PMID 34385227, PMID 33234881).",
+  },
+  {
+    id: "biotin-hsn",
+    evidenceSummary: "Two independent reviews found no randomized controlled trials demonstrating that biotin supplementation improves hair or nail growth in healthy individuals without an underlying deficiency — documented benefit is essentially limited to confirmed biotin deficiency or specific pathologies like brittle nail syndrome (PMID 28879195, PMID 28628687).",
+    importanceAddition: "Why this matters (efficacy evidence), told honestly: despite biotin's popularity for hair/skin/nails, two independent reviews found no randomized controlled trials demonstrating that biotin supplementation improves hair or nail growth in healthy individuals without an underlying deficiency — documented benefit is essentially limited to confirmed biotin deficiency or specific pathologies like brittle nail syndrome (PMID 28879195, PMID 28628687). Set expectations accordingly: in healthy people, this is a popularity-driven product, not a strongly evidence-backed one.",
+  },
+  {
+    id: "digestive-enzymes",
+    evidenceSummary: "A small double-blind, placebo-controlled crossover study (16 healthy adults) found acid-resistant lipase taken before a high-fat meal significantly reduced reported stomach fullness versus placebo, though it did not significantly affect bloating, nausea, or gastric myoelectrical activity (PMID 25287168).",
+    importanceAddition: "Why this matters (efficacy evidence): a small double-blind, placebo-controlled crossover study (16 healthy adults) found acid-resistant lipase taken before a high-fat meal significantly reduced reported stomach fullness versus placebo, though it did not significantly affect bloating, nausea, or gastric myoelectrical activity (PMID 25287168). This is modest, single-study evidence in healthy volunteers for mild postprandial fullness — a different clinical context from prescription pancreatic enzyme replacement therapy used for diagnosed exocrine pancreatic insufficiency.",
+  },
+  {
+    id: "bcaa",
+    evidenceSummary: "A meta-analysis of 8 studies found BCAA supplementation produced a significant, large reduction in delayed-onset muscle soreness (DOMS) following exercise compared to placebo (PMID 30938579).",
+    importanceAddition: "Why this matters (efficacy evidence): a meta-analysis of 8 studies found BCAA supplementation produced a significant, large reduction in delayed-onset muscle soreness (DOMS) following exercise compared to placebo (PMID 30938579).",
+  },
+  {
+    id: "l-carnitine",
+    evidenceSummary: "A systematic review and meta-analysis found L-carnitine supplementation significantly increased maximal oxygen consumption (VO2) and serum carnitine levels at specific doses (around 2g/day for 3-4 weeks), though it did not significantly change serum lactate (PMID 34842765).",
+    importanceAddition: "Why this matters (efficacy evidence): a systematic review and meta-analysis found L-carnitine supplementation significantly increased maximal oxygen consumption (VO2) and serum carnitine levels at specific doses, around 2g/day for 3-4 weeks, though it did not significantly change serum lactate — the performance benefit is real but dose-dependent, not seen on every exercise-physiology marker tested (PMID 34842765).",
+  },
+  {
+    id: "maca",
+    evidenceSummary: "A small double-blind, randomized pilot dose-finding trial (20 patients) found higher-dose maca (3.0g/day) significantly improved sexual dysfunction scores and libido in patients with SSRI-induced sexual dysfunction, while a lower dose (1.5g/day) did not reach significance (PMID 18801111).",
+    importanceAddition: "Why this matters (efficacy evidence): a small double-blind, randomized pilot dose-finding trial (20 patients) found higher-dose maca (3.0g/day) significantly improved sexual dysfunction scores and libido in patients with SSRI-induced sexual dysfunction, while a lower dose (1.5g/day) did not reach significance (PMID 18801111) — maca's traditional aphrodisiac reputation has some real, dose-dependent clinical support, though from a small pilot study.",
+  },
+  {
+    id: "guarana",
+    evidenceSummary: "A 2024 double-blind crossover trial found neither acute guarana (500mg, ~130mg caffeine) nor a low dose of caffeine alone (100mg) significantly improved cognitive performance or mood versus placebo in healthy adults (PMID 38931247).",
+    importanceAddition: "Why this matters (efficacy evidence), told honestly: a 2024 double-blind crossover trial found that neither acute guarana (500mg, ~130mg caffeine) nor a low dose of caffeine alone (100mg) significantly improved cognitive performance or mood versus placebo in healthy adults (PMID 38931247). This challenges the common \"natural energy booster\" marketing framing — at least at these doses, in this trial, the acute cognitive-boost claim was not confirmed.",
+  },
+  {
+    id: "nac",
+    evidenceSummary: "A 2024 meta-analysis of 20 studies found NAC significantly reduced the frequency of exacerbations and improved respiratory symptoms/quality of life in patients with COPD or chronic bronchitis compared to placebo (PMID 38555190).",
+    importanceAddition: "Why this matters (efficacy evidence): a 2024 meta-analysis of 20 studies found NAC significantly reduced the frequency of exacerbations and improved respiratory symptoms and quality of life in patients with COPD or chronic bronchitis compared to placebo (PMID 38555190) — the main evidence-backed clinical use behind this ingredient, distinct from its antioxidant/glutathione-precursor marketing framing.",
+  },
+];
+
+let phase10ImportanceEnrichmentChecked = false;
+async function ensureIngredientImportanceEnriched() {
+  if (phase10ImportanceEnrichmentChecked) return;
+  await ensurePhase9CategoriesSeeded();
+
+  const existingSources = await db.getAllRows("RecallResearchSources");
+  const existingSourceIds = new Set(existingSources.map((s) => s.id));
+  const newSources = PHASE10_SOURCES_SEED.filter((s) => !existingSourceIds.has(s.id));
+  if (newSources.length) {
+    await db.appendRows("RecallResearchSources", newSources.map((s) => ({
+      id: s.id, sourceType: s.sourceType, sourceName: s.sourceName, title: s.title, authors: "",
+      journal: s.journal || "", pmid: s.pmid || "", pmcid: "", doi: s.doi || "", url: s.url || "",
+      publicationYear: s.publicationYear || "", sourceDate: "", sourceQuality: s.sourceQuality || "", notes: "",
+    })));
+  }
+
+  const existingIngredients = await db.getAllRows("RecallIngredients");
+  const byId = new Map(existingIngredients.map((i) => [i.id, i]));
+  const updates = [];
+  for (const def of INGREDIENT_IMPORTANCE_ENRICHMENT) {
+    const row = byId.get(def.id);
+    if (!row) continue; // never invents an ingredient that doesn't exist
+    const patch = {};
+    if (!row.evidenceSummary && def.evidenceSummary) patch.evidenceSummary = def.evidenceSummary;
+    const currentTakeaway = row.repQuickTakeaway || "";
+    if (def.importanceAddition && !currentTakeaway.includes(def.importanceAddition)) {
+      patch.repQuickTakeaway = currentTakeaway ? `${currentTakeaway}\n${def.importanceAddition}` : def.importanceAddition;
+    }
+    if (Object.keys(patch).length) updates.push({ id: def.id, patch });
+  }
+  if (updates.length) await db.batchUpdateRows("RecallIngredients", updates);
+
+  phase10ImportanceEnrichmentChecked = true;
+}
+
 // ---------- Recall: auto-link ANY competitor product into its matching
 // category, by shared ingredient ----------
 // Not a one-time seed step like the functions above — a competitor product
@@ -11270,6 +11509,7 @@ app.get("/api/recall/categories", requireTabAccess("recall"), async (req, res) =
     await ensurePhase7CategoriesSeeded();
     await ensurePhase8CategoriesSeeded();
     await ensurePhase9CategoriesSeeded();
+    await ensureIngredientImportanceEnriched();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
@@ -11332,6 +11572,7 @@ app.get("/api/recall/categories/:id", requireTabAccess("recall"), async (req, re
     await ensurePhase7CategoriesSeeded();
     await ensurePhase8CategoriesSeeded();
     await ensurePhase9CategoriesSeeded();
+    await ensureIngredientImportanceEnriched();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources, features, benefits, uspRows, advantageRows] = await Promise.all([
