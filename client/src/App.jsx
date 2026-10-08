@@ -2953,7 +2953,11 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
               />
             )}
 
-            {!isRemoteContact && (!isDoctorStyleEntity || visitStarted) && (
+            {/* Skipped on a return visit — "What happened this time?" in the
+                condensed postcall screen right after this one (reusing the
+                same keyLearning state) already asks for exactly this, so
+                asking again here would just be the same question twice. */}
+            {!isRemoteContact && (!isDoctorStyleEntity || visitStarted) && !isReturnVisit && (
               <Field label={isDoctorStyleEntity ? "Additional notes (optional)" : "Visit notes"}>
                 <textarea
                   value={notes}
