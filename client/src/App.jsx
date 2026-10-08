@@ -3061,10 +3061,21 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
 
             {!isRemoteContact && isDoctorStyleEntity && visitStarted && (
               <>
-                <Field label="What did the doctor need?">
-                  <ChipPicker options={DOCTOR_NEED_OPTIONS} value={doctorNeeds} onChange={setDoctorNeeds} multi />
-                </Field>
-                <div style={{ height: 14 }} />
+                {/* Full needs/insight/motive/comments profiling — first visit
+                    only. Return visits (isReturnVisit) skip straight to the
+                    two fields that still drive Quality Call reporting
+                    (reaction, commitment) — everything else here is already
+                    covered by Products discussed above (interest + sample
+                    status) and the condensed postcall screen that follows
+                    (what happened / what's next). */}
+                {!isReturnVisit && (
+                  <>
+                    <Field label="What did the doctor need?">
+                      <ChipPicker options={DOCTOR_NEED_OPTIONS} value={doctorNeeds} onChange={setDoctorNeeds} multi />
+                    </Field>
+                    <div style={{ height: 14 }} />
+                  </>
+                )}
                 <Field label="Doctor reaction">
                   <ChipPicker options={REACTION_OPTIONS} value={reaction} onChange={(v) => { setReaction(v); if (v !== "concerned") setConcern(""); }} />
                 </Field>
@@ -3077,24 +3088,28 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                   </>
                 )}
                 <div style={{ height: 14 }} />
-                <Field label="Doctor's words / important insight (optional)">
-                  <textarea
-                    value={doctorInsight}
-                    onChange={(e) => setDoctorInsight(e.target.value)}
-                    placeholder={'e.g. "He said several patients ask for B12 but dislike swallowing tablets."'}
-                    rows={2}
-                    style={{ ...inputStyle, resize: "vertical" }}
-                  />
-                </Field>
-                <div style={{ height: 14 }} />
-                <Field label="Buying motive (optional)">
-                  <input value={buyingMotive} onChange={(e) => setBuyingMotive(e.target.value)} placeholder="e.g. Wants better compliance for elderly patients" style={inputStyle} />
-                </Field>
-                <div style={{ height: 14 }} />
-                <Field label="Customer comments (optional)">
-                  <input value={customerComments} onChange={(e) => setCustomerComments(e.target.value)} placeholder="e.g. Open but cautious" style={inputStyle} />
-                </Field>
-                <div style={{ height: 14 }} />
+                {!isReturnVisit && (
+                  <>
+                    <Field label="Doctor's words / important insight (optional)">
+                      <textarea
+                        value={doctorInsight}
+                        onChange={(e) => setDoctorInsight(e.target.value)}
+                        placeholder={'e.g. "He said several patients ask for B12 but dislike swallowing tablets."'}
+                        rows={2}
+                        style={{ ...inputStyle, resize: "vertical" }}
+                      />
+                    </Field>
+                    <div style={{ height: 14 }} />
+                    <Field label="Buying motive (optional)">
+                      <input value={buyingMotive} onChange={(e) => setBuyingMotive(e.target.value)} placeholder="e.g. Wants better compliance for elderly patients" style={inputStyle} />
+                    </Field>
+                    <div style={{ height: 14 }} />
+                    <Field label="Customer comments (optional)">
+                      <input value={customerComments} onChange={(e) => setCustomerComments(e.target.value)} placeholder="e.g. Open but cautious" style={inputStyle} />
+                    </Field>
+                    <div style={{ height: 14 }} />
+                  </>
+                )}
                 <Field label="Commitment">
                   <ChipPicker options={COMMITMENT_OPTIONS} value={commitment} onChange={(v) => { setCommitment(v); if (v !== "will_try") setPatientsToTry(""); }} />
                 </Field>
