@@ -1420,6 +1420,7 @@ app.get("/api/competitor-products", async (req, res) => {
     await ensurePhase4CategoriesSeeded();
     await ensurePhase5CategoriesSeeded();
     await ensurePhase6CategoriesSeeded();
+    await ensurePhase7CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const { q, limit } = req.query;
@@ -7379,6 +7380,8 @@ const COMPETITOR_GENERIC_NAME_KEYWORDS = [
   [/guarana/i, "Guarana"],
   [/\bmaca\b/i, "Maca"],
   [/glucosamine.{0,20}chondroitin|chondroitin.{0,20}glucosamine/i, "Glucosamine & Chondroitin"],
+  [/\bginger\b|zingiber/i, "Ginger"],
+  [/pancreatin|papain|bromelain/i, "Digestive Enzymes"],
 ];
 // Tier 1: words that unambiguously name a physical dosage-unit form. Tier 2:
 // words that often double as an INGREDIENT descriptor rather than the
@@ -10434,6 +10437,266 @@ async function ensurePhase6CategoriesSeeded() {
   phase6CategoriesSeedChecked = true;
 }
 
+// ---------- Women's Health / Immune Support / Digestive-Gut Health /
+// Collagen / Hair-Skin-Nails / Zinc / Probiotics (Recall Phase 7) ----------
+// Same sourcing discipline as every prior phase.
+const PHASE7_SOURCES_SEED = [
+  { id: "src-pmid-40311928", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Efficacy and safety of Echinacea purpurea in treating upper respiratory infections and complications of otitis media in children",
+    pmid: "40311928", doi: "10.1016/j.clnesp.2025.04.025", journal: "Clinical Nutrition ESPEN", publicationYear: "2025",
+    url: "https://pubmed.ncbi.nlm.nih.gov/40311928/", sourceQuality: "Meta-analysis of 9 RCTs, n=3169" },
+  { id: "src-pmid-15449760", sourceType: "Case report", sourceName: "PubMed",
+    title: "A 76-year-old woman with erratic anticoagulation",
+    pmid: "15449760", doi: "10.3949/ccjm.71.8.651", journal: "Cleveland Clinic Journal of Medicine", publicationYear: "2004",
+    url: "https://pubmed.ncbi.nlm.nih.gov/15449760/", sourceQuality: "Case report" },
+  { id: "src-pmid-11144706", sourceType: "Review", sourceName: "PubMed",
+    title: "Interactions of warfarin with garlic, ginger, ginkgo, or ginseng: nature of the evidence",
+    pmid: "11144706", doi: "10.1345/aph.10031", journal: "The Annals of Pharmacotherapy", publicationYear: "2000",
+    url: "https://pubmed.ncbi.nlm.nih.gov/11144706/", sourceQuality: "Narrative review" },
+  { id: "src-pmid-32761612", sourceType: "Systematic review (Cochrane)", sourceName: "Cochrane",
+    title: "Pancreatic enzyme replacement therapy for people with cystic fibrosis",
+    pmid: "32761612", doi: "10.1002/14651858.CD008227.pub4", journal: "Cochrane Database of Systematic Reviews", publicationYear: "2020",
+    url: "https://pubmed.ncbi.nlm.nih.gov/32761612/", sourceQuality: "Cochrane systematic review, 14 trials" },
+  { id: "src-pmid-42342959", sourceType: "Systematic review", sourceName: "PubMed",
+    title: "Efficacy and safety of hydrolyzed collagen supplementation on skin health outcomes",
+    pmid: "42342959", doi: "10.1038/s41430-026-01778-3", journal: "European Journal of Clinical Nutrition", publicationYear: "2026",
+    url: "https://pubmed.ncbi.nlm.nih.gov/42342959/", sourceQuality: "Systematic review of 25 RCTs" },
+  { id: "src-pmid-31944861", sourceType: "Laboratory study", sourceName: "PubMed",
+    title: "Interference From High-Dose Biotin Intake in Immunoassays for Potentially Time-Critical Analytes by Roche",
+    pmid: "31944861", doi: "10.5858/arpa.2019-0425-OA", journal: "Archives of Pathology & Laboratory Medicine", publicationYear: "2020",
+    url: "https://pubmed.ncbi.nlm.nih.gov/31944861/", sourceQuality: "Laboratory interference study" },
+  { id: "src-pmid-30296442", sourceType: "Laboratory study", sourceName: "PubMed",
+    title: "Comprehensive assessment of biotin interference in immunoassays",
+    pmid: "30296442", doi: "10.1016/j.cca.2018.10.013", journal: "Clinica Chimica Acta", publicationYear: "2018",
+    url: "https://pubmed.ncbi.nlm.nih.gov/30296442/", sourceQuality: "Laboratory interference study" },
+  { id: "src-pmid-42757636", sourceType: "Case report", sourceName: "PubMed",
+    title: "Zinc-associated Copper Deficiency Myelopathy: A Case Report",
+    pmid: "42757636", doi: "10.1097/WNF.0000000000000701", journal: "Clinical Neuropharmacology", publicationYear: "2026",
+    url: "https://pubmed.ncbi.nlm.nih.gov/42757636/", sourceQuality: "Case report" },
+  { id: "src-pmid-2094240", sourceType: "Case report", sourceName: "PubMed",
+    title: "Excessive zinc ingestion. A reversible cause of sideroblastic anemia and bone marrow depression",
+    pmid: "2094240", doi: "10.1001/jama.264.11.1441", journal: "JAMA", publicationYear: "1990",
+    url: "https://pubmed.ncbi.nlm.nih.gov/2094240/", sourceQuality: "Case reports (2 patients)" },
+  { id: "src-pmid-41742039", sourceType: "Case report", sourceName: "PubMed",
+    title: "Lacticaseibacillus paracasei bacteremia and mediastinitis secondary to esophageal invasion by left hilar pleomorphic carcinoma",
+    pmid: "41742039", doi: "10.1186/s12879-026-12971-x", journal: "BMC Infectious Diseases", publicationYear: "2026",
+    url: "https://pubmed.ncbi.nlm.nih.gov/41742039/", sourceQuality: "Case report" },
+  { id: "src-pmid-26130690", sourceType: "Case report / review", sourceName: "PubMed",
+    title: "The potential risks of probiotics among HIV-infected persons: Bacteraemia due to Lactobacillus acidophilus",
+    pmid: "26130690", doi: "10.1177/0956462415590725", journal: "International Journal of STD & AIDS", publicationYear: "2015",
+    url: "https://pubmed.ncbi.nlm.nih.gov/26130690/", sourceQuality: "Case report with literature review" },
+];
+
+const PHASE7_INGREDIENTS_SEED = [
+  {
+    id: "womens-multivitamin", categoryId: "womens-health", name: "Women's Multivitamin", commonName: "Multivitamin (women's formula)", scientificName: "",
+    description: "A multivitamin/multimineral blend formulated for women.",
+    evidenceLevel: "NOT_VERIFIED",
+    productMatches: [
+      { productName: "ALFA Multi Women 100 Tabs", chemicalForm: "Multivitamin/mineral blend", compoundAmount: "", activeAmount: "", unit: "", servingSize: "1 tablet", notes: "Contains Vitamin A, C, D, E, K, B1, B2, B3, B6, folate, B12, biotin, pantothenic acid, calcium, iron, phosphorus, iodine, magnesium, zinc, selenium, copper, manganese, chromium, molybdenum, and boron per the product's own ingredient text." },
+      { productName: "Mason Natural Women's Daily Formula 90caplets", chemicalForm: "Multivitamin/mineral blend", compoundAmount: "", activeAmount: "", unit: "", servingSize: "1 caplet", notes: "Per the product's own ingredient text (a full-spectrum multivitamin/mineral formula)." },
+    ],
+  },
+  {
+    id: "echinacea", categoryId: "immune-support", name: "Echinacea", commonName: "Echinacea", scientificName: "Echinacea purpurea",
+    description: "An herb traditionally used for short-term immune support during upper respiratory infections.",
+    evidenceLevel: "NOT_VERIFIED",
+    evidenceSummary: "A 2025 systematic review and meta-analysis of 9 RCTs (3,169 children) found Echinacea purpurea significantly reduced upper respiratory infection (URTI) duration, incidence, and antibiotic use, and reduced otitis media episode incidence — but adverse events were moderately increased versus placebo (RR 1.38), though generally described as mild (Pham et al., Clin Nutr ESPEN 2025, PMID 40311928).",
+    repQuickTakeaway: [
+      "What it is: an herb traditionally used for short-term immune support during colds/upper respiratory infections.",
+      "Balanced evidence picture: a 2025 meta-analysis of 9 trials in children found real benefits (shorter infections, less antibiotic use, fewer ear-infection episodes) but ALSO a moderately increased rate of adverse events versus placebo, even though those were generally mild (PMID 40311928) — it's not a free lunch.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Ask about any known allergy to the Asteraceae/daisy plant family, which Echinacea belongs to.",
+      "This is generally intended for short-course use during an active cold/URI, not indefinite daily use — worth confirming how the patient is actually using it.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim Echinacea is adverse-event-free — a meta-analysis found a moderately increased adverse-event rate versus placebo, even though effects were generally mild.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Echinacea 1200mg 90 Capsules", chemicalForm: "Echinacea", compoundAmount: 1200, unit: "mg", servingSize: "", notes: "Amount per the product's own label text." },
+    ],
+  },
+  {
+    id: "ginger", categoryId: "digestive-gut-health", name: "Ginger", commonName: "Ginger", scientificName: "Zingiber officinale",
+    description: "An herbal supplement commonly used for digestive/nausea support.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "A published case report describes an elderly woman on warfarin who developed erratic anticoagulation with gingival bleeding and hematuria, with ginger use identified as a contributing factor (Lesho et al., Cleve Clin J Med 2004, PMID 15449760). However, a dedicated review of the evidence for warfarin interactions with garlic, ginger, ginkgo, and ginseng concluded that evidence for an interaction between warfarin and garlic or ginger specifically is lacking, in contrast to ginkgo (case report of intracerebral hemorrhage) and ginseng (case report of decreased anticoagulation effect) (Vaes & Chyka, Ann Pharmacother 2000, PMID 11144706) — so the honest picture is an isolated case report exists, but the broader evidence base does not confirm a reliable interaction.",
+    repQuickTakeaway: [
+      "What it is: an herbal supplement commonly used for digestive/nausea support.",
+      "Nuanced safety picture: one published case report links ginger to erratic anticoagulation and bleeding in a patient on warfarin (PMID 15449760), but a dedicated review of the overall evidence concluded that a reliable warfarin-ginger interaction is NOT well-established, unlike ginkgo or ginseng which have their own documented interaction patterns (PMID 11144706).",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is the patient on warfarin or another anticoagulant? Worth asking even though the broader evidence doesn't confirm a reliable interaction — one case report exists.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim a confirmed warfarin-ginger interaction exists as established fact — the best available review found the evidence lacking, despite one case report.",
+      "Do not claim ginger has zero bleeding-risk reports either — a specific case report does exist.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "Mason Natural Ginger 500 Mg 60 Caps.", chemicalForm: "Whole herb ginger", compoundAmount: 500, unit: "mg", servingSize: "1 capsule", notes: "Per label: whole herb ginger 500mg." },
+    ],
+  },
+  {
+    id: "digestive-enzymes", categoryId: "digestive-gut-health", name: "Digestive Enzymes", commonName: "Pancreatin / Papain / Bromelain", scientificName: "Pancreatin, Papain, Bromelain, Amylase",
+    description: "An enzyme blend marketed to support digestion of proteins, fats, and carbohydrates.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "Prescription-strength pancreatic enzyme replacement therapy (PERT), used for conditions like cystic fibrosis with true pancreatic insufficiency, is a distinct, much higher-dose medical therapy from this OTC digestive-support product — a Cochrane review of PERT notes it is dosed and adjusted specifically to the food consumed and the degree of pancreatic insufficiency (Somaraju & Solis-Moya, Cochrane Database Syst Rev 2020, PMID 32761612). This OTC blend should not be assumed equivalent to a patient's prescribed PERT medication.",
+    repQuickTakeaway: [
+      "What it is: an enzyme blend (pancreatin, papain, bromelain, amylase) marketed to support digestion.",
+      "Important distinction for doctors: prescription-strength pancreatic enzyme replacement therapy (PERT) for conditions like cystic fibrosis is a much higher, individually-dosed medical therapy (PMID 32761612) — this OTC product is not equivalent and should never be assumed to substitute for a patient's prescribed PERT.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Does the patient have a diagnosed condition requiring prescription pancreatic enzyme replacement (e.g. cystic fibrosis, chronic pancreatitis)? If so, this OTC product is not a substitute for their prescribed therapy.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim this OTC enzyme blend is equivalent to or can substitute for prescription pancreatic enzyme replacement therapy — they are different dose classes for different medical purposes.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "Mason Natural Chewable Papaya 100tab", chemicalForm: "Pancreatin + Papain + Papaya fruit powder + Bromelain + Amylase", compoundAmount: 40, unit: "mg", servingSize: "1 chewable", notes: "Per label: Pancreatin 40mg + Papain 10mg + Papaya fruit powder 10mg + Bromelain 6mg + Amylase 4mg per chewable." },
+    ],
+  },
+  {
+    id: "collagen", categoryId: "collagen", name: "Collagen", commonName: "Hydrolyzed Collagen", scientificName: "Hydrolyzed collagen peptides",
+    description: "A protein supplement marketed for skin, joint, and connective-tissue support.",
+    evidenceLevel: "NOT_VERIFIED",
+    evidenceSummary: "A 2026 systematic review of 25 RCTs found hydrolyzed collagen supplementation improved skin hydration (10 of 15 trials), elasticity (10 of 13 trials), and wrinkle depth/volume (9 of 10 trials) versus placebo, and was generally well-tolerated with a low incidence of adverse events — though most included trials were rated high risk of bias, so the evidence is preliminary rather than definitive (Bassila et al., Eur J Clin Nutr 2026, PMID 42342959).",
+    repQuickTakeaway: [
+      "What it is: a protein supplement (hydrolyzed collagen peptides) marketed for skin, joint, and connective-tissue support.",
+      "Evidence picture: a 2026 systematic review of 25 RCTs found real improvements in skin hydration, elasticity, and wrinkle depth in most trials, with generally good tolerability and a low rate of adverse events — but most trials had a high risk of bias, so call this 'promising, not proven' (PMID 42342959).",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Set realistic expectations on evidence quality — real signal across multiple trials, but most individual trials carry a high risk of bias per the systematic review.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not present collagen's skin benefits as definitively proven — the systematic review rated most included trials as high risk of bias, even though the direction of effect was consistently positive.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Collagen Hydrolysate+c 60 Caps", chemicalForm: "Collagen hydrolysate + Vitamin C + Biotin", compoundAmount: 1000, unit: "mg", servingSize: "3 capsules", notes: "Per label: Vitamin C 90mg + Biotin 1,000mcg + Collagen hydrolysate 1,000mg per 3-capsule serving." },
+    ],
+  },
+  {
+    id: "biotin-hsn", categoryId: "hair-skin-nails", name: "Biotin", commonName: "Biotin (hair/skin/nails context)", scientificName: "Biotin (Vitamin B7)",
+    description: "A B-vitamin marketed at high doses for hair, skin, and nail support — a genuinely different dose context from the small amount found in a routine multivitamin.",
+    evidenceLevel: "NOT_VERIFIED",
+    drugInteractionSummary: "Two independent laboratory studies found that high-dose biotin intake causes clinically significant interference in common immunoassay-based lab tests — most notably falsely LOW high-sensitivity troponin T and thyroid-stimulating hormone (TSH) results, and falsely HIGH triiodothyronine and vitamin D results (Li et al., Clin Chim Acta 2018, PMID 30296442; Mrosewski et al., Arch Pathol Lab Med 2020, PMID 31944861). A falsely low troponin T result in a patient having a heart attack, or a falsely abnormal thyroid panel, are real, clinically significant patient-safety risks from this interference, not a minor lab footnote.",
+    repQuickTakeaway: [
+      "What it is: a B-vitamin, taken here at a high dose specifically for hair/skin/nails — not the small amount in a routine multivitamin.",
+      "The single most clinically important fact about this ingredient: high-dose biotin causes real, documented interference in common lab immunoassays — most notably FALSELY LOW troponin T (the heart-attack blood test) and TSH, and falsely HIGH thyroid/vitamin D results (PMID 30296442, PMID 31944861). This is a genuine patient-safety issue, not a theoretical footnote.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Always ask if the patient is taking a high-dose biotin supplement before any lab panel is drawn, especially troponin (cardiac) or thyroid testing — tell the patient to inform their doctor/lab, and that stopping biotin 1-2 days before bloodwork is a commonly recommended precaution.",
+      "If a patient on biotin gets a surprising or inconsistent troponin or thyroid result, biotin interference should be considered as a possible explanation worth raising with their doctor.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not fail to mention the lab-interference issue when discussing biotin — this is one of the best-documented, clinically significant safety points of any ingredient in this catalog, directly affecting how doctors interpret real test results.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA HAIR NAILS SKIN 60 CAPS", chemicalForm: "Biotin-based hair/skin/nails blend (B12, zinc, copper also present)", compoundAmount: "", activeAmount: "", unit: "", servingSize: "2 capsules", notes: "Per label: multiple vitamins/minerals including B12, biotin, zinc, and copper; exact individual amounts not captured from the page text." },
+    ],
+  },
+  {
+    id: "zinc", categoryId: "zinc", name: "Zinc", commonName: "Zinc", scientificName: "Zinc (as zinc oxide/other salts)",
+    description: "An essential trace mineral with roles in immune function and wound healing, also sold combined with calcium/magnesium.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "Two independent published case reports document zinc-induced copper deficiency from chronic zinc supplementation: a 2026 case report of a 70-year-old woman on long-term zinc supplementation who developed copper-deficiency myelopathy (progressive gait problems, falls, sensory deficits), which substantially reversed after stopping zinc and replacing copper (Goodrich & Schneider, Clin Neuropharmacol 2026, PMID 42757636); and a JAMA case series of 2 patients who developed reversible sideroblastic anemia and bone marrow depression from excessive zinc ingestion via zinc-induced copper deficiency (Broun et al., JAMA 1990, PMID 2094240).",
+    repQuickTakeaway: [
+      "What it is: an essential trace mineral for immune function and wound healing.",
+      "Real, documented risk with chronic use: two separate published case reports describe patients who developed copper deficiency from long-term zinc supplementation — one causing a reversible neurologic disorder (gait problems, falls) (PMID 42757636), another causing reversible anemia and bone marrow suppression (PMID 2094240). Both reversed once zinc was stopped and copper was replaced.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Ask about duration of use — these are documented as CHRONIC, long-term zinc exposure cases, not single-dose concerns.",
+      "New unexplained gait problems, falls, sensory symptoms, or unexplained anemia in a chronic zinc user should prompt consideration of copper deficiency.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim zinc has no risk with long-term use — two independent published case reports document reversible but serious neurologic and hematologic effects from zinc-induced copper deficiency.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "Mason Natural Calcium Magnesium Zinc100tab", chemicalForm: "Zinc (combined with calcium and magnesium)", compoundAmount: 5, unit: "mg", servingSize: "1 tablet", notes: "Per label: Calcium 334mg + Magnesium 134mg + Zinc 5mg per tablet." },
+    ],
+  },
+  {
+    id: "probiotic", categoryId: "probiotics", name: "Probiotic", commonName: "Probiotic (strain not disclosed on label)", scientificName: "",
+    description: "Live microorganisms marketed for digestive/immune support; the specific strain and CFU count are not disclosed on this product's label.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "Probiotics have an established general safety record, but published case reports document rare but serious bloodstream infections (bacteremia) from probiotic organisms specifically in immunocompromised patients or those with a disrupted gastrointestinal barrier: one case of Lacticaseibacillus paracasei bacteremia in a cancer patient with esophageal tumor invasion (Kushima et al., BMC Infect Dis 2026, PMID 41742039), and one case of Lactobacillus acidophilus bacteremia in a patient with AIDS following heavy probiotic yogurt consumption (Haghighat & Crum-Cianflone, Int J STD AIDS 2015, PMID 26130690).",
+    repQuickTakeaway: [
+      "What it is: live microorganisms marketed for digestive/immune support — this product's label doesn't disclose the specific strain or CFU count.",
+      "Real but rare risk group: published case reports document bloodstream infections (bacteremia) from probiotic organisms specifically in immunocompromised patients or those with GI-barrier disruption, such as cancer or AIDS patients (PMID 41742039, PMID 26130690) — probiotics are generally safe, but not a zero-risk choice for every patient.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is the patient immunocompromised (cancer treatment, HIV/AIDS, transplant, etc.) or do they have a condition disrupting the GI tract lining? These are the specific populations where rare but serious bacteremia has been documented.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim probiotics are risk-free for every patient — documented case reports exist of serious bloodstream infections in immunocompromised patients specifically.",
+      "Do not alarm patients broadly either — these are rare events in specific high-risk populations, not a general population concern.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "Mason Natural Highly Concentrated Cranberry with Probiotic 60 tabs", chemicalForm: "Probiotic (strain not disclosed) + cranberry + calcium + vitamin C", compoundAmount: "", activeAmount: "", unit: "", servingSize: "", notes: "Per label, a cranberry/calcium/vitamin C/probiotic combination; specific probiotic strain and CFU count not captured from the page text." },
+    ],
+  },
+];
+
+let phase7CategoriesSeedChecked = false;
+async function ensurePhase7CategoriesSeeded() {
+  if (phase7CategoriesSeedChecked) return;
+  await ensureRecallCategoriesSeeded();
+  await ensureOurProductsMasterDataSeeded();
+  await ensurePhase1CategoriesSeeded();
+  await ensurePhase2CategoriesSeeded();
+  await ensurePhase3CategoriesSeeded();
+  await ensurePhase4CategoriesSeeded();
+  await ensurePhase5CategoriesSeeded();
+  await ensurePhase6CategoriesSeeded();
+
+  const existingIngredients = await db.getAllRows("RecallIngredients");
+  const existingIngredientIds = new Set(existingIngredients.map((i) => i.id));
+  const missingIngredientDefs = PHASE7_INGREDIENTS_SEED.filter((def) => !existingIngredientIds.has(def.id));
+  if (missingIngredientDefs.length === 0) { phase7CategoriesSeedChecked = true; return; }
+
+  const existingSources = await db.getAllRows("RecallResearchSources");
+  const existingSourceIds = new Set(existingSources.map((s) => s.id));
+  const newSources = PHASE7_SOURCES_SEED.filter((s) => !existingSourceIds.has(s.id));
+  if (newSources.length) {
+    await db.appendRows("RecallResearchSources", newSources.map((s) => ({
+      id: s.id, sourceType: s.sourceType, sourceName: s.sourceName, title: s.title, authors: "",
+      journal: s.journal || "", pmid: s.pmid || "", pmcid: "", doi: s.doi || "", url: s.url || "",
+      publicationYear: s.publicationYear || "", sourceDate: "", sourceQuality: s.sourceQuality || "", notes: "",
+    })));
+  }
+
+  const catalog = await db.getAllRows("ProductCatalog");
+  const catalogByName = new Map(catalog.map((p) => [p.name, p]));
+  const newIngredientRows = [];
+  const newLinkRows = [];
+
+  for (const def of missingIngredientDefs) {
+    newIngredientRows.push({
+      id: def.id, categoryId: def.categoryId, name: def.name, commonName: def.commonName || "", scientificName: def.scientificName || "",
+      description: def.description || "", physiologicalRole: "", clinicalUses: "",
+      evidenceSummary: def.evidenceSummary || "", evidenceLevel: def.evidenceLevel || "NOT_VERIFIED",
+      precautions: def.precautions || "", contraindications: "", drugInteractionSummary: def.drugInteractionSummary || "",
+      clinicalCheckpoints: def.clinicalCheckpoints || "", repQuickTakeaway: def.repQuickTakeaway || "", whatNotToClaim: def.whatNotToClaim || "", lastReviewed: "",
+      absorptionTimingNotes: "", repTakeawayQuestions: "", repTakeaway30Second: "",
+    });
+    for (const m of def.productMatches || []) {
+      const product = catalogByName.get(m.productName);
+      if (!product) continue; // never invents a product — only links one that's already in the catalog
+      newLinkRows.push({
+        id: `rpi-${def.id}-${crypto.randomUUID()}`, productId: product.id, ingredientId: def.id,
+        chemicalForm: m.chemicalForm || "", compoundAmount: m.compoundAmount ?? "", activeAmount: m.activeAmount ?? "", unit: m.unit || "",
+        servingSize: m.servingSize || "", dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "PARTIALLY_VERIFIED",
+        notes: m.notes || "", missingFields: "", sku: "", manufacturer: "", sourceLabel: "Product catalog import", sourceUrl: "",
+      });
+    }
+  }
+
+  if (newIngredientRows.length) await db.appendRows("RecallIngredients", newIngredientRows);
+  if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
+
+  phase7CategoriesSeedChecked = true;
+}
+
 // ---------- Recall: auto-link ANY competitor product into its matching
 // category, by shared ingredient ----------
 // Not a one-time seed step like the functions above — a competitor product
@@ -10657,6 +10920,7 @@ app.get("/api/recall/categories", requireTabAccess("recall"), async (req, res) =
     await ensurePhase4CategoriesSeeded();
     await ensurePhase5CategoriesSeeded();
     await ensurePhase6CategoriesSeeded();
+    await ensurePhase7CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
@@ -10716,6 +10980,7 @@ app.get("/api/recall/categories/:id", requireTabAccess("recall"), async (req, re
     await ensurePhase4CategoriesSeeded();
     await ensurePhase5CategoriesSeeded();
     await ensurePhase6CategoriesSeeded();
+    await ensurePhase7CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources, features, benefits, uspRows, advantageRows] = await Promise.all([
