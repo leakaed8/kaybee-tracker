@@ -2087,13 +2087,9 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   const [showMyVisits, setShowMyVisits] = useState(false);
   const [mentionedItems, setMentionedItems] = useState([]);
   const [itemQuery, setItemQuery] = useState("");
-  // Separate input from itemQuery above — this one only ever appears on a
-  // return visit's condensed postcall/followup step, never alongside the
-  // during-call "Products discussed" search, but kept distinct so the two
-  // can't ever clobber each other's typed text.
-  const [sampleRequestQuery, setSampleRequestQuery] = useState("");
-  const [givenSampleQuery, setGivenSampleQuery] = useState("");
-  const [sampleMenuFor, setSampleMenuFor] = useState(null);
+  // Separate input from itemQuery above (the "Products discussed" search) so
+  // the two can't ever clobber each other's typed text.
+  const [samplesQuery, setSamplesQuery] = useState("");
   const [sawCompetitor, setSawCompetitor] = useState(false);
   const [competitorName, setCompetitorName] = useState("");
   const [competitorNotes, setCompetitorNotes] = useState("");
@@ -2298,56 +2294,32 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
     setItemQuery("");
   };
   const removeMentionedItem = (productId) => setMentionedItems((prev) => prev.filter((it) => it.productId !== productId));
-  const setSampleStatus = (productId, status) => {
-    setMentionedItems((prev) => prev.map((it) => (it.productId === productId ? { ...it, sampleStatus: status } : it)));
-    setSampleMenuFor(null);
-  };
 
-  // Return-visit postcall/followup "Request samples for next visit" control
-  // — feeds the exact same mentionedItems/sampleStatus mechanism the
-  // during-call "Give next visit" tagging already uses, so POST /api/visits
-  // and POST /api/followups need no changes to pick this up: a product
-  // added here is indistinguishable from one tagged "next_visit" live
-  // during the call.
-  const matchedSampleRequestItem = products.find((p) => p.name.toLowerCase().trim() === sampleRequestQuery.toLowerCase().trim());
-  const sampleRequestItemOptions = (sampleRequestQuery.trim()
-    ? products.filter((p) => p.name.toLowerCase().includes(sampleRequestQuery.toLowerCase().trim()))
+  // Single "Samples" control (during-call, every visit) — used to have two
+  // separate lookalike boxes (one for "gave it today," one for "need it
+  // next visit," in different places/steps) and reps kept mixing them up,
+  // repeatedly tagging a sample as already-given when they meant to request
+  // it for next time (and vice versa). One search, two explicit buttons —
+  // "Gave it today" / "Need next visit" — removes the guesswork. Feeds the
+  // same mentionedItems/sampleStatus mechanism either way, so POST
+  // /api/visits and POST /api/followups need no changes to pick it up.
+  const matchedSamplesItem = products.find((p) => p.name.toLowerCase().trim() === samplesQuery.toLowerCase().trim());
+  const samplesItemOptions = (samplesQuery.trim()
+    ? products.filter((p) => p.name.toLowerCase().includes(samplesQuery.toLowerCase().trim()))
     : products
   ).slice(0, 50);
-  const addSampleRequestItem = () => {
-    if (!matchedSampleRequestItem) return;
+  const addSamplesItem = (status) => {
+    if (!matchedSamplesItem) return;
     setMentionedItems((prev) => {
-      if (prev.some((it) => it.productId === matchedSampleRequestItem.id)) {
-        return prev.map((it) => (it.productId === matchedSampleRequestItem.id ? { ...it, sampleStatus: "next_visit" } : it));
+      if (prev.some((it) => it.productId === matchedSamplesItem.id)) {
+        return prev.map((it) => (it.productId === matchedSamplesItem.id ? { ...it, sampleStatus: status } : it));
       }
-      return [...prev, { productId: matchedSampleRequestItem.id, name: matchedSampleRequestItem.name, sampleStatus: "next_visit" }];
+      return [...prev, { productId: matchedSamplesItem.id, name: matchedSamplesItem.name, sampleStatus: status }];
     });
-    setSampleRequestQuery("");
+    setSamplesQuery("");
   };
+  const taggedSampleItems = mentionedItems.filter((it) => it.sampleStatus === "gave" || it.sampleStatus === "next_visit");
   const requestedSampleItems = mentionedItems.filter((it) => it.sampleStatus === "next_visit");
-
-  // During-call "Did you give any samples this visit?" control — a rep could
-  // easily miss the per-item "Sample" tag buried under "Products discussed"
-  // (especially if they didn't search that exact product there), so this is
-  // its own clearly-labeled box right below it. Feeds the same
-  // mentionedItems/sampleStatus mechanism, just tagged "gave" instead of
-  // "next_visit" — no server changes needed.
-  const matchedGivenSampleItem = products.find((p) => p.name.toLowerCase().trim() === givenSampleQuery.toLowerCase().trim());
-  const givenSampleItemOptions = (givenSampleQuery.trim()
-    ? products.filter((p) => p.name.toLowerCase().includes(givenSampleQuery.toLowerCase().trim()))
-    : products
-  ).slice(0, 50);
-  const addGivenSampleItem = () => {
-    if (!matchedGivenSampleItem) return;
-    setMentionedItems((prev) => {
-      if (prev.some((it) => it.productId === matchedGivenSampleItem.id)) {
-        return prev.map((it) => (it.productId === matchedGivenSampleItem.id ? { ...it, sampleStatus: "gave" } : it));
-      }
-      return [...prev, { productId: matchedGivenSampleItem.id, name: matchedGivenSampleItem.name, sampleStatus: "gave" }];
-    });
-    setGivenSampleQuery("");
-  };
-  const givenSampleItems = mentionedItems.filter((it) => it.sampleStatus === "gave");
 
   const lastPunch = myLastPunch;
   const isPunchedIn = lastPunch?.type === "in";
@@ -2390,7 +2362,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
       // NOT cleared here (only on startNewVisit) — Back can bring the rep
       // right back to this same checkin form, pre-filled with what they just
       // entered, to fix up anything they forgot (see editingSavedVisit).
-      setItemQuery(""); setSampleMenuFor(null);
+      setItemQuery("");
       setFollowUpStatus(null);
       setFollowUpError("");
       setCustomFollowUpDays("");
@@ -2475,7 +2447,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
       ...extra,
     });
     setLastVisit({ client, pending: true, localKey });
-    setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
+    setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSamplesQuery("");
     setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
     setVisitStarted(false); setTodaysObjective(""); setDoctorNeeds([]); setReaction(""); setConcern("");
     setDoctorInsight(""); setCommitment(""); setPatientsToTry(""); setCallOutcome(""); setKeyLearning(""); setNextAction("");
@@ -2671,7 +2643,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
     // The previous visit's client/notes/mentionedItems/competitor fields
     // stuck around after saving (so Back could bring the rep right back to
     // them for edits) — clear them now that a genuinely new visit begins.
-    setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSampleMenuFor(null);
+    setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSamplesQuery("");
     setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
     setInteractionType("in_person");
     setFollowUpStatus(null);
@@ -3058,29 +3030,15 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                       }}>
                         <span style={{ fontWeight: 500 }}>{it.name}</span>
 
+                        {/* Sample status is set in the dedicated "Samples" box
+                            below, not here — this is just a read-only
+                            reflection so it's still visible alongside
+                            whatever else came up about this product. */}
                         {it.sampleStatus === "gave" && (
                           <span style={{ fontSize: 10.5, color: "#4C7A5E", fontWeight: 600 }}>✓ Sample given</span>
                         )}
                         {it.sampleStatus === "next_visit" && (
-                          <span style={{ fontSize: 10.5, color: "#C17817", fontWeight: 600 }}>→ Give next visit</span>
-                        )}
-
-                        {sampleMenuFor === it.productId ? (
-                          <div style={{ display: "flex", gap: 4 }}>
-                            <button type="button" onClick={() => setSampleStatus(it.productId, "gave")} style={{ fontSize: 10.5, border: "none", background: "#4C7A5E", color: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
-                              Gave
-                            </button>
-                            <button type="button" onClick={() => setSampleStatus(it.productId, "next_visit")} style={{ fontSize: 10.5, border: "none", background: "#C17817", color: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
-                              Give next visit
-                            </button>
-                            <button type="button" onClick={() => setSampleMenuFor(null)} style={{ fontSize: 10.5, border: "1px solid #E5DFD3", background: "#fff", borderRadius: 5, padding: "3px 8px" }}>
-                              Cancel
-                            </button>
-                          </div>
-                        ) : (
-                          <button type="button" onClick={() => setSampleMenuFor(it.productId)} style={{ fontSize: 10.5, border: "1px solid #D8D2C4", background: "#fff", borderRadius: 5, padding: "3px 8px", fontWeight: 500 }}>
-                            {it.sampleStatus ? "Change" : "Sample"}
-                          </button>
+                          <span style={{ fontSize: 10.5, color: "#C17817", fontWeight: 600 }}>→ Sample needed next visit</span>
                         )}
 
                         <button
@@ -3099,49 +3057,65 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
             )}
 
             {!isRemoteContact && isDoctorStyleEntity && visitStarted && (
-              <div style={{ background: "#EEF5EE", border: "1.5px solid #A9CBB0", borderRadius: 10, padding: 12, marginBottom: 14 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
-                  <Package size={15} style={{ color: "#4C7A5E", flexShrink: 0 }} />
-                  <span style={{ fontSize: 13.5, fontWeight: 700, color: "#2F5B41" }}>Did you give any samples this visit?</span>
-                </div>
-                <div style={{ fontSize: 11, color: "#4C7A5E", marginBottom: 8 }}>
-                  Only for samples you physically handed over today. Need one for your <strong>next</strong> visit instead? That's a separate question on the next screen.
+              <div style={{ background: "#FBF3E8", border: "1.5px solid #E9C88A", borderRadius: 10, padding: 12, marginBottom: 14 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                  <Package size={15} style={{ color: "#C17817", flexShrink: 0 }} />
+                  <span style={{ fontSize: 13.5, fontWeight: 700, color: "#7A5B2E" }}>Samples</span>
                 </div>
                 <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                   <input
-                    list="given-sample-options"
-                    value={givenSampleQuery}
-                    onChange={(e) => setGivenSampleQuery(e.target.value)}
+                    list="samples-options"
+                    value={samplesQuery}
+                    onChange={(e) => setSamplesQuery(e.target.value)}
                     placeholder="Search a product…"
                     style={{ ...inputStyle, flex: 1, background: "#fff" }}
                   />
-                  <datalist id="given-sample-options">
-                    {givenSampleItemOptions.map((p) => <option key={p.id} value={p.name} />)}
+                  <datalist id="samples-options">
+                    {samplesItemOptions.map((p) => <option key={p.id} value={p.name} />)}
                   </datalist>
+                </div>
+                <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
                   <button
                     type="button"
-                    onClick={addGivenSampleItem}
-                    disabled={!matchedGivenSampleItem}
+                    onClick={() => addSamplesItem("gave")}
+                    disabled={!matchedSamplesItem}
                     style={{
-                      padding: "8px 14px", borderRadius: 8, border: "none", whiteSpace: "nowrap",
-                      background: matchedGivenSampleItem ? "#4C7A5E" : "#CBDCCF", color: "#fff", fontSize: 12.5, fontWeight: 600,
+                      flex: 1, padding: "8px 10px", borderRadius: 8, border: "none", whiteSpace: "nowrap",
+                      background: matchedSamplesItem ? "#4C7A5E" : "#D8D2C4", color: "#fff", fontSize: 12.5, fontWeight: 600,
                     }}
                   >
-                    Add
+                    + Gave it today
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => addSamplesItem("next_visit")}
+                    disabled={!matchedSamplesItem}
+                    style={{
+                      flex: 1, padding: "8px 10px", borderRadius: 8, border: "none", whiteSpace: "nowrap",
+                      background: matchedSamplesItem ? "#C17817" : "#D8D2C4", color: "#fff", fontSize: 12.5, fontWeight: 600,
+                    }}
+                  >
+                    + Need next visit
                   </button>
                 </div>
-                {givenSampleItems.length > 0 ? (
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                    {givenSampleItems.map((it) => (
+                {taggedSampleItems.length > 0 ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {taggedSampleItems.map((it) => (
                       <div key={it.productId} style={{
-                        display: "flex", alignItems: "center", gap: 6, fontSize: 12,
-                        background: "#fff", border: "1px solid #A9CBB0", borderRadius: 10, padding: "5px 6px 5px 10px",
+                        display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, fontSize: 12,
+                        background: "#fff", border: "1px solid #E9C88A", borderRadius: 10, padding: "6px 8px 6px 10px",
                       }}>
                         <span style={{ fontWeight: 500 }}>{it.name}</span>
+                        <span style={{
+                          fontSize: 10.5, fontWeight: 600,
+                          color: it.sampleStatus === "gave" ? "#4C7A5E" : "#C17817",
+                        }}>
+                          {it.sampleStatus === "gave" ? "✓ Gave it today" : "→ Needed for next visit"}
+                        </span>
                         <button
                           type="button"
                           onClick={() => removeMentionedItem(it.productId)}
-                          style={{ border: "none", background: "none", cursor: "pointer", display: "flex", padding: 2, color: "#8A8272" }}
+                          style={{ border: "none", background: "none", cursor: "pointer", display: "flex", padding: 2, marginLeft: "auto", color: "#8A8272" }}
                           aria-label={`Remove ${it.name}`}
                         >
                           <X size={12} />
@@ -3150,7 +3124,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                     ))}
                   </div>
                 ) : (
-                  <div style={{ fontSize: 11.5, color: "#2F5B41" }}>No samples given this visit yet.</div>
+                  <div style={{ fontSize: 11.5, color: "#7A5B2E" }}>No samples tagged yet for this visit.</div>
                 )}
               </div>
             )}
@@ -3395,11 +3369,12 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
           )}
 
           {/* Condensed flow for every visit after the first — two open
-              questions instead of five, plus (doctors only, inline here)
-              requesting samples for the next visit. Nutritionists get the
-              same two-question condensing here, but their sample request
-              and "what's next" planning stay in the later shared "followup"
-              step below, where their follow-up date already lives today. */}
+              questions instead of five. Sample tagging (gave today / need
+              next visit) is handled earlier, during the call, by the one
+              shared "Samples" box — not duplicated here. Nutritionists get
+              the same two-question condensing here, but their "what's next"
+              planning stays in the later shared "followup" step below,
+              where their follow-up date already lives today. */}
           {isReturnVisit && (
             <>
               <Field label="What happened this time?">
@@ -3414,72 +3389,15 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
               <div style={{ height: 14 }} />
 
               {isDoctorEntity && (
-                <>
-                  <div style={{ background: "#FBF3E8", border: "1.5px solid #E9C88A", borderRadius: 10, padding: 12, marginBottom: 14 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
-                      <Package size={15} style={{ color: "#C17817", flexShrink: 0 }} />
-                      <span style={{ fontSize: 13.5, fontWeight: 700, color: "#7A5B2E" }}>Request samples for next visit</span>
-                    </div>
-                    <div style={{ fontSize: 11, color: "#7A5B2E", marginBottom: 8 }}>
-                      Not for something you gave today — this tells the manager what to prepare, with your next visit's date, so it's ready in time.
-                    </div>
-                    <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                      <input
-                        list="sample-request-options"
-                        value={sampleRequestQuery}
-                        onChange={(e) => setSampleRequestQuery(e.target.value)}
-                        placeholder="Search a product…"
-                        style={{ ...inputStyle, flex: 1, background: "#fff" }}
-                      />
-                      <datalist id="sample-request-options">
-                        {sampleRequestItemOptions.map((p) => <option key={p.id} value={p.name} />)}
-                      </datalist>
-                      <button
-                        type="button"
-                        onClick={addSampleRequestItem}
-                        disabled={!matchedSampleRequestItem}
-                        style={{
-                          padding: "8px 14px", borderRadius: 8, border: "none", whiteSpace: "nowrap",
-                          background: matchedSampleRequestItem ? "#C17817" : "#E9DCC4", color: "#fff", fontSize: 12.5, fontWeight: 600,
-                        }}
-                      >
-                        Add
-                      </button>
-                    </div>
-                    {requestedSampleItems.length > 0 ? (
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                        {requestedSampleItems.map((it) => (
-                          <div key={it.productId} style={{
-                            display: "flex", alignItems: "center", gap: 6, fontSize: 12,
-                            background: "#fff", border: "1px solid #E9C88A", borderRadius: 10, padding: "5px 6px 5px 10px",
-                          }}>
-                            <span style={{ fontWeight: 500 }}>{it.name}</span>
-                            <button
-                              type="button"
-                              onClick={() => removeMentionedItem(it.productId)}
-                              style={{ border: "none", background: "none", cursor: "pointer", display: "flex", padding: 2, color: "#8A8272" }}
-                              aria-label={`Remove ${it.name}`}
-                            >
-                              <X size={12} />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div style={{ fontSize: 11.5, color: "#7A5B2E" }}>Nothing requested yet — the manager gets a Telegram the moment you add one.</div>
-                    )}
-                  </div>
-
-                  <Field label="What do you plan for next time? (included in your Telegram reminder for this follow-up)">
-                    <textarea
-                      value={smartiObjective}
-                      onChange={(e) => setSmartiObjective(e.target.value)}
-                      placeholder="e.g. Check if they've started recommending it to new patients, address any leftover concerns."
-                      rows={2}
-                      style={{ ...inputStyle, resize: "vertical", marginBottom: 14 }}
-                    />
-                  </Field>
-                </>
+                <Field label="What do you plan for next time? (included in your Telegram reminder for this follow-up)">
+                  <textarea
+                    value={smartiObjective}
+                    onChange={(e) => setSmartiObjective(e.target.value)}
+                    placeholder="e.g. Check if they've started recommending it to new patients, address any leftover concerns."
+                    rows={2}
+                    style={{ ...inputStyle, resize: "vertical", marginBottom: 14 }}
+                  />
+                </Field>
               )}
             </>
           )}
@@ -3634,63 +3552,6 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                 style={{ ...inputStyle, resize: "vertical", marginBottom: 14 }}
               />
             </Field>
-          )}
-
-          {isReturnVisit && (
-            <div style={{ background: "#FBF3E8", border: "1.5px solid #E9C88A", borderRadius: 10, padding: 12, marginBottom: 14 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
-                <Package size={15} style={{ color: "#C17817", flexShrink: 0 }} />
-                <span style={{ fontSize: 13.5, fontWeight: 700, color: "#7A5B2E" }}>Request samples for next visit</span>
-              </div>
-              <div style={{ fontSize: 11, color: "#7A5B2E", marginBottom: 8 }}>
-                Not for something you gave today — this tells the manager what to prepare, with your next visit's date, so it's ready in time.
-              </div>
-              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                <input
-                  list="sample-request-options-followup"
-                  value={sampleRequestQuery}
-                  onChange={(e) => setSampleRequestQuery(e.target.value)}
-                  placeholder="Search a product…"
-                  style={{ ...inputStyle, flex: 1, background: "#fff" }}
-                />
-                <datalist id="sample-request-options-followup">
-                  {sampleRequestItemOptions.map((p) => <option key={p.id} value={p.name} />)}
-                </datalist>
-                <button
-                  type="button"
-                  onClick={addSampleRequestItem}
-                  disabled={!matchedSampleRequestItem}
-                  style={{
-                    padding: "8px 14px", borderRadius: 8, border: "none", whiteSpace: "nowrap",
-                    background: matchedSampleRequestItem ? "#C17817" : "#E9DCC4", color: "#fff", fontSize: 12.5, fontWeight: 600,
-                  }}
-                >
-                  Add
-                </button>
-              </div>
-              {requestedSampleItems.length > 0 ? (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  {requestedSampleItems.map((it) => (
-                    <div key={it.productId} style={{
-                      display: "flex", alignItems: "center", gap: 6, fontSize: 12,
-                      background: "#fff", border: "1px solid #E9C88A", borderRadius: 10, padding: "5px 6px 5px 10px",
-                    }}>
-                      <span style={{ fontWeight: 500 }}>{it.name}</span>
-                      <button
-                        type="button"
-                        onClick={() => removeMentionedItem(it.productId)}
-                        style={{ border: "none", background: "none", cursor: "pointer", display: "flex", padding: 2, color: "#8A8272" }}
-                        aria-label={`Remove ${it.name}`}
-                      >
-                        <X size={12} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div style={{ fontSize: 11.5, color: "#7A5B2E" }}>Nothing requested yet — the manager gets a Telegram the moment you add one.</div>
-              )}
-            </div>
           )}
 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
