@@ -1418,6 +1418,7 @@ app.get("/api/competitor-products", async (req, res) => {
     await ensurePhase2CategoriesSeeded();
     await ensurePhase3CategoriesSeeded();
     await ensurePhase4CategoriesSeeded();
+    await ensurePhase5CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const { q, limit } = req.query;
@@ -7352,6 +7353,12 @@ const COMPETITOR_GENERIC_NAME_KEYWORDS = [
   // manual Excel review before this regex existed).
   [/\bN-?Acetyl[\s-]?(L-?)?Cystein|(^|[^a-zA-Z])NAC(?![a-zA-Z])/i, "NAC"],
   [/\bNAD\+?\b|Nicotinamide\s+(Mononucleotide|Riboside|Adenine\s+Dinucleotide)/i, "NAD+"],
+  // Word-boundary-safe against "Niacinamide" (a different, related-but-distinct
+  // B3 form already seen in multivitamin ingredient text in this catalog).
+  [/\bNiacin\b(?!amide)/i, "Niacin (High-Dose)"],
+  [/berberine/i, "Berberine"],
+  [/bitter\s*orange|synephrine|citrus\s*aurantium/i, "Bitter Orange (Synephrine)"],
+  [/garcinia/i, "Garcinia Cambogia"],
   [/\bbcaa\b/i, "BCAA"],
   [/creatine/i, "Creatine"],
   [/apple\s*cider\s*vinegar/i, "Apple cider vinegar"],
@@ -9735,6 +9742,379 @@ async function ensurePhase4CategoriesSeeded() {
   phase4CategoriesSeedChecked = true;
 }
 
+// ---------- Heart-Cardiovascular / Liver-Detox-Metabolic / Weight-Management
+// (Recall Phase 5) ----------
+// Same sourcing discipline as every prior phase. This batch leans into
+// higher drug-interaction-risk botanicals/stimulants (per the user's stated
+// priority: doctors need to know about these), so several ingredients below
+// carry real, specific interaction findings rather than the thinner
+// coverage NAC/NAD got (those two had very little dedicated literature).
+const PHASE5_SOURCES_SEED = [
+  { id: "src-pmid-17588301", sourceType: "Multicenter observational study", sourceName: "PubMed",
+    title: "Safety and tolerability of prolonged-release nicotinic acid in statin-treated patients",
+    pmid: "17588301", doi: "10.1185/030079907x199682", journal: "Current Medical Research and Opinion", publicationYear: "2007",
+    url: "https://pubmed.ncbi.nlm.nih.gov/17588301/", sourceQuality: "Prospective multicenter study, n=1053" },
+  { id: "src-pmid-12503944", sourceType: "Review", sourceName: "PubMed",
+    title: "Niacin-ER and lovastatin treatment of hypercholesterolemia and mixed dyslipidemia",
+    pmid: "12503944", doi: "10.1345/aph.1C161", journal: "The Annals of Pharmacotherapy", publicationYear: "2003",
+    url: "https://pubmed.ncbi.nlm.nih.gov/12503944/", sourceQuality: "Narrative review" },
+  { id: "src-pmid-17908423", sourceType: "Review", sourceName: "PubMed",
+    title: "An examination of the bleeding complications associated with herbal supplements, antiplatelet and anticoagulant medications",
+    pmid: "17908423", journal: "Journal of Dental Hygiene", publicationYear: "2007",
+    url: "https://pubmed.ncbi.nlm.nih.gov/17908423/", sourceQuality: "Clinical review" },
+  { id: "src-pmid-16484565", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Aged garlic extract may be safe for patients on warfarin therapy",
+    pmid: "16484565", doi: "10.1093/jn/136.3.793S", journal: "The Journal of Nutrition", publicationYear: "2006",
+    url: "https://pubmed.ncbi.nlm.nih.gov/16484565/", sourceQuality: "Double-blind RCT, n=48" },
+  { id: "src-pmid-31978258", sourceType: "Systematic review (Cochrane)", sourceName: "Cochrane",
+    title: "Resveratrol for adults with type 2 diabetes mellitus",
+    pmid: "31978258", doi: "10.1002/14651858.CD011919.pub2", journal: "Cochrane Database of Systematic Reviews", publicationYear: "2020",
+    url: "https://pubmed.ncbi.nlm.nih.gov/31978258/", sourceQuality: "Cochrane systematic review, 3 RCTs" },
+  { id: "src-pmid-34320173", sourceType: "Umbrella review", sourceName: "PubMed",
+    title: "The effects of resveratrol supplementation in patients with type 2 diabetes, metabolic syndrome, and nonalcoholic fatty liver disease",
+    pmid: "34320173", doi: "10.1093/ajcn/nqab250", journal: "American Journal of Clinical Nutrition", publicationYear: "2021",
+    url: "https://pubmed.ncbi.nlm.nih.gov/34320173/", sourceQuality: "Umbrella review of 38 meta-analyses" },
+  { id: "src-pmid-31069872", sourceType: "Review", sourceName: "PubMed",
+    title: "Safety and toxicity of silymarin, the major constituent of milk thistle extract: An updated review",
+    pmid: "31069872", doi: "10.1002/ptr.6361", journal: "Phytotherapy Research", publicationYear: "2019",
+    url: "https://pubmed.ncbi.nlm.nih.gov/31069872/", sourceQuality: "Narrative review" },
+  { id: "src-pmid-17968815", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "The effect of silymarin on oral nifedipine pharmacokinetics",
+    pmid: "17968815", doi: "10.1055/s-2007-990256", journal: "Planta Medica", publicationYear: "2007",
+    url: "https://pubmed.ncbi.nlm.nih.gov/17968815/", sourceQuality: "Crossover RCT, n=16" },
+  { id: "src-pmid-18397984", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Treatment of type 2 diabetes and dyslipidemia with the natural plant alkaloid berberine",
+    pmid: "18397984", doi: "10.1210/jc.2007-2404", journal: "Journal of Clinical Endocrinology & Metabolism", publicationYear: "2008",
+    url: "https://pubmed.ncbi.nlm.nih.gov/18397984/", sourceQuality: "Double-blind RCT, n=116" },
+  { id: "src-pmid-39998703", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "The efficacy and safety of berberine in combination with cinnamon supplementation in patients with type 2 diabetes",
+    pmid: "39998703", doi: "10.1007/s00394-025-03618-9", journal: "European Journal of Nutrition", publicationYear: "2025",
+    url: "https://pubmed.ncbi.nlm.nih.gov/39998703/", sourceQuality: "Double-blind RCT" },
+  { id: "src-pmid-24635480", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Systematic review and meta-analysis of the efficacy and safety of chromium supplementation in diabetes",
+    pmid: "24635480", doi: "10.1111/jcpt.12147", journal: "Journal of Clinical Pharmacy and Therapeutics", publicationYear: "2014",
+    url: "https://pubmed.ncbi.nlm.nih.gov/24635480/", sourceQuality: "Meta-analysis of 25 RCTs" },
+  { id: "src-pmid-14983576", sourceType: "Review", sourceName: "PubMed",
+    title: "Chromium and insulin resistance",
+    pmid: "14983576", journal: "Nederlands Tijdschrift voor Geneeskunde", publicationYear: "2004",
+    url: "https://pubmed.ncbi.nlm.nih.gov/14983576/", sourceQuality: "Narrative review" },
+  { id: "src-pmid-12126463", sourceType: "Review", sourceName: "PubMed",
+    title: "The safety and efficacy of high-dose chromium",
+    pmid: "12126463", journal: "Alternative Medicine Review", publicationYear: "2002",
+    url: "https://pubmed.ncbi.nlm.nih.gov/12126463/", sourceQuality: "Narrative review" },
+  { id: "src-pmid-36235672", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "The Safety and Efficacy of Citrus aurantium (Bitter Orange) Extracts and p-Synephrine: A Systematic Review and Meta-Analysis",
+    pmid: "36235672", doi: "10.3390/nu14194019", journal: "Nutrients", publicationYear: "2022",
+    url: "https://pubmed.ncbi.nlm.nih.gov/36235672/", sourceQuality: "Meta-analysis of 18 placebo-controlled trials" },
+  { id: "src-pmid-28058460", sourceType: "Government risk assessment", sourceName: "PubMed",
+    title: "Risk assessment of synephrine in dietary supplements",
+    pmid: "28058460", doi: "10.1007/s00103-016-2506-5", journal: "Bundesgesundheitsblatt", publicationYear: "2017",
+    url: "https://pubmed.ncbi.nlm.nih.gov/28058460/", sourceQuality: "German Federal Institute for Risk Assessment (BfR) review" },
+  { id: "src-pmid-28018115", sourceType: "Case report", sourceName: "PubMed",
+    title: "Dangerous dietary supplements: Garcinia cambogia-associated hepatic failure requiring transplantation",
+    pmid: "28018115", doi: "10.3748/wjg.v22.i45.10071", journal: "World Journal of Gastroenterology", publicationYear: "2016",
+    url: "https://pubmed.ncbi.nlm.nih.gov/28018115/", sourceQuality: "Case report" },
+  { id: "src-pmid-24797657", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "IQP-GC-101 reduces body weight and body fat mass: a randomized, double-blind, placebo-controlled study",
+    pmid: "24797657", doi: "10.1002/ptr.5158", journal: "Phytotherapy Research", publicationYear: "2014",
+    url: "https://pubmed.ncbi.nlm.nih.gov/24797657/", sourceQuality: "Double-blind RCT, n=91" },
+  { id: "src-pmid-36048508", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Effects of conjugated linoleic acid and exercise on body composition and obesity",
+    pmid: "36048508", doi: "10.1093/nutrit/nuac060", journal: "Nutrition Reviews", publicationYear: "2023",
+    url: "https://pubmed.ncbi.nlm.nih.gov/36048508/", sourceQuality: "Meta-analysis of 20 RCTs/crossover trials" },
+  { id: "src-pmid-30604177", sourceType: "Review", sourceName: "PubMed",
+    title: "Supplements with purported effects on muscle mass and strength",
+    pmid: "30604177", doi: "10.1007/s00394-018-1882-z", journal: "European Journal of Nutrition", publicationYear: "2019",
+    url: "https://pubmed.ncbi.nlm.nih.gov/30604177/", sourceQuality: "Narrative review" },
+  { id: "src-pmid-41010525", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Effect of Apple Cider Vinegar Intake on Body Composition in Humans with Type 2 Diabetes and/or Overweight",
+    pmid: "41010525", doi: "10.3390/nu17183000", journal: "Nutrients", publicationYear: "2025",
+    url: "https://pubmed.ncbi.nlm.nih.gov/41010525/", sourceQuality: "Meta-analysis of 10 RCTs, n=789" },
+];
+
+const PHASE5_INGREDIENTS_SEED = [
+  {
+    id: "niacin", categoryId: "heart-cardiovascular", name: "Niacin (High-Dose)", commonName: "Vitamin B3 / Nicotinic Acid",
+    scientificName: "Nicotinic acid",
+    description: "At gram-range doses (well above the RDA amount found in multivitamins), niacin is used to raise HDL and lower triglycerides — a different use case from basic B-vitamin supplementation.",
+    evidenceLevel: "NOT_VERIFIED",
+    drugInteractionSummary: "In statin-treated patients, prolonged-release niacin up to 2000mg/day showed no evidence of hepatotoxicity or myopathy over 6 months in a 1053-patient study (Birjmohun et al., Curr Med Res Opin 2007, PMID 17588301); niacin-ER combined with lovastatin has been reviewed as having minimal myopathy/hepatotoxicity risk compared with older sustained-release niacin formulations (Yim & Chong, Ann Pharmacother 2003, PMID 12503944).",
+    repQuickTakeaway: [
+      "What it is: niacin (vitamin B3) at pharmacologic, gram-range doses used to raise HDL and lower triglycerides — not the same use case as a small multivitamin dose.",
+      "Most common effect: flushing, reported in 40.8% of patients in a 1053-patient prolonged-release niacin study, mostly mild-to-moderate; 11.1% discontinued for flushing (Birjmohun et al., Curr Med Res Opin 2007, PMID 17588301).",
+      "Combined with statins: that same study found no evidence of hepatotoxicity or myopathy over 6 months, and a separate review found niacin-ER has a better hepatotoxicity/myopathy profile than older sustained-release niacin (PMID 12503944) — but liver enzymes still warrant monitoring at these doses.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is the patient already on a statin? Combination use has published safety data, but liver enzymes should still be monitored at gram-range niacin doses.",
+      "Warn the patient about flushing before they start — it's the most common reason people stop taking it (11.1% discontinuation in the cited study), and knowing to expect it improves adherence.",
+      "Confirm this is a high-dose niacin product, not confused with a routine multivitamin B3 amount — the safety profile described here applies to pharmacologic doses specifically.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim high-dose niacin is free of liver/muscle risk — the cited studies monitored for hepatotoxicity and myopathy specifically because the risk, while found to be low in these studies, is a real monitored concern at these doses.",
+      "Do not claim flushing won't happen — it's the most commonly reported effect, occurring in roughly 4 in 10 patients in the cited study.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA NIACIN 500mg 60 TABS", chemicalForm: "Niacin + inositol", compoundAmount: 500, unit: "mg", servingSize: "2 tablets", notes: "Per label: niacin 500mg + inositol 100mg per tablet; labeled serving size 2 tablets/day (1000mg niacin)." },
+    ],
+  },
+  {
+    id: "garlic", categoryId: "heart-cardiovascular", name: "Garlic", commonName: "Garlic (odorless)", scientificName: "Allium sativum",
+    description: "Garlic supplements are commonly used for general cardiovascular support, based on garlic's antiplatelet properties.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "A dental-literature review recommends discontinuing herbal supplements including garlic 2 weeks prior to invasive surgical procedures due to bleeding-complication concerns (Spolarich & Andrews, J Dent Hyg 2007, PMID 17908423). However, a 12-week double-blind RCT of aged garlic extract in patients on warfarin found no evidence of increased bleeding risk in that specific trial (Macan et al., J Nutr 2006, PMID 16484565) — the evidence is mixed rather than uniformly alarming.",
+    repQuickTakeaway: [
+      "What it is: garlic oil/extract, used for general cardiovascular support based on its antiplatelet (blood-thinning) properties.",
+      "Surgical caution: a dental-literature review recommends stopping garlic (along with other antiplatelet herbs) 2 weeks before invasive surgical procedures due to bleeding-complication concerns (PMID 17908423).",
+      "Nuance worth knowing: a 12-week RCT specifically testing aged garlic extract alongside warfarin found no increased bleeding risk in that trial (PMID 16484565) — so the evidence isn't uniform, but the surgical-timing caution is still the standard recommendation.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is the patient on warfarin, a DOAC, or an antiplatelet drug (aspirin, clopidogrel)? Garlic's antiplatelet effect is the main interaction concern.",
+      "Does the patient have any invasive procedure (surgical or dental) scheduled? The standard recommendation is to stop 2 weeks prior.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim garlic supplements are risk-free for a patient on blood thinners ahead of surgery — the standard clinical recommendation is to stop 2 weeks before any invasive procedure.",
+      "Do not claim garlic definitively increases bleeding risk in every context either — one specific warfarin RCT found no increased bleeding, so the evidence is nuanced, not uniform.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Garlic (odorless) 2000 Mg 100 Softgel", chemicalForm: "Garlic oil concentrate", compoundAmount: 2000, unit: "mg", servingSize: "2 softgels", notes: "Per label: garlic oil concentrate 20mg equivalent to 2,000mg odorless garlic per 2 softgels." },
+      { productName: "Mason Natural Odor Free Garlic 100cap", chemicalForm: "Garlic oil", compoundAmount: 500, unit: "mg", servingSize: "1 softgel", notes: "Per label: garlic oil 500mg (Allium sativum)." },
+    ],
+  },
+  {
+    id: "resveratrol", categoryId: "heart-cardiovascular", name: "Resveratrol", commonName: "Resveratrol", scientificName: "trans-Resveratrol",
+    description: "A plant-derived polyphenol marketed for cardiovascular and antioxidant support.",
+    evidenceLevel: "NOT_VERIFIED",
+    evidenceSummary: "A Cochrane systematic review of 3 small RCTs (50 participants total) in type 2 diabetes found no adverse events reported, but rated the evidence as very low-certainty and insufficient to evaluate safety or efficacy (Jeyaraman et al., Cochrane Database Syst Rev 2020, PMID 31978258). A broader umbrella review of 38 meta-analyses across type 2 diabetes, metabolic syndrome, and NAFLD found mostly trivial effects on cardiometabolic markers with very-low-to-low certainty evidence (Zeraattalab-Motlagh et al., Am J Clin Nutr 2021, PMID 34320173).",
+    repQuickTakeaway: [
+      "What it is: a plant polyphenol (found in grapes/red wine) marketed for cardiovascular and antioxidant support.",
+      "Honest evidence picture: a Cochrane review of the available small trials found no adverse events reported, but called the evidence very-low-certainty and insufficient to judge safety or efficacy either way (PMID 31978258). A larger umbrella review across related conditions found mostly trivial effects with low-certainty evidence (PMID 34320173).",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Set expectations accurately: current evidence does not establish a clear benefit or a clear long-term safety profile at supplement doses — this is a 'we don't know yet' ingredient, not a proven one.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim resveratrol has proven cardiovascular or antidiabetic benefits — the Cochrane review found the evidence insufficient, and a larger umbrella review found mostly trivial effects.",
+      "Do not claim long-term safety has been established — the available RCTs are small and short-term.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Resveratrol 500 Mg 60 Caps", chemicalForm: "Polygonum cuspidatum extract (resveratrol)", compoundAmount: 500, unit: "mg", servingSize: "3 capsules", notes: "Per label: Polygonum cuspidatum extract 1,000mg equivalent to 500mg resveratrol per 3 capsules." },
+    ],
+  },
+  {
+    id: "milk-thistle", categoryId: "liver-detox-metabolic", name: "Milk Thistle", commonName: "Silymarin", scientificName: "Silybum marianum",
+    description: "An herbal extract most commonly used for liver support, via its major active constituent silymarin.",
+    evidenceLevel: "NOT_VERIFIED",
+    drugInteractionSummary: "An updated safety review found silymarin has low drug-interaction potential and no major effect on cytochrome P450 enzymes overall, but still advises caution when co-administered with narrow-therapeutic-window drugs (Soleimani et al., Phytother Res 2019, PMID 31069872). A controlled crossover study testing silymarin against the CYP3A4 substrate nifedipine found no clinically meaningful change in nifedipine's metabolism or absorption extent in vivo, despite silibinin inhibiting CYP3A4 in vitro (Fuhr et al., Planta Med 2007, PMID 17968815).",
+    precautions: "Silymarin was well tolerated in trials up to 700mg three times daily for 24 weeks, with the most common issues being mild gastrointestinal discomfort (nausea, diarrhea). One trial reported it as safe in pregnancy with no anomalies, but the review still recommends caution and more human research in pregnancy specifically (Soleimani et al., Phytother Res 2019, PMID 31069872).",
+    repQuickTakeaway: [
+      "What it is: an herbal extract (silymarin, from milk thistle) most commonly used for liver support.",
+      "Interaction picture: generally low drug-interaction potential — an in vivo study found no clinically meaningful change to a CYP3A4 test drug's metabolism despite an in-vitro signal (PMID 17968815) — but caution is still advised with narrow-therapeutic-window drugs (PMID 31069872).",
+      "Tolerability: well tolerated even at high doses (700mg three times daily for 24 weeks) in trials; mild nausea/diarrhea were the main reported issues.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is the patient on a narrow-therapeutic-window medication? General interaction risk is low, but caution is still advised for these specific drugs.",
+      "Is the patient pregnant? One trial reported safety, but the review calls for more research before treating that as settled.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim milk thistle has zero drug-interaction potential — low risk is not the same as none, especially with narrow-therapeutic-window drugs.",
+      "Do not claim milk thistle is definitively safe in pregnancy — only one trial reported this, and the safety review itself calls for more research.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Milk Thistle 500 mg 120 Capsules", chemicalForm: "Milk thistle extract", compoundAmount: 500, unit: "mg", servingSize: "1 capsule", notes: "Per label: milk thistle extract 500mg/capsule." },
+      { productName: "Mason Natural Milk Thistle 500 Mg 60 Caps.", chemicalForm: "Milk thistle whole herb", compoundAmount: 500, unit: "mg", servingSize: "1 capsule", notes: "Per label: milk thistle whole herb 500mg." },
+    ],
+  },
+  {
+    id: "berberine", categoryId: "liver-detox-metabolic", name: "Berberine", commonName: "Berberine", scientificName: "Berberine",
+    description: "A plant alkaloid studied for blood-glucose and lipid effects, mechanistically similar in outcome (though not in mechanism) to some diabetes medications.",
+    evidenceLevel: "NOT_VERIFIED",
+    drugInteractionSummary: "Because berberine itself produces clinically meaningful glucose and lipid lowering — a double-blind RCT found it significantly reduced fasting glucose, HbA1c, triglycerides, total cholesterol, and LDL-C versus placebo in type 2 diabetes (Zhang et al., J Clin Endocrinol Metab 2008, PMID 18397984), and a 2025 RCT found berberine+cinnamon significantly lowered fasting blood sugar, HbA1c, and LDL-C in type 2 diabetes (Mansour et al., Eur J Nutr 2025, PMID 39998703) — combining it with glucose-lowering or lipid-lowering medication raises a real risk of additive effects (hypoglycemia, excessive LDL lowering) that needs monitoring.",
+    precautions: "Mild-to-moderate constipation was the main adverse effect reported (5 of 116 participants) in the cited RCT, otherwise well tolerated (PMID 18397984).",
+    repQuickTakeaway: [
+      "What it is: a plant alkaloid studied for blood-glucose and lipid-lowering effects.",
+      "Why doctors need to know: because it genuinely lowers glucose and LDL — a 116-patient RCT found significant reductions in fasting glucose, HbA1c, triglycerides, and LDL-C versus placebo (PMID 18397984) — combining it with a patient's existing diabetes or cholesterol medication can add up to more lowering than expected.",
+      "Tolerability: mild-to-moderate constipation was the main side effect reported (about 1 in 20 participants in the cited trial); otherwise well tolerated.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is the patient already on a glucose-lowering medication (metformin, sulfonylurea, insulin)? Berberine's own glucose-lowering effect can stack with these — ask about symptoms of hypoglycemia.",
+      "Is the patient on a statin or other lipid-lowering medication? Berberine's LDL-lowering effect was clinically significant in trials and could add to the medication's effect.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not describe berberine as having no interaction with diabetes or cholesterol medications — its own glucose- and lipid-lowering effects were large enough to be statistically significant against placebo in RCTs, which is exactly what creates the combination risk.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "Mason Natural BERBERINE CEYLON CINNAMON COMPLEX 60 CAPSULES", chemicalForm: "Berberine-Ceylon cinnamon complex + BioPerine", compoundAmount: 200, unit: "mg", servingSize: "1 capsule", notes: "Per label: 200mg Berberine-Ceylon Complex + 2mg BioPerine black pepper extract per capsule; exact berberine-only amount within the complex not separately stated on label." },
+    ],
+  },
+  {
+    id: "chromium", categoryId: "liver-detox-metabolic", name: "Chromium Picolinate", commonName: "Chromium", scientificName: "Chromium picolinate",
+    description: "An essential trace mineral marketed for blood-sugar and metabolic support, most commonly as the picolinate form.",
+    evidenceLevel: "NOT_VERIFIED",
+    drugInteractionSummary: "A meta-analysis of 25 RCTs found chromium supplementation significantly improved glycemic control (HbA1c and fasting glucose) in diabetes, with adverse-event risk not different from placebo at usual doses (Suksomboon et al., J Clin Pharm Ther 2014, PMID 24635480). Because of this real glucose-lowering effect, a separate review specifically cautions that individual type 2 diabetes patients may have an increased risk of hypoglycemic episodes when taking chromium supplements as self-medication alongside their regular diabetes treatment (Kleefstra et al., Ned Tijdschr Geneeskd 2004, PMID 14983576).",
+    precautions: "A review of high-dose chromium safety notes that chromium picolinate specifically has shown DNA fragmentation (clastogenic) effects in some studies, though anecdotal reports of high-dose toxicity in humans are described as few and ambiguous; chromium does accumulate in tissue (especially kidney) with supplementation, without a demonstrated pathogenic effect in that review (Lamson & Plaza, Altern Med Rev 2002, PMID 12126463).",
+    repQuickTakeaway: [
+      "What it is: an essential trace mineral, most often supplemented as chromium picolinate, marketed for blood-sugar/metabolic support.",
+      "Real effect, real interaction risk: a 25-RCT meta-analysis found chromium meaningfully improves glycemic control in diabetes (PMID 24635480) — which is exactly why a patient already on diabetes medication can be pushed toward hypoglycemia by adding it on their own (PMID 14983576).",
+      "Adverse events overall: not different from placebo at usual doses in the meta-analysis, though a separate review flags that the picolinate form specifically has shown DNA-fragmentation effects in some lab studies, with human toxicity reports described as rare and ambiguous (PMID 12126463).",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is the patient on any diabetes medication? Ask specifically — chromium's own glucose-lowering effect is real enough in trials to meaningfully add to a medication's effect and increase hypoglycemia risk if self-added without medical supervision.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim chromium picolinate is risk-free to combine with diabetes medication — the same glucose-lowering effect that makes it popular is what creates a real, published hypoglycemia-risk concern.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Chromium Picolinate 400 Mcg 100tab", chemicalForm: "Chromium picolinate + calcium", compoundAmount: 400, unit: "mcg", servingSize: "1 tablet", notes: "Per label: chromium 400mcg + calcium 92mg per tablet." },
+      { productName: "Mason Natural Chromium Picolinate 200mcg 100tab", chemicalForm: "Chromium picolinate (Chromax) + calcium", compoundAmount: 200, unit: "mcg", servingSize: "1 tablet", notes: "Per label: chromium 200mcg as Chromax chromium picolinate + calcium 51mg per tablet." },
+    ],
+  },
+  {
+    id: "bitter-orange", categoryId: "weight-management", name: "Bitter Orange (Synephrine)", commonName: "Bitter Orange", scientificName: "Citrus aurantium (p-synephrine)",
+    description: "A stimulant botanical (synephrine, structurally related to ephedrine/adrenaline) used in weight-management/fat-burner blends for its thermogenic effect.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "A systematic review and meta-analysis of 18 placebo-controlled trials found synephrine significantly raised both systolic and diastolic blood pressure with prolonged use, with no significant weight-loss benefit (Koncz et al., Nutrients 2022, PMID 36235672). The German Federal Institute for Risk Assessment's review cites published case reports of hypertension, cardiac arrhythmia, and myocardial infarction associated with synephrine- and caffeine-containing weight-loss supplements, with effects enhanced by concurrent caffeine and physical exercise (Bakhyia et al., Bundesgesundheitsblatt 2017, PMID 28058460).",
+    repQuickTakeaway: [
+      "What it is: a stimulant compound (synephrine) from bitter orange, structurally related to ephedrine/adrenaline, used in fat-burner blends for its thermogenic effect.",
+      "The most important safety point in this entire category: an 18-trial meta-analysis found synephrine significantly raises blood pressure with prolonged use, with no proven weight-loss benefit to offset that risk (PMID 36235672). A government risk-assessment review cites real case reports of hypertension, arrhythmia, and heart attack linked to synephrine+caffeine supplements, worsened by concurrent caffeine and exercise (PMID 28058460).",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Does the patient have hypertension, a cardiac arrhythmia history, or take any stimulant or cardiovascular medication? This is the single highest-caution ingredient in the Product Expert catalog for exactly this reason.",
+      "Is the patient also consuming caffeine (coffee, energy drinks, the product's own caffeine content) or exercising vigorously while taking this? Both are documented to amplify the cardiovascular effect.",
+      "Does the patient take an MAOI or other sympathomimetic-interacting medication? Synephrine's adrenergic mechanism makes this a relevant question even though a specific interaction trial wasn't found in this review.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not present this as a safe, proven weight-loss aid — the best available meta-analysis found a significant blood-pressure increase and no significant weight loss.",
+      "Do not minimize the cardiovascular risk — real case reports of hypertension, arrhythmia, and myocardial infarction exist in the published literature, specifically for synephrine+caffeine combination products like this one.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA ALFAHYDROXY FAT BURNER & WEIGHT CONTROL 90CAPS", chemicalForm: "Bitter orange (synephrine)", compoundAmount: 225, unit: "mg", servingSize: "3 capsules", notes: "Per label, one component of a multi-ingredient blend (chromium, bitter orange 225mg, apple cider vinegar powder 225mg, garcinia 195mg, green tea 90mg, uva ursi 90mg, cascara 90mg, caffeine 45mg, grapefruit 45mg per 3-capsule serving)." },
+    ],
+  },
+  {
+    id: "garcinia-cambogia", categoryId: "weight-management", name: "Garcinia Cambogia", commonName: "Garcinia Cambogia (HCA)", scientificName: "Garcinia gummi-gutta (hydroxycitric acid)",
+    description: "A tropical fruit extract (active component hydroxycitric acid, HCA) marketed for appetite suppression and weight loss, commonly included in fat-burner blends.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "A published case report documents fulminant hepatic failure requiring liver transplantation in a patient taking a Garcinia cambogia/HCA-containing weight-loss supplement — the authors note HCA is also found in weight-loss products the FDA banned in 2009 for hepatotoxicity (Lunsford et al., World J Gastroenterol 2016, PMID 28018115). This is balanced against a 12-week double-blind RCT of a Garcinia-containing blend that found modest weight/fat-mass reduction with no serious adverse events reported (Chong et al., Phytother Res 2014, PMID 24797657) — serious liver injury appears to be rare but real, not a theoretical risk.",
+    repQuickTakeaway: [
+      "What it is: a tropical fruit extract (hydroxycitric acid, HCA) marketed for appetite suppression, commonly found in fat-burner blends.",
+      "The key safety fact for doctors: a published case report describes fulminant liver failure requiring transplantation in a patient taking an HCA-containing weight-loss supplement (PMID 28018115) — this is a rare but documented, serious outcome, not a theoretical concern.",
+      "Context: a separate 91-patient RCT of a Garcinia-containing blend found modest weight loss with no serious adverse events reported over 12 weeks (PMID 24797657) — so serious liver injury appears rare, but it has happened and been published.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Does the patient have any history of liver disease, or are they on other medications metabolized by the liver? Ask specifically given the published hepatic-failure case report.",
+      "Advise the patient to stop and seek care immediately for jaundice, dark urine, abdominal pain, or unusual fatigue while using any Garcinia/HCA-containing product.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim Garcinia cambogia/HCA is free of serious risk — a published case report documents liver failure requiring transplantation from an HCA-containing supplement.",
+      "Do not overstate the risk as common either — the cited RCT of 91 patients reported no serious adverse events; the honest framing is 'rare but real and serious.'",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA ALFAHYDROXY FAT BURNER & WEIGHT CONTROL 90CAPS", chemicalForm: "Garcinia (HCA)", compoundAmount: 195, unit: "mg", servingSize: "3 capsules", notes: "Per label, one component of a multi-ingredient blend — see Bitter Orange entry for the full ingredient list of this product." },
+      { productName: "Mason Natural Fat Burner 60 Tab", chemicalForm: "Garcinia Cambogia", compoundAmount: 500, unit: "mg", servingSize: "2 tablets", notes: "Per label, one component of a multi-ingredient blend (calcium, chromium, garcinia cambogia 500mg, griffonia seed extract/5-HTP 50mg, thermogenic herbal blend 600mg including yerba mate/guarana/green tea/green coffee/cinnamon extract, per 2-tablet serving)." },
+    ],
+  },
+  {
+    id: "cla", categoryId: "weight-management", name: "CLA (Conjugated Linoleic Acid)", commonName: "CLA", scientificName: "Conjugated linoleic acid",
+    description: "A fatty acid marketed for body-composition support, often combined with exercise programs.",
+    evidenceLevel: "NOT_VERIFIED",
+    evidenceSummary: "A meta-analysis of 20 RCTs/crossover trials found CLA combined with exercise modestly reduced body fat and insulin resistance versus exercise alone, but did not improve body weight, exercise performance, or lipid profile, and was not associated with a higher risk of adverse events (Liang et al., Nutr Rev 2023, PMID 36048508). A separate review of muscle-mass supplements explicitly rated the evidence for CLA as weak, and noted there is insufficient evidence to fully determine its safety at commonly used doses (Valenzuela et al., Eur J Nutr 2019, PMID 30604177).",
+    repQuickTakeaway: [
+      "What it is: a fatty acid supplement marketed for body-composition support.",
+      "Honest evidence picture: combined with exercise, a 20-trial meta-analysis found modest body-fat and insulin-resistance improvements, but no effect on body weight, performance, or lipids — and no increased adverse-event risk in that analysis (PMID 36048508). A separate review rates the overall evidence for CLA as weak and says safety data is still insufficient to fully determine (PMID 30604177).",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Set expectations accurately: CLA is not shown to produce weight loss on its own — only modest body-fat/insulin-resistance changes when paired with an exercise program.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim CLA causes weight loss — the cited meta-analysis found no significant effect on body weight.",
+      "Do not claim CLA's safety is fully established — a review specifically flags insufficient safety data for it.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Maximum CLA 2000 Mg 100 Softgels", chemicalForm: "Safflower oil (CLA)", compoundAmount: 2000, unit: "mg", servingSize: "2 softgels", notes: "Per label: safflower oil 2,000mg, typically 80% CLA; exact CLA amount per serving not separately stated on label." },
+    ],
+  },
+  {
+    id: "apple-cider-vinegar", categoryId: "weight-management", name: "Apple Cider Vinegar", commonName: "Apple Cider Vinegar (ACV)", scientificName: "Acetic acid (from fermented apple)",
+    description: "A fermented product (primary active: acetic acid) marketed for weight management and blood-sugar support, taken here in capsule form.",
+    evidenceLevel: "NOT_VERIFIED",
+    evidenceSummary: "A 2025 systematic review and meta-analysis of 10 RCTs (789 participants) found daily ACV intake (commonly 30mL/day for up to 12 weeks) significantly reduced body weight, BMI, and waist circumference in overweight/obese adults and those with type 2 diabetes (Castagna et al., Nutrients 2025, PMID 41010525). The trials behind this finding largely used liquid vinegar; this product is a capsule, which sidesteps the direct esophageal/dental-contact concern associated with drinking liquid vinegar, though the same acetic-acid-related GI and glycemic effects would still apply.",
+    repQuickTakeaway: [
+      "What it is: a capsule form of apple cider vinegar (acetic acid), marketed for weight management and blood-sugar support.",
+      "Real efficacy signal: a 2025 meta-analysis of 10 RCTs (789 participants) found daily ACV intake significantly reduced body weight, BMI, and waist circumference over up to 12 weeks in overweight/obese or type 2 diabetic adults (PMID 41010525) — one of the stronger efficacy findings in this whole batch.",
+      "Form matters: the classic esophageal/dental-erosion caution associated with ACV applies to drinking liquid vinegar directly — this is a capsule, which avoids that specific direct-contact risk, though GI and blood-sugar effects from the acetic acid itself would still apply.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is the patient on a diabetes medication? Acetic acid has real glycemic effects per the cited trials, so combined glucose-lowering is plausible, though a specific interaction study wasn't found in this review.",
+      "If the patient is also using liquid vinegar/ACV drinks alongside this capsule, the esophageal/dental caution applies to that liquid use, not to the capsule itself.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim this capsule carries the same esophageal/dental-erosion risk as drinking liquid vinegar — that specific concern is tied to direct liquid contact, not this product's form.",
+      "Do not overstate long-term safety — the cited meta-analysis covers trials of 12 weeks or less.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Apple Cider Vinegar 1000 Mg 60 Caps.", chemicalForm: "Apple cider vinegar", compoundAmount: 1000, unit: "mg", servingSize: "2 capsules", notes: "Per label: 1,000mg per serving; labeled serving size 2 capsules." },
+    ],
+  },
+];
+
+let phase5CategoriesSeedChecked = false;
+async function ensurePhase5CategoriesSeeded() {
+  if (phase5CategoriesSeedChecked) return;
+  await ensureRecallCategoriesSeeded();
+  await ensureOurProductsMasterDataSeeded();
+  await ensurePhase1CategoriesSeeded();
+  await ensurePhase2CategoriesSeeded();
+  await ensurePhase3CategoriesSeeded();
+  await ensurePhase4CategoriesSeeded();
+
+  const existingIngredients = await db.getAllRows("RecallIngredients");
+  const existingIngredientIds = new Set(existingIngredients.map((i) => i.id));
+  const missingIngredientDefs = PHASE5_INGREDIENTS_SEED.filter((def) => !existingIngredientIds.has(def.id));
+  if (missingIngredientDefs.length === 0) { phase5CategoriesSeedChecked = true; return; }
+
+  const existingSources = await db.getAllRows("RecallResearchSources");
+  const existingSourceIds = new Set(existingSources.map((s) => s.id));
+  const newSources = PHASE5_SOURCES_SEED.filter((s) => !existingSourceIds.has(s.id));
+  if (newSources.length) {
+    await db.appendRows("RecallResearchSources", newSources.map((s) => ({
+      id: s.id, sourceType: s.sourceType, sourceName: s.sourceName, title: s.title, authors: "",
+      journal: s.journal || "", pmid: s.pmid || "", pmcid: "", doi: s.doi || "", url: s.url || "",
+      publicationYear: s.publicationYear || "", sourceDate: "", sourceQuality: s.sourceQuality || "", notes: "",
+    })));
+  }
+
+  const catalog = await db.getAllRows("ProductCatalog");
+  const catalogByName = new Map(catalog.map((p) => [p.name, p]));
+  const newIngredientRows = [];
+  const newLinkRows = [];
+
+  for (const def of missingIngredientDefs) {
+    newIngredientRows.push({
+      id: def.id, categoryId: def.categoryId, name: def.name, commonName: def.commonName || "", scientificName: def.scientificName || "",
+      description: def.description || "", physiologicalRole: "", clinicalUses: "",
+      evidenceSummary: def.evidenceSummary || "", evidenceLevel: def.evidenceLevel || "NOT_VERIFIED",
+      precautions: def.precautions || "", contraindications: "", drugInteractionSummary: def.drugInteractionSummary || "",
+      clinicalCheckpoints: def.clinicalCheckpoints || "", repQuickTakeaway: def.repQuickTakeaway || "", whatNotToClaim: def.whatNotToClaim || "", lastReviewed: "",
+      absorptionTimingNotes: "", repTakeawayQuestions: "", repTakeaway30Second: "",
+    });
+    for (const m of def.productMatches || []) {
+      const product = catalogByName.get(m.productName);
+      if (!product) continue; // never invents a product — only links one that's already in the catalog
+      newLinkRows.push({
+        id: `rpi-${def.id}-${crypto.randomUUID()}`, productId: product.id, ingredientId: def.id,
+        chemicalForm: m.chemicalForm || "", compoundAmount: m.compoundAmount ?? "", activeAmount: m.activeAmount ?? "", unit: m.unit || "",
+        servingSize: m.servingSize || "", dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "PARTIALLY_VERIFIED",
+        notes: m.notes || "", missingFields: "", sku: "", manufacturer: "", sourceLabel: "Product catalog import", sourceUrl: "",
+      });
+    }
+  }
+
+  if (newIngredientRows.length) await db.appendRows("RecallIngredients", newIngredientRows);
+  if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
+
+  phase5CategoriesSeedChecked = true;
+}
+
 // ---------- Recall: auto-link ANY competitor product into its matching
 // category, by shared ingredient ----------
 // Not a one-time seed step like the functions above — a competitor product
@@ -9956,6 +10336,7 @@ app.get("/api/recall/categories", requireTabAccess("recall"), async (req, res) =
     await ensurePhase2CategoriesSeeded();
     await ensurePhase3CategoriesSeeded();
     await ensurePhase4CategoriesSeeded();
+    await ensurePhase5CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
@@ -10013,6 +10394,7 @@ app.get("/api/recall/categories/:id", requireTabAccess("recall"), async (req, re
     await ensurePhase2CategoriesSeeded();
     await ensurePhase3CategoriesSeeded();
     await ensurePhase4CategoriesSeeded();
+    await ensurePhase5CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources, features, benefits, uspRows, advantageRows] = await Promise.all([
