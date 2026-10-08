@@ -1438,6 +1438,21 @@ app.get("/api/competitor-products", async (req, res) => {
   }
 });
 
+// Full, uncapped dump for the "Export Excel" button next to Import Excel —
+// the regular GET above caps at 500 for normal browsing/search performance,
+// but a manager downloading the whole competitor price list (e.g. to share
+// externally or re-import elsewhere) needs every row, not a page of them.
+app.get("/api/competitor-products/export", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("CompetitorProducts");
+    const products = rows.sort((a, b) => a.genericName.localeCompare(b.genericName));
+    res.json({ competitorProducts: products.map(({ _row, ...p }) => p) });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/products", async (req, res) => {
   try {
     const { name, category, expiry, qty, sold90, description, price } = req.body;

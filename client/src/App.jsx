@@ -5145,6 +5145,7 @@ function CompetitorsView({ canEdit, competitors, ourProducts, onAdd, onUpdate, o
   const [showImportProducts, setShowImportProducts] = useState(false);
   const [productSaving, setProductSaving] = useState(false);
   const [productError, setProductError] = useState("");
+  const [exportingProducts, setExportingProducts] = useState(false);
   const [editingProductId, setEditingProductId] = useState(null);
   const [confirmProductId, setConfirmProductId] = useState(null);
   const [compareIds, setCompareIds] = useState(new Set());
@@ -5168,6 +5169,25 @@ function CompetitorsView({ canEdit, competitors, ourProducts, onAdd, onUpdate, o
     }).catch(() => { setProducts([]); setProductsTotal(0); });
   }, [productSearch]);
   useEffect(() => { loadProducts(); }, [loadProducts]);
+
+  // Mirrors Import Excel — same sheet, same columns, full list this time
+  // (the browsing/search endpoint caps at 500) so whatever's already
+  // organized in the app can be taken out again, e.g. to work on it
+  // elsewhere or hand it off, without re-doing any of that organizing.
+  const handleExportProducts = async () => {
+    setExportingProducts(true);
+    try {
+      const { competitorProducts: all } = await api.exportCompetitorProducts();
+      const ws = XLSX.utils.json_to_sheet(all || []);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Competitor Products");
+      XLSX.writeFile(wb, `competitor-price-list-${todayBeirutStr()}.xlsx`);
+    } catch (e) {
+      alert(e?.message || "Couldn't export the competitor price list.");
+    } finally {
+      setExportingProducts(false);
+    }
+  };
   useEffect(() => {
     api.getCompetitorSightings({}).then((data) => setSightings(data.sightings || [])).catch(() => setSightings([]));
   }, []);
@@ -5349,6 +5369,15 @@ function CompetitorsView({ canEdit, competitors, ourProducts, onAdd, onUpdate, o
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "28px 0 10px", flexWrap: "wrap", gap: 8 }}>
         <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0, color: "#8A8272" }}>Competitor price list</h3>
         <div style={{ display: "flex", gap: 8 }}>
+          {canEdit && (
+            <button
+              onClick={handleExportProducts}
+              disabled={exportingProducts}
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 12.5, fontWeight: 500 }}
+            >
+              <Download size={14} /> {exportingProducts ? "Exporting…" : "Export Excel"}
+            </button>
+          )}
           {canEdit && (
             <button
               onClick={() => { setShowImportProducts((v) => !v); setShowAddProduct(false); }}

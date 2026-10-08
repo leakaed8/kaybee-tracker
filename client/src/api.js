@@ -83,6 +83,7 @@ export const api = {
   getOutreachLogToday: () => request("/outreach-log/today"),
   getCompetitorSightings: (params) => request(`/competitor-sightings${qs(params)}`),
   getCompetitorProducts: (params) => request(`/competitor-products${qs(params)}`),
+  exportCompetitorProducts: () => request("/competitor-products/export"),
   getClientVisitStats: (names) => request("/clients/visit-stats", { method: "POST", body: JSON.stringify({ names }) }),
   getVisitCadence: () => request("/visit-cadence"),
   getDoctorVisitStats: (names) => request("/doctors/visit-stats", { method: "POST", body: JSON.stringify({ names }) }),
