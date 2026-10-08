@@ -1417,6 +1417,7 @@ app.get("/api/competitor-products", async (req, res) => {
     await ensurePhase1CategoriesSeeded();
     await ensurePhase2CategoriesSeeded();
     await ensurePhase3CategoriesSeeded();
+    await ensurePhase4CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const { q, limit } = req.query;
@@ -5420,6 +5421,9 @@ const RECALL_CATEGORIES_SEED = [
   { id: "eye-health-vision", name: "Eye Health & Vision" },
   { id: "brain-cognitive-health-memory", name: "Brain / Cognitive Health & Memory" },
   { id: "respiratory-allergy-seasonal-support", name: "Respiratory / Allergy / Seasonal Support" },
+  { id: "nac", name: "NAC" },
+  { id: "nad", name: "NAD" },
+  { id: "ashwagandha", name: "Ashwagandha" },
 ];
 
 // Idempotent — checks before inserting, per the "no duplicates" rule. Runs
@@ -7343,6 +7347,11 @@ const COMPETITOR_GENERIC_NAME_KEYWORDS = [
   [/l[\s-]?carnitine/i, "L-carnitine"],
   [/l[\s-]?glutamine/i, "L-glutamine"],
   [/l[\s-]?arginine/i, "L-arginine"],
+  // Word-boundary-safe against false positives like "Echinacea"/"Maternace",
+  // which contain "nac" as a plain substring (caught during this session's
+  // manual Excel review before this regex existed).
+  [/\bN-?Acetyl[\s-]?(L-?)?Cystein|(^|[^a-zA-Z])NAC(?![a-zA-Z])/i, "NAC"],
+  [/\bNAD\+?\b|Nicotinamide\s+(Mononucleotide|Riboside|Adenine\s+Dinucleotide)/i, "NAD+"],
   [/\bbcaa\b/i, "BCAA"],
   [/creatine/i, "Creatine"],
   [/apple\s*cider\s*vinegar/i, "Apple cider vinegar"],
@@ -9554,6 +9563,178 @@ async function ensurePhase3CategoriesSeeded() {
   phase3CategoriesSeedChecked = true;
 }
 
+// ---------- NAC / NAD / Ashwagandha (Recall Phase 4) ----------
+// Same sourcing discipline as B12/Phase1/Phase2: clinical content below is
+// limited to what live PubMed lookups actually returned this session (named
+// PMID + what that specific paper found), never filled in from plausible-
+// sounding training-knowledge detail. Where no real finding was returned
+// (e.g. NAC has very little dedicated supplement-dose safety literature),
+// the field is left blank with evidenceLevel "NOT_VERIFIED" rather than
+// guessed.
+const PHASE4_SOURCES_SEED = [
+  { id: "src-pmid-33368259", sourceType: "Review", sourceName: "PubMed",
+    title: "Drug interactions of natural supplements in dermatology: a review",
+    pmid: "33368259", doi: "10.1111/ijd.15389", journal: "International Journal of Dermatology", publicationYear: "2020",
+    url: "https://pubmed.ncbi.nlm.nih.gov/33368259/", sourceQuality: "Narrative review" },
+  { id: "src-pmid-34785186", sourceType: "Scoping review", sourceName: "PubMed",
+    title: "Use of fomepizole (4-methylpyrazole) for acetaminophen poisoning: A scoping review",
+    pmid: "34785186", doi: "10.1016/j.toxlet.2021.11.005", journal: "Toxicology Letters", publicationYear: "2021",
+    url: "https://pubmed.ncbi.nlm.nih.gov/34785186/", sourceQuality: "Scoping review" },
+  { id: "src-pmid-42514320", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Safety and Metabolism-Related Outcomes of Oral Nicotinamide Mononucleotide Supplementation in Adults: A Systematic Review and Meta-Analysis",
+    pmid: "42514320", doi: "10.3390/nu18142251", journal: "Nutrients", publicationYear: "2026",
+    url: "https://pubmed.ncbi.nlm.nih.gov/42514320/", sourceQuality: "Meta-analysis of 15 RCTs (10 in safety analysis)" },
+  { id: "src-pmid-37619764", sourceType: "Review", sourceName: "PubMed",
+    title: "The Safety and Antiaging Effects of Nicotinamide Mononucleotide in Human Clinical Trials: an Update",
+    pmid: "37619764", doi: "10.1016/j.advnut.2023.08.008", journal: "Advances in Nutrition", publicationYear: "2023",
+    url: "https://pubmed.ncbi.nlm.nih.gov/37619764/", sourceQuality: "Narrative review" },
+  { id: "src-pmid-40887707", sourceType: "Systematic review", sourceName: "PubMed",
+    title: "A Systematic and Ethnobotanical Review of Ashwagandha's (Withania Somnifera) Teratogenic and Abortifacient Potentials",
+    pmid: "40887707", doi: "10.1002/ptr.70079", journal: "Phytotherapy Research", publicationYear: "2025",
+    url: "https://pubmed.ncbi.nlm.nih.gov/40887707/", sourceQuality: "Systematic/ethnobotanical review" },
+  { id: "src-pmid-39348746", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Effects of Ashwagandha (Withania Somnifera) on stress and anxiety: A systematic review and meta-analysis",
+    pmid: "39348746", doi: "10.1016/j.explore.2024.103062", journal: "Explore (New York, N.Y.)", publicationYear: "2024",
+    url: "https://pubmed.ncbi.nlm.nih.gov/39348746/", sourceQuality: "Meta-analysis of 9 RCTs, n=558" },
+  { id: "src-pmid-34559859", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Effect of Ashwagandha (Withania somnifera) extract on sleep: A systematic review and meta-analysis",
+    pmid: "34559859", doi: "10.1371/journal.pone.0257843", journal: "PLoS ONE", publicationYear: "2021",
+    url: "https://pubmed.ncbi.nlm.nih.gov/34559859/", sourceQuality: "Meta-analysis of 5 RCTs, n=400" },
+];
+
+const PHASE4_INGREDIENTS_SEED = [
+  {
+    id: "nac", categoryId: "nac", name: "NAC", commonName: "NAC", scientificName: "N-Acetyl-L-Cysteine",
+    description: "NAC (N-Acetyl-L-Cysteine) is an acetylated form of the amino acid cysteine and a precursor to intracellular glutathione, the body's principal antioxidant.",
+    evidenceLevel: "NOT_VERIFIED",
+    drugInteractionSummary: "A dermatology drug-interaction review found NAC may interfere with the concentrations of other medications used in psychiatric treatment (Hadeler & Maderal, Int J Dermatol 2020, PMID 33368259).",
+    repQuickTakeaway: [
+      "What it is: an acetylated form of the amino acid cysteine; replenishes intracellular glutathione.",
+      "Prescription use (distinct from this supplement): standard-of-care IV/oral antidote for acetaminophen (paracetamol) overdose (Pourbagher-Shahri et al., Toxicol Lett 2021, PMID 34785186) — a different product, dose, and medical context than an OTC supplement capsule.",
+      "Why people use the supplement: general antioxidant support; studied off-label in psychiatric and respiratory contexts.",
+      "Safety point: a dermatology drug-interaction review found NAC may interfere with concentrations of other medications used in psychiatric treatment (PMID 33368259) — worth asking about before recommending.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is the patient currently on any psychiatric medication? A published drug-interaction review flags a possible interaction (PMID 33368259).",
+      "Make sure the patient understands this OTC supplement is not the prescription NAC protocol used for acetaminophen poisoning.",
+      "No dedicated supplement-dose RCT safety review was found in this session's research — treat long-term/high-dose safety as unverified rather than assuming it is established.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not imply this supplement is an appropriate treatment for acetaminophen (paracetamol) poisoning — that is a distinct, medically-supervised antidote protocol, not this OTC product.",
+      "Do not claim this product has no drug interactions — a published review found a possible interaction with psychiatric medications.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "Mason Natural N-Acetyl-L-Cysteine (NAC) 60 caps", chemicalForm: "N-Acetyl-L-Cysteine", compoundAmount: 500, activeAmount: "", unit: "mg", servingSize: "1 capsule", notes: "Per the product's own ingredient text." },
+    ],
+  },
+  {
+    id: "nad", categoryId: "nad", name: "NAD+", commonName: "NAD+", scientificName: "Nicotinamide Adenine Dinucleotide",
+    description: "NAD+ is a coenzyme central to cellular energy metabolism. Supplements typically deliver an NAD+ precursor (such as NMN or nicotinamide riboside) rather than NAD+ itself — check the exact form on each product's label.",
+    evidenceLevel: "NOT_VERIFIED",
+    evidenceSummary: "A 2026 systematic review and meta-analysis of 15 trials (10 contributing to safety analysis) found oral NMN supplementation at 250-2000 mg/day for 14 days to 24 weeks did not increase overall, serious, or system-specific adverse events, and did not elevate ALT/AST (Yang et al., Nutrients 2026, PMID 42514320). The same review found no significant effect on body weight, BMI, fasting glucose, HbA1c, lipid profiles, or systolic blood pressure. Most other NMN evidence remains in cell/animal models, with human long-term safety data still limited (Song et al., Adv Nutr 2023, PMID 37619764).",
+    repQuickTakeaway: [
+      "What it is: NAD+ is a coenzyme central to cellular energy metabolism; this product delivers NAD+ together with resveratrol (confirm the exact form on the label — most clinical data is on NMN as an NAD+ precursor, not on NAD+ directly).",
+      "Safety signal: a 2026 systematic review/meta-analysis of 15 trials found short-term oral NMN supplementation (250-2000mg/day, 14 days-24 weeks) did not increase adverse events or liver enzymes (PMID 42514320).",
+      "Evidence gap: that same review found no significant effect on weight, fasting glucose, HbA1c, lipids, or systolic blood pressure; most other NMN research is still cell/animal-model only, and no long-term (beyond 24 weeks) human safety data exists yet (PMID 37619764).",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "All reviewed human trials were short-term (≤24 weeks) — there is no long-term human safety data to cite for this ingredient.",
+      "Confirm which exact NAD+ precursor/form is in the product, since most clinical safety data is on NMN specifically, not NAD+ itself.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim proven long-term safety — the only systematic safety review found covers trials of 24 weeks or less.",
+      "Do not claim proven anti-aging or broad metabolic benefit — the 2026 meta-analysis found no significant effect on weight, glucose, HbA1c, lipids, or blood pressure.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA NAD+ PLUS RESVERATROL 60 CAPS", chemicalForm: "NAD+ with nicotinamide ribose and resveratrol", compoundAmount: 600, activeAmount: "", unit: "mg", servingSize: "3 capsules", notes: "Per the product's own ingredient text: NAD+ 600mg + nicotinamide ribose 300mg + resveratrol 100mg per 3-capsule serving." },
+    ],
+  },
+  {
+    id: "ashwagandha-root", categoryId: "ashwagandha", name: "Ashwagandha", commonName: "Ashwagandha", scientificName: "Withania somnifera",
+    description: "Ashwagandha is an adaptogenic herb from Ayurvedic medicine, most studied for stress, anxiety, and sleep.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "Historical reports describe abortifacient/teratogenic effects, and WHO and some regulators have flagged concern; a 2025 systematic review found these specific historical claims rest on citation distortion without primary-source validation, and that animal/human data show no significant reproductive toxicity at human-relevant doses — but the review still concluded the evidence is inconclusive, so caution in pregnancy remains warranted (Tallon, Koturbash & Blum, Phytother Res 2025, PMID 40887707).",
+    evidenceSummary: "Meta-analyses report reduced Perceived Stress Scale and Hamilton Anxiety Scale scores and serum cortisol versus placebo (9 RCTs, n=558; Arumugam et al., Explore 2024, PMID 39348746), and improved sleep quality/onset at doses ≥600mg/day for ≥8 weeks (5 RCTs, n=400; Cheah et al., PLoS One 2021, PMID 34559859).",
+    repQuickTakeaway: [
+      "What it is: an adaptogenic herb (Withania somnifera) from Ayurvedic medicine, most studied for stress, anxiety, and sleep.",
+      "Efficacy signal: meta-analyses report reduced stress/anxiety scores and cortisol versus placebo (PMID 39348746), and improved sleep at ≥600mg/day for ≥8 weeks (PMID 34559859).",
+      "Pregnancy safety: historical reports describe abortifacient/teratogenic effects and WHO/some regulators have flagged concern; a 2025 systematic review found the specific historical claims rest on citation distortion, and animal/human data show no significant reproductive toxicity at typical doses — but the review still called the evidence inconclusive, not reassuring (PMID 40887707).",
+      "Adverse events: mild-to-moderate adverse events were reported in 4 of 9 RCTs in one meta-analysis (PMID 39348746); no serious adverse effects were reported in the sleep meta-analysis, but both reviews explicitly flag that long-term safety data remains limited.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is the patient pregnant or trying to conceive? Reproductive safety evidence is inconclusive per the most recent systematic review (PMID 40887707) — flag for discussion given regulatory caution.",
+      "Ask about duration of use beyond 8 weeks — safety data beyond studied trial durations is not established.",
+      "Ask about any mild GI or other adverse symptoms, which were reported in a minority of trials (PMID 39348746).",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim Ashwagandha is proven safe in pregnancy — regulators have flagged concern, and the most recent systematic review called the evidence inconclusive rather than reassuring.",
+      "Do not claim zero adverse effects — several RCTs in meta-analyses reported mild-to-moderate adverse events.",
+      "Do not claim proven long-term safety — the reviewed trials capped out at 8 weeks in most cases.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA ASHWAGANDHA 2100MG 60 CAPS", chemicalForm: "Ashwagandha root extract", compoundAmount: 2100, activeAmount: "", unit: "mg", servingSize: "", notes: "Per the product's own ingredient text." },
+    ],
+  },
+];
+
+let phase4CategoriesSeedChecked = false;
+async function ensurePhase4CategoriesSeeded() {
+  if (phase4CategoriesSeedChecked) return;
+  // Self-sufficient, same reasoning as ensurePhase1/2/3CategoriesSeeded above.
+  await ensureRecallCategoriesSeeded();
+  await ensureOurProductsMasterDataSeeded();
+  await ensurePhase1CategoriesSeeded();
+  await ensurePhase2CategoriesSeeded();
+  await ensurePhase3CategoriesSeeded();
+
+  const existingIngredients = await db.getAllRows("RecallIngredients");
+  const existingIngredientIds = new Set(existingIngredients.map((i) => i.id));
+  const missingIngredientDefs = PHASE4_INGREDIENTS_SEED.filter((def) => !existingIngredientIds.has(def.id));
+  if (missingIngredientDefs.length === 0) { phase4CategoriesSeedChecked = true; return; }
+
+  const existingSources = await db.getAllRows("RecallResearchSources");
+  const existingSourceIds = new Set(existingSources.map((s) => s.id));
+  const newSources = PHASE4_SOURCES_SEED.filter((s) => !existingSourceIds.has(s.id));
+  if (newSources.length) {
+    await db.appendRows("RecallResearchSources", newSources.map((s) => ({
+      id: s.id, sourceType: s.sourceType, sourceName: s.sourceName, title: s.title, authors: "",
+      journal: s.journal || "", pmid: s.pmid || "", pmcid: "", doi: s.doi || "", url: s.url || "",
+      publicationYear: s.publicationYear || "", sourceDate: "", sourceQuality: s.sourceQuality || "", notes: "",
+    })));
+  }
+
+  const catalog = await db.getAllRows("ProductCatalog");
+  const catalogByName = new Map(catalog.map((p) => [p.name, p]));
+  const newIngredientRows = [];
+  const newLinkRows = [];
+
+  for (const def of missingIngredientDefs) {
+    newIngredientRows.push({
+      id: def.id, categoryId: def.categoryId, name: def.name, commonName: def.commonName || "", scientificName: def.scientificName || "",
+      description: def.description || "", physiologicalRole: "", clinicalUses: "",
+      evidenceSummary: def.evidenceSummary || "", evidenceLevel: def.evidenceLevel || "NOT_VERIFIED",
+      precautions: def.precautions || "", contraindications: "", drugInteractionSummary: def.drugInteractionSummary || "",
+      clinicalCheckpoints: def.clinicalCheckpoints || "", repQuickTakeaway: def.repQuickTakeaway || "", whatNotToClaim: def.whatNotToClaim || "", lastReviewed: "",
+      absorptionTimingNotes: "", repTakeawayQuestions: "", repTakeaway30Second: "",
+    });
+    for (const m of def.productMatches || []) {
+      const product = catalogByName.get(m.productName);
+      if (!product) continue; // never invents a product — only links one that's already in the catalog
+      newLinkRows.push({
+        id: `rpi-${def.id}-${crypto.randomUUID()}`, productId: product.id, ingredientId: def.id,
+        chemicalForm: m.chemicalForm || "", compoundAmount: m.compoundAmount ?? "", activeAmount: m.activeAmount ?? "", unit: m.unit || "",
+        servingSize: m.servingSize || "", dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "PARTIALLY_VERIFIED",
+        notes: m.notes || "", missingFields: "", sku: "", manufacturer: "", sourceLabel: "Product catalog import", sourceUrl: "",
+      });
+    }
+  }
+
+  if (newIngredientRows.length) await db.appendRows("RecallIngredients", newIngredientRows);
+  if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
+
+  phase4CategoriesSeedChecked = true;
+}
+
 // ---------- Recall: auto-link ANY competitor product into its matching
 // category, by shared ingredient ----------
 // Not a one-time seed step like the functions above — a competitor product
@@ -9774,6 +9955,7 @@ app.get("/api/recall/categories", requireTabAccess("recall"), async (req, res) =
     await ensurePhase1CategoriesSeeded();
     await ensurePhase2CategoriesSeeded();
     await ensurePhase3CategoriesSeeded();
+    await ensurePhase4CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
@@ -9830,6 +10012,7 @@ app.get("/api/recall/categories/:id", requireTabAccess("recall"), async (req, re
     await ensurePhase1CategoriesSeeded();
     await ensurePhase2CategoriesSeeded();
     await ensurePhase3CategoriesSeeded();
+    await ensurePhase4CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources, features, benefits, uspRows, advantageRows] = await Promise.all([
