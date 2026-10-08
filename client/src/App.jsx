@@ -2578,6 +2578,17 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   // same tick otherwise).
   const saveVisitAndFollowUp = async () => {
     setVisitError("");
+    // A sample request only reaches the manager via the follow-up that gets
+    // scheduled right after this save (POST /api/followups is what stamps
+    // needsSample/sampleItems and fires the immediate Telegram) — if no
+    // follow-up date is picked (or "stop visiting" is checked instead), that
+    // call never happens and the request silently never reaches the
+    // manager, even though the sample itself is still saved. Block here
+    // rather than let that happen quietly.
+    if (isDoctorEntity && requestedSampleItems.length > 0 && (showStopFollowUp || !followUpChoice)) {
+      setVisitError("You requested a sample for next visit — pick a follow-up date below so the manager knows by when to have it ready.");
+      return;
+    }
     setSaving(true);
     try {
       const created = await onAddVisit({
@@ -3738,7 +3749,13 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
               <div style={{ display: "flex", gap: 8 }}>
                 <button
                   disabled={followUpSaving}
-                  onClick={stopFollowUp}
+                  onClick={() => {
+                    if (requestedSampleItems.length > 0) {
+                      setFollowUpError("You requested a sample for next visit — that needs an actual next visit scheduled. Remove the sample request above if you're stopping instead.");
+                      return;
+                    }
+                    stopFollowUp();
+                  }}
                   style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#B33A3A", color: "#fff", fontSize: 12.5, fontWeight: 500 }}
                 >
                   Confirm — stop visiting
