@@ -2283,15 +2283,20 @@ app.post("/api/followups", async (req, res) => {
     // to have ready, 2 days out.
     if (entityType === "doctor" || entityType === "nutritionist") {
       const samples = await db.getAllRows("Samples");
-      const matches = samples.filter((s) => s.doctorName.toLowerCase().trim() === entityName.toLowerCase().trim());
+      const matches = samples.filter((s) => (s.doctorName || "").toLowerCase().trim() === entityName.toLowerCase().trim());
       const latestByProduct = new Map();
       matches.forEach((s) => {
         const existing = latestByProduct.get(s.productId);
-        if (!existing || new Date(s.date) > new Date(existing.date)) latestByProduct.set(s.productId, s);
+        // >= (not >) so that on an exact-tied timestamp the later-appended
+        // row (later in sheet/array order, same visit) wins — otherwise a
+        // same-visit "gave" + "next_visit" pair for one product could leave
+        // the "gave" row stuck in the map and silently drop the request.
+        if (!existing || new Date(s.date) >= new Date(existing.date)) latestByProduct.set(s.productId, s);
       });
       const items = [...latestByProduct.values()]
         .filter((s) => s.status === "next_visit")
         .map((s) => ({ productId: s.productId, name: s.productName }));
+      console.log(`sample-request check: entityName="${entityName}" visitId=${visitId || ""} samplesTotal=${samples.length} matchesForDoctor=${matches.length} itemsNeedingSample=${items.length}`);
       if (items.length) {
         await db.updateRowById("FollowUps", followUp.id, {
           needsSample: "true",
@@ -2302,14 +2307,21 @@ app.post("/api/followups", async (req, res) => {
         // instead of only a couple of days' notice.
         (async () => {
           try {
-            if (!telegram.isConfigured()) return;
+            if (!telegram.isConfigured()) {
+              console.log("sample-request telegram: skipped, telegram.isConfigured() is false");
+              return;
+            }
             const settings = await db.getSettings();
-            if (!settings.managerTelegramChatId) return;
+            if (!settings.managerTelegramChatId) {
+              console.log("sample-request telegram: skipped, no managerTelegramChatId in settings");
+              return;
+            }
             const itemsText = items.map((it) => it.name).join(", ");
             await telegram.sendMessage(
               settings.managerTelegramChatId,
               `📋 Sample request — <b>${escapeHtml(req.repName)}</b> asked to bring <b>${escapeHtml(itemsText)}</b> for the next visit to <b>${escapeHtml(entityName)}</b>, planned for ${followUp.dueDate}. Please start preparing.`
             );
+            console.log(`sample-request telegram: sent to chatId=${settings.managerTelegramChatId} items="${itemsText}"`);
             notifyManagers({ title: "Sample request", body: `${req.repName} needs ${itemsText} ready for ${entityName} on ${followUp.dueDate}`, url: "/" }).catch(() => {});
           } catch (e) {
             console.error("immediate sample-request telegram notify failed", e);
