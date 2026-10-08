@@ -1421,6 +1421,7 @@ app.get("/api/competitor-products", async (req, res) => {
     await ensurePhase5CategoriesSeeded();
     await ensurePhase6CategoriesSeeded();
     await ensurePhase7CategoriesSeeded();
+    await ensurePhase8CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const { q, limit } = req.query;
@@ -10697,6 +10698,202 @@ async function ensurePhase7CategoriesSeeded() {
   phase7CategoriesSeedChecked = true;
 }
 
+// ---------- Sports Nutrition & Performance (Recall Phase 8 — final phase) ----------
+// Same sourcing discipline as every prior phase. This completes the plan to
+// fill in every Product Expert category with a real linkable product.
+const PHASE8_SOURCES_SEED = [
+  { id: "src-pmid-42035842", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "The Effect of Creatine Supplementation on Kidney Function: A Systematic Review and Meta-Analysis of Randomized Controlled Trials",
+    pmid: "42035842", doi: "10.1053/j.jrn.2026.04.010", journal: "Journal of Renal Nutrition", publicationYear: "2026",
+    url: "https://pubmed.ncbi.nlm.nih.gov/42035842/", sourceQuality: "Meta-analysis of 19 RCTs + 1 crossover study" },
+  { id: "src-pmid-41199218", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Effect of creatine supplementation on kidney function: a systematic review and meta-analysis",
+    pmid: "41199218", doi: "10.1186/s12882-025-04558-6", journal: "BMC Nephrology", publicationYear: "2025",
+    url: "https://pubmed.ncbi.nlm.nih.gov/41199218/", sourceQuality: "Systematic review of 21 studies" },
+  { id: "src-pmid-37062432", sourceType: "Narrative review", sourceName: "PubMed",
+    title: "Tolerable Upper Intake Level for Individual Amino Acids in Humans: A Narrative Review of Recent Clinical Studies",
+    pmid: "37062432", doi: "10.1016/j.advnut.2023.04.004", journal: "Advances in Nutrition", publicationYear: "2023",
+    url: "https://pubmed.ncbi.nlm.nih.gov/37062432/", sourceQuality: "Narrative review establishing human UL dose-response data" },
+  { id: "src-pmid-27934655", sourceType: "Clinical study", sourceName: "PubMed",
+    title: "Safety and Tolerability of Leucine Supplementation in Elderly Men",
+    pmid: "27934655", doi: "10.3945/jn.116.234930", journal: "The Journal of Nutrition", publicationYear: "2016",
+    url: "https://pubmed.ncbi.nlm.nih.gov/27934655/", sourceQuality: "Dose-response clinical study" },
+  { id: "src-pmid-39722590", sourceType: "Mechanistic study", sourceName: "PubMed",
+    title: "Gut microbes with the cntA/cntB genes determine TMAO production from L-carnitine intake and serve as a biomarker for precision nutrition",
+    pmid: "39722590", doi: "10.1080/19490976.2024.2446374", journal: "Gut Microbes", publicationYear: "2024",
+    url: "https://pubmed.ncbi.nlm.nih.gov/39722590/", sourceQuality: "Multi-cohort mechanistic/metagenomic study" },
+  { id: "src-pmid-23435582", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Arginine supplementation for improving maternal and neonatal outcomes in hypertensive disorder of pregnancy: a systematic review",
+    pmid: "23435582", doi: "10.1177/1470320313475910", journal: "Journal of the Renin-Angiotensin-Aldosterone System", publicationYear: "2013",
+    url: "https://pubmed.ncbi.nlm.nih.gov/23435582/", sourceQuality: "Meta-analysis of 7 RCTs, n=916" },
+  { id: "src-pmid-32877810", sourceType: "Overview of systematic reviews", sourceName: "PubMed",
+    title: "Effects of glutamine supplementation on critically ill patients: Focus on efficacy and safety",
+    pmid: "32877810", doi: "10.1016/j.nut.2020.110960", journal: "Nutrition", publicationYear: "2020",
+    url: "https://pubmed.ncbi.nlm.nih.gov/32877810/", sourceQuality: "Overview of 17 systematic reviews, 117 RCTs, n=9933" },
+];
+
+const PHASE8_INGREDIENTS_SEED = [
+  {
+    id: "creatine", categoryId: "sports-nutrition-performance", name: "Creatine", commonName: "Creatine Monohydrate", scientificName: "Creatine monohydrate",
+    description: "One of the most-studied sports-performance supplements, used to support strength and power output.",
+    evidenceLevel: "NOT_VERIFIED",
+    evidenceSummary: "Two independent 2025/2026 systematic reviews and meta-analyses of creatine supplementation and kidney function (19-21 RCTs each) found a small, statistically significant rise in serum creatinine, but no significant change in estimated glomerular filtration rate (eGFR) or urea — both review teams concluded this reflects increased metabolic turnover/creatinine production rather than true kidney impairment (Tsiaras et al., J Ren Nutr 2026, PMID 42035842; Naeini et al., BMC Nephrol 2025, PMID 41199218).",
+    repQuickTakeaway: [
+      "What it is: one of the most-studied sports supplements, used to support strength and power output.",
+      "Important doctor-facing point: two separate, very recent (2025/2026) meta-analyses found creatine use raises serum creatinine slightly, but does NOT significantly change actual kidney filtration (eGFR) or urea (PMID 42035842, PMID 41199218) — this is a key distinction, because a doctor seeing elevated serum creatinine in a creatine user could otherwise misread it as kidney impairment when it's a benign metabolic artifact.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "If a patient using creatine has an elevated serum creatinine on routine labs, ask about creatine use before assuming kidney impairment — the best current evidence shows this is a common, benign artifact that doesn't track with actual eGFR/urea changes.",
+      "This evidence covers short-to-medium-term use; both reviews note longer-term (over 1 year) data is still limited.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim creatine definitively has zero effect on any kidney-related lab value — it does raise serum creatinine measurably — but do not claim it causes kidney damage either, since eGFR and urea were not significantly affected in either meta-analysis.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Maximum Creatine 1200 Mg 100 Caps.", chemicalForm: "Creatine monohydrate", compoundAmount: 1200, unit: "mg", servingSize: "2 capsules", notes: "Per label: creatine monohydrate 1,200mg per 2-capsule serving." },
+    ],
+  },
+  {
+    id: "bcaa", categoryId: "sports-nutrition-performance", name: "BCAA", commonName: "Branched-Chain Amino Acids", scientificName: "L-Leucine, L-Isoleucine, L-Valine",
+    description: "A combination of three essential amino acids (leucine, isoleucine, valine) marketed to support muscle protein synthesis and recovery.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "A narrative review establishing human tolerable upper intake levels found leucine (the most-studied BCAA component) well tolerated up to a breakpoint of roughly 35g/day in young adults and 30g/day in elderly adults (Elango, Adv Nutr 2023, PMID 37062432); a dedicated dose-response study found blood ammonia concentrations rose above normal levels at leucine intakes above that breakpoint (Elango et al., J Nutr 2016, PMID 27934655), indicating a real upper-limit safety signal at high doses rather than unlimited safety.",
+    repQuickTakeaway: [
+      "What it is: a combination of 3 essential amino acids (leucine, isoleucine, valine) for muscle protein synthesis/recovery support.",
+      "Dose matters: human dose-finding studies found leucine (the main BCAA studied) well tolerated at typical doses, but blood ammonia rose above normal at very high intakes, giving a real, identified upper limit rather than an assumption of unlimited safety (PMID 37062432, PMID 27934655).",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Ask about total daily dose if the patient uses multiple protein/amino-acid products together — the identified safety signal (elevated blood ammonia) was dose-dependent at high cumulative leucine intake.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim BCAA/leucine has no upper safety limit — a dose-response study found blood ammonia rose above normal at high leucine intakes.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Maximum Bcaa 100 Capsules", chemicalForm: "L-Leucine + L-Isoleucine + L-Valine", compoundAmount: 500, unit: "mg", servingSize: "2 capsules", notes: "Per label: L-Leucine 500mg + L-Isoleucine 320mg + L-Valine 440mg per 2-capsule serving." },
+    ],
+  },
+  {
+    id: "l-carnitine", categoryId: "sports-nutrition-performance", name: "L-Carnitine", commonName: "L-Carnitine", scientificName: "L-Carnitine",
+    description: "An amino-acid derivative marketed for fat metabolism and exercise-recovery support.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "A 2024 multi-cohort mechanistic study confirmed that specific gut bacteria convert dietary/supplemental L-carnitine into trimethylamine N-oxide (TMAO), a metabolite that has been linked to cardiovascular risk in the broader research literature, and found that this conversion increases with L-carnitine supplementation itself (Wu et al., Gut Microbes 2024, PMID 39722590). This is a real, biologically confirmed pathway, not a theoretical concern, though the clinical significance for a given individual depends heavily on their specific gut microbiome composition.",
+    repQuickTakeaway: [
+      "What it is: an amino-acid derivative marketed for fat metabolism and exercise recovery.",
+      "Worth knowing: gut bacteria in some people convert L-carnitine into TMAO, a metabolite linked to cardiovascular risk in the research literature — a 2024 study confirmed this conversion pathway increases with L-carnitine supplementation itself and identified the specific bacteria responsible (PMID 39722590). How much this matters varies person-to-person based on their gut microbiome.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "For patients with existing cardiovascular risk factors, this TMAO-production pathway is worth being aware of, even though individual risk varies by gut microbiome composition.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim L-carnitine supplementation has no connection to TMAO production — a 2024 mechanistic study confirmed gut bacteria convert it to TMAO and that supplementation increases this conversion.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Maximum L-carnitine 500 Mg 60 Caps", chemicalForm: "L-carnitine", compoundAmount: 500, unit: "mg", servingSize: "1 capsule", notes: "Per label: L-carnitine 500mg per capsule." },
+    ],
+  },
+  {
+    id: "l-arginine", categoryId: "sports-nutrition-performance", name: "L-Arginine", commonName: "L-Arginine", scientificName: "L-Arginine",
+    description: "An amino acid and nitric-oxide precursor marketed as a pre-workout/pump-support supplement.",
+    evidenceLevel: "NOT_VERIFIED",
+    drugInteractionSummary: "A meta-analysis of 7 RCTs (916 patients) found L-arginine supplementation produced a real, measurable reduction in diastolic blood pressure in patients with hypertensive disorders of pregnancy (Gui et al., J Renin Angiotensin Aldosterone Syst 2013, PMID 23435582) — direct clinical evidence that arginine's nitric-oxide-mediated blood-pressure-lowering effect is real, not just theoretical, which is the basis for caution combining it with antihypertensive medication or PDE5 inhibitors (e.g. sildenafil, which works through the same nitric-oxide pathway).",
+    precautions: "A review establishing human tolerable upper intake levels found a no-observed-adverse-effect level (NOAEL) for arginine of 30g/day in healthy adults (Elango, Adv Nutr 2023, PMID 37062432).",
+    repQuickTakeaway: [
+      "What it is: an amino acid and nitric-oxide precursor, marketed as a pre-workout/pump-support supplement.",
+      "Real mechanism, real effect: a clinical meta-analysis found arginine supplementation produces a genuine, measurable blood-pressure-lowering effect (PMID 23435582) — this is the same nitric-oxide pathway that prescription PDE5 inhibitors (like sildenafil) work through, which is the real basis for caution combining the two, not a theoretical worry.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Is the patient on an antihypertensive medication? Arginine has a demonstrated blood-pressure-lowering effect that could add to the medication's effect.",
+      "Is the patient on a PDE5 inhibitor (sildenafil, tadalafil) or a nitrate? Both work through the same nitric-oxide pathway as arginine.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim arginine has no effect on blood pressure — a clinical meta-analysis found a real, measurable blood-pressure-lowering effect.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Maximum L-arginine 1000mc 100 Caps", chemicalForm: "L-arginine HCl", compoundAmount: 1000, unit: "mg", servingSize: "2 capsules", notes: "Per label: L-arginine 1,000mg (as L-arginine HCl) per 2-capsule serving." },
+    ],
+  },
+  {
+    id: "l-glutamine", categoryId: "sports-nutrition-performance", name: "L-Glutamine", commonName: "L-Glutamine", scientificName: "L-Glutamine",
+    description: "A conditionally essential amino acid marketed for recovery and gut-health support.",
+    evidenceLevel: "NOT_VERIFIED",
+    evidenceSummary: "An overview of 17 systematic reviews (117 RCTs, 9,933 patients) of glutamine supplementation in critically ill patients — a much higher-dose, clinically supervised context than an OTC sports supplement — found glutamine was not associated with a change in overall mortality, and may reduce infectious complications, with no safety signal identified even in this vulnerable population (Apostolopoulou et al., Nutrition 2020, PMID 32877810). This is reassuring general safety context rather than a direct study of OTC sports-supplement dosing.",
+    repQuickTakeaway: [
+      "What it is: a conditionally essential amino acid marketed for recovery and gut-health support.",
+      "Reassuring context: a large overview of 117 clinical trials (9,933 patients) studied glutamine in critically ill hospital patients — a much higher-dose, more vulnerable population than typical supplement users — and found no mortality signal and possibly fewer infections, with no safety concern raised (PMID 32877810). This isn't a study of the OTC product specifically, but it's a reassuring safety signal even in a high-risk population.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "No specific interaction or contraindication was found in this review's research — flag this to the user/doctor as an area with limited direct OTC-dose safety data rather than asserting an unfounded caution.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim glutamine's safety at OTC sports-supplement doses is directly proven by the critically-ill-patient research — that population and dosing context is different; the finding is reassuring context, not a direct equivalence.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "ALFA Maximum L-glutamine 1000mg 100 Capsules", chemicalForm: "L-glutamine", compoundAmount: 1000, unit: "mg", servingSize: "2 capsules", notes: "Per label: L-glutamine 1,000mg per 2-capsule serving." },
+    ],
+  },
+];
+
+let phase8CategoriesSeedChecked = false;
+async function ensurePhase8CategoriesSeeded() {
+  if (phase8CategoriesSeedChecked) return;
+  await ensureRecallCategoriesSeeded();
+  await ensureOurProductsMasterDataSeeded();
+  await ensurePhase1CategoriesSeeded();
+  await ensurePhase2CategoriesSeeded();
+  await ensurePhase3CategoriesSeeded();
+  await ensurePhase4CategoriesSeeded();
+  await ensurePhase5CategoriesSeeded();
+  await ensurePhase6CategoriesSeeded();
+  await ensurePhase7CategoriesSeeded();
+
+  const existingIngredients = await db.getAllRows("RecallIngredients");
+  const existingIngredientIds = new Set(existingIngredients.map((i) => i.id));
+  const missingIngredientDefs = PHASE8_INGREDIENTS_SEED.filter((def) => !existingIngredientIds.has(def.id));
+  if (missingIngredientDefs.length === 0) { phase8CategoriesSeedChecked = true; return; }
+
+  const existingSources = await db.getAllRows("RecallResearchSources");
+  const existingSourceIds = new Set(existingSources.map((s) => s.id));
+  const newSources = PHASE8_SOURCES_SEED.filter((s) => !existingSourceIds.has(s.id));
+  if (newSources.length) {
+    await db.appendRows("RecallResearchSources", newSources.map((s) => ({
+      id: s.id, sourceType: s.sourceType, sourceName: s.sourceName, title: s.title, authors: "",
+      journal: s.journal || "", pmid: s.pmid || "", pmcid: "", doi: s.doi || "", url: s.url || "",
+      publicationYear: s.publicationYear || "", sourceDate: "", sourceQuality: s.sourceQuality || "", notes: "",
+    })));
+  }
+
+  const catalog = await db.getAllRows("ProductCatalog");
+  const catalogByName = new Map(catalog.map((p) => [p.name, p]));
+  const newIngredientRows = [];
+  const newLinkRows = [];
+
+  for (const def of missingIngredientDefs) {
+    newIngredientRows.push({
+      id: def.id, categoryId: def.categoryId, name: def.name, commonName: def.commonName || "", scientificName: def.scientificName || "",
+      description: def.description || "", physiologicalRole: "", clinicalUses: "",
+      evidenceSummary: def.evidenceSummary || "", evidenceLevel: def.evidenceLevel || "NOT_VERIFIED",
+      precautions: def.precautions || "", contraindications: "", drugInteractionSummary: def.drugInteractionSummary || "",
+      clinicalCheckpoints: def.clinicalCheckpoints || "", repQuickTakeaway: def.repQuickTakeaway || "", whatNotToClaim: def.whatNotToClaim || "", lastReviewed: "",
+      absorptionTimingNotes: "", repTakeawayQuestions: "", repTakeaway30Second: "",
+    });
+    for (const m of def.productMatches || []) {
+      const product = catalogByName.get(m.productName);
+      if (!product) continue; // never invents a product — only links one that's already in the catalog
+      newLinkRows.push({
+        id: `rpi-${def.id}-${crypto.randomUUID()}`, productId: product.id, ingredientId: def.id,
+        chemicalForm: m.chemicalForm || "", compoundAmount: m.compoundAmount ?? "", activeAmount: m.activeAmount ?? "", unit: m.unit || "",
+        servingSize: m.servingSize || "", dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "PARTIALLY_VERIFIED",
+        notes: m.notes || "", missingFields: "", sku: "", manufacturer: "", sourceLabel: "Product catalog import", sourceUrl: "",
+      });
+    }
+  }
+
+  if (newIngredientRows.length) await db.appendRows("RecallIngredients", newIngredientRows);
+  if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
+
+  phase8CategoriesSeedChecked = true;
+}
+
 // ---------- Recall: auto-link ANY competitor product into its matching
 // category, by shared ingredient ----------
 // Not a one-time seed step like the functions above — a competitor product
@@ -10921,6 +11118,7 @@ app.get("/api/recall/categories", requireTabAccess("recall"), async (req, res) =
     await ensurePhase5CategoriesSeeded();
     await ensurePhase6CategoriesSeeded();
     await ensurePhase7CategoriesSeeded();
+    await ensurePhase8CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
@@ -10981,6 +11179,7 @@ app.get("/api/recall/categories/:id", requireTabAccess("recall"), async (req, re
     await ensurePhase5CategoriesSeeded();
     await ensurePhase6CategoriesSeeded();
     await ensurePhase7CategoriesSeeded();
+    await ensurePhase8CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources, features, benefits, uspRows, advantageRows] = await Promise.all([
