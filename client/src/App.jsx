@@ -1331,7 +1331,7 @@ function CompleteInfoForm({ fields, currentValues, onSave, onCancel }) {
 function Field({ label, children }) {
   return (
     <div>
-      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 4 }}>{label}</label>
+      <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#3A362C", marginBottom: 6 }}>{label}</label>
       {children}
     </div>
   );
@@ -2092,6 +2092,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   // during-call "Products discussed" search, but kept distinct so the two
   // can't ever clobber each other's typed text.
   const [sampleRequestQuery, setSampleRequestQuery] = useState("");
+  const [givenSampleQuery, setGivenSampleQuery] = useState("");
   const [sampleMenuFor, setSampleMenuFor] = useState(null);
   const [sawCompetitor, setSawCompetitor] = useState(false);
   const [competitorName, setCompetitorName] = useState("");
@@ -2324,6 +2325,29 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
     setSampleRequestQuery("");
   };
   const requestedSampleItems = mentionedItems.filter((it) => it.sampleStatus === "next_visit");
+
+  // During-call "Did you give any samples this visit?" control — a rep could
+  // easily miss the per-item "Sample" tag buried under "Products discussed"
+  // (especially if they didn't search that exact product there), so this is
+  // its own clearly-labeled box right below it. Feeds the same
+  // mentionedItems/sampleStatus mechanism, just tagged "gave" instead of
+  // "next_visit" — no server changes needed.
+  const matchedGivenSampleItem = products.find((p) => p.name.toLowerCase().trim() === givenSampleQuery.toLowerCase().trim());
+  const givenSampleItemOptions = (givenSampleQuery.trim()
+    ? products.filter((p) => p.name.toLowerCase().includes(givenSampleQuery.toLowerCase().trim()))
+    : products
+  ).slice(0, 50);
+  const addGivenSampleItem = () => {
+    if (!matchedGivenSampleItem) return;
+    setMentionedItems((prev) => {
+      if (prev.some((it) => it.productId === matchedGivenSampleItem.id)) {
+        return prev.map((it) => (it.productId === matchedGivenSampleItem.id ? { ...it, sampleStatus: "gave" } : it));
+      }
+      return [...prev, { productId: matchedGivenSampleItem.id, name: matchedGivenSampleItem.name, sampleStatus: "gave" }];
+    });
+    setGivenSampleQuery("");
+  };
+  const givenSampleItems = mentionedItems.filter((it) => it.sampleStatus === "gave");
 
   const lastPunch = myLastPunch;
   const isPunchedIn = lastPunch?.type === "in";
@@ -3057,6 +3081,60 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                   </div>
                 )}
               </Field>
+            )}
+
+            {!isRemoteContact && isDoctorStyleEntity && visitStarted && (
+              <div style={{ background: "#EEF5EE", border: "1.5px solid #A9CBB0", borderRadius: 10, padding: 12, marginBottom: 14 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                  <Package size={15} style={{ color: "#4C7A5E", flexShrink: 0 }} />
+                  <span style={{ fontSize: 13.5, fontWeight: 700, color: "#2F5B41" }}>Did you give any samples this visit?</span>
+                </div>
+                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                  <input
+                    list="given-sample-options"
+                    value={givenSampleQuery}
+                    onChange={(e) => setGivenSampleQuery(e.target.value)}
+                    placeholder="Search a product…"
+                    style={{ ...inputStyle, flex: 1, background: "#fff" }}
+                  />
+                  <datalist id="given-sample-options">
+                    {givenSampleItemOptions.map((p) => <option key={p.id} value={p.name} />)}
+                  </datalist>
+                  <button
+                    type="button"
+                    onClick={addGivenSampleItem}
+                    disabled={!matchedGivenSampleItem}
+                    style={{
+                      padding: "8px 14px", borderRadius: 8, border: "none", whiteSpace: "nowrap",
+                      background: matchedGivenSampleItem ? "#4C7A5E" : "#CBDCCF", color: "#fff", fontSize: 12.5, fontWeight: 600,
+                    }}
+                  >
+                    Add
+                  </button>
+                </div>
+                {givenSampleItems.length > 0 ? (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {givenSampleItems.map((it) => (
+                      <div key={it.productId} style={{
+                        display: "flex", alignItems: "center", gap: 6, fontSize: 12,
+                        background: "#fff", border: "1px solid #A9CBB0", borderRadius: 10, padding: "5px 6px 5px 10px",
+                      }}>
+                        <span style={{ fontWeight: 500 }}>{it.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => removeMentionedItem(it.productId)}
+                          style={{ border: "none", background: "none", cursor: "pointer", display: "flex", padding: 2, color: "#8A8272" }}
+                          aria-label={`Remove ${it.name}`}
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 11.5, color: "#2F5B41" }}>No samples given this visit yet.</div>
+                )}
+              </div>
             )}
 
             {!isRemoteContact && isDoctorStyleEntity && visitStarted && (
