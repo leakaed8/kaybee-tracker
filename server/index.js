@@ -1422,6 +1422,7 @@ app.get("/api/competitor-products", async (req, res) => {
     await ensurePhase6CategoriesSeeded();
     await ensurePhase7CategoriesSeeded();
     await ensurePhase8CategoriesSeeded();
+    await ensurePhase9CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const { q, limit } = req.query;
@@ -7383,6 +7384,7 @@ const COMPETITOR_GENERIC_NAME_KEYWORDS = [
   [/glucosamine.{0,20}chondroitin|chondroitin.{0,20}glucosamine/i, "Glucosamine & Chondroitin"],
   [/\bginger\b|zingiber/i, "Ginger"],
   [/pancreatin|papain|bromelain/i, "Digestive Enzymes"],
+  [/beta[\s-]?carotene/i, "Beta Carotene (Vitamin A)"],
 ];
 // Tier 1: words that unambiguously name a physical dosage-unit form. Tier 2:
 // words that often double as an INGREDIENT descriptor rather than the
@@ -10894,6 +10896,154 @@ async function ensurePhase8CategoriesSeeded() {
   phase8CategoriesSeedChecked = true;
 }
 
+// ---------- Eye Health & Vision / Respiratory-Allergy-Seasonal Support
+// (Recall Phase 9) ----------
+// Correction to the Phase 5-8 planning round: these 2 categories were
+// initially skipped as "no matching product," but that was an incomplete
+// audit — Mason Natural Beta Carotene Vit A (labeled "Supports Healthy
+// Vision") covers eye health, and NAC (already in the catalog as a
+// prescription-grade mucolytic ingredient) has real respiratory evidence.
+// Same sourcing discipline as every prior phase.
+//
+// NAC id collision note: the existing "nac" ingredient (Phase 4, category
+// "nac") already owns the real competitor-product auto-links found in the
+// user's market-analysis Excel. This entry uses a distinct name ("NAC
+// (Respiratory)") rather than "NAC" so it does NOT collide in
+// ensureCompetitorIngredientAutoLinking()'s exact-name-match Map — avoiding
+// any risk of silently moving those existing real links away from the
+// "nac" category. This entry surfaces our own product + respiratory-
+// specific clinical content only; it does not duplicate competitor linking.
+const PHASE9_SOURCES_SEED = [
+  { id: "src-pmid-42514387", sourceType: "Review", sourceName: "PubMed",
+    title: "Lycopene, Carotenoids, and Retinoids in Cancer Chemoprevention: Molecular Mechanisms and Clinical Implications",
+    pmid: "42514387", doi: "10.3390/nu18142318", journal: "Nutrients", publicationYear: "2026",
+    url: "https://pubmed.ncbi.nlm.nih.gov/42514387/", sourceQuality: "Narrative review" },
+  { id: "src-pmid-37702300", sourceType: "Systematic review (Cochrane)", sourceName: "Cochrane",
+    title: "Antioxidant vitamin and mineral supplements for slowing the progression of age-related macular degeneration",
+    pmid: "37702300", doi: "10.1002/14651858.CD000254.pub5", journal: "Cochrane Database of Systematic Reviews", publicationYear: "2023",
+    url: "https://pubmed.ncbi.nlm.nih.gov/37702300/", sourceQuality: "Cochrane systematic review, 26 studies, n=11,952" },
+  { id: "src-pmid-39413571", sourceType: "Systematic review / meta-analysis", sourceName: "PubMed",
+    title: "Efficacy and safety of mucolytics in patients with stable chronic obstructive pulmonary disease",
+    pmid: "39413571", doi: "10.1016/j.resinv.2024.10.004", journal: "Respiratory Investigation", publicationYear: "2024",
+    url: "https://pubmed.ncbi.nlm.nih.gov/39413571/", sourceQuality: "Meta-analysis of 23 RCTs" },
+  { id: "src-pmid-31598901", sourceType: "Meta-analysis", sourceName: "PubMed",
+    title: "Effect of Orally Administered N-Acetylcysteine on Chronic Bronchitis: A Meta-analysis",
+    pmid: "31598901", doi: "10.1007/s12325-019-01111-4", journal: "Advances in Therapy", publicationYear: "2019",
+    url: "https://pubmed.ncbi.nlm.nih.gov/31598901/", sourceQuality: "Meta-analysis of 11 RCTs, n=1564" },
+  { id: "src-pmid-19138505", sourceType: "Randomized controlled trial", sourceName: "PubMed",
+    title: "Fluticasone and N-acetylcysteine in primary care patients with COPD or chronic bronchitis",
+    pmid: "19138505", doi: "10.1016/j.rmed.2008.11.003", journal: "Respiratory Medicine", publicationYear: "2009",
+    url: "https://pubmed.ncbi.nlm.nih.gov/19138505/", sourceQuality: "3-year placebo-controlled RCT, n=286" },
+];
+
+const PHASE9_INGREDIENTS_SEED = [
+  {
+    id: "beta-carotene", categoryId: "eye-health-vision", name: "Beta Carotene (Vitamin A)", commonName: "Beta Carotene", scientificName: "Provitamin A (beta-carotene)",
+    description: "A provitamin-A carotenoid marketed for eye/vision support, immune function, and cell health.",
+    evidenceLevel: "NOT_VERIFIED",
+    precautions: "Randomized trials of isolated high-dose beta-carotene supplementation have found null or harmful effects specifically in smokers, including a confirmed increased risk of lung cancer, mostly in former smokers — a finding distinct from and in contrast to the generally protective associations seen with dietary (food-based) carotenoid intake (Kalemoglu et al., Nutrients 2026, PMID 42514387; Evans & Lawrenson, Cochrane Database Syst Rev 2023, PMID 37702300). The same Cochrane review (the AREDS/AREDS2 eye-health trials) found antioxidant formulas including beta-carotene, vitamin C, E, and zinc probably slow progression of age-related macular degeneration in people who already have intermediate AMD, but the follow-on AREDS2 trial replaced beta-carotene with lutein/zeaxanthin specifically because of this lung-cancer signal.",
+    repQuickTakeaway: [
+      "What it is: a provitamin-A carotenoid marketed for eye/vision support.",
+      "The single most important safety fact for this ingredient: large randomized trials found high-dose beta-carotene supplements increase lung cancer risk specifically in smokers and former smokers (PMID 42514387, PMID 37702300) — this is exactly why the follow-on AREDS2 eye-health trial replaced beta-carotene with lutein/zeaxanthin in its updated formula.",
+      "For non-smokers with intermediate age-related macular degeneration specifically, the original AREDS antioxidant formula (including beta-carotene) showed a real benefit in slowing progression to late AMD (PMID 37702300) — so the risk is concentrated in smokers, not a blanket contraindication.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Does the patient currently smoke, or have a significant smoking history? This is the single most important question for this ingredient — the lung-cancer risk signal is specific to smokers and former smokers.",
+      "Is this being used for general eye-health marketing, or does the patient have a diagnosed intermediate-stage AMD? The real evidence of benefit is specifically in that AMD population, not general eye-health maintenance.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not recommend this product to a current or former smoker without flagging the documented lung-cancer risk increase found in randomized trials — this is one of the most serious, well-established supplement safety findings in this entire catalog.",
+      "Do not claim beta-carotene supplements are interchangeable with dietary carotenoid intake from food — the harmful trial findings are specific to isolated high-dose supplementation, not food-based intake.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "Mason Natural Beta Carotene Vit A", chemicalForm: "Beta-carotene (Vitamin A)", compoundAmount: 3750, unit: "mcg", servingSize: "1 softgel", notes: "Per label: Vitamin A 3,750mcg, as 100% beta-carotene (25,000 IU)." },
+    ],
+  },
+  {
+    id: "nac-respiratory", categoryId: "respiratory-allergy-seasonal-support", name: "NAC (Respiratory)", commonName: "NAC", scientificName: "N-Acetyl-L-Cysteine",
+    description: "N-Acetyl-L-Cysteine used specifically in its mucolytic (mucus-thinning) role for chronic respiratory conditions — a different clinical angle from the general-antioxidant NAC entry elsewhere in this catalog.",
+    evidenceLevel: "NOT_VERIFIED",
+    evidenceSummary: "A 2024 systematic review and meta-analysis of 23 RCTs found mucolytics, including NAC, significantly reduced exacerbation and hospitalization rates and shortened exacerbation duration in patients with stable COPD, with a safety profile comparable to placebo (Ohnishi et al., Respir Investig 2024, PMID 39413571). A meta-analysis of 11 RCTs (1,564 patients) found oral NAC significantly reduced chronic bronchitis exacerbation frequency and improved symptoms versus placebo, without a significant increase in adverse effects, at doses under 1200mg/day for at least 3 months (Wei et al., Adv Ther 2019, PMID 31598901). However, this is not a uniform finding: a 3-year placebo-controlled RCT of 286 primary-care COPD/chronic bronchitis patients found oral NAC 600mg/day did NOT significantly improve exacerbation rate, quality of life, or FEV1 decline versus placebo (Schermer et al., Respir Med 2009, PMID 19138505) — so the honest picture is that meta-analyses lean positive, but not every individual trial has confirmed a benefit.",
+    repQuickTakeaway: [
+      "What it is: N-Acetyl-L-Cysteine used specifically for its mucolytic (mucus-thinning) effect in chronic respiratory conditions like COPD/chronic bronchitis — a different use case from the general-antioxidant NAC entry in this catalog's NAC category.",
+      "Evidence picture, told honestly: meta-analyses pooling multiple trials found NAC reduces COPD/chronic bronchitis exacerbations and hospitalizations with a safety profile comparable to placebo (PMID 39413571, PMID 31598901) — but at least one well-designed 3-year RCT found no significant benefit at a lower dose (PMID 19138505). The evidence leans positive on balance, but isn't unanimous.",
+    ].join("\n"),
+    clinicalCheckpoints: [
+      "Confirm the patient's diagnosis and current treatment plan for their respiratory condition — NAC here is a supplement-level mucolytic aid, not a replacement for prescribed COPD/asthma medications.",
+      "Effective doses in the positive meta-analysis were under 1200mg/day for at least 3 months — a single dose or short course is unlikely to reflect the evidence base.",
+    ].join("\n"),
+    whatNotToClaim: [
+      "Do not claim NAC is a universally proven respiratory treatment — one solid 3-year RCT found no significant benefit, even though pooled meta-analyses lean positive.",
+      "Do not suggest NAC replaces a patient's prescribed respiratory medication (inhalers, steroids, etc.) — it was studied as an add-on, not a replacement.",
+    ].join("\n"),
+    productMatches: [
+      { productName: "Mason Natural N-Acetyl-L-Cysteine (NAC) 60 caps", chemicalForm: "N-Acetyl-L-Cysteine", compoundAmount: 500, unit: "mg", servingSize: "1 capsule", notes: "Per the product's own ingredient text. Same physical product as the general NAC category entry — this entry covers its respiratory/mucolytic use case specifically." },
+    ],
+  },
+];
+
+let phase9CategoriesSeedChecked = false;
+async function ensurePhase9CategoriesSeeded() {
+  if (phase9CategoriesSeedChecked) return;
+  await ensureRecallCategoriesSeeded();
+  await ensureOurProductsMasterDataSeeded();
+  await ensurePhase1CategoriesSeeded();
+  await ensurePhase2CategoriesSeeded();
+  await ensurePhase3CategoriesSeeded();
+  await ensurePhase4CategoriesSeeded();
+  await ensurePhase5CategoriesSeeded();
+  await ensurePhase6CategoriesSeeded();
+  await ensurePhase7CategoriesSeeded();
+  await ensurePhase8CategoriesSeeded();
+
+  const existingIngredients = await db.getAllRows("RecallIngredients");
+  const existingIngredientIds = new Set(existingIngredients.map((i) => i.id));
+  const missingIngredientDefs = PHASE9_INGREDIENTS_SEED.filter((def) => !existingIngredientIds.has(def.id));
+  if (missingIngredientDefs.length === 0) { phase9CategoriesSeedChecked = true; return; }
+
+  const existingSources = await db.getAllRows("RecallResearchSources");
+  const existingSourceIds = new Set(existingSources.map((s) => s.id));
+  const newSources = PHASE9_SOURCES_SEED.filter((s) => !existingSourceIds.has(s.id));
+  if (newSources.length) {
+    await db.appendRows("RecallResearchSources", newSources.map((s) => ({
+      id: s.id, sourceType: s.sourceType, sourceName: s.sourceName, title: s.title, authors: "",
+      journal: s.journal || "", pmid: s.pmid || "", pmcid: "", doi: s.doi || "", url: s.url || "",
+      publicationYear: s.publicationYear || "", sourceDate: "", sourceQuality: s.sourceQuality || "", notes: "",
+    })));
+  }
+
+  const catalog = await db.getAllRows("ProductCatalog");
+  const catalogByName = new Map(catalog.map((p) => [p.name, p]));
+  const newIngredientRows = [];
+  const newLinkRows = [];
+
+  for (const def of missingIngredientDefs) {
+    newIngredientRows.push({
+      id: def.id, categoryId: def.categoryId, name: def.name, commonName: def.commonName || "", scientificName: def.scientificName || "",
+      description: def.description || "", physiologicalRole: "", clinicalUses: "",
+      evidenceSummary: def.evidenceSummary || "", evidenceLevel: def.evidenceLevel || "NOT_VERIFIED",
+      precautions: def.precautions || "", contraindications: "", drugInteractionSummary: def.drugInteractionSummary || "",
+      clinicalCheckpoints: def.clinicalCheckpoints || "", repQuickTakeaway: def.repQuickTakeaway || "", whatNotToClaim: def.whatNotToClaim || "", lastReviewed: "",
+      absorptionTimingNotes: "", repTakeawayQuestions: "", repTakeaway30Second: "",
+    });
+    for (const m of def.productMatches || []) {
+      const product = catalogByName.get(m.productName);
+      if (!product) continue; // never invents a product — only links one that's already in the catalog
+      newLinkRows.push({
+        id: `rpi-${def.id}-${crypto.randomUUID()}`, productId: product.id, ingredientId: def.id,
+        chemicalForm: m.chemicalForm || "", compoundAmount: m.compoundAmount ?? "", activeAmount: m.activeAmount ?? "", unit: m.unit || "",
+        servingSize: m.servingSize || "", dailyAmount: "", amountBasis: "", sourceId: "", verificationStatus: "PARTIALLY_VERIFIED",
+        notes: m.notes || "", missingFields: "", sku: "", manufacturer: "", sourceLabel: "Product catalog import", sourceUrl: "",
+      });
+    }
+  }
+
+  if (newIngredientRows.length) await db.appendRows("RecallIngredients", newIngredientRows);
+  if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
+
+  phase9CategoriesSeedChecked = true;
+}
+
 // ---------- Recall: auto-link ANY competitor product into its matching
 // category, by shared ingredient ----------
 // Not a one-time seed step like the functions above — a competitor product
@@ -11119,6 +11269,7 @@ app.get("/api/recall/categories", requireTabAccess("recall"), async (req, res) =
     await ensurePhase6CategoriesSeeded();
     await ensurePhase7CategoriesSeeded();
     await ensurePhase8CategoriesSeeded();
+    await ensurePhase9CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, productIngredients, evidence, assignments] = await Promise.all([
@@ -11180,6 +11331,7 @@ app.get("/api/recall/categories/:id", requireTabAccess("recall"), async (req, re
     await ensurePhase6CategoriesSeeded();
     await ensurePhase7CategoriesSeeded();
     await ensurePhase8CategoriesSeeded();
+    await ensurePhase9CategoriesSeeded();
     await ensureCompetitorIngredientAutoLinking();
     await ensureExcludedCompetitorBrandsRemoved();
     const [categories, ingredients, forms, productIngredients, evidence, interactions, quiz, catalog, competitorRels, competitorProducts, retailerListings, fieldConflicts, sources, features, benefits, uspRows, advantageRows] = await Promise.all([
