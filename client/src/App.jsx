@@ -3085,9 +3085,12 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
 
             {!isRemoteContact && isDoctorStyleEntity && visitStarted && (
               <div style={{ background: "#EEF5EE", border: "1.5px solid #A9CBB0", borderRadius: 10, padding: 12, marginBottom: 14 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
                   <Package size={15} style={{ color: "#4C7A5E", flexShrink: 0 }} />
                   <span style={{ fontSize: 13.5, fontWeight: 700, color: "#2F5B41" }}>Did you give any samples this visit?</span>
+                </div>
+                <div style={{ fontSize: 11, color: "#4C7A5E", marginBottom: 8 }}>
+                  Only for samples you physically handed over today. Need one for your <strong>next</strong> visit instead? That's a separate question on the next screen.
                 </div>
                 <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                   <input
@@ -3398,9 +3401,12 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
               {isDoctorEntity && (
                 <>
                   <div style={{ background: "#FBF3E8", border: "1.5px solid #E9C88A", borderRadius: 10, padding: 12, marginBottom: 14 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
                       <Package size={15} style={{ color: "#C17817", flexShrink: 0 }} />
                       <span style={{ fontSize: 13.5, fontWeight: 700, color: "#7A5B2E" }}>Request samples for next visit</span>
+                    </div>
+                    <div style={{ fontSize: 11, color: "#7A5B2E", marginBottom: 8 }}>
+                      Not for something you gave today — this tells the manager what to prepare, with your next visit's date, so it's ready in time.
                     </div>
                     <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                       <input
@@ -3617,9 +3623,12 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
 
           {isReturnVisit && (
             <div style={{ background: "#FBF3E8", border: "1.5px solid #E9C88A", borderRadius: 10, padding: 12, marginBottom: 14 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
                 <Package size={15} style={{ color: "#C17817", flexShrink: 0 }} />
                 <span style={{ fontSize: 13.5, fontWeight: 700, color: "#7A5B2E" }}>Request samples for next visit</span>
+              </div>
+              <div style={{ fontSize: 11, color: "#7A5B2E", marginBottom: 8 }}>
+                Not for something you gave today — this tells the manager what to prepare, with your next visit's date, so it's ready in time.
               </div>
               <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                 <input
