@@ -10829,14 +10829,17 @@ function RepActivityToday({ repNames }) {
   );
 }
 
-// Daily Rep Performance PDF — built client-side with the same jsPDF/autoTable
+// Rep Performance PDF — built client-side with the same jsPDF/autoTable
 // pattern as downloadOrderPdf. Reuses the exact pharmacy/doctor/nutritionist
 // classification logic from RepPerformanceCard (in-person visits only,
 // pharmacy count derived by subtraction), filtered by a manager-chosen
 // Beirut calendar-day window (fromDateStr..toDateStr inclusive, a single day
-// when both are equal) instead of a fixed single day, plus a month-to-date
-// column for context — a single window's number is noise without it.
-function downloadRepPerformancePdfForRange(fromDateStr, toDateStr, monthKey, repNames, visits, doctors, nutritionists) {
+// when both are equal). Below the summary table, a per-rep visit-details
+// section lists every in-person visit in the window by name, with its order
+// status (pharmacies/nutritionists only — doctors never place orders, see
+// CheckInView's STEP_KEYS) and any sample given, sourced from the Samples
+// sheet matched by visitId.
+function downloadRepPerformancePdfForRange(fromDateStr, toDateStr, repNames, visits, orders, samples, doctors, nutritionists) {
   const isDoctorName = (name) => doctors.some((d) => d.name.toLowerCase().trim() === name.toLowerCase().trim());
   const isNutritionistName = (name) => nutritionists.some((n) => n.name.toLowerCase().trim() === name.toLowerCase().trim());
   const countsFor = (repVisits) => {
@@ -10846,16 +10849,16 @@ function downloadRepPerformancePdfForRange(fromDateStr, toDateStr, monthKey, rep
     const pharmacyCount = inPerson.length - doctorCount - nutritionistCount;
     return { pharmacyCount, doctorCount, nutritionistCount, total: inPerson.length };
   };
+  const inRange = (v) => {
+    const d = beirutDateStrOfInstant(v.time);
+    return d >= fromDateStr && d <= toDateStr;
+  };
 
   const isSingleDay = fromDateStr === toDateStr;
   const rows = repNames.map((name) => {
     const repVisits = visits.filter((v) => v.repName === name);
-    const range = countsFor(repVisits.filter((v) => {
-      const d = beirutDateStrOfInstant(v.time);
-      return d >= fromDateStr && d <= toDateStr;
-    }));
-    const month = countsFor(repVisits.filter((v) => beirutDateStrOfInstant(v.time).slice(0, 7) === monthKey));
-    return { name, range, month };
+    const range = countsFor(repVisits.filter(inRange));
+    return { name, range };
   });
   // Zero-visit reps first, then busiest-to-quietest — the attention-worthy
   // cases float to the top instead of being buried alphabetically.
@@ -10866,7 +10869,7 @@ function downloadRepPerformancePdfForRange(fromDateStr, toDateStr, monthKey, rep
   const zeroVisitRowIndexes = new Set(rows.map((r, i) => (r.range.total === 0 ? i : -1)).filter((i) => i !== -1));
 
   const fmtLongDate = (dateStr) => new Date(`${dateStr}T12:00:00`).toLocaleDateString("en-GB", { timeZone: "Asia/Beirut", weekday: "long", day: "numeric", month: "long", year: "numeric" });
-  const rangeColumnLabel = isSingleDay ? "today" : "range";
+  const fmtShortDate = (iso) => new Date(iso).toLocaleDateString("en-GB", { timeZone: "Asia/Beirut" });
   const noVisitsLabel = isSingleDay ? " (no visits today)" : " (no visits in range)";
 
   const doc = new jsPDF();
@@ -10878,17 +10881,12 @@ function downloadRepPerformancePdfForRange(fromDateStr, toDateStr, monthKey, rep
 
   autoTable(doc, {
     startY: 42,
-    head: [[
-      "Rep",
-      `Pharmacies\n(${rangeColumnLabel})`, `Doctors\n(${rangeColumnLabel})`, `Nutritionists\n(${rangeColumnLabel})`, `Total\n(${rangeColumnLabel})`,
-      "Pharmacies\n(MTD)", "Doctors\n(MTD)", "Nutritionists\n(MTD)", "Total\n(MTD)",
-    ]],
+    head: [["Rep", "Pharmacies", "Doctors", "Nutritionists", "Total"]],
     body: rows.map((r) => [
       r.name + (r.range.total === 0 ? noVisitsLabel : ""),
       String(r.range.pharmacyCount), String(r.range.doctorCount), String(r.range.nutritionistCount), String(r.range.total),
-      String(r.month.pharmacyCount), String(r.month.doctorCount), String(r.month.nutritionistCount), String(r.month.total),
     ]),
-    styles: { fontSize: 8.5, halign: "center" },
+    styles: { fontSize: 9, halign: "center" },
     columnStyles: { 0: { halign: "left", fontStyle: "bold" } },
     headStyles: { fillColor: [31, 42, 36], halign: "center" },
     didParseCell: (data) => {
@@ -10898,6 +10896,66 @@ function downloadRepPerformancePdfForRange(fromDateStr, toDateStr, monthKey, rep
       }
     },
   });
+
+  // ---- Visit Details — one block per rep who had at least one in-person
+  // visit in the window, one line per visit, in the format the manager
+  // asked for: "<name> — <order status if applicable> — sample given:
+  // <product(s) or none> — day visited: <date>". ----
+  const pageHeight = doc.internal.pageSize.getHeight();
+  let y = (doc.lastAutoTable?.finalY || 50) + 12;
+  const ensureSpace = (needed) => {
+    if (y + needed > pageHeight - 14) {
+      doc.addPage();
+      y = 18;
+    }
+  };
+
+  doc.setFontSize(13);
+  ensureSpace(10);
+  doc.text("Visit Details", 14, y);
+  y += 8;
+
+  let anyVisitsInWindow = false;
+  for (const name of repNames) {
+    const repVisitsInRange = visits
+      .filter((v) => v.repName === name && isInPersonVisit(v) && inRange(v))
+      .sort((a, b) => new Date(a.time) - new Date(b.time));
+    if (repVisitsInRange.length === 0) continue;
+    anyVisitsInWindow = true;
+
+    ensureSpace(12);
+    doc.setFontSize(11);
+    doc.setFont("helvetica", "bold");
+    doc.text(name, 14, y);
+    doc.setFont("helvetica", "normal");
+    y += 6;
+    doc.setFontSize(9);
+
+    for (const v of repVisitsInRange) {
+      // Only an actually-given sample counts here, not a "give next visit"
+      // intention logged for a future follow-up.
+      const sampleNames = samples
+        .filter((s) => s.visitId === v.id && s.status === "gave")
+        .map((s) => s.productName)
+        .filter(Boolean);
+      const sampleText = sampleNames.length ? sampleNames.join(", ") : "none";
+      const dayVisited = fmtShortDate(v.time);
+
+      const line = isDoctorName(v.client)
+        ? `${v.client} — sample given: ${sampleText} — day visited: ${dayVisited}`
+        : `${v.client} — ${orders.some((o) => o.visitId === v.id) ? "order placed" : "no order"} — sample given: ${sampleText} — day visited: ${dayVisited}`;
+
+      const wrapped = doc.splitTextToSize(line, 180);
+      ensureSpace(wrapped.length * 5 + 2);
+      doc.text(wrapped, 18, y);
+      y += wrapped.length * 5 + 2;
+    }
+    y += 4;
+  }
+  if (!anyVisitsInWindow) {
+    doc.setFontSize(9);
+    doc.text("No in-person visits in the selected range.", 14, y);
+  }
 
   doc.save(isSingleDay ? `daily-rep-performance-${fromDateStr}.pdf` : `rep-performance-${fromDateStr}_to_${toDateStr}.pdf`);
 }
@@ -10944,21 +11002,41 @@ function PerformanceView({
   const [repTargetsByName, setRepTargetsByName] = useState({});
   const [followUps, setFollowUps] = useState([]);
   // Tracked specifically (not just swallowed into a silent catch) because
-  // the Daily Rep Performance export reads straight from `visits` — if that
-  // fetch hasn't finished yet or failed outright, exporting would silently
-  // produce an all-zero PDF with no indication anything was wrong. The
-  // export button below is disabled until this reads "ready", and a failure
-  // surfaces a retry control instead of failing silently.
+  // the Rep Performance export reads straight from `visits`/`orders`/
+  // `samples` — if any of those fetches hasn't finished yet or failed
+  // outright, exporting would silently produce a report with missing or
+  // all-zero data and no indication anything was wrong (this is exactly the
+  // bug a manager hit in practice). The export button below is disabled
+  // until all three read "ready", and a failure surfaces a retry control
+  // instead of failing silently.
   const [visitsStatus, setVisitsStatus] = useState("loading"); // loading | ready | error
+  const [ordersStatus, setOrdersStatus] = useState("loading");
+  const [samplesStatus, setSamplesStatus] = useState("loading");
+  const [samples, setSamples] = useState([]);
   const loadVisits = () => {
     setVisitsStatus("loading");
     return api.getVisits({ all: true })
       .then((data) => { setVisits(data.visits || []); setVisitsStatus("ready"); })
       .catch(() => setVisitsStatus("error"));
   };
+  const loadOrders = () => {
+    setOrdersStatus("loading");
+    return api.getOrders({ all: true })
+      .then((data) => { setOrders(data.orders || []); setOrdersStatus("ready"); })
+      .catch(() => setOrdersStatus("error"));
+  };
+  const loadSamples = () => {
+    setSamplesStatus("loading");
+    return api.getSamples({ all: true })
+      .then((data) => { setSamples(data.samples || []); setSamplesStatus("ready"); })
+      .catch(() => setSamplesStatus("error"));
+  };
+  const loadExportData = () => { loadVisits(); loadOrders(); loadSamples(); };
+  const exportDataStatus = [visitsStatus, ordersStatus, samplesStatus].includes("error")
+    ? "error"
+    : [visitsStatus, ordersStatus, samplesStatus].every((s) => s === "ready") ? "ready" : "loading";
   useEffect(() => {
-    loadVisits();
-    api.getOrders({ all: true }).then((data) => setOrders(data.orders || [])).catch(() => {});
+    loadExportData();
     // GET /api/reps is manager-only server-side (it includes passcodes) —
     // a supervisor session gets a 403 here, which the .catch below turns
     // into an empty list (role labels just fall back to a sensible default
@@ -11155,20 +11233,20 @@ function PerformanceView({
             style={{ padding: "6px 12px", borderRadius: 14, fontSize: 11.5, fontWeight: 500, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", cursor: "pointer" }}>
             Today
           </button>
-          {visitsStatus === "error" && (
-            <button onClick={loadVisits}
+          {exportDataStatus === "error" && (
+            <button onClick={loadExportData}
               style={{ padding: "6px 12px", borderRadius: 14, fontSize: 11.5, fontWeight: 600, border: "1px solid #B33A3A", background: "#fff", color: "#B33A3A", cursor: "pointer" }}>
-              Couldn't load visit data — Retry
+              Couldn't load report data — Retry
             </button>
           )}
-          {visitsStatus === "loading" && (
-            <div style={{ fontSize: 11.5, color: "#8A8272" }}>Loading visit data…</div>
+          {exportDataStatus === "loading" && (
+            <div style={{ fontSize: 11.5, color: "#8A8272" }}>Loading report data…</div>
           )}
           <button
-            onClick={() => downloadRepPerformancePdfForRange(exportFromDateStr, exportToDateStr, thisMonthKey, repNames, visits, doctors, nutritionists)}
-            disabled={visitsStatus !== "ready"}
-            title={visitsStatus !== "ready" ? "Visit data hasn't finished loading yet" : undefined}
-            style={{ padding: "9px 16px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, border: "1px solid #1F2A24", background: visitsStatus === "ready" ? "#1F2A24" : "#C8C2B4", color: "#FAF7F2", cursor: visitsStatus === "ready" ? "pointer" : "default", display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
+            onClick={() => downloadRepPerformancePdfForRange(exportFromDateStr, exportToDateStr, repNames, visits, orders, samples, doctors, nutritionists)}
+            disabled={exportDataStatus !== "ready"}
+            title={exportDataStatus !== "ready" ? "Report data hasn't finished loading yet" : undefined}
+            style={{ padding: "9px 16px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, border: "1px solid #1F2A24", background: exportDataStatus === "ready" ? "#1F2A24" : "#C8C2B4", color: "#FAF7F2", cursor: exportDataStatus === "ready" ? "pointer" : "default", display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
             <Download size={14} /> Export PDF
           </button>
         </div>

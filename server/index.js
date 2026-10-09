@@ -1334,7 +1334,7 @@ app.get("/api/orders", async (req, res) => {
 
 app.get("/api/samples", async (req, res) => {
   try {
-    const { doctorName, visitId, limit } = req.query;
+    const { doctorName, visitId, limit, all } = req.query;
     const rows = await db.getAllRows("Samples");
     let samples = rows.sort((a, b) => new Date(b.date) - new Date(a.date));
     if (doctorName) {
@@ -1342,7 +1342,11 @@ app.get("/api/samples", async (req, res) => {
       samples = samples.filter((s) => s.doctorName.toLowerCase().trim() === key);
     }
     if (visitId) samples = samples.filter((s) => s.visitId === visitId);
-    res.json({ samples: samples.slice(0, clampLimit(limit, 50, 500)) });
+    // Same manager/supervisor-only full-history override as /api/visits —
+    // the Rep Performance PDF's visit-details section needs every sample in
+    // the chosen window, not just the newest 500.
+    const wantsAll = all === "true" && (req.role === "manager" || req.isSupervisor);
+    res.json({ samples: wantsAll ? samples : samples.slice(0, clampLimit(limit, 50, 500)) });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
