@@ -10838,8 +10838,10 @@ function RepActivityToday({ repNames }) {
 // section lists every in-person visit in the window by name, with its order
 // status (pharmacies/nutritionists only — doctors never place orders, see
 // CheckInView's STEP_KEYS) and any sample given, sourced from the Samples
-// sheet matched by visitId.
-function downloadRepPerformancePdfForRange(fromDateStr, toDateStr, repNames, visits, orders, samples, doctors, nutritionists) {
+// sheet matched by visitId. "Test" is a fake rep account used for in-app
+// QA, not a real med rep, so it's dropped from this report entirely.
+function downloadRepPerformancePdfForRange(fromDateStr, toDateStr, repNamesIn, visits, orders, samples, doctors, nutritionists) {
+  const repNames = repNamesIn.filter((name) => name.toLowerCase().trim() !== "test");
   const isDoctorName = (name) => doctors.some((d) => d.name.toLowerCase().trim() === name.toLowerCase().trim());
   const isNutritionistName = (name) => nutritionists.some((n) => n.name.toLowerCase().trim() === name.toLowerCase().trim());
   const countsFor = (repVisits) => {
@@ -10900,7 +10902,8 @@ function downloadRepPerformancePdfForRange(fromDateStr, toDateStr, repNames, vis
   // ---- Visit Details — one block per rep who had at least one in-person
   // visit in the window, one line per visit, in the format the manager
   // asked for: "<name> — <order status if applicable> — sample given:
-  // <product(s) or none> — day visited: <date>". ----
+  // <product(s)> — <date>", with the sample clause dropped entirely when no
+  // sample was given (not printed as "sample given: none"). ----
   const pageHeight = doc.internal.pageSize.getHeight();
   let y = (doc.lastAutoTable?.finalY || 50) + 12;
   const ensureSpace = (needed) => {
@@ -10938,12 +10941,12 @@ function downloadRepPerformancePdfForRange(fromDateStr, toDateStr, repNames, vis
         .filter((s) => s.visitId === v.id && s.status === "gave")
         .map((s) => s.productName)
         .filter(Boolean);
-      const sampleText = sampleNames.length ? sampleNames.join(", ") : "none";
+      const sampleClause = sampleNames.length ? ` — sample given: ${sampleNames.join(", ")}` : "";
       const dayVisited = fmtShortDate(v.time);
 
       const line = isDoctorName(v.client)
-        ? `${v.client} — sample given: ${sampleText} — day visited: ${dayVisited}`
-        : `${v.client} — ${orders.some((o) => o.visitId === v.id) ? "order placed" : "no order"} — sample given: ${sampleText} — day visited: ${dayVisited}`;
+        ? `${v.client}${sampleClause} — ${dayVisited}`
+        : `${v.client} — ${orders.some((o) => o.visitId === v.id) ? "order placed" : "no order"}${sampleClause} — ${dayVisited}`;
 
       const wrapped = doc.splitTextToSize(line, 180);
       ensureSpace(wrapped.length * 5 + 2);
