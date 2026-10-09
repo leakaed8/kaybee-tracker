@@ -11101,12 +11101,23 @@ function PerformanceView({
 
       {subView === "overview" && repNames.length > 0 && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-          <Field label="Daily Rep Performance report for">
-            <input type="date" value={exportDateStr} max={todayBeirutStr()} onChange={(e) => setExportDateStr(e.target.value)} style={inputStyle} />
-          </Field>
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", marginRight: -2 }}>Daily Rep Performance report for</div>
+          <button onClick={() => setExportDateStr((d) => addDaysToDateStr(d, -1))} aria-label="Previous day"
+            style={{ width: 28, height: 28, borderRadius: 14, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 15, cursor: "pointer" }}>
+            ‹
+          </button>
+          <input type="date" value={exportDateStr} max={todayBeirutStr()} onChange={(e) => setExportDateStr(e.target.value)} style={{ ...inputStyle, width: "auto" }} />
+          <button onClick={() => setExportDateStr((d) => addDaysToDateStr(d, 1))} disabled={exportDateStr >= todayBeirutStr()} aria-label="Next day"
+            style={{ width: 28, height: 28, borderRadius: 14, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 15, cursor: exportDateStr >= todayBeirutStr() ? "default" : "pointer", opacity: exportDateStr >= todayBeirutStr() ? 0.35 : 1 }}>
+            ›
+          </button>
+          <button onClick={() => setExportDateStr(todayBeirutStr())} disabled={exportDateStr === todayBeirutStr()}
+            style={{ padding: "6px 12px", borderRadius: 14, fontSize: 11.5, fontWeight: 500, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", cursor: exportDateStr === todayBeirutStr() ? "default" : "pointer", opacity: exportDateStr === todayBeirutStr() ? 0.35 : 1 }}>
+            Today
+          </button>
           <button
             onClick={() => downloadDailyRepPerformancePdf(exportDateStr, exportDateStr.slice(0, 7), repNames, visits, doctors, nutritionists)}
-            style={{ padding: "9px 16px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, border: "1px solid #1F2A24", background: "#1F2A24", color: "#FAF7F2", cursor: "pointer", display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-end" }}>
+            style={{ padding: "9px 16px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, border: "1px solid #1F2A24", background: "#1F2A24", color: "#FAF7F2", cursor: "pointer", display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
             <Download size={14} /> Export Daily PDF
           </button>
         </div>
