@@ -10832,10 +10832,11 @@ function RepActivityToday({ repNames }) {
 // Daily Rep Performance PDF — built client-side with the same jsPDF/autoTable
 // pattern as downloadOrderPdf. Reuses the exact pharmacy/doctor/nutritionist
 // classification logic from RepPerformanceCard (in-person visits only,
-// pharmacy count derived by subtraction), just filtered by a single Beirut
-// calendar day instead of a month, plus a month-to-date column for context —
-// a lone day's number is noise without it.
-function downloadDailyRepPerformancePdf(dateStr, monthKey, repNames, visits, doctors, nutritionists) {
+// pharmacy count derived by subtraction), filtered by a manager-chosen
+// Beirut calendar-day window (fromDateStr..toDateStr inclusive, a single day
+// when both are equal) instead of a fixed single day, plus a month-to-date
+// column for context — a single window's number is noise without it.
+function downloadRepPerformancePdfForRange(fromDateStr, toDateStr, monthKey, repNames, visits, doctors, nutritionists) {
   const isDoctorName = (name) => doctors.some((d) => d.name.toLowerCase().trim() === name.toLowerCase().trim());
   const isNutritionistName = (name) => nutritionists.some((n) => n.name.toLowerCase().trim() === name.toLowerCase().trim());
   const countsFor = (repVisits) => {
@@ -10846,37 +10847,45 @@ function downloadDailyRepPerformancePdf(dateStr, monthKey, repNames, visits, doc
     return { pharmacyCount, doctorCount, nutritionistCount, total: inPerson.length };
   };
 
+  const isSingleDay = fromDateStr === toDateStr;
   const rows = repNames.map((name) => {
     const repVisits = visits.filter((v) => v.repName === name);
-    const day = countsFor(repVisits.filter((v) => beirutDateStrOfInstant(v.time) === dateStr));
+    const range = countsFor(repVisits.filter((v) => {
+      const d = beirutDateStrOfInstant(v.time);
+      return d >= fromDateStr && d <= toDateStr;
+    }));
     const month = countsFor(repVisits.filter((v) => beirutDateStrOfInstant(v.time).slice(0, 7) === monthKey));
-    return { name, day, month };
+    return { name, range, month };
   });
   // Zero-visit reps first, then busiest-to-quietest — the attention-worthy
   // cases float to the top instead of being buried alphabetically.
   rows.sort((a, b) => {
-    if ((a.day.total === 0) !== (b.day.total === 0)) return a.day.total === 0 ? -1 : 1;
-    return b.day.total - a.day.total;
+    if ((a.range.total === 0) !== (b.range.total === 0)) return a.range.total === 0 ? -1 : 1;
+    return b.range.total - a.range.total;
   });
-  const zeroVisitRowIndexes = new Set(rows.map((r, i) => (r.day.total === 0 ? i : -1)).filter((i) => i !== -1));
+  const zeroVisitRowIndexes = new Set(rows.map((r, i) => (r.range.total === 0 ? i : -1)).filter((i) => i !== -1));
+
+  const fmtLongDate = (dateStr) => new Date(`${dateStr}T12:00:00`).toLocaleDateString("en-GB", { timeZone: "Asia/Beirut", weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  const rangeColumnLabel = isSingleDay ? "today" : "range";
+  const noVisitsLabel = isSingleDay ? " (no visits today)" : " (no visits in range)";
 
   const doc = new jsPDF();
   doc.setFontSize(16);
-  doc.text("KayBee Pharma — Daily Rep Performance", 14, 18);
+  doc.text("KayBee Pharma — Rep Performance", 14, 18);
   doc.setFontSize(10);
-  doc.text(`Date: ${new Date(`${dateStr}T12:00:00`).toLocaleDateString("en-GB", { timeZone: "Asia/Beirut", weekday: "long", day: "numeric", month: "long", year: "numeric" })}`, 14, 28);
+  doc.text(isSingleDay ? `Date: ${fmtLongDate(fromDateStr)}` : `Date range: ${fmtLongDate(fromDateStr)}  to  ${fmtLongDate(toDateStr)}`, 14, 28);
   doc.text(`Generated: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Beirut" })}`, 14, 34);
 
   autoTable(doc, {
     startY: 42,
     head: [[
       "Rep",
-      "Pharmacies\n(today)", "Doctors\n(today)", "Nutritionists\n(today)", "Total\n(today)",
+      `Pharmacies\n(${rangeColumnLabel})`, `Doctors\n(${rangeColumnLabel})`, `Nutritionists\n(${rangeColumnLabel})`, `Total\n(${rangeColumnLabel})`,
       "Pharmacies\n(MTD)", "Doctors\n(MTD)", "Nutritionists\n(MTD)", "Total\n(MTD)",
     ]],
     body: rows.map((r) => [
-      r.name + (r.day.total === 0 ? " (no visits today)" : ""),
-      String(r.day.pharmacyCount), String(r.day.doctorCount), String(r.day.nutritionistCount), String(r.day.total),
+      r.name + (r.range.total === 0 ? noVisitsLabel : ""),
+      String(r.range.pharmacyCount), String(r.range.doctorCount), String(r.range.nutritionistCount), String(r.range.total),
       String(r.month.pharmacyCount), String(r.month.doctorCount), String(r.month.nutritionistCount), String(r.month.total),
     ]),
     styles: { fontSize: 8.5, halign: "center" },
@@ -10890,7 +10899,7 @@ function downloadDailyRepPerformancePdf(dateStr, monthKey, repNames, visits, doc
     },
   });
 
-  doc.save(`daily-rep-performance-${dateStr}.pdf`);
+  doc.save(isSingleDay ? `daily-rep-performance-${fromDateStr}.pdf` : `rep-performance-${fromDateStr}_to_${toDateStr}.pdf`);
 }
 
 function PerformanceView({
@@ -10918,10 +10927,11 @@ function PerformanceView({
     return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
   };
 
-  // Daily Rep Performance PDF — defaults to today (Beirut), but a manager can
-  // back-date it (e.g. generating the prior day's report first thing in the
-  // morning).
-  const [exportDateStr, setExportDateStr] = useState(todayBeirutStr());
+  // Daily Rep Performance PDF — a manager-chosen window (defaults to just
+  // today, Beirut time) rather than a single fixed day, so a week's or a
+  // month's worth of activity can be exported in one report.
+  const [exportFromDateStr, setExportFromDateStr] = useState(todayBeirutStr());
+  const [exportToDateStr, setExportToDateStr] = useState(todayBeirutStr());
 
   // Fetched once when this tab is opened (manager/supervisor-only, not
   // polled) instead of the whole visits/orders history riding along in
@@ -10933,8 +10943,21 @@ function PerformanceView({
   const [reps, setReps] = useState([]);
   const [repTargetsByName, setRepTargetsByName] = useState({});
   const [followUps, setFollowUps] = useState([]);
+  // Tracked specifically (not just swallowed into a silent catch) because
+  // the Daily Rep Performance export reads straight from `visits` — if that
+  // fetch hasn't finished yet or failed outright, exporting would silently
+  // produce an all-zero PDF with no indication anything was wrong. The
+  // export button below is disabled until this reads "ready", and a failure
+  // surfaces a retry control instead of failing silently.
+  const [visitsStatus, setVisitsStatus] = useState("loading"); // loading | ready | error
+  const loadVisits = () => {
+    setVisitsStatus("loading");
+    return api.getVisits({ all: true })
+      .then((data) => { setVisits(data.visits || []); setVisitsStatus("ready"); })
+      .catch(() => setVisitsStatus("error"));
+  };
   useEffect(() => {
-    api.getVisits({ all: true }).then((data) => setVisits(data.visits || [])).catch(() => {});
+    loadVisits();
     api.getOrders({ all: true }).then((data) => setOrders(data.orders || [])).catch(() => {});
     // GET /api/reps is manager-only server-side (it includes passcodes) —
     // a supervisor session gets a 403 here, which the .catch below turns
@@ -11101,24 +11124,52 @@ function PerformanceView({
 
       {subView === "overview" && repNames.length > 0 && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-          <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", marginRight: -2 }}>Daily Rep Performance report for</div>
-          <button onClick={() => setExportDateStr((d) => addDaysToDateStr(d, -1))} aria-label="Previous day"
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", marginRight: -2 }}>Rep Performance report, from</div>
+          <input type="date" value={exportFromDateStr} max={exportToDateStr} onChange={(e) => {
+            const v = e.target.value;
+            setExportFromDateStr(v);
+            if (v > exportToDateStr) setExportToDateStr(v);
+          }} style={{ ...inputStyle, width: "auto" }} />
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272" }}>to</div>
+          <input type="date" value={exportToDateStr} min={exportFromDateStr} max={todayBeirutStr()} onChange={(e) => {
+            const v = e.target.value;
+            setExportToDateStr(v);
+            if (v < exportFromDateStr) setExportFromDateStr(v);
+          }} style={{ ...inputStyle, width: "auto" }} />
+          <button onClick={() => {
+            setExportFromDateStr((d) => addDaysToDateStr(d, -1));
+            setExportToDateStr((d) => addDaysToDateStr(d, -1));
+          }} aria-label="Shift window back one day"
             style={{ width: 28, height: 28, borderRadius: 14, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 15, cursor: "pointer" }}>
             ‹
           </button>
-          <input type="date" value={exportDateStr} max={todayBeirutStr()} onChange={(e) => setExportDateStr(e.target.value)} style={{ ...inputStyle, width: "auto" }} />
-          <button onClick={() => setExportDateStr((d) => addDaysToDateStr(d, 1))} disabled={exportDateStr >= todayBeirutStr()} aria-label="Next day"
-            style={{ width: 28, height: 28, borderRadius: 14, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 15, cursor: exportDateStr >= todayBeirutStr() ? "default" : "pointer", opacity: exportDateStr >= todayBeirutStr() ? 0.35 : 1 }}>
+          <button onClick={() => {
+            setExportFromDateStr((d) => addDaysToDateStr(d, 1));
+            setExportToDateStr((d) => addDaysToDateStr(d, 1));
+          }} disabled={exportToDateStr >= todayBeirutStr()} aria-label="Shift window forward one day"
+            style={{ width: 28, height: 28, borderRadius: 14, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 15, cursor: exportToDateStr >= todayBeirutStr() ? "default" : "pointer", opacity: exportToDateStr >= todayBeirutStr() ? 0.35 : 1 }}>
             ›
           </button>
-          <button onClick={() => setExportDateStr(todayBeirutStr())} disabled={exportDateStr === todayBeirutStr()}
-            style={{ padding: "6px 12px", borderRadius: 14, fontSize: 11.5, fontWeight: 500, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", cursor: exportDateStr === todayBeirutStr() ? "default" : "pointer", opacity: exportDateStr === todayBeirutStr() ? 0.35 : 1 }}>
+          <button onClick={() => { setExportFromDateStr(todayBeirutStr()); setExportToDateStr(todayBeirutStr()); }}
+            disabled={exportFromDateStr === todayBeirutStr() && exportToDateStr === todayBeirutStr()}
+            style={{ padding: "6px 12px", borderRadius: 14, fontSize: 11.5, fontWeight: 500, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", cursor: "pointer" }}>
             Today
           </button>
+          {visitsStatus === "error" && (
+            <button onClick={loadVisits}
+              style={{ padding: "6px 12px", borderRadius: 14, fontSize: 11.5, fontWeight: 600, border: "1px solid #B33A3A", background: "#fff", color: "#B33A3A", cursor: "pointer" }}>
+              Couldn't load visit data — Retry
+            </button>
+          )}
+          {visitsStatus === "loading" && (
+            <div style={{ fontSize: 11.5, color: "#8A8272" }}>Loading visit data…</div>
+          )}
           <button
-            onClick={() => downloadDailyRepPerformancePdf(exportDateStr, exportDateStr.slice(0, 7), repNames, visits, doctors, nutritionists)}
-            style={{ padding: "9px 16px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, border: "1px solid #1F2A24", background: "#1F2A24", color: "#FAF7F2", cursor: "pointer", display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
-            <Download size={14} /> Export Daily PDF
+            onClick={() => downloadRepPerformancePdfForRange(exportFromDateStr, exportToDateStr, thisMonthKey, repNames, visits, doctors, nutritionists)}
+            disabled={visitsStatus !== "ready"}
+            title={visitsStatus !== "ready" ? "Visit data hasn't finished loading yet" : undefined}
+            style={{ padding: "9px 16px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, border: "1px solid #1F2A24", background: visitsStatus === "ready" ? "#1F2A24" : "#C8C2B4", color: "#FAF7F2", cursor: visitsStatus === "ready" ? "pointer" : "default", display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
+            <Download size={14} /> Export PDF
           </button>
         </div>
       )}
