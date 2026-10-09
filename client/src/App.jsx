@@ -10829,6 +10829,70 @@ function RepActivityToday({ repNames }) {
   );
 }
 
+// Daily Rep Performance PDF — built client-side with the same jsPDF/autoTable
+// pattern as downloadOrderPdf. Reuses the exact pharmacy/doctor/nutritionist
+// classification logic from RepPerformanceCard (in-person visits only,
+// pharmacy count derived by subtraction), just filtered by a single Beirut
+// calendar day instead of a month, plus a month-to-date column for context —
+// a lone day's number is noise without it.
+function downloadDailyRepPerformancePdf(dateStr, monthKey, repNames, visits, doctors, nutritionists) {
+  const isDoctorName = (name) => doctors.some((d) => d.name.toLowerCase().trim() === name.toLowerCase().trim());
+  const isNutritionistName = (name) => nutritionists.some((n) => n.name.toLowerCase().trim() === name.toLowerCase().trim());
+  const countsFor = (repVisits) => {
+    const inPerson = repVisits.filter(isInPersonVisit);
+    const doctorCount = inPerson.filter((v) => isDoctorName(v.client)).length;
+    const nutritionistCount = inPerson.filter((v) => isNutritionistName(v.client)).length;
+    const pharmacyCount = inPerson.length - doctorCount - nutritionistCount;
+    return { pharmacyCount, doctorCount, nutritionistCount, total: inPerson.length };
+  };
+
+  const rows = repNames.map((name) => {
+    const repVisits = visits.filter((v) => v.repName === name);
+    const day = countsFor(repVisits.filter((v) => beirutDateStrOfInstant(v.time) === dateStr));
+    const month = countsFor(repVisits.filter((v) => beirutDateStrOfInstant(v.time).slice(0, 7) === monthKey));
+    return { name, day, month };
+  });
+  // Zero-visit reps first, then busiest-to-quietest — the attention-worthy
+  // cases float to the top instead of being buried alphabetically.
+  rows.sort((a, b) => {
+    if ((a.day.total === 0) !== (b.day.total === 0)) return a.day.total === 0 ? -1 : 1;
+    return b.day.total - a.day.total;
+  });
+  const zeroVisitRowIndexes = new Set(rows.map((r, i) => (r.day.total === 0 ? i : -1)).filter((i) => i !== -1));
+
+  const doc = new jsPDF();
+  doc.setFontSize(16);
+  doc.text("KayBee Pharma — Daily Rep Performance", 14, 18);
+  doc.setFontSize(10);
+  doc.text(`Date: ${new Date(`${dateStr}T12:00:00`).toLocaleDateString("en-GB", { timeZone: "Asia/Beirut", weekday: "long", day: "numeric", month: "long", year: "numeric" })}`, 14, 28);
+  doc.text(`Generated: ${new Date().toLocaleString("en-GB", { timeZone: "Asia/Beirut" })}`, 14, 34);
+
+  autoTable(doc, {
+    startY: 42,
+    head: [[
+      "Rep",
+      "Pharmacies\n(today)", "Doctors\n(today)", "Nutritionists\n(today)", "Total\n(today)",
+      "Pharmacies\n(MTD)", "Doctors\n(MTD)", "Nutritionists\n(MTD)", "Total\n(MTD)",
+    ]],
+    body: rows.map((r) => [
+      r.name + (r.day.total === 0 ? " (no visits today)" : ""),
+      String(r.day.pharmacyCount), String(r.day.doctorCount), String(r.day.nutritionistCount), String(r.day.total),
+      String(r.month.pharmacyCount), String(r.month.doctorCount), String(r.month.nutritionistCount), String(r.month.total),
+    ]),
+    styles: { fontSize: 8.5, halign: "center" },
+    columnStyles: { 0: { halign: "left", fontStyle: "bold" } },
+    headStyles: { fillColor: [31, 42, 36], halign: "center" },
+    didParseCell: (data) => {
+      if (data.section === "body" && zeroVisitRowIndexes.has(data.row.index)) {
+        data.cell.styles.fillColor = [250, 228, 228];
+        data.cell.styles.textColor = [140, 40, 40];
+      }
+    },
+  });
+
+  doc.save(`daily-rep-performance-${dateStr}.pdf`);
+}
+
 function PerformanceView({
   clients, doctors, nutritionists = [], repNames, monthlyVisitTarget, setMonthlyVisitTarget, monthlyRevenueTarget, setMonthlyRevenueTarget, isSupervisor,
   role, qualityCallRequiredFields, tierVisitFrequency,
@@ -10853,6 +10917,11 @@ function PerformanceView({
     const [y, m] = key.split("-").map(Number);
     return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
   };
+
+  // Daily Rep Performance PDF — defaults to today (Beirut), but a manager can
+  // back-date it (e.g. generating the prior day's report first thing in the
+  // morning).
+  const [exportDateStr, setExportDateStr] = useState(todayBeirutStr());
 
   // Fetched once when this tab is opened (manager/supervisor-only, not
   // polled) instead of the whole visits/orders history riding along in
@@ -11029,6 +11098,19 @@ function PerformanceView({
           </div>
         )}
       </div>
+
+      {subView === "overview" && repNames.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+          <Field label="Daily Rep Performance report for">
+            <input type="date" value={exportDateStr} max={todayBeirutStr()} onChange={(e) => setExportDateStr(e.target.value)} style={inputStyle} />
+          </Field>
+          <button
+            onClick={() => downloadDailyRepPerformancePdf(exportDateStr, exportDateStr.slice(0, 7), repNames, visits, doctors, nutritionists)}
+            style={{ padding: "9px 16px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, border: "1px solid #1F2A24", background: "#1F2A24", color: "#FAF7F2", cursor: "pointer", display: "flex", alignItems: "center", gap: 6, alignSelf: "flex-end" }}>
+            <Download size={14} /> Export Daily PDF
+          </button>
+        </div>
+      )}
 
       {subView === "targets" ? (
         <TargetsView repNames={repNames} reps={reps} />
