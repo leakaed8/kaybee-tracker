@@ -10754,6 +10754,328 @@ function ReviewsView({ repNames, visits, followUps, clients, doctors, repTargets
   );
 }
 
+// Sales Contests (motivation/recognition tool) — standings are always
+// computed live server-side from Visits/Orders, same convention as every
+// other Performance KPI; this view just shows the config + live leaderboard.
+const CONTEST_METRIC_OPTIONS = [
+  { value: "visits", label: "Visits (in-person)" },
+  { value: "revenue", label: "Revenue collected ($)" },
+];
+
+function ContestsView({ role }) {
+  const [contests, setContests] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [title, setTitle] = useState("");
+  const [metric, setMetric] = useState("visits");
+  const [startDate, setStartDate] = useState(todayBeirutStr());
+  const [endDate, setEndDate] = useState(todayBeirutStr());
+  const [prizeDescription, setPrizeDescription] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [leaderboards, setLeaderboards] = useState({}); // contestId -> standings[]
+  const [closingId, setClosingId] = useState(null);
+
+  const load = () => {
+    setLoading(true);
+    api.getSalesContests().then((data) => setContests(data.contests || [])).catch(() => setContests([])).finally(() => setLoading(false));
+  };
+  useEffect(load, []);
+
+  useEffect(() => {
+    contests.forEach((c) => {
+      api.getContestLeaderboard(c.id).then((data) => setLeaderboards((prev) => ({ ...prev, [c.id]: data.standings || [] }))).catch(() => {});
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contests.length]);
+
+  const openForm = () => {
+    setShowForm(true);
+    setTitle(""); setMetric("visits"); setStartDate(todayBeirutStr()); setEndDate(todayBeirutStr()); setPrizeDescription(""); setError("");
+  };
+
+  const saveContest = async () => {
+    if (!title.trim()) { setError("Title is required."); return; }
+    if (endDate < startDate) { setError("End date can't be before start date."); return; }
+    setSaving(true);
+    setError("");
+    try {
+      await api.createSalesContest({ title: title.trim(), metric, startDate, endDate, prizeDescription });
+      setShowForm(false);
+      load();
+    } catch (e) {
+      setError(e?.message || "Couldn't create the contest.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const closeContest = async (id) => {
+    setClosingId(id);
+    try {
+      await api.closeSalesContest(id);
+      load();
+    } catch {
+      // Silent — the Close button stays visible so the manager can retry.
+    } finally {
+      setClosingId(null);
+    }
+  };
+
+  const activeContests = contests.filter((c) => c.status === "active");
+  const closedContests = contests.filter((c) => c.status === "closed");
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>Sales Contests</div>
+        {role === "manager" && (
+          <button onClick={openForm} style={{ padding: "9px 16px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, border: "1px solid #1F2A24", background: "#1F2A24", color: "#FAF7F2", cursor: "pointer" }}>
+            + New Contest
+          </button>
+        )}
+      </div>
+
+      {showForm && (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>New Sales Contest</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12, marginBottom: 12 }}>
+            <Field label="Title"><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. October Visit Sprint" style={inputStyle} /></Field>
+            <Field label="Metric">
+              <select value={metric} onChange={(e) => setMetric(e.target.value)} style={inputStyle}>
+                {CONTEST_METRIC_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </Field>
+            <Field label="Start date"><input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} style={inputStyle} /></Field>
+            <Field label="End date"><input type="date" value={endDate} min={startDate} onChange={(e) => setEndDate(e.target.value)} style={inputStyle} /></Field>
+          </div>
+          <Field label="Prize"><input value={prizeDescription} onChange={(e) => setPrizeDescription(e.target.value)} placeholder="e.g. $100 gift card" style={{ ...inputStyle, marginBottom: 10 }} /></Field>
+          {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setShowForm(false)} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>Cancel</button>
+            <button onClick={saveContest} disabled={saving} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+              {saving ? "Saving…" : "Create Contest"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>
+      ) : contests.length === 0 ? (
+        <EmptyState text="No contests yet." />
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+          {activeContests.length > 0 && (
+            <div>
+              <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", textTransform: "uppercase", marginBottom: 8 }}>Active</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {activeContests.map((c) => (
+                  <ContestCard key={c.id} contest={c} standings={leaderboards[c.id] || []}
+                    onClose={role === "manager" ? () => closeContest(c.id) : null} closing={closingId === c.id} />
+                ))}
+              </div>
+            </div>
+          )}
+          {closedContests.length > 0 && (
+            <div>
+              <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", textTransform: "uppercase", marginBottom: 8 }}>Past Contests</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {closedContests.map((c) => <ContestCard key={c.id} contest={c} standings={leaderboards[c.id] || []} />)}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ContestCard({ contest, standings, onClose, closing }) {
+  const metricLabel = CONTEST_METRIC_OPTIONS.find((o) => o.value === contest.metric)?.label || contest.metric;
+  const fmtValue = (v) => (contest.metric === "revenue" ? `$${Number(v).toLocaleString()}` : Number(v).toLocaleString());
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+        <div>
+          <div style={{ fontSize: 13.5, fontWeight: 600 }}>{contest.title}</div>
+          <div style={{ fontSize: 11.5, color: "#8A8272" }}>
+            {metricLabel} · {fmtDateOfInstant(contest.startDate)} – {fmtDateOfInstant(contest.endDate)}
+            {contest.prizeDescription && ` · Prize: ${contest.prizeDescription}`}
+          </div>
+        </div>
+        {onClose && (
+          <button onClick={onClose} disabled={closing} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 11.5, cursor: "pointer" }}>
+            {closing ? "Closing…" : "Close Contest"}
+          </button>
+        )}
+      </div>
+      {contest.status === "closed" && contest.winnerRepName && (
+        <div style={{ fontSize: 12.5, color: "#4C7A5E", fontWeight: 600, marginBottom: 8 }}>
+          Winner: {contest.winnerRepName} ({fmtValue(contest.winnerValue)})
+        </div>
+      )}
+      {standings.length === 0 ? (
+        <div style={{ fontSize: 12, color: "#8A8272" }}>No activity yet.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {standings.slice(0, 5).map((s, i) => (
+            <div key={s.repName} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "4px 0", borderTop: i > 0 ? "1px solid #F0EBE0" : "none" }}>
+              <div>{i + 1}. {s.repName}</div>
+              <div style={{ fontWeight: 600 }}>{fmtValue(s.value)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Monthly Commission / Bonus — computed live server-side from Orders vs.
+// each rep's revenueTarget (same convention RepPerformanceCard already
+// uses), against a manager-configurable CompensationPlans rate. Manager-only
+// (gated by the "Compensation" tab itself only showing for role==="manager").
+function CompensationView() {
+  const [monthKey, setMonthKey] = useState(todayBeirutStr().slice(0, 7));
+  const [summary, setSummary] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [plans, setPlans] = useState([]);
+  const [editingRep, setEditingRep] = useState(null); // "" = default plan, or a repName; null = closed
+  const [formCommissionPct, setFormCommissionPct] = useState(0);
+  const [formBonusThresholdPct, setFormBonusThresholdPct] = useState(0);
+  const [formBonusAmount, setFormBonusAmount] = useState(0);
+  const [saving, setSaving] = useState(false);
+
+  const loadSummary = (mk) => {
+    setLoading(true);
+    api.getCompensationSummary({ monthKey: mk }).then((data) => setSummary(data.summary || [])).catch(() => setSummary([])).finally(() => setLoading(false));
+  };
+  useEffect(() => { loadSummary(monthKey); }, [monthKey]);
+  useEffect(() => {
+    api.getCompensationPlans().then((data) => setPlans(data.plans || [])).catch(() => setPlans([]));
+  }, []);
+
+  const openEdit = (repName) => {
+    const plan = plans.find((p) => p.repName === repName) || { commissionPct: 0, bonusThresholdPct: 0, bonusAmount: 0 };
+    setEditingRep(repName);
+    setFormCommissionPct(plan.commissionPct);
+    setFormBonusThresholdPct(plan.bonusThresholdPct);
+    setFormBonusAmount(plan.bonusAmount);
+  };
+
+  const savePlan = async () => {
+    setSaving(true);
+    try {
+      const saved = await api.saveCompensationPlan({
+        repName: editingRep, commissionPct: formCommissionPct, bonusThresholdPct: formBonusThresholdPct, bonusAmount: formBonusAmount,
+      });
+      setPlans((prev) => {
+        const idx = prev.findIndex((p) => p.repName === editingRep);
+        return idx === -1 ? [...prev, saved] : prev.map((p, i) => (i === idx ? saved : p));
+      });
+      setEditingRep(null);
+      loadSummary(monthKey);
+    } catch {
+      // Keep the form open so the manager can retry.
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const [y, m] = monthKey.split("-").map(Number);
+  const monthLabel = new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
+  const shiftMonth = (delta) => {
+    const d = new Date(Date.UTC(y, m - 1 + delta, 1));
+    setMonthKey(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`);
+  };
+
+  const defaultPlan = plans.find((p) => p.repName === "") || { commissionPct: 0, bonusThresholdPct: 0, bonusAmount: 0 };
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>Monthly Commission / Bonus</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
+          <button onClick={() => shiftMonth(-1)} style={{ width: 28, height: 28, borderRadius: 14, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 15, cursor: "pointer" }}>‹</button>
+          <div style={{ fontSize: 12.5, fontWeight: 600, minWidth: 120, textAlign: "center" }}>{monthLabel}</div>
+          <button onClick={() => shiftMonth(1)} style={{ width: 28, height: 28, borderRadius: 14, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 15, cursor: "pointer" }}>›</button>
+        </div>
+      </div>
+
+      <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, marginBottom: 16, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 12, color: "#8A8272" }}>
+          Default plan: {defaultPlan.commissionPct}% commission{defaultPlan.bonusThresholdPct > 0 ? `, $${defaultPlan.bonusAmount} bonus at ${defaultPlan.bonusThresholdPct}%+ of target` : ", no bonus set"}
+        </div>
+        <button onClick={() => openEdit("")} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 11.5, cursor: "pointer" }}>Edit default plan</button>
+      </div>
+
+      {editingRep !== null && (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>
+            {editingRep === "" ? "Default Compensation Plan" : `Compensation Plan — ${editingRep}`}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12, marginBottom: 12 }}>
+            <Field label="Commission (% of revenue)">
+              <input type="number" min="0" max="100" value={formCommissionPct} onChange={(e) => setFormCommissionPct(Number(e.target.value) || 0)} style={inputStyle} />
+            </Field>
+            <Field label="Bonus threshold (% of target)">
+              <input type="number" min="0" value={formBonusThresholdPct} onChange={(e) => setFormBonusThresholdPct(Number(e.target.value) || 0)} style={inputStyle} />
+            </Field>
+            <Field label="Bonus amount ($)">
+              <input type="number" min="0" value={formBonusAmount} onChange={(e) => setFormBonusAmount(Number(e.target.value) || 0)} style={inputStyle} />
+            </Field>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setEditingRep(null)} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>Cancel</button>
+            <button onClick={savePlan} disabled={saving} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+              {saving ? "Saving…" : "Save Plan"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>
+      ) : summary.length === 0 ? (
+        <EmptyState text="No reps found." />
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+            <thead>
+              <tr style={{ textAlign: "left", borderBottom: "1px solid #E5DFD3" }}>
+                <th style={{ padding: "8px 6px" }}>Rep</th>
+                <th style={{ padding: "8px 6px" }}>Revenue</th>
+                <th style={{ padding: "8px 6px" }}>Target</th>
+                <th style={{ padding: "8px 6px" }}>Attainment</th>
+                <th style={{ padding: "8px 6px" }}>Commission</th>
+                <th style={{ padding: "8px 6px" }}>Bonus</th>
+                <th style={{ padding: "8px 6px" }}>Total Payout</th>
+                <th style={{ padding: "8px 6px" }} />
+              </tr>
+            </thead>
+            <tbody>
+              {summary.map((s) => (
+                <tr key={s.repName} style={{ borderBottom: "1px solid #F0EBE0" }}>
+                  <td style={{ padding: "8px 6px", fontWeight: 600 }}>{s.repName}</td>
+                  <td style={{ padding: "8px 6px" }}>${s.revenue.toLocaleString()}</td>
+                  <td style={{ padding: "8px 6px" }}>{s.revenueTarget > 0 ? `$${s.revenueTarget.toLocaleString()}` : "—"}</td>
+                  <td style={{ padding: "8px 6px" }}>{s.attainmentPct == null ? "—" : `${s.attainmentPct}%`}</td>
+                  <td style={{ padding: "8px 6px" }}>${s.commissionAmount.toLocaleString()} ({s.commissionPct}%)</td>
+                  <td style={{ padding: "8px 6px", color: s.bonusEarned ? "#4C7A5E" : "#8A8272" }}>{s.bonusEarned ? `$${s.bonusAmount.toLocaleString()}` : "—"}</td>
+                  <td style={{ padding: "8px 6px", fontWeight: 700 }}>${s.totalPayout.toLocaleString()}</td>
+                  <td style={{ padding: "8px 6px" }}>
+                    <button onClick={() => openEdit(s.repName)} style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 11, cursor: "pointer" }}>Edit plan</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function accountStatusList(clients, doctors, visits) {
   const lastVisitFor = (name) => {
     const matches = visits.filter((v) => v.client.toLowerCase().trim() === name.toLowerCase().trim());
@@ -11402,7 +11724,7 @@ function PerformanceView({
   // rather than a device-local Date range.
   const [beirutYear, beirutMonth] = todayBeirutStr().split("-").map(Number);
   const thisMonthKey = `${beirutYear}-${String(beirutMonth).padStart(2, "0")}`;
-  const [subView, setSubView] = useState("overview"); // overview | targets
+  const [subView, setSubView] = useState("overview"); // overview | targets | objections | reviews | contests | compensation
 
   // Month picker for the per-rep performance cards below — lets a manager
   // browse any past month's detailed stats, not just the current one.
@@ -11624,6 +11946,14 @@ function PerformanceView({
             Reviews
           </button>
         )}
+        <button onClick={() => setSubView("contests")} style={{ padding: "7px 16px", borderRadius: 16, fontSize: 12.5, fontWeight: 500, border: subView === "contests" ? "1px solid #1F2A24" : "1px solid #E5DFD3", background: subView === "contests" ? "#1F2A24" : "#fff", color: subView === "contests" ? "#FAF7F2" : "#5B5445" }}>
+          Contests
+        </button>
+        {role === "manager" && (
+          <button onClick={() => setSubView("compensation")} style={{ padding: "7px 16px", borderRadius: 16, fontSize: 12.5, fontWeight: 500, border: subView === "compensation" ? "1px solid #1F2A24" : "1px solid #E5DFD3", background: subView === "compensation" ? "#1F2A24" : "#fff", color: subView === "compensation" ? "#FAF7F2" : "#5B5445" }}>
+            Compensation
+          </button>
+        )}
         {(subView === "overview" || subView === "objections") && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
             <button onClick={() => setViewMonthKey((k) => shiftMonthKey(k, -1))} aria-label="Previous month"
@@ -11700,6 +12030,10 @@ function PerformanceView({
       ) : subView === "reviews" ? (
         <ReviewsView repNames={repNames} visits={visits} followUps={followUps} clients={clients} doctors={doctors}
           repTargetsByName={repTargetsByName} monthlyVisitTarget={monthlyVisitTarget} qualityCallRequiredFields={qualityCallRequiredFields} />
+      ) : subView === "contests" ? (
+        <ContestsView role={role} />
+      ) : subView === "compensation" ? (
+        <CompensationView />
       ) : (
       <>
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>

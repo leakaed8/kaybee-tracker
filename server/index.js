@@ -1982,6 +1982,218 @@ app.patch("/api/performance-reviews/:id/acknowledge", async (req, res) => {
   }
 });
 
+// Sales Contests (motivation tool) — standings are always computed live
+// from Visits/Orders, same as every other Performance KPI; only the
+// contest's own config (and, once closed, a frozen winner snapshot) is
+// stored.
+const CONTEST_METRICS = new Set(["visits", "revenue"]);
+function parseSalesContest(r) {
+  return {
+    id: r.id, title: r.title, metric: r.metric, startDate: r.startDate, endDate: r.endDate,
+    prizeDescription: r.prizeDescription || "", status: r.status || "active",
+    winnerRepName: r.winnerRepName || "", winnerValue: r.winnerValue !== "" ? Number(r.winnerValue) : "",
+    createdBy: r.createdBy || "", createdAt: r.createdAt, closedAt: r.closedAt || "",
+  };
+}
+function computeContestStandings(contest, visits, orders, repNames) {
+  const byRep = new Map(repNames.map((n) => [n, 0]));
+  if (contest.metric === "revenue") {
+    orders.forEach((o) => {
+      const d = beirutDateStr(new Date(o.date));
+      if (d < contest.startDate || d > contest.endDate) return;
+      byRep.set(o.repName, (byRep.get(o.repName) || 0) + Number(o.netTotal ?? o.total ?? 0));
+    });
+  } else {
+    visits.forEach((v) => {
+      if (effectiveInteractionType(v) !== "in_person") return;
+      const d = beirutDateStr(new Date(v.time));
+      if (d < contest.startDate || d > contest.endDate) return;
+      byRep.set(v.repName, (byRep.get(v.repName) || 0) + 1);
+    });
+  }
+  return [...byRep.entries()]
+    .map(([repName, value]) => ({ repName, value }))
+    .sort((a, b) => b.value - a.value);
+}
+
+app.get("/api/sales-contests", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("SalesContests");
+    const contests = rows.map(parseSalesContest).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    res.json({ contests });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/sales-contests", requireManager, async (req, res) => {
+  try {
+    const { title, metric, startDate, endDate, prizeDescription } = req.body;
+    if (!title || !String(title).trim()) return res.status(400).json({ error: "title is required" });
+    if (!CONTEST_METRICS.has(metric)) return res.status(400).json({ error: "metric must be one of: " + [...CONTEST_METRICS].join(", ") });
+    if (!startDate || !endDate) return res.status(400).json({ error: "startDate and endDate are required" });
+    const row = {
+      id: `sc${crypto.randomUUID()}`, title: String(title).trim(), metric, startDate, endDate,
+      prizeDescription: prizeDescription || "", status: "active", winnerRepName: "", winnerValue: "",
+      createdBy: req.repName || "Manager", createdAt: new Date().toISOString(), closedAt: "",
+    };
+    await db.appendRow("SalesContests", row);
+    res.json(parseSalesContest(row));
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/sales-contests/:id/leaderboard", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("SalesContests");
+    const contestRow = rows.find((r) => r.id === req.params.id);
+    if (!contestRow) return res.status(404).json({ error: "Contest not found." });
+    const contest = parseSalesContest(contestRow);
+    const [visitRows, orderRows, repRows] = await Promise.all([
+      db.getAllRows("Visits"), db.getAllRows("Orders"), db.getAllRows("Reps"),
+    ]);
+    const visits = visitRows.map(parseVisit);
+    const standings = computeContestStandings(contest, visits, orderRows, repRows.map((r) => r.name));
+    res.json({ contest, standings });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/sales-contests/:id/close", requireManager, async (req, res) => {
+  try {
+    const rows = await db.getAllRows("SalesContests");
+    const contestRow = rows.find((r) => r.id === req.params.id);
+    if (!contestRow) return res.status(404).json({ error: "Contest not found." });
+    const contest = parseSalesContest(contestRow);
+    if (contest.status === "closed") return res.status(400).json({ error: "Contest is already closed." });
+    const [visitRows, orderRows, repRows] = await Promise.all([
+      db.getAllRows("Visits"), db.getAllRows("Orders"), db.getAllRows("Reps"),
+    ]);
+    const visits = visitRows.map(parseVisit);
+    const standings = computeContestStandings(contest, visits, orderRows, repRows.map((r) => r.name));
+    const winner = standings[0] && standings[0].value > 0 ? standings[0] : null;
+    const patch = {
+      status: "closed",
+      winnerRepName: winner ? winner.repName : "",
+      winnerValue: winner ? winner.value : "",
+      closedAt: new Date().toISOString(),
+    };
+    await db.updateRowById("SalesContests", contest.id, patch);
+    res.json({ ...parseSalesContest({ ...contestRow, ...patch }), standings });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Compensation plans — repName "" is the default plan applied to every rep
+// without their own override row. Commission/bonus amounts for a given
+// month are computed on demand from Orders + RepTargets, never stored.
+function parseCompensationPlan(r) {
+  return {
+    id: r.id, repName: r.repName || "",
+    commissionPct: r.commissionPct !== "" ? Number(r.commissionPct) : 0,
+    bonusThresholdPct: r.bonusThresholdPct !== "" ? Number(r.bonusThresholdPct) : 0,
+    bonusAmount: r.bonusAmount !== "" ? Number(r.bonusAmount) : 0,
+    updatedBy: r.updatedBy || "", updatedAt: r.updatedAt,
+  };
+}
+
+app.get("/api/compensation-plans", requireManager, async (req, res) => {
+  try {
+    const rows = await db.getAllRows("CompensationPlans");
+    res.json({ plans: rows.map(parseCompensationPlan) });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Upsert by repName ("" = default plan) — one plan per rep, edited in
+// place rather than accumulating history (unlike PerformanceReviews, a
+// compensation rate isn't a dated record of a discussion, just current
+// config).
+app.post("/api/compensation-plans", requireManager, async (req, res) => {
+  try {
+    const repName = typeof req.body.repName === "string" ? req.body.repName.trim() : "";
+    const commissionPct = Number(req.body.commissionPct) || 0;
+    const bonusThresholdPct = Number(req.body.bonusThresholdPct) || 0;
+    const bonusAmount = Number(req.body.bonusAmount) || 0;
+    const rows = await db.getAllRows("CompensationPlans");
+    const existing = rows.find((r) => (r.repName || "") === repName);
+    const patch = {
+      repName, commissionPct, bonusThresholdPct, bonusAmount,
+      updatedBy: req.repName || "Manager", updatedAt: new Date().toISOString(),
+    };
+    if (existing) {
+      await db.updateRowById("CompensationPlans", existing.id, patch);
+      res.json(parseCompensationPlan({ ...existing, ...patch }));
+    } else {
+      const row = { id: `cp${crypto.randomUUID()}`, ...patch };
+      await db.appendRow("CompensationPlans", row);
+      res.json(parseCompensationPlan(row));
+    }
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Monthly commission/bonus summary — a live calculation (revenue collected
+// in the month vs. that rep's target, same netTotal/revenueTarget
+// convention RepPerformanceCard already uses) against whichever
+// compensation plan applies to each rep. A plain rep can only ever see
+// their own row; a manager/supervisor sees the whole team (or one rep via
+// ?repName=).
+app.get("/api/compensation/summary", async (req, res) => {
+  try {
+    const isTeamWide = req.role === "manager" || req.isSupervisor;
+    const monthKey = typeof req.query.monthKey === "string" && /^\d{4}-\d{2}$/.test(req.query.monthKey) ? req.query.monthKey : todayBeirutStr().slice(0, 7);
+    const [orderRows, repTargetRows, planRows, repRows, settingsRows] = await Promise.all([
+      db.getAllRows("Orders"), db.getAllRows("RepTargets"), db.getAllRows("CompensationPlans"),
+      db.getAllRows("Reps"), db.getAllRows("Settings"),
+    ]);
+    const defaultRevenueTargetSetting = settingsRows.find((s) => s.key === "monthlyRevenueTarget");
+    const defaultRevenueTarget = defaultRevenueTargetSetting ? Number(defaultRevenueTargetSetting.value) || 0 : 0;
+    const targetByRep = new Map(repTargetRows.map((t) => [t.repName, t]));
+    const planByRep = new Map(planRows.map((p) => [p.repName || "", p]));
+    const defaultPlan = planByRep.get("") || { commissionPct: 0, bonusThresholdPct: 0, bonusAmount: 0 };
+
+    let repNames = repRows.map((r) => r.name);
+    if (!isTeamWide) repNames = repNames.filter((n) => n === req.repName);
+    else if (req.query.repName) repNames = repNames.filter((n) => n === req.query.repName);
+
+    const monthOrders = orderRows.filter((o) => beirutDateStr(new Date(o.date)).slice(0, 7) === monthKey);
+    const summary = repNames.map((repName) => {
+      const revenue = monthOrders.filter((o) => o.repName === repName).reduce((s, o) => s + Number(o.netTotal ?? o.total ?? 0), 0);
+      const target = targetByRep.get(repName);
+      const revenueTarget = target?.revenueTarget != null && target.revenueTarget !== "" ? Number(target.revenueTarget) : defaultRevenueTarget;
+      const attainmentPct = revenueTarget > 0 ? Math.round((revenue / revenueTarget) * 100) : null;
+      const planRow = planByRep.get(repName) || defaultPlan;
+      const commissionPct = Number(planRow.commissionPct) || 0;
+      const bonusThresholdPct = Number(planRow.bonusThresholdPct) || 0;
+      const bonusAmount = Number(planRow.bonusAmount) || 0;
+      const commissionAmount = Math.round(revenue * (commissionPct / 100) * 100) / 100;
+      const bonusEarned = bonusThresholdPct > 0 && attainmentPct != null && attainmentPct >= bonusThresholdPct;
+      return {
+        repName, monthKey, revenue, revenueTarget, attainmentPct,
+        commissionPct, commissionAmount,
+        bonusThresholdPct, bonusAmount: bonusEarned ? bonusAmount : 0, bonusEarned,
+        totalPayout: Math.round((commissionAmount + (bonusEarned ? bonusAmount : 0)) * 100) / 100,
+      };
+    });
+    res.json({ monthKey, summary });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/visits", async (req, res) => {
   const startedAt = Date.now();
   try {

@@ -231,6 +231,25 @@ const SCHEMAS = {
     "strengths", "areasToImprove", "actionItems",
     "repAcknowledged", "repAcknowledgedAt", "repComment", "createdAt",
   ],
+  // Sales contests (motivation tool) — a manager-defined window + metric
+  // ("visits" or "revenue"); standings are always computed live from
+  // Visits/Orders (never stored, same "live KPI" convention as everything
+  // else in Performance), this row only records the contest's own config
+  // and, once closed, a frozen snapshot of who won so the record doesn't
+  // silently drift if later visit/order edits change the live standings.
+  SalesContests: [
+    "id", "title", "metric", "startDate", "endDate", "prizeDescription",
+    "status", "winnerRepName", "winnerValue",
+    "createdBy", "createdAt", "closedAt",
+  ],
+  // Commission/bonus structure. repName "" = the default plan applied to
+  // every rep without their own override row. Monthly commission/bonus
+  // amounts themselves are computed live from Orders + RepTargets (same
+  // live-KPI convention), never stored here.
+  CompensationPlans: [
+    "id", "repName", "commissionPct", "bonusThresholdPct", "bonusAmount",
+    "updatedBy", "updatedAt",
+  ],
   // The last analysis's flagged-client results (effective % >= 35 only —
   // same filter the client already applies before this gets saved), so
   // reopening Discount Audit shows where things stood without re-uploading
