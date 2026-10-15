@@ -1272,6 +1272,7 @@ function clampLimit(raw, def, max) {
 app.get("/api/visits", async (req, res) => {
   try {
     const { client, repName, limit, all } = req.query;
+    const isTeamWide = req.role === "manager" || req.isSupervisor;
     const [rows, commentRows] = await Promise.all([
       db.getAllRows("Visits"),
       db.getAllRows("VisitComments"),
@@ -1281,13 +1282,18 @@ app.get("/api/visits", async (req, res) => {
       const key = String(client).toLowerCase().trim();
       visits = visits.filter((v) => v.client.toLowerCase().trim() === key);
     }
-    if (repName) visits = visits.filter((v) => v.repName === repName);
+    // A plain rep only ever sees their own visits, regardless of what
+    // repName they pass — mirrors the isTeamWide convention used for
+    // PerformanceReviews/FollowUps/visit-cadence. Only a manager/supervisor
+    // can filter to a specific other rep.
+    if (!isTeamWide) visits = visits.filter((v) => v.repName === req.repName);
+    else if (repName) visits = visits.filter((v) => v.repName === repName);
     const total = visits.length;
     // Dashboard/Performance need the true complete history to compute
     // per-account overdue status and monthly aggregates correctly — capping
     // that would silently produce wrong numbers. Reserved for
     // manager/supervisor views that fetch once on tab-open, not polled.
-    const wantsAll = all === "true" && (req.role === "manager" || req.isSupervisor);
+    const wantsAll = all === "true" && isTeamWide;
     if (!wantsAll) visits = visits.slice(0, clampLimit(limit, 20, 200));
 
     const commentsByVisit = new Map();
@@ -1315,9 +1321,13 @@ app.get("/api/visits", async (req, res) => {
 app.get("/api/orders", async (req, res) => {
   try {
     const { repName, client, product, from, to, page, limit, all, posStatus } = req.query;
+    const isTeamWide = req.role === "manager" || req.isSupervisor;
     const rows = await db.getAllRows("Orders");
     let orders = rows.map(parseOrder).sort((a, b) => new Date(b.date) - new Date(a.date));
-    if (repName) orders = orders.filter((o) => o.repName === repName);
+    // A plain rep only ever sees their own orders, regardless of what
+    // repName they pass — same isTeamWide convention as /api/visits.
+    if (!isTeamWide) orders = orders.filter((o) => o.repName === req.repName);
+    else if (repName) orders = orders.filter((o) => o.repName === repName);
     if (client) {
       const key = String(client).toLowerCase().trim();
       orders = orders.filter((o) => (o.clientName || "").toLowerCase().includes(key));
@@ -1337,7 +1347,7 @@ app.get("/api/orders", async (req, res) => {
     const total = orders.length;
     // Same "give me the true complete set" escape hatch as /api/visits, for
     // Dashboard/Performance's revenue-aggregation math.
-    if (all === "true" && (req.role === "manager" || req.isSupervisor)) {
+    if (all === "true" && isTeamWide) {
       return res.json({ orders, total, page: 1, limit: total });
     }
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
@@ -1353,8 +1363,12 @@ app.get("/api/orders", async (req, res) => {
 app.get("/api/samples", async (req, res) => {
   try {
     const { doctorName, visitId, limit, all } = req.query;
+    const isTeamWide = req.role === "manager" || req.isSupervisor;
     const rows = await db.getAllRows("Samples");
     let samples = rows.sort((a, b) => new Date(b.date) - new Date(a.date));
+    // A plain rep only ever sees their own tagged samples — same isTeamWide
+    // convention as /api/visits and /api/orders.
+    if (!isTeamWide) samples = samples.filter((s) => s.repName === req.repName);
     if (doctorName) {
       const key = String(doctorName).toLowerCase().trim();
       samples = samples.filter((s) => s.doctorName.toLowerCase().trim() === key);
@@ -1363,7 +1377,7 @@ app.get("/api/samples", async (req, res) => {
     // Same manager/supervisor-only full-history override as /api/visits —
     // the Rep Performance PDF's visit-details section needs every sample in
     // the chosen window, not just the newest 500.
-    const wantsAll = all === "true" && (req.role === "manager" || req.isSupervisor);
+    const wantsAll = all === "true" && isTeamWide;
     res.json({ samples: wantsAll ? samples : samples.slice(0, clampLimit(limit, 50, 500)) });
   } catch (e) {
     logErr(e);
@@ -5222,15 +5236,18 @@ app.post("/api/clients/visit-stats", async (req, res) => {
     const names = Array.isArray(req.body.names) ? req.body.names.map((n) => String(n).toLowerCase().trim()) : [];
     if (names.length === 0) return res.json({ stats: {} });
     const nameSet = new Set(names);
+    const isTeamWide = req.role === "manager" || req.isSupervisor;
     const [visitRows, orderRows] = await Promise.all([db.getAllRows("Visits"), db.getAllRows("Orders")]);
     const stats = {};
     names.forEach((n) => { stats[n] = { lastVisit: null, revenue: 0 }; });
     visitRows.forEach((v) => {
+      if (!isTeamWide && v.repName !== req.repName) return;
       const key = String(v.client || "").toLowerCase().trim();
       if (!nameSet.has(key)) return;
       if (!stats[key].lastVisit || new Date(v.time) > new Date(stats[key].lastVisit)) stats[key].lastVisit = v.time;
     });
     orderRows.forEach((o) => {
+      if (!isTeamWide && o.repName !== req.repName) return;
       const key = String(o.clientName || "").toLowerCase().trim();
       if (!nameSet.has(key)) return;
       const total = Number(o.total) || 0;
@@ -5410,16 +5427,19 @@ async function handleEntityVisitStats(req, res) {
     const names = Array.isArray(req.body.names) ? req.body.names.map((n) => String(n).toLowerCase().trim()) : [];
     if (names.length === 0) return res.json({ stats: {} });
     const nameSet = new Set(names);
+    const isTeamWide = req.role === "manager" || req.isSupervisor;
     const [visitRows, sampleRows] = await Promise.all([db.getAllRows("Visits"), db.getAllRows("Samples")]);
     const stats = {};
     names.forEach((n) => { stats[n] = { lastVisit: null, pendingSamples: [] }; });
     visitRows.forEach((v) => {
+      if (!isTeamWide && v.repName !== req.repName) return;
       const key = String(v.client || "").toLowerCase().trim();
       if (!nameSet.has(key)) return;
       if (!stats[key].lastVisit || new Date(v.time) > new Date(stats[key].lastVisit)) stats[key].lastVisit = v.time;
     });
     const latestByDoctorProduct = new Map();
     sampleRows.forEach((s) => {
+      if (!isTeamWide && s.repName !== req.repName) return;
       const key = String(s.doctorName || "").toLowerCase().trim();
       if (!nameSet.has(key)) return;
       const mapKey = `${key}::${s.productId}`;
@@ -5523,21 +5543,28 @@ function buildDoctorMemory(visits, sightings, nextFollowUp) {
 // without a second parallel aggregation implementation. The doctor-only
 // structured fields simply stay blank on pharmacy visits, which the
 // existing client-side Legacy-note rule already renders correctly.
-async function buildEntityProfile(entityRow, entityType, name) {
+//
+// `repName` scopes the whole profile to one rep's own history with this
+// account — pass it for a plain-rep caller so their pre-call brief and
+// timeline only ever show visits/notes/objections/competitor sightings they
+// personally logged, never another rep's; pass null/undefined for a
+// manager/supervisor to see the full team's combined history, same
+// isTeamWide convention used everywhere else in this file.
+async function buildEntityProfile(entityRow, entityType, name, repName) {
   const [visitRows, followUpRows, sightingRows] = await Promise.all([
     db.getAllRows("Visits"), db.getAllRows("FollowUps"), db.getAllRows("CompetitorSightings"),
   ]);
   const visits = visitRows
     .map(parseVisit)
-    .filter((v) => v.client.toLowerCase().trim() === name)
+    .filter((v) => v.client.toLowerCase().trim() === name && (!repName || v.repName === repName))
     .sort((a, b) => new Date(b.time) - new Date(a.time))
     .slice(0, 30);
   const sightings = sightingRows
-    .filter((s) => String(s.client || "").toLowerCase().trim() === name)
+    .filter((s) => String(s.client || "").toLowerCase().trim() === name && (!repName || s.repName === repName))
     .sort((a, b) => new Date(b.date) - new Date(a.date));
   const nextFollowUp = followUpRows
     .filter((f) => String(f.entityName || "").toLowerCase().trim() === name && f.entityType === entityType
-      && (f.status === "pending" || f.status === "reminded"))
+      && (f.status === "pending" || f.status === "reminded") && (!repName || f.repName === repName))
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0] || null;
 
   return {
@@ -5556,7 +5583,8 @@ app.get("/api/doctors/:name/profile", async (req, res) => {
     const doctors = await db.getAllRows("Doctors");
     const doctor = doctors.find((d) => d.name.toLowerCase().trim() === name);
     if (!doctor) return res.status(404).json({ error: "Doctor not found." });
-    res.json(await buildEntityProfile(doctor, "doctor", name));
+    const isTeamWide = req.role === "manager" || req.isSupervisor;
+    res.json(await buildEntityProfile(doctor, "doctor", name, isTeamWide ? null : req.repName));
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
@@ -5570,7 +5598,8 @@ app.get("/api/nutritionists/:name/profile", async (req, res) => {
     const nutritionists = await db.getAllRows("Nutritionists");
     const nutritionist = nutritionists.find((n) => n.name.toLowerCase().trim() === name);
     if (!nutritionist) return res.status(404).json({ error: "Nutritionist/dietitian not found." });
-    res.json(await buildEntityProfile(nutritionist, "nutritionist", name));
+    const isTeamWide = req.role === "manager" || req.isSupervisor;
+    res.json(await buildEntityProfile(nutritionist, "nutritionist", name, isTeamWide ? null : req.repName));
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
@@ -5587,7 +5616,8 @@ app.get("/api/clients/:name/profile", async (req, res) => {
     const clients = await db.getAllRows("Clients");
     const client = clients.find((c) => c.name.toLowerCase().trim() === name);
     if (!client) return res.status(404).json({ error: "Client not found." });
-    res.json(await buildEntityProfile(client, client.type === "supplement_store" ? "supplement_store" : "pharmacy", name));
+    const isTeamWide = req.role === "manager" || req.isSupervisor;
+    res.json(await buildEntityProfile(client, client.type === "supplement_store" ? "supplement_store" : "pharmacy", name, isTeamWide ? null : req.repName));
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
