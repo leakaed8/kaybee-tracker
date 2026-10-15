@@ -607,12 +607,6 @@ export default function App() {
         {false && role === "manager" && <TabBtn active={tab === "outreach"} onClick={() => setTab("outreach")} icon={<MessageCircle size={15} />} label="Outreach" />}
         {false && role === "manager" && <TabBtn active={tab === "broadcast"} onClick={() => setTab("broadcast")} icon={<Megaphone size={15} />} label="Broadcast" />}
         {role === "rep" && <TabBtn active={tab === "checkin"} onClick={() => setTab("checkin")} icon={<MapPin size={15} />} label="Check-In" />}
-        {/* My Visits — rep-only, not a tabVisibility toggle (same reasoning
-            as My Schedule: it's a rep's own data, not a manager-configurable
-            report). Lets a rep search any pharmacy/doctor and see only the
-            visits/notes THEY personally logged with that account — never
-            another rep's, enforced server-side in GET /api/visits. */}
-        {role === "rep" && <TabBtn active={tab === "myVisits"} onClick={() => setTab("myVisits")} icon={<History size={15} />} label="My Visits" />}
         {/* Route tab hidden for now (temporary — flip this back to
             role === "rep" && !isSupervisor to re-enable). RouteView and its
             render block below are untouched, so this is a one-line revert. */}
@@ -682,7 +676,6 @@ export default function App() {
                 myLastPunch={myLastPunch}
               />
             )}
-            {tab === "myVisits" && role === "rep" && <MyVisitHistoryView repName={repName} />}
             {tab === "schedule" && (
               <ScheduleView
                 role={role}
@@ -1509,117 +1502,16 @@ function MyVisitsView({ repName, onClose }) {
       />
       {loading && <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>}
       {!loading && filtered.length === 0 && <EmptyState text={query ? "No visits match that search." : "No visits logged yet."} />}
-      <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 480, overflowY: "auto" }}>
-        {filtered.map((v) => (
-          <div key={v.id} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
-              <span style={{ fontWeight: 600, fontSize: 13 }}>{v.client}</span>
-              <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>
-                {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })}{" "}
-                {new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Beirut" })}
-              </span>
-            </div>
-            {v.notes && (
-              <div style={{ fontSize: 12, marginTop: 4 }}><strong style={{ color: "#8A8272", fontWeight: 600 }}>Notes: </strong>{v.notes}</div>
-            )}
-            {v.mentionedItems && v.mentionedItems.length > 0 && (
-              <div style={{ fontSize: 12, marginTop: 4 }}>
-                <strong style={{ color: "#8A8272", fontWeight: 600 }}>Items discussed: </strong>
-                {v.mentionedItems.map((it) => it.name).join(", ")}
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-      {visits.length >= 200 && <div style={{ fontSize: 11, color: "#8A8272", marginTop: 8 }}>Showing your 200 most recent visits.</div>}
-    </div>
-  );
-}
-
-// Dedicated "My Visits" nav tab — a rep searches for one pharmacy or doctor
-// by name and sees the full history/notes THEY personally logged with that
-// account. Same fetch-once-then-filter-client-side approach as MyVisitsView
-// (GET /api/visits' own `client` filter is an exact-match lookup used
-// elsewhere for "this one confirmed entity," not substring search-as-you-
-// type) — just surfaced as its own full page instead of a small panel.
-// GET /api/visits enforces the repName scoping itself — a rep can never
-// pull another rep's visits here, by query param or otherwise.
-function MyVisitHistoryView({ repName }) {
-  const [query, setQuery] = useState("");
-  const [visits, setVisits] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    setLoading(true);
-    api.getVisits({ repName, limit: 200 })
-      .then((data) => setVisits(data.visits || []))
-      .catch(() => setVisits([]))
-      .finally(() => setLoading(false));
-  }, [repName]);
-
-  const trimmedQuery = query.trim().toLowerCase();
-  const filtered = trimmedQuery ? visits.filter((v) => v.client.toLowerCase().includes(trimmedQuery)) : visits;
-
-  return (
-    <div>
-      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 4px" }}>My Visits</h2>
-      <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
-        Search a pharmacy or doctor to see your own visit history and notes with them.
-      </p>
-      <input
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        placeholder="Search by pharmacy or doctor name…"
-        style={{ ...inputStyle, marginBottom: 16 }}
-      />
-      {loading && <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>}
-      {!loading && filtered.length === 0 && (
-        <EmptyState text={trimmedQuery ? `No visits found for "${query.trim()}".` : "No visits logged yet."} />
-      )}
       {!loading && filtered.length > 0 && (
-        <>
-          {!trimmedQuery && (
-            <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 10 }}>
-              Your most recent visits. Search above to pull up a specific account's history.
-            </div>
-          )}
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {filtered.map((v) => (
-              <div key={v.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
-                  <span style={{ fontWeight: 600, fontSize: 13.5 }}>{v.client}</span>
-                  <span className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272" }}>
-                    {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })}{" "}
-                    {new Date(v.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Beirut" })}
-                  </span>
-                </div>
-                {v.notes && (
-                  <div style={{ fontSize: 12.5, marginTop: 6 }}><strong style={{ color: "#8A8272", fontWeight: 600 }}>Notes: </strong>{v.notes}</div>
-                )}
-                {v.doctorInsight && (
-                  <div style={{ fontSize: 12.5, marginTop: 4 }}><strong style={{ color: "#8A8272", fontWeight: 600 }}>Insight: </strong>{v.doctorInsight}</div>
-                )}
-                {v.mentionedItems && v.mentionedItems.length > 0 && (
-                  <div style={{ fontSize: 12.5, marginTop: 4 }}>
-                    <strong style={{ color: "#8A8272", fontWeight: 600 }}>Items discussed: </strong>
-                    {v.mentionedItems.map((it) => it.name).join(", ")}
-                  </div>
-                )}
-                {v.objectionTag && (
-                  <div style={{ fontSize: 12.5, marginTop: 4 }}>
-                    <strong style={{ color: "#8A8272", fontWeight: 600 }}>Objection: </strong>{v.objectionTag}
-                    {v.objectionResolution ? ` — ${v.objectionResolution}` : ""}
-                    {v.objectionNotes ? `: ${v.objectionNotes}` : ""}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-          {visits.length >= 200 && (
-            <div style={{ fontSize: 11, color: "#8A8272", marginTop: 8 }}>Showing your 200 most recent visits.</div>
-          )}
-        </>
+        <div style={{ maxHeight: 480, overflowY: "auto" }}>
+          {/* Tap a visit to expand the full details — reaction, commitment,
+              buying motive, objections, samples given/needed, etc. — same
+              card the Check-In "Full History" modal and DoctorsView/
+              ClientsView's History toggle already use. */}
+          <DoctorTimeline visits={filtered} showClient />
+        </div>
       )}
+      {visits.length >= 200 && <div style={{ fontSize: 11, color: "#8A8272", marginTop: 8 }}>Showing your 200 most recent visits.</div>}
     </div>
   );
 }
@@ -2107,7 +1999,19 @@ function StructuredVisitCard({ visit: v }) {
           {v.plannedClose && <div><strong>Planned close:</strong> {v.plannedClose}</div>}
         </div>
       )}
-      {v.mentionedItems?.length > 0 && <div><strong>Discussed:</strong> {v.mentionedItems.map((it) => it.name).join(", ")}</div>}
+      {v.mentionedItems?.length > 0 && (
+        <div>
+          <strong>Discussed:</strong>{" "}
+          {v.mentionedItems.map((it, i) => (
+            <span key={it.productId || i}>
+              {i > 0 && ", "}
+              {it.name}
+              {it.sampleStatus === "gave" && <span style={{ color: "#4C7A5E", fontWeight: 600 }}> (✓ sample given)</span>}
+              {it.sampleStatus === "next_visit" && <span style={{ color: "#C17817", fontWeight: 600 }}> (→ sample needed next visit)</span>}
+            </span>
+          ))}
+        </div>
+      )}
       {v.doctorNeeds?.length > 0 && <div><strong>Need:</strong> {v.doctorNeeds.map((n) => optionLabel(DOCTOR_NEED_OPTIONS, n)).join(", ")}</div>}
       {v.reaction && <div><strong>Reaction:</strong> {REACTION_EMOJI(v.reaction)} {optionLabel(REACTION_OPTIONS, v.reaction)}</div>}
       {v.concern && <div><strong>Concern:</strong> {optionLabel(CONCERN_OPTIONS, v.concern)}</div>}
@@ -2130,10 +2034,13 @@ function StructuredVisitCard({ visit: v }) {
   );
 }
 
-// Pure/presentational — takes a pre-sorted `visits` array (both call sites,
-// the Check-In "View Full History" modal and DoctorsView's History toggle,
-// already get newest-first data straight from the profile endpoint).
-function DoctorTimeline({ visits }) {
+// Pure/presentational — takes a pre-sorted `visits` array (all three call
+// sites — the Check-In "View Full History" modal, DoctorsView/ClientsView's
+// History toggle, and the My Visits tab — already get newest-first data).
+// `showClient` prepends the account name to each row's summary line; the
+// first two call sites view one entity's history at a time so it stays off
+// by default, but My Visits can show results spanning several accounts.
+function DoctorTimeline({ visits, showClient = false }) {
   const [expandedId, setExpandedId] = useState(null);
   if (!visits || visits.length === 0) return <EmptyState text="No visits recorded yet." />;
   return (
@@ -2146,6 +2053,7 @@ function DoctorTimeline({ visits }) {
             <button type="button" onClick={() => setExpandedId(expanded ? null : v.id)} style={{ width: "100%", textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span style={{ fontSize: 12.5, fontWeight: 600 }}>
+                  {showClient && <>{v.client} · </>}
                   {/* v.time is a full ISO timestamp, not the plain
                       date-only string fmtDate (helpers.js) expects. */}
                   {new Date(v.time).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })} {v.reaction ? REACTION_EMOJI(v.reaction) : ""}
