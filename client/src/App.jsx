@@ -3157,7 +3157,11 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
             )}
 
             {!isRemoteContact && isDoctorStyleEntity && visitStarted && (
-              <Field label="Products discussed">
+              <div style={{ background: "#EEF4F8", border: "1.5px solid #B8D4E3", borderRadius: 10, padding: 12, marginBottom: 14 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                  <Boxes size={15} style={{ color: "#2E6B8F", flexShrink: 0 }} />
+                  <span style={{ fontSize: 13.5, fontWeight: 700, color: "#1D4E66" }}>Products discussed</span>
+                </div>
                 <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                   <input
                     value={itemQuery}
@@ -3165,7 +3169,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                     onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addMentionedItem(); } }}
                     placeholder="Search product…"
                     list="checkin-item-options"
-                    style={{ ...inputStyle, flex: 1 }}
+                    style={{ ...inputStyle, flex: 1, background: "#fff" }}
                   />
                   <datalist id="checkin-item-options">
                     {itemOptions.map((p) => <option key={p.id} value={p.name} />)}
@@ -3182,12 +3186,12 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                     Add item
                   </button>
                 </div>
-                {mentionedItems.length > 0 && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+                {mentionedItems.length > 0 ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                     {mentionedItems.map((it) => (
                       <div key={it.productId} style={{
                         display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, fontSize: 12,
-                        background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 10, padding: "6px 8px 6px 10px",
+                        background: "#fff", border: "1px solid #B8D4E3", borderRadius: 10, padding: "6px 8px 6px 10px",
                       }}>
                         <span style={{ fontWeight: 500 }}>{it.name}</span>
 
@@ -3213,8 +3217,10 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                       </div>
                     ))}
                   </div>
+                ) : (
+                  <div style={{ fontSize: 11.5, color: "#1D4E66" }}>No products tagged yet for this visit.</div>
                 )}
-              </Field>
+              </div>
             )}
 
             {!isRemoteContact && isDoctorStyleEntity && visitStarted && (
