@@ -1529,6 +1529,100 @@ function MyVisitsView({ repName, onClose }) {
   );
 }
 
+// Rep-facing read-only counterpart to ReviewsView (PerformanceView, manager
+// side) — "here's what we discussed with you this quarter," with an
+// acknowledgment control so the feedback loop actually closes instead of
+// living only in a manager's head.
+function MyPerformanceReviewsPanel({ repName, onClose }) {
+  const [reviews, setReviews] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [comments, setComments] = useState({});
+  const [savingId, setSavingId] = useState(null);
+
+  const load = () => {
+    setLoading(true);
+    api.getPerformanceReviews({ repName }).then((data) => setReviews(data.reviews || [])).catch(() => setReviews([])).finally(() => setLoading(false));
+  };
+  useEffect(load, [repName]);
+
+  const acknowledge = async (review, repComment) => {
+    setSavingId(review.id);
+    try {
+      await api.acknowledgePerformanceReview(review.id, repComment);
+      load();
+    } catch {
+      // Silent — the panel is read-mostly and a failed acknowledge just
+      // leaves the checkbox unticked for the rep to retry.
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>My Performance Reviews</h3>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: "#8A8272", cursor: "pointer" }}><X size={16} /></button>
+      </div>
+      {loading && <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>}
+      {!loading && reviews.length === 0 && <EmptyState text="No reviews recorded yet." />}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 520, overflowY: "auto" }}>
+        {reviews.map((r) => {
+          const ratingValues = REVIEW_RATING_DIMENSIONS.map(({ key }) => r[key]).filter((n) => n !== "" && n != null);
+          const avg = ratingValues.length ? (ratingValues.reduce((s, n) => s + n, 0) / ratingValues.length).toFixed(1) : null;
+          const comment = comments[r.id] ?? r.repComment ?? "";
+          return (
+            <div key={r.id} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                <div>
+                  <div style={{ fontSize: 13.5, fontWeight: 600 }}>{r.periodLabel}</div>
+                  <div style={{ fontSize: 11.5, color: "#8A8272" }}>Reviewed by: {r.reviewedBy} · {fmtDateOfInstant(r.reviewDate)}</div>
+                </div>
+                {avg && <div style={{ fontSize: 15, fontWeight: 700 }}>{avg}/5</div>}
+              </div>
+              {r.strengths && (
+                <div style={{ fontSize: 12.5, marginTop: 8 }}><strong style={{ fontWeight: 600 }}>Strengths: </strong>{r.strengths}</div>
+              )}
+              {r.areasToImprove && (
+                <div style={{ fontSize: 12.5, marginTop: 4 }}><strong style={{ fontWeight: 600 }}>Areas to Improve: </strong>{r.areasToImprove}</div>
+              )}
+              {r.actionItems.length > 0 && (
+                <div style={{ fontSize: 12.5, marginTop: 6 }}>
+                  <strong style={{ fontWeight: 600 }}>Action Items:</strong>
+                  <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                    {r.actionItems.map((item, i) => <li key={i}>{item}</li>)}
+                  </ul>
+                </div>
+              )}
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
+                  <input type="checkbox" checked={r.repAcknowledged} disabled={savingId === r.id}
+                    onChange={() => acknowledge(r, comment)} />
+                  I have reviewed and discussed this performance review.
+                  {r.repAcknowledged && <span style={{ color: "#8A8272" }}> ({fmtDateOfInstant(r.repAcknowledgedAt)})</span>}
+                </label>
+                <textarea
+                  value={comment}
+                  onChange={(e) => setComments((prev) => ({ ...prev, [r.id]: e.target.value }))}
+                  placeholder="My comment (optional)"
+                  rows={2}
+                  style={{ ...inputStyle, resize: "vertical", marginTop: 8 }}
+                />
+                {comment !== (r.repComment || "") && (
+                  <button onClick={() => acknowledge(r, comment)} disabled={savingId === r.id}
+                    style={{ marginTop: 6, padding: "6px 12px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 11.5, cursor: "pointer" }}>
+                    {savingId === r.id ? "Saving…" : "Save comment"}
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function BackStepButton({ onClick }) {
   return (
     <button
@@ -2107,6 +2201,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   const [stopFollowUpReason, setStopFollowUpReason] = useState("");
   const [exportSheetId, setExportSheetId] = useState("");
   const [showMyVisits, setShowMyVisits] = useState(false);
+  const [showMyPerformanceReviews, setShowMyPerformanceReviews] = useState(false);
   const [mentionedItems, setMentionedItems] = useState([]);
   const [itemQuery, setItemQuery] = useState("");
   // Separate input from itemQuery above (the "Products discussed" search) so
@@ -2747,6 +2842,12 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
           >
             {showMyVisits ? "Hide my visits" : "My Visits"}
           </button>
+          <button
+            onClick={() => setShowMyPerformanceReviews((v) => !v)}
+            style={{ fontSize: 12, color: "#5B5445", background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "5px 10px", cursor: "pointer" }}
+          >
+            {showMyPerformanceReviews ? "Hide my reviews" : "My Reviews"}
+          </button>
           {exportSheetId && (
             <a href={`https://docs.google.com/spreadsheets/d/${exportSheetId}/edit`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: "#4C7A5E", textDecoration: "none", border: "1px solid #4C7A5E33", borderRadius: 6, padding: "5px 10px" }}>
             View my visits sheet
@@ -2756,6 +2857,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
       </div>
 
       {showMyVisits && <MyVisitsView repName={repName} onClose={() => setShowMyVisits(false)} />}
+      {showMyPerformanceReviews && <MyPerformanceReviewsPanel repName={repName} onClose={() => setShowMyPerformanceReviews(false)} />}
 
       <div style={{
         display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10,
@@ -10449,6 +10551,209 @@ function ObjectionsView({ visits, viewMonthKey, monthKeyLabel }) {
   );
 }
 
+const REVIEW_RATING_DIMENSIONS = [
+  { key: "visitActivityRating", label: "Visit Activity" },
+  { key: "callQualityRating", label: "Call Quality" },
+  { key: "followUpDisciplineRating", label: "Follow-up Discipline" },
+  { key: "coverageRating", label: "Coverage" },
+];
+
+function StarRatingInput({ value, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 2 }}>
+      {[1, 2, 3, 4, 5].map((n) => (
+        <button key={n} type="button" onClick={() => onChange(n)}
+          style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 18, color: n <= value ? "#D9A441" : "#D8D2C4" }}>
+          ★
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Formal documented performance reviews — "here's what we discussed with
+// Rayan this quarter," tied to history (append/amend only, see the server
+// route comment). The auto-filled metrics reuse the exact same formulas
+// RepPerformanceCard already uses for the current month, as a starting
+// point the manager edits/confirms rather than typing ratings from scratch.
+function ReviewsView({ repNames, visits, followUps, clients, doctors, repTargetsByName, monthlyVisitTarget, qualityCallRequiredFields }) {
+  const [selectedRep, setSelectedRep] = useState(repNames[0] || "");
+  const [reviews, setReviews] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const [periodLabel, setPeriodLabel] = useState("");
+  const [reviewedBy, setReviewedBy] = useState("Manager");
+  const [ratings, setRatings] = useState({ visitActivityRating: 0, callQualityRating: 0, followUpDisciplineRating: 0, coverageRating: 0 });
+  const [strengths, setStrengths] = useState("");
+  const [areasToImprove, setAreasToImprove] = useState("");
+  const [actionItems, setActionItems] = useState([""]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadReviews = (repName) => {
+    if (!repName) { setReviews([]); return; }
+    setLoading(true);
+    api.getPerformanceReviews({ repName }).then((data) => setReviews(data.reviews || [])).catch(() => setReviews([])).finally(() => setLoading(false));
+  };
+  useEffect(() => { loadReviews(selectedRep); }, [selectedRep]);
+
+  // Auto-filled metrics for the current month — same formulas as
+  // RepPerformanceCard, computed here for whichever rep is selected.
+  const thisMonthKey = todayBeirutStr().slice(0, 7);
+  const repVisits = visits.filter((v) => v.repName === selectedRep);
+  const monthVisits = repVisits.filter((v) => beirutDateStrOfInstant(v.time).slice(0, 7) === thisMonthKey);
+  const monthInPerson = monthVisits.filter(isInPersonVisit);
+  const target = effectiveMonthlyVisitTarget(repTargetsByName[selectedRep], monthlyVisitTarget) || monthlyVisitTarget;
+  const visitActivityPct = target ? Math.min(100, Math.round((monthInPerson.length / target) * 100)) : 0;
+  const doctorInPerson = monthInPerson.filter((v) => doctors.some((d) => d.name.toLowerCase().trim() === v.client.toLowerCase().trim()));
+  const qualityCount = doctorInPerson.filter((v) => isQualityCall(v, qualityCallRequiredFields)).length;
+  const qualityPct = doctorInPerson.length ? Math.round((qualityCount / doctorInPerson.length) * 100) : null;
+  const relevantFollowUps = followUps.filter((f) => f.repName === selectedRep);
+  const followUpOnTrack = relevantFollowUps.filter((f) => f.status !== "pending" || daysUntil(f.dueDate) >= 0).length;
+  const followUpPct = relevantFollowUps.length ? Math.round((followUpOnTrack / relevantFollowUps.length) * 100) : null;
+  const relevantClients = clients.filter((c) => c.assignedRep === selectedRep);
+  const visitedNames = new Set(monthVisits.map((v) => v.client.toLowerCase().trim()));
+  const coveragePct = relevantClients.length ? Math.round((relevantClients.filter((c) => visitedNames.has(c.name.toLowerCase().trim())).length / relevantClients.length) * 100) : 0;
+  const [thisMonthY, thisMonthM] = thisMonthKey.split("-").map(Number);
+  const thisMonthLabel = new Date(Date.UTC(thisMonthY, thisMonthM - 1, 1)).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
+
+  const openForm = () => {
+    setShowForm(true);
+    setPeriodLabel("");
+    setReviewedBy("Manager");
+    // Round the live % metrics down to a 1-5 star starting point — a rough
+    // on-ramp the manager is expected to adjust, not a precise conversion.
+    const toStars = (pct) => (pct == null ? 0 : Math.max(1, Math.min(5, Math.round((pct / 100) * 5))));
+    setRatings({
+      visitActivityRating: toStars(visitActivityPct),
+      callQualityRating: toStars(qualityPct),
+      followUpDisciplineRating: toStars(followUpPct),
+      coverageRating: toStars(coveragePct),
+    });
+    setStrengths(""); setAreasToImprove(""); setActionItems([""]); setError("");
+  };
+
+  const saveReview = async () => {
+    if (!periodLabel.trim()) { setError("Period is required (e.g. \"Q4 2026\")."); return; }
+    setSaving(true);
+    setError("");
+    try {
+      await api.createPerformanceReview({
+        repName: selectedRep, periodLabel: periodLabel.trim(), reviewedBy: reviewedBy.trim(),
+        ...ratings, strengths, areasToImprove,
+        actionItems: actionItems.map((a) => a.trim()).filter(Boolean),
+      });
+      setShowForm(false);
+      loadReviews(selectedRep);
+    } catch (e) {
+      setError(e?.message || "Couldn't save the review.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+        <Field label="Rep">
+          <select value={selectedRep} onChange={(e) => setSelectedRep(e.target.value)} style={{ ...inputStyle, width: "auto" }}>
+            {repNames.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </Field>
+        <button onClick={openForm} style={{ padding: "9px 16px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, border: "1px solid #1F2A24", background: "#1F2A24", color: "#FAF7F2", cursor: "pointer", marginLeft: "auto", alignSelf: "flex-end" }}>
+          + Add Review
+        </button>
+      </div>
+
+      {showForm && (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>New Performance Review — {selectedRep}</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12, marginBottom: 12 }}>
+            <Field label="Period"><input value={periodLabel} onChange={(e) => setPeriodLabel(e.target.value)} placeholder="e.g. Q4 2026" style={inputStyle} /></Field>
+            <Field label="Reviewed by"><input value={reviewedBy} onChange={(e) => setReviewedBy(e.target.value)} style={inputStyle} /></Field>
+          </div>
+
+          <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, marginBottom: 12 }}>
+            <div style={{ fontSize: 10.5, fontWeight: 600, color: "#8A8272", textTransform: "uppercase", marginBottom: 8 }}>Performance metrics (auto-filled from actual data, {thisMonthLabel})</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(110px,1fr))", gap: 10, fontSize: 12.5 }}>
+              <div><div style={{ color: "#8A8272" }}>Visits vs Target</div><div style={{ fontWeight: 700, fontSize: 16 }}>{visitActivityPct}%</div><div style={{ color: "#8A8272" }}>{monthInPerson.length} / {target}</div></div>
+              <div><div style={{ color: "#8A8272" }}>Call Quality</div><div style={{ fontWeight: 700, fontSize: 16 }}>{qualityPct == null ? "—" : `${qualityPct}%`}</div></div>
+              <div><div style={{ color: "#8A8272" }}>Coverage</div><div style={{ fontWeight: 700, fontSize: 16 }}>{coveragePct}%</div></div>
+              <div><div style={{ color: "#8A8272" }}>Follow-up Compliance</div><div style={{ fontWeight: 700, fontSize: 16 }}>{followUpPct == null ? "—" : `${followUpPct}%`}</div></div>
+            </div>
+          </div>
+
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", marginBottom: 8 }}>Ratings (1 = Needs Improvement, 5 = Excellent)</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+            {REVIEW_RATING_DIMENSIONS.map(({ key, label }) => (
+              <div key={key} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ fontSize: 12.5, minWidth: 150 }}>{label}</div>
+                <StarRatingInput value={ratings[key]} onChange={(n) => setRatings((prev) => ({ ...prev, [key]: n }))} />
+              </div>
+            ))}
+          </div>
+
+          <Field label="Strengths">
+            <textarea value={strengths} onChange={(e) => setStrengths(e.target.value)} rows={2} style={{ ...inputStyle, resize: "vertical", marginBottom: 10 }} />
+          </Field>
+          <Field label="Areas to Improve">
+            <textarea value={areasToImprove} onChange={(e) => setAreasToImprove(e.target.value)} rows={2} style={{ ...inputStyle, resize: "vertical", marginBottom: 10 }} />
+          </Field>
+          <Field label="Action Items">
+            {actionItems.map((item, i) => (
+              <input key={i} value={item} onChange={(e) => setActionItems((prev) => prev.map((a, j) => (j === i ? e.target.value : a)))}
+                placeholder="e.g. Visit 5 new pharmacies in Chiyah" style={{ ...inputStyle, marginBottom: 6 }} />
+            ))}
+            <button type="button" onClick={() => setActionItems((prev) => [...prev, ""])} style={{ background: "none", border: "none", color: "#4C7A5E", fontSize: 12, cursor: "pointer", padding: 0, marginBottom: 10 }}>
+              + Add action item
+            </button>
+          </Field>
+
+          {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setShowForm(false)} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>Cancel</button>
+            <button onClick={saveReview} disabled={saving} style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+              {saving ? "Saving…" : "Save Review"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Reviews — {selectedRep}</div>
+      {loading ? (
+        <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>
+      ) : reviews.length === 0 ? (
+        <EmptyState text={`No reviews recorded yet for ${selectedRep}.`} />
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {reviews.map((r) => {
+            const ratingValues = REVIEW_RATING_DIMENSIONS.map(({ key }) => r[key]).filter((n) => n !== "" && n != null);
+            const avg = ratingValues.length ? (ratingValues.reduce((s, n) => s + n, 0) / ratingValues.length).toFixed(1) : null;
+            return (
+              <div key={r.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <div>
+                    <div style={{ fontSize: 13.5, fontWeight: 600 }}>{r.periodLabel}</div>
+                    <div style={{ fontSize: 11.5, color: "#8A8272" }}>
+                      Reviewed by: {r.reviewedBy} · {fmtDateOfInstant(r.reviewDate)}
+                      {r.repAcknowledged && <span style={{ color: "#4C7A5E" }}> · Acknowledged</span>}
+                    </div>
+                  </div>
+                  {avg && <div style={{ fontSize: 15, fontWeight: 700 }}>{avg}/5</div>}
+                </div>
+                {r.strengths && <div style={{ fontSize: 12.5, marginTop: 8 }}>{r.strengths}</div>}
+                {r.repComment && (
+                  <div style={{ fontSize: 12, color: "#4C7A5E", marginTop: 8, fontStyle: "italic" }}>Rep's comment: "{r.repComment}"</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function accountStatusList(clients, doctors, visits) {
   const lastVisitFor = (name) => {
     const matches = visits.filter((v) => v.client.toLowerCase().trim() === name.toLowerCase().trim());
@@ -11314,6 +11619,11 @@ function PerformanceView({
         <button onClick={() => setSubView("objections")} style={{ padding: "7px 16px", borderRadius: 16, fontSize: 12.5, fontWeight: 500, border: subView === "objections" ? "1px solid #1F2A24" : "1px solid #E5DFD3", background: subView === "objections" ? "#1F2A24" : "#fff", color: subView === "objections" ? "#FAF7F2" : "#5B5445" }}>
           Objections
         </button>
+        {role === "manager" && (
+          <button onClick={() => setSubView("reviews")} style={{ padding: "7px 16px", borderRadius: 16, fontSize: 12.5, fontWeight: 500, border: subView === "reviews" ? "1px solid #1F2A24" : "1px solid #E5DFD3", background: subView === "reviews" ? "#1F2A24" : "#fff", color: subView === "reviews" ? "#FAF7F2" : "#5B5445" }}>
+            Reviews
+          </button>
+        )}
         {(subView === "overview" || subView === "objections") && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
             <button onClick={() => setViewMonthKey((k) => shiftMonthKey(k, -1))} aria-label="Previous month"
@@ -11387,6 +11697,9 @@ function PerformanceView({
         <TargetsView repNames={repNames} reps={reps} />
       ) : subView === "objections" ? (
         <ObjectionsView visits={visits} viewMonthKey={viewMonthKey} monthKeyLabel={monthKeyLabel} />
+      ) : subView === "reviews" ? (
+        <ReviewsView repNames={repNames} visits={visits} followUps={followUps} clients={clients} doctors={doctors}
+          repTargetsByName={repTargetsByName} monthlyVisitTarget={monthlyVisitTarget} qualityCallRequiredFields={qualityCallRequiredFields} />
       ) : (
       <>
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>

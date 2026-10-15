@@ -220,6 +220,17 @@ const SCHEMAS = {
   // here is what suppresses a client from being re-flagged on every future
   // import; deleting it re-opens that client to being flagged again.
   DiscountAuditReasons: ["id", "clientName", "reason", "addedBy", "addedAt"],
+  // Formal documented performance reviews ("here's what we discussed with
+  // Rayan this quarter") — a historical record, not a live computed metric,
+  // so rows are only ever appended or amended (acknowledge), never deleted.
+  // Ratings are 1-5 or "" (not yet rated); actionItems is a JSON array of
+  // strings, same convention as mentionedItems on Visits.
+  PerformanceReviews: [
+    "id", "repName", "periodLabel", "reviewedBy", "reviewDate",
+    "visitActivityRating", "callQualityRating", "followUpDisciplineRating", "coverageRating",
+    "strengths", "areasToImprove", "actionItems",
+    "repAcknowledged", "repAcknowledgedAt", "repComment", "createdAt",
+  ],
   // The last analysis's flagged-client results (effective % >= 35 only —
   // same filter the client already applies before this gets saved), so
   // reopening Discount Audit shows where things stood without re-uploading

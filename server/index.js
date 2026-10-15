@@ -1890,6 +1890,98 @@ app.post("/api/discount-audit/results", requireManager, async (req, res) => {
   }
 });
 
+// Formal documented performance reviews — "here's what we discussed with
+// Rayan this quarter," tied to history, not just a live computed metric.
+// A manager writes them (requireManager, same bar as creating a review of
+// someone is a stronger action than viewing team stats); a rep can only
+// ever read/acknowledge their own, same isTeamWide convention already used
+// by GET /api/followups.
+const REVIEW_RATING_FIELDS = ["visitActivityRating", "callQualityRating", "followUpDisciplineRating", "coverageRating"];
+function sanitizeReviewRating(raw) {
+  const n = Number(raw);
+  return raw !== "" && raw != null && Number.isFinite(n) && n >= 1 && n <= 5 ? n : "";
+}
+function parsePerformanceReview(r) {
+  let actionItems = [];
+  if (r.actionItems) {
+    try { actionItems = JSON.parse(r.actionItems); } catch { actionItems = []; }
+  }
+  return {
+    id: r.id, repName: r.repName, periodLabel: r.periodLabel, reviewedBy: r.reviewedBy || "", reviewDate: r.reviewDate,
+    visitActivityRating: r.visitActivityRating !== "" ? Number(r.visitActivityRating) : "",
+    callQualityRating: r.callQualityRating !== "" ? Number(r.callQualityRating) : "",
+    followUpDisciplineRating: r.followUpDisciplineRating !== "" ? Number(r.followUpDisciplineRating) : "",
+    coverageRating: r.coverageRating !== "" ? Number(r.coverageRating) : "",
+    strengths: r.strengths || "", areasToImprove: r.areasToImprove || "",
+    actionItems, repAcknowledged: r.repAcknowledged === "true",
+    repAcknowledgedAt: r.repAcknowledgedAt || "", repComment: r.repComment || "", createdAt: r.createdAt,
+  };
+}
+
+app.get("/api/performance-reviews", async (req, res) => {
+  try {
+    const isTeamWide = req.role === "manager" || req.isSupervisor;
+    if (!isTeamWide && !req.repName) return res.status(403).json({ error: "Reps only." });
+    const rows = await db.getAllRows("PerformanceReviews");
+    let reviews = rows.map(parsePerformanceReview).sort((a, b) => new Date(b.reviewDate) - new Date(a.reviewDate));
+    // A plain rep only ever sees their own, regardless of what repName they
+    // pass — a manager/supervisor can filter to any one rep via the query.
+    if (!isTeamWide) reviews = reviews.filter((r) => r.repName === req.repName);
+    else if (req.query.repName) reviews = reviews.filter((r) => r.repName === req.query.repName);
+    res.json({ reviews });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/performance-reviews", requireManager, async (req, res) => {
+  try {
+    const { repName, periodLabel, reviewedBy, strengths, areasToImprove } = req.body;
+    if (!repName || !String(repName).trim()) return res.status(400).json({ error: "repName is required" });
+    if (!periodLabel || !String(periodLabel).trim()) return res.status(400).json({ error: "periodLabel is required" });
+    const row = {
+      id: `pr${crypto.randomUUID()}`,
+      repName: String(repName).trim(),
+      periodLabel: String(periodLabel).trim(),
+      reviewedBy: reviewedBy && String(reviewedBy).trim() ? String(reviewedBy).trim() : "Manager",
+      reviewDate: new Date().toISOString(),
+      strengths: strengths || "", areasToImprove: areasToImprove || "",
+      actionItems: Array.isArray(req.body.actionItems) ? JSON.stringify(req.body.actionItems.filter((a) => typeof a === "string" && a.trim())) : "",
+      repAcknowledged: "false", repAcknowledgedAt: "", repComment: "",
+      createdAt: new Date().toISOString(),
+    };
+    REVIEW_RATING_FIELDS.forEach((f) => { row[f] = sanitizeReviewRating(req.body[f]); });
+    await db.appendRow("PerformanceReviews", row);
+    res.json(parsePerformanceReview(row));
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// A rep acknowledging their own review — the only write a rep can make to
+// this sheet, and only on a review that's actually theirs.
+app.patch("/api/performance-reviews/:id/acknowledge", async (req, res) => {
+  try {
+    if (req.role !== "rep") return res.status(403).json({ error: "Reps only." });
+    const rows = await db.getAllRows("PerformanceReviews");
+    const review = rows.find((r) => r.id === req.params.id);
+    if (!review) return res.status(404).json({ error: "Review not found." });
+    if (review.repName !== req.repName) return res.status(403).json({ error: "You can only acknowledge your own reviews." });
+    const patch = {
+      repAcknowledged: "true",
+      repAcknowledgedAt: new Date().toISOString(),
+      repComment: typeof req.body.repComment === "string" ? req.body.repComment.trim() : review.repComment || "",
+    };
+    await db.updateRowById("PerformanceReviews", review.id, patch);
+    res.json(parsePerformanceReview({ ...review, ...patch }));
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/visits", async (req, res) => {
   const startedAt = Date.now();
   try {
