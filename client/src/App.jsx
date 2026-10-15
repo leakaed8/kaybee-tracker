@@ -1034,6 +1034,16 @@ const NEXT_ACTION_OPTIONS = [
   { key: "no_followup_needed", label: "No follow-up needed" },
 ];
 
+// Pharmacy-only objection tracking. Mirrors server's OBJECTION_KEYWORDS tag
+// strings exactly (same taxonomy as the existing auto-classifier) so a
+// manually-picked tag and an auto-classified one aggregate identically in
+// the Performance tab's Objections view.
+const OBJECTION_TAG_OPTIONS = [
+  "Price / margin", "Slow delivery", "Competitor stocking", "Shelf space",
+  "Payment terms", "Side effects", "Efficacy concerns",
+];
+const OBJECTION_RESOLUTION_OPTIONS = ["Resolved", "Partially addressed", "Unresolved"];
+
 // ---------- Manager Performance Management redesign: Visit ≠ Contact ----------
 // Mirrors the server's INTERACTION_TYPE_CODES allow-list key-for-key. Only
 // "in_person" counts toward the field-visit KPI everywhere in the app —
@@ -1912,7 +1922,13 @@ function StructuredVisitCard({ visit: v }) {
       {v.doctorNeeds?.length > 0 && <div><strong>Need:</strong> {v.doctorNeeds.map((n) => optionLabel(DOCTOR_NEED_OPTIONS, n)).join(", ")}</div>}
       {v.reaction && <div><strong>Reaction:</strong> {REACTION_EMOJI(v.reaction)} {optionLabel(REACTION_OPTIONS, v.reaction)}</div>}
       {v.concern && <div><strong>Concern:</strong> {optionLabel(CONCERN_OPTIONS, v.concern)}</div>}
-      {!v.concern && v.objectionTag && <div><strong>Objection:</strong> {v.objectionTag}</div>}
+      {!v.concern && v.objectionTag && (
+        <div>
+          <strong>Objection:</strong> {v.objectionTag}
+          {v.objectionResolution && ` — ${v.objectionResolution}`}
+          {v.objectionNotes && <div style={{ color: "#8A8272" }}>{v.objectionNotes}</div>}
+        </div>
+      )}
       {v.buyingMotive && <div><strong>Buying motive:</strong> {v.buyingMotive}</div>}
       {v.customerComments && <div><strong>Customer comments:</strong> {v.customerComments}</div>}
       {v.doctorInsight && <div style={{ fontStyle: "italic" }}>"{v.doctorInsight}"</div>}
@@ -2034,6 +2050,12 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   const entityTabLabel = entityType === "doctor" ? "Doctors" : entityType === "supplement_store" ? "Supplement Stores" : entityType === "nutritionist" ? "Nutritionists/Dietitians" : "Pharmacies";
   const [client, setClient] = useState("");
   const [notes, setNotes] = useState("");
+  // Objection resolution (pharmacy-only) — manual tag overrides the server's
+  // notes-text auto-classifier; resolution/notes are meaningless without a
+  // tag, so the UI only reveals them once one is picked.
+  const [objectionTag, setObjectionTag] = useState("");
+  const [objectionResolution, setObjectionResolution] = useState("");
+  const [objectionNotes, setObjectionNotes] = useState("");
   const [coords, setCoords] = useState(null);
   const [locating, setLocating] = useState(false);
   const [locError, setLocError] = useState("");
@@ -2356,6 +2378,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
         client, notes, coords, mentionedItems, interactionType,
         competitorName: sawCompetitor ? competitorName : "",
         competitorNotes: sawCompetitor ? competitorNotes : "",
+        objectionTag, objectionResolution, objectionNotes,
       });
       setLastVisit(created || { client: visitClient });
       // client/notes/coords/mentionedItems/competitor fields are deliberately
@@ -2409,6 +2432,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
         notes, mentionedItems,
         competitorName: sawCompetitor ? competitorName : "",
         competitorNotes: sawCompetitor ? competitorNotes : "",
+        objectionTag, objectionResolution, objectionNotes,
       });
       setEditingSavedVisit(false);
       loadTodayVisits();
@@ -2442,12 +2466,14 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
       objective: todaysObjective, doctorNeeds, reaction, concern, doctorInsight, commitment, patientsToTry,
       callOutcome, keyLearning, nextAction,
       treatmentGoal, keyMessage, plannedObjectionHandling, plannedClose, buyingMotive, customerComments,
+      objectionTag, objectionResolution, objectionNotes,
       queuedAt: new Date().toISOString(),
       localKey,
       ...extra,
     });
     setLastVisit({ client, pending: true, localKey });
     setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSamplesQuery("");
+    setObjectionTag(""); setObjectionResolution(""); setObjectionNotes("");
     setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
     setVisitStarted(false); setTodaysObjective(""); setDoctorNeeds([]); setReaction(""); setConcern("");
     setDoctorInsight(""); setCommitment(""); setPatientsToTry(""); setCallOutcome(""); setKeyLearning(""); setNextAction("");
@@ -2644,6 +2670,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
     // stuck around after saving (so Back could bring the rep right back to
     // them for edits) — clear them now that a genuinely new visit begins.
     setClient(""); setNotes(""); setCoords(null); setMentionedItems([]); setItemQuery(""); setSamplesQuery("");
+    setObjectionTag(""); setObjectionResolution(""); setObjectionNotes("");
     setSawCompetitor(false); setCompetitorName(""); setCompetitorNotes("");
     setInteractionType("in_person");
     setFollowUpStatus(null);
@@ -2961,6 +2988,38 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                         + {t}
                       </button>
                     ))}
+                  </div>
+                )}
+              </Field>
+            )}
+
+            {/* Objection resolution — pharmacy-only (doctors/nutritionists
+                already have the structured Concern field for this). Picking
+                a tag here overrides the server's notes-text auto-classifier;
+                leaving it blank falls back to that classifier as before. */}
+            {!isRemoteContact && !isDoctorStyleEntity && !isReturnVisit && (
+              <Field label="Objection (if any)">
+                <select value={objectionTag} onChange={(e) => setObjectionTag(e.target.value)} style={inputStyle}>
+                  <option value="">No objection</option>
+                  {OBJECTION_TAG_OPTIONS.map((tag) => <option key={tag} value={tag}>{tag}</option>)}
+                </select>
+                {objectionTag && (
+                  <div style={{ marginTop: 8 }}>
+                    <Field label="Resolution">
+                      <select value={objectionResolution} onChange={(e) => setObjectionResolution(e.target.value)} style={inputStyle}>
+                        <option value="">Not yet determined</option>
+                        {OBJECTION_RESOLUTION_OPTIONS.map((r) => <option key={r} value={r}>{r}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Notes (what did you say/do?)">
+                      <textarea
+                        value={objectionNotes}
+                        onChange={(e) => setObjectionNotes(e.target.value)}
+                        placeholder="How you handled it…"
+                        rows={2}
+                        style={{ ...inputStyle, resize: "vertical" }}
+                      />
+                    </Field>
                   </div>
                 )}
               </Field>
@@ -10324,6 +10383,72 @@ function TargetsView({ repNames, reps }) {
   );
 }
 
+// Objection Resolution Rate — one row per objection tag (manually picked or
+// auto-classified, same taxonomy either way), for the month the Performance
+// tab's existing month picker is currently showing. Turns the Top
+// Objection vanity count into an actionable coaching number: not just that
+// reps hit price objections, but whether they're actually overcoming them.
+function ObjectionsView({ visits, viewMonthKey, monthKeyLabel }) {
+  const monthVisits = visits.filter((v) => beirutDateStrOfInstant(v.time).slice(0, 7) === viewMonthKey);
+  const byTag = {};
+  monthVisits.forEach((v) => {
+    if (!v.objectionTag) return;
+    if (!byTag[v.objectionTag]) byTag[v.objectionTag] = { occurrences: 0, resolved: 0, partial: 0, unresolved: 0 };
+    const row = byTag[v.objectionTag];
+    row.occurrences += 1;
+    if (v.objectionResolution === "Resolved") row.resolved += 1;
+    else if (v.objectionResolution === "Partially addressed") row.partial += 1;
+    else if (v.objectionResolution === "Unresolved") row.unresolved += 1;
+  });
+  const rows = Object.entries(byTag)
+    .map(([tag, r]) => ({ tag, ...r, resolutionRate: r.occurrences ? Math.round((r.resolved / r.occurrences) * 100) : 0 }))
+    .sort((a, b) => b.occurrences - a.occurrences);
+
+  if (rows.length === 0) {
+    return <EmptyState text={`No objections logged for ${monthKeyLabel(viewMonthKey)}.`} />;
+  }
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16 }}>
+      <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Objection Resolution Rate</div>
+      <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 14 }}>{monthKeyLabel(viewMonthKey)}</div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+          <thead>
+            <tr style={{ textAlign: "left", borderBottom: "1px solid #E5DFD3" }}>
+              <th style={{ padding: "6px 8px" }}>Objection</th>
+              <th style={{ padding: "6px 8px", textAlign: "center" }}>Occurrences</th>
+              <th style={{ padding: "6px 8px", textAlign: "center" }}>Resolved</th>
+              <th style={{ padding: "6px 8px", textAlign: "center" }}>Partially Addressed</th>
+              <th style={{ padding: "6px 8px", textAlign: "center" }}>Unresolved</th>
+              <th style={{ padding: "6px 8px" }}>Resolution Rate</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.tag} style={{ borderBottom: "1px solid #F0EDE4" }}>
+                <td style={{ padding: "8px", fontWeight: 500 }}>{r.tag}</td>
+                <td style={{ padding: "8px", textAlign: "center" }}>{r.occurrences}</td>
+                <td style={{ padding: "8px", textAlign: "center" }}>{r.resolved}</td>
+                <td style={{ padding: "8px", textAlign: "center" }}>{r.partial}</td>
+                <td style={{ padding: "8px", textAlign: "center" }}>{r.unresolved}</td>
+                <td style={{ padding: "8px", minWidth: 140 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ flex: 1, height: 6, borderRadius: 3, background: "#F0EDE4", overflow: "hidden" }}>
+                      <div style={{ width: `${r.resolutionRate}%`, height: "100%", background: r.resolutionRate >= 60 ? "#4C7A5E" : r.resolutionRate >= 35 ? "#D9A441" : "#B33A3A" }} />
+                    </div>
+                    <span style={{ fontWeight: 600, minWidth: 32, textAlign: "right" }}>{r.resolutionRate}%</span>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function accountStatusList(clients, doctors, visits) {
   const lastVisitFor = (name) => {
     const matches = visits.filter((v) => v.client.toLowerCase().trim() === name.toLowerCase().trim());
@@ -11186,7 +11311,10 @@ function PerformanceView({
             Targets
           </button>
         )}
-        {subView === "overview" && (
+        <button onClick={() => setSubView("objections")} style={{ padding: "7px 16px", borderRadius: 16, fontSize: 12.5, fontWeight: 500, border: subView === "objections" ? "1px solid #1F2A24" : "1px solid #E5DFD3", background: subView === "objections" ? "#1F2A24" : "#fff", color: subView === "objections" ? "#FAF7F2" : "#5B5445" }}>
+          Objections
+        </button>
+        {(subView === "overview" || subView === "objections") && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
             <button onClick={() => setViewMonthKey((k) => shiftMonthKey(k, -1))} aria-label="Previous month"
               style={{ width: 28, height: 28, borderRadius: 14, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 15, cursor: "pointer" }}>
@@ -11257,6 +11385,8 @@ function PerformanceView({
 
       {subView === "targets" ? (
         <TargetsView repNames={repNames} reps={reps} />
+      ) : subView === "objections" ? (
+        <ObjectionsView visits={visits} viewMonthKey={viewMonthKey} monthKeyLabel={monthKeyLabel} />
       ) : (
       <>
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>

@@ -305,6 +305,22 @@ function classifyObjection(notes) {
   const hit = OBJECTION_KEYWORDS.find(({ words }) => words.some((w) => text.includes(w)));
   return hit ? hit.tag : "";
 }
+// A rep can now pick the objection tag explicitly (Check-In's "Objection (if
+// any)" dropdown) instead of relying solely on the auto-classifier above.
+// Resolve it to one of the exact same tag strings the classifier already
+// produces — no separate taxonomy — so manually and auto-tagged visits
+// aggregate together identically in the Performance tab.
+const KNOWN_OBJECTION_TAGS = new Set(OBJECTION_KEYWORDS.map((o) => o.tag));
+function resolveObjectionTag(manualTag, notes) {
+  const trimmed = typeof manualTag === "string" ? manualTag.trim() : "";
+  if (trimmed && KNOWN_OBJECTION_TAGS.has(trimmed)) return trimmed;
+  return classifyObjection(notes);
+}
+const OBJECTION_RESOLUTION_VALUES = new Set(["Resolved", "Partially addressed", "Unresolved"]);
+function sanitizeObjectionResolution(raw) {
+  const trimmed = typeof raw === "string" ? raw.trim() : "";
+  return OBJECTION_RESOLUTION_VALUES.has(trimmed) ? trimmed : "";
+}
 
 // ---------- Doctor-visit redesign: structured field allow-lists ----------
 // Mirrors the option lists the client offers a rep — an unrecognized code
@@ -934,6 +950,7 @@ function parseVisit(v) {
     treatmentGoal: v.treatmentGoal || "", keyMessage: v.keyMessage || "",
     plannedObjectionHandling: v.plannedObjectionHandling || "", plannedClose: v.plannedClose || "",
     buyingMotive: v.buyingMotive || "", customerComments: v.customerComments || "",
+    objectionResolution: v.objectionResolution || "", objectionNotes: v.objectionNotes || "",
   };
 }
 // Same formula as haversineKm in client/src/helpers.js — used here to check
@@ -990,6 +1007,7 @@ function visitToRow(v) {
     treatmentGoal: v.treatmentGoal || "", keyMessage: v.keyMessage || "",
     plannedObjectionHandling: v.plannedObjectionHandling || "", plannedClose: v.plannedClose || "",
     buyingMotive: v.buyingMotive || "", customerComments: v.customerComments || "",
+    objectionResolution: v.objectionResolution || "", objectionNotes: v.objectionNotes || "",
   };
 }
 
@@ -1877,6 +1895,9 @@ app.post("/api/visits", async (req, res) => {
   try {
     const { client, notes, coords, mentionedItems, competitorName, competitorNotes } = req.body;
     if (!client) return res.status(400).json({ error: "client is required" });
+    const objectionTag = resolveObjectionTag(req.body.objectionTag, notes);
+    const objectionResolution = objectionTag ? sanitizeObjectionResolution(req.body.objectionResolution) : "";
+    const objectionNotes = objectionTag && typeof req.body.objectionNotes === "string" ? req.body.objectionNotes.trim() : "";
     // Interaction Type (Manager Performance Management redesign) — required
     // going forward. A missing/unrecognized value defaults to "in_person"
     // rather than being rejected outright, so an in-flight client build from
@@ -1949,7 +1970,7 @@ app.post("/api/visits", async (req, res) => {
       time: new Date().toISOString(),
       repName: req.repName || "",
       mentionedItems: Array.isArray(mentionedItems) ? mentionedItems : [],
-      objectionTag: classifyObjection(notes),
+      objectionTag, objectionResolution, objectionNotes,
       interactionType,
       locationVerified,
       distanceFromCustomerKm,
@@ -2082,7 +2103,16 @@ app.patch("/api/visits/:id", async (req, res) => {
     const patch = {};
     if (notes !== undefined) {
       patch.notes = notes || "";
-      patch.objectionTag = classifyObjection(notes);
+      patch.objectionTag = resolveObjectionTag(req.body.objectionTag, notes);
+    } else if (req.body.objectionTag !== undefined) {
+      // Rep touched only the objection section, not the notes text itself.
+      patch.objectionTag = resolveObjectionTag(req.body.objectionTag, visit.notes);
+    }
+    if (patch.objectionTag !== undefined) {
+      // A resolution/notes with no tag makes no sense — clear them together
+      // if the tag was cleared, same as the empty-tag case on first save.
+      patch.objectionResolution = patch.objectionTag ? sanitizeObjectionResolution(req.body.objectionResolution) : "";
+      patch.objectionNotes = patch.objectionTag && typeof req.body.objectionNotes === "string" ? req.body.objectionNotes.trim() : "";
     }
     if (Array.isArray(mentionedItems)) {
       patch.itemsMentioned = mentionedItems.length ? JSON.stringify(mentionedItems) : "";

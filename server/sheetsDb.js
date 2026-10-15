@@ -188,6 +188,10 @@ const SCHEMAS = {
     "interactionType", "locationVerified", "distanceFromCustomerKm",
     "treatmentGoal", "keyMessage", "plannedObjectionHandling", "plannedClose",
     "buyingMotive", "customerComments",
+    // Objection resolution tracking — appended. Pharmacy-only (doctors/
+    // nutritionists already have the structured `concern` field for this).
+    // "" on every visit that predates this change.
+    "objectionResolution", "objectionNotes",
   ],
   // subTerritory appended (Pharmacy territory hierarchy) — a finer
   // classification WITHIN `area` (e.g. area="Dahiyeh", subTerritory="Chiyah"),
