@@ -1955,13 +1955,27 @@ function DoctorBrief({ profile, loading, objective, onObjectiveChange, onViewFul
   );
 }
 
+// Shared by isLegacyVisit and StructuredVisitCard below — checks every
+// structured field either entity type can populate. Doctor visits set
+// reaction/commitment/doctorInsight/etc.; pharmacy visits set buyingMotive/
+// customerComments/objectionTag instead (and never the doctor-only fields).
+// Checking only the doctor-only subset (as this used to) misclassified
+// every structured PHARMACY visit as "legacy" the moment it had notes, since
+// pharmacy visits never set reaction/commitment/doctorInsight at all —
+// silently dropping its buying motive/customer comments/objection
+// resolution in ClientsView's History toggle.
+function visitHasStructuredData(v) {
+  return Boolean((v.mentionedItems || []).length || v.reaction || v.commitment || v.doctorInsight || v.keyLearning || v.nextAction || v.objectionTag || v.concern
+    || v.treatmentGoal || v.keyMessage || v.plannedObjectionHandling || v.plannedClose || v.buyingMotive || v.customerComments);
+}
+
 // A visit predating this redesign has notes but none of the new structured
 // fields — render it under "Legacy note" rather than a StructuredVisitCard
 // that would otherwise look suspiciously empty. A visit with genuinely
 // nothing at all (rare — a bare check-in) falls through to
 // StructuredVisitCard's own "no additional details recorded" message.
 function isLegacyVisit(v) {
-  return !v.reaction && !v.commitment && !v.doctorInsight && Boolean(v.notes && v.notes.trim());
+  return !visitHasStructuredData(v) && Boolean(v.notes && v.notes.trim());
 }
 
 // A doctor visit counts as a "Quality Call" once every field named in the
@@ -1982,9 +1996,7 @@ function isQualityCall(v, requiredFields) {
 }
 
 function StructuredVisitCard({ visit: v }) {
-  const hasAnything = (v.mentionedItems || []).length || v.reaction || v.commitment || v.doctorInsight || v.keyLearning || v.nextAction || v.objectionTag || v.concern
-    || v.treatmentGoal || v.keyMessage || v.plannedObjectionHandling || v.plannedClose || v.buyingMotive || v.customerComments;
-  if (!hasAnything) return <div style={{ fontSize: 12.5, color: "#8A8272" }}>No additional details recorded.</div>;
+  if (!visitHasStructuredData(v)) return <div style={{ fontSize: 12.5, color: "#8A8272" }}>No additional details recorded.</div>;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13 }}>
       {v.interactionType && v.interactionType !== "in_person" && (
