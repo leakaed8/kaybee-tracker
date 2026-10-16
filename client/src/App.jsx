@@ -9152,7 +9152,51 @@ function KnowledgeView() {
   const [search, setSearch] = useState("");
   const q = search.toLowerCase().trim();
 
-  const filteredSpecialty = SPECIALTY_TALKING_POINTS.map((s) => ({
+  // Rep-contributed additions to the static By Specialty list — any rep or
+  // manager who can see this tab can add a supplement under a specialty,
+  // tagged with who added it, so the reference grows from the field without
+  // needing a code change for every new talking point.
+  const [contributions, setContributions] = useState([]);
+  const [addingTo, setAddingTo] = useState(null); // specialty name currently showing its add form, or null
+  const [newTopic, setNewTopic] = useState("");
+  const [newText, setNewText] = useState("");
+  const [savingContribution, setSavingContribution] = useState(false);
+
+  const loadContributions = () => {
+    api.getKnowledgeContributions().then((data) => setContributions(data.contributions || [])).catch(() => {});
+  };
+  useEffect(loadContributions, []);
+
+  const openAddForm = (specialty) => {
+    setAddingTo(addingTo === specialty ? null : specialty);
+    setNewTopic(""); setNewText("");
+  };
+
+  const submitContribution = async (specialty) => {
+    if (!newTopic.trim() || !newText.trim()) return;
+    setSavingContribution(true);
+    try {
+      await api.addKnowledgeContribution({ specialty, topic: newTopic.trim(), text: newText.trim() });
+      setAddingTo(null); setNewTopic(""); setNewText("");
+      loadContributions();
+    } catch {
+      // Keep the form open so the rep can retry.
+    } finally {
+      setSavingContribution(false);
+    }
+  };
+
+  const specialtyWithContributions = SPECIALTY_TALKING_POINTS.map((s) => ({
+    ...s,
+    topics: [
+      ...s.topics,
+      ...contributions
+        .filter((c) => c.specialty === s.specialty)
+        .map((c) => ({ topic: c.topic, text: c.text, addedBy: c.addedBy, contributed: true })),
+    ],
+  }));
+
+  const filteredSpecialty = specialtyWithContributions.map((s) => ({
     ...s,
     topics: s.topics.filter((t) =>
       !q || s.specialty.toLowerCase().includes(q) || t.topic.toLowerCase().includes(q) || t.text.toLowerCase().includes(q)
@@ -9210,12 +9254,62 @@ function KnowledgeView() {
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {filteredSpecialty.map((s) => (
             <div key={s.specialty} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
-              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>{s.specialty}</div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{s.specialty}</div>
+                <button
+                  onClick={() => openAddForm(s.specialty)}
+                  title={`Add a supplement under ${s.specialty}`}
+                  aria-label={`Add a supplement under ${s.specialty}`}
+                  style={{
+                    width: 24, height: 24, borderRadius: 12, border: "1px solid #4C7A5E", flexShrink: 0,
+                    background: addingTo === s.specialty ? "#4C7A5E" : "#fff", color: addingTo === s.specialty ? "#fff" : "#4C7A5E",
+                    fontSize: 16, fontWeight: 600, lineHeight: 1, cursor: "pointer",
+                  }}
+                >
+                  +
+                </button>
+              </div>
+              {addingTo === s.specialty && (
+                <div style={{ background: "#FAF7F2", border: "1px dashed #4C7A5E", borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                  <input
+                    value={newTopic}
+                    onChange={(e) => setNewTopic(e.target.value)}
+                    placeholder="Supplement or topic name"
+                    style={{ ...inputStyle, marginBottom: 6, background: "#fff" }}
+                  />
+                  <textarea
+                    value={newText}
+                    onChange={(e) => setNewText(e.target.value)}
+                    placeholder="What to mention…"
+                    rows={2}
+                    style={{ ...inputStyle, resize: "vertical", marginBottom: 8, background: "#fff" }}
+                  />
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={() => setAddingTo(null)} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 11.5, cursor: "pointer" }}>
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => submitContribution(s.specialty)}
+                      disabled={savingContribution || !newTopic.trim() || !newText.trim()}
+                      style={{
+                        padding: "6px 12px", borderRadius: 6, border: "none", fontSize: 11.5, fontWeight: 600, cursor: "pointer",
+                        background: !newTopic.trim() || !newText.trim() ? "#D8D2C4" : "#4C7A5E", color: "#fff",
+                      }}
+                    >
+                      {savingContribution ? "Saving…" : "Add"}
+                    </button>
+                  </div>
+                </div>
+              )}
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {s.topics.map((t, i) => (
-                  <div key={i} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
+                  <div key={i} style={{
+                    background: t.contributed ? "#EEF4F8" : "#FAF7F2", border: t.contributed ? "1px solid #B8D4E3" : "1px solid #E5DFD3",
+                    borderRadius: 8, padding: 10,
+                  }}>
                     <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 3 }}>{t.topic}</div>
                     <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.5 }}>{t.text}</div>
+                    {t.contributed && <div style={{ fontSize: 10.5, color: "#2E6B8F", fontWeight: 600, marginTop: 4 }}>Added by {t.addedBy}</div>}
                   </div>
                 ))}
               </div>

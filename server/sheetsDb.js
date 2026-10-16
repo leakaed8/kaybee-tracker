@@ -250,6 +250,13 @@ const SCHEMAS = {
     "id", "repName", "commissionPct", "bonusThresholdPct", "bonusAmount",
     "updatedBy", "updatedAt",
   ],
+  // Rep-contributed additions to the static Knowledge "By Specialty" talking
+  // points (SPECIALTY_TALKING_POINTS, client/src/repKnowledge.js) — any rep
+  // or manager who can see the Knowledge tab can add a supplement under a
+  // specialty; `addedBy` records who, so the crowd-sourced entries are never
+  // anonymous. Append-only — reps add to this shared reference, they don't
+  // edit/delete each other's entries.
+  KnowledgeContributions: ["id", "specialty", "topic", "text", "addedBy", "createdAt"],
   // The last analysis's flagged-client results (effective % >= 35 only —
   // same filter the client already applies before this gets saved), so
   // reopening Discount Audit shows where things stood without re-uploading

@@ -2208,6 +2208,41 @@ app.get("/api/compensation/summary", async (req, res) => {
   }
 });
 
+// Rep-contributed additions to the Knowledge tab's "By Specialty" talking
+// points (the static SPECIALTY_TALKING_POINTS list in client/src/
+// repKnowledge.js). Shared reference content, not personal visit data, so
+// every authenticated caller (manager or rep) can both read and add — no
+// isTeamWide scoping here, unlike Visits/Orders/Samples.
+app.get("/api/knowledge-contributions", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("KnowledgeContributions");
+    res.json({ contributions: rows.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)) });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/knowledge-contributions", async (req, res) => {
+  try {
+    const { specialty, topic, text } = req.body;
+    if (!specialty || !String(specialty).trim()) return res.status(400).json({ error: "specialty is required" });
+    if (!topic || !String(topic).trim()) return res.status(400).json({ error: "topic is required" });
+    if (!text || !String(text).trim()) return res.status(400).json({ error: "text is required" });
+    const row = {
+      id: `kc${crypto.randomUUID()}`,
+      specialty: String(specialty).trim(), topic: String(topic).trim(), text: String(text).trim(),
+      addedBy: req.repName || "Manager",
+      createdAt: new Date().toISOString(),
+    };
+    await db.appendRow("KnowledgeContributions", row);
+    res.json(row);
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/visits", async (req, res) => {
   const startedAt = Date.now();
   try {
