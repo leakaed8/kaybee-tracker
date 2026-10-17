@@ -12276,6 +12276,83 @@ app.get("/api/recall/categories", requireTabAccess("recall"), async (req, res) =
 // page needs, computed from currently-empty tables. Sections legitimately
 // show real empty arrays right now; the client renders each as an
 // empty-state message rather than fabricating placeholder content.
+// A compact PubMed/NCBI study-citation list for a set of RecallClinicalEvidence
+// rows — only sources with a real PMID, deduped, with the evidence's own
+// population/intervention/key-finding context folded in. Shared by the
+// Recall category-detail route (whole category) and
+// GET /api/product-catalog/:id/studies (one product's linked ingredient(s)),
+// so "the studies we added in Product Expert" is the exact same data either
+// way it's viewed, never a second copy.
+function buildStudyReferences(relevantEvidence, sources) {
+  const sourceIds = new Set(relevantEvidence.map((e) => e.sourceId).filter(Boolean));
+  return sources
+    .filter((s) => sourceIds.has(s.id) && String(s.pmid || "").trim())
+    .map((s) => {
+      const relatedEvidence = relevantEvidence.filter((e) => e.sourceId === s.id);
+      return {
+        id: s.id,
+        title: s.title,
+        pmid: s.pmid,
+        url: s.url || `https://pubmed.ncbi.nlm.nih.gov/${s.pmid}/`,
+        sourceName: s.sourceName || "",
+        journal: s.journal || "",
+        publicationYear: s.publicationYear || relatedEvidence.find((e) => e.publicationYear)?.publicationYear || "",
+        studyType: relatedEvidence.find((e) => e.studyType)?.studyType || "",
+        population: relatedEvidence.find((e) => e.population)?.population || "",
+        sampleSize: relatedEvidence.find((e) => e.sampleSize)?.sampleSize || "",
+        intervention: relatedEvidence.find((e) => e.intervention)?.intervention || "",
+        comparator: relatedEvidence.find((e) => e.comparator)?.comparator || "",
+        keyFinding: relatedEvidence.map((e) => e.result).filter(Boolean).join(" ") || "",
+        limitations: relatedEvidence.map((e) => e.limitations).filter(Boolean).join(" ") || "",
+      };
+    });
+}
+
+// Knowledge's "By Specialty" view surfaces a contributed product's linked
+// research without requiring the viewer to also have Product Expert (Recall)
+// tab access — gated on the Knowledge tab instead, since that's who actually
+// consumes this. Reuses the same ensure*Seeded prerequisite chain the Recall
+// routes use so this works even if nobody has opened Product Expert yet.
+app.get("/api/product-catalog/:id/studies", requireTabAccess("knowledge"), async (req, res) => {
+  try {
+    await ensureRecallCategoriesSeeded();
+    await ensureRecallB12Seeded();
+    await ensureB12ProductDataSeeded();
+    await ensureOurProductsMasterDataSeeded();
+    await ensurePhase1CategoriesSeeded();
+    await ensurePhase2CategoriesSeeded();
+    await ensurePhase3CategoriesSeeded();
+    await ensurePhase4CategoriesSeeded();
+    await ensurePhase5CategoriesSeeded();
+    await ensurePhase6CategoriesSeeded();
+    await ensurePhase7CategoriesSeeded();
+    await ensurePhase8CategoriesSeeded();
+    await ensurePhase9CategoriesSeeded();
+    await ensureIngredientImportanceEnriched();
+
+    const [productIngredients, ingredientsAll, evidence, sources] = await Promise.all([
+      db.getAllRows("RecallProductIngredients"),
+      db.getAllRows("RecallIngredients"),
+      db.getAllRows("RecallClinicalEvidence"),
+      db.getAllRows("RecallResearchSources"),
+    ]);
+
+    const links = productIngredients.filter((pi) => pi.productId === req.params.id);
+    const ingredientIds = new Set(links.map((l) => l.ingredientId));
+    const ingredients = ingredientsAll.filter((i) => ingredientIds.has(i.id));
+    const relevantEvidence = evidence.filter((e) => ingredientIds.has(e.ingredientId));
+    const studies = buildStudyReferences(relevantEvidence, sources);
+
+    res.json({
+      ingredients: ingredients.map((i) => ({ id: i.id, name: i.name, repQuickTakeaway: i.repQuickTakeaway || "" })),
+      studies,
+    });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get("/api/recall/categories/:id", requireTabAccess("recall"), async (req, res) => {
   try {
     await ensureRecallCategoriesSeeded();
@@ -12421,28 +12498,10 @@ app.get("/api/recall/categories/:id", requireTabAccess("recall"), async (req, re
     // RecallClinicalEvidence row(s) already on file — nothing new
     // researched or invented here, just surfaced as its own compact list
     // with a link out to the real source instead of buried in prose.
-    const categorySourceIds = new Set(categoryEvidence.map((e) => e.sourceId).filter(Boolean));
-    const references = sources
-      .filter((s) => categorySourceIds.has(s.id) && String(s.pmid || "").trim())
-      .map((s) => {
-        const relatedEvidence = categoryEvidence.filter((e) => e.sourceId === s.id);
-        return {
-          id: s.id,
-          title: s.title,
-          pmid: s.pmid,
-          url: s.url || `https://pubmed.ncbi.nlm.nih.gov/${s.pmid}/`,
-          sourceName: s.sourceName || "",
-          journal: s.journal || "",
-          publicationYear: s.publicationYear || relatedEvidence.find((e) => e.publicationYear)?.publicationYear || "",
-          studyType: relatedEvidence.find((e) => e.studyType)?.studyType || "",
-          population: relatedEvidence.find((e) => e.population)?.population || "",
-          sampleSize: relatedEvidence.find((e) => e.sampleSize)?.sampleSize || "",
-          intervention: relatedEvidence.find((e) => e.intervention)?.intervention || "",
-          comparator: relatedEvidence.find((e) => e.comparator)?.comparator || "",
-          keyFinding: relatedEvidence.map((e) => e.result).filter(Boolean).join(" ") || "",
-          limitations: relatedEvidence.map((e) => e.limitations).filter(Boolean).join(" ") || "",
-        };
-      });
+    // (buildStudyReferences is shared with GET /api/product-catalog/:id/studies,
+    // which surfaces the same citations scoped to one product's ingredient(s)
+    // for Knowledge's "By Specialty" view instead of a whole category.)
+    const references = buildStudyReferences(categoryEvidence, sources);
 
     const categoryFeatures = features.filter((f) => f.categoryId === category.id);
     const categoryBenefits = benefits.filter((b) => b.categoryId === category.id);

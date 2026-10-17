@@ -9244,7 +9244,7 @@ async function downloadSelectedProductImages(selectedProducts) {
 // visual card (thumbnail + name) instead of the plain text line — lazily
 // fetches the presigned image URL (same pattern as ProductImageSlot in the
 // Product Catalog manager screen) rather than ever receiving a raw R2 key.
-function KnowledgeProductCard({ contribution, product, selected, onToggleSelect }) {
+function KnowledgeProductCard({ contribution, product, selected, onToggleSelect, onOpenStudies }) {
   const [url, setUrl] = useState("");
   useEffect(() => {
     let cancelled = false;
@@ -9258,8 +9258,80 @@ function KnowledgeProductCard({ contribution, product, selected, onToggleSelect 
         {url && <img src={url} alt={contribution.productName} style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
       </div>
       <div style={{ fontSize: 12.5 }}>
-        <div style={{ fontWeight: 600 }}>{contribution.productName}</div>
+        <button
+          type="button" onClick={onOpenStudies} title="View studies from Product Expert"
+          style={{ fontWeight: 600, background: "none", border: "none", padding: 0, color: "#1F2A24", cursor: "pointer", textDecoration: "underline", textDecorationColor: "#D8D2C4", textAlign: "left" }}
+        >
+          {contribution.productName}
+        </button>
         <div style={{ color: "#2E6B8F", fontSize: 11 }}>(added by {contribution.addedBy})</div>
+      </div>
+    </div>
+  );
+}
+
+// Studies cited in Product Expert for whichever ingredient(s) this Product
+// Catalog product is linked to — same fields RecallView's "Clinical
+// References" section renders, fetched via the shared buildStudyReferences
+// server helper so it's always the exact same citation list either way it's
+// viewed, not a second copy.
+function ProductStudiesModal({ productId, productName, onClose }) {
+  const [status, setStatus] = useState("loading"); // loading | ready | error
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus("loading");
+    api.getProductCatalogStudies(productId)
+      .then((d) => { if (!cancelled) { setData(d); setStatus("ready"); } })
+      .catch(() => { if (!cancelled) setStatus("error"); });
+    return () => { cancelled = true; };
+  }, [productId]);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(23,37,34,0.75)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={onClose}>
+      <div style={{ background: "#fff", borderRadius: 12, width: "min(640px, 100%)", maxHeight: "85vh", overflowY: "auto", padding: 18 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div style={{ fontSize: 15, fontWeight: 600 }}>{productName} — Studies</div>
+          <button onClick={onClose} title="Close" style={{ background: "none", border: "none", cursor: "pointer", color: "#5B5445" }}><X size={18} /></button>
+        </div>
+
+        {status === "loading" && <div style={{ fontSize: 12.5, color: "#8A8272", padding: "20px 0" }}>Loading…</div>}
+        {status === "error" && <div style={{ fontSize: 12.5, color: "#B33A3A", padding: "20px 0" }}>Couldn't load studies for this product.</div>}
+        {status === "ready" && (
+          <>
+            {data.ingredients.length > 0 && (
+              <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, marginBottom: 12 }}>
+                {data.ingredients.map((ing) => (
+                  <div key={ing.id} style={{ fontSize: 12.5 }}>
+                    <strong>{ing.name}</strong>{ing.repQuickTakeaway ? ` — ${ing.repQuickTakeaway}` : ""}
+                  </div>
+                ))}
+              </div>
+            )}
+            {data.studies.length === 0 ? (
+              <EmptyState text="No PubMed/NCBI studies have been linked to this product in Product Expert yet." />
+            ) : (
+              data.studies.map((r) => (
+                <div key={r.id} style={{ fontSize: 12, marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid #F0EBE0" }}>
+                  <div style={{ fontWeight: 600, marginBottom: 2 }}>{r.title}</div>
+                  <div style={{ color: "#8A8272", fontSize: 11 }}>
+                    {[r.studyType, r.publicationYear, r.journal || r.sourceName].filter(Boolean).join(" · ")}
+                  </div>
+                  {r.population && <div style={{ marginTop: 3, fontSize: 11 }}><strong>Population:</strong> {r.population}{r.sampleSize ? ` (N=${r.sampleSize})` : ""}</div>}
+                  {r.intervention && <div style={{ fontSize: 11 }}><strong>Intervention:</strong> {r.intervention}</div>}
+                  {r.comparator && <div style={{ fontSize: 11 }}><strong>Comparator:</strong> {r.comparator}</div>}
+                  {r.keyFinding && <div style={{ marginTop: 4, color: "#5B5445" }}><strong>Key finding:</strong> {r.keyFinding}</div>}
+                  {r.limitations && <div style={{ marginTop: 3, fontSize: 11, color: "#8A8272" }}><strong>Limitations:</strong> {r.limitations}</div>}
+                  <div style={{ marginTop: 4, fontSize: 11 }}>
+                    PMID: {r.pmid}{" — "}
+                    <a href={r.url} target="_blank" rel="noreferrer">Read full study →</a>
+                  </div>
+                </div>
+              ))
+            )}
+          </>
+        )}
       </div>
     </div>
   );
@@ -9280,6 +9352,7 @@ function KnowledgeView({ products, productCatalog }) {
     return m;
   }, [productCatalog]);
   const [selectedForExport, setSelectedForExport] = useState(new Set());
+  const [openStudiesFor, setOpenStudiesFor] = useState(null); // { id, name } | null
   const [exporting, setExporting] = useState(false);
   const toggleExportSelection = (id) => {
     setSelectedForExport((prev) => {
@@ -9538,12 +9611,23 @@ function KnowledgeView({ products, productCatalog }) {
                                 key={c.id} contribution={c} product={catalogProduct}
                                 selected={selectedForExport.has(catalogProduct.id)}
                                 onToggleSelect={() => toggleExportSelection(catalogProduct.id)}
+                                onOpenStudies={() => setOpenStudiesFor({ id: catalogProduct.id, name: c.productName })}
                               />
                             );
                           }
                           return (
                             <div key={c.id} style={{ fontSize: 12.5, color: "#1F2A24" }}>
-                              <strong style={{ fontWeight: 600 }}>{c.productName}</strong>{" "}
+                              {catalogProduct ? (
+                                <button
+                                  type="button" onClick={() => setOpenStudiesFor({ id: catalogProduct.id, name: c.productName })}
+                                  title="View studies from Product Expert"
+                                  style={{ fontWeight: 600, background: "none", border: "none", padding: 0, font: "inherit", color: "#1F2A24", cursor: "pointer", textDecoration: "underline", textDecorationColor: "#D8D2C4" }}
+                                >
+                                  {c.productName}
+                                </button>
+                              ) : (
+                                <strong style={{ fontWeight: 600 }}>{c.productName}</strong>
+                              )}{" "}
                               <span style={{ color: "#2E6B8F", fontSize: 11 }}>(added by {c.addedBy})</span>
                             </div>
                           );
@@ -9647,6 +9731,9 @@ function KnowledgeView({ products, productCatalog }) {
             </ul>
           </div>
         </div>
+      )}
+      {openStudiesFor && (
+        <ProductStudiesModal productId={openStudiesFor.id} productName={openStudiesFor.name} onClose={() => setOpenStudiesFor(null)} />
       )}
     </div>
   );
