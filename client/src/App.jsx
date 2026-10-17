@@ -751,7 +751,7 @@ export default function App() {
             {tab === "cadence" && canSeeTab("cadence") && (
               <VisitCadenceView role={role} isSupervisor={isSupervisor} repNames={repNames} />
             )}
-            {tab === "knowledge" && canSeeTab("knowledge") && <KnowledgeView products={products} productCatalog={productCatalog} />}
+            {tab === "knowledge" && canSeeTab("knowledge") && <KnowledgeView products={products} productCatalog={productCatalog} role={role} />}
             {tab === "training" && canSeeTab("training") && (
               <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
             )}
@@ -9244,7 +9244,28 @@ async function downloadSelectedProductImages(selectedProducts) {
 // visual card (thumbnail + name) instead of the plain text line — lazily
 // fetches the presigned image URL (same pattern as ProductImageSlot in the
 // Product Catalog manager screen) rather than ever receiving a raw R2 key.
-function KnowledgeProductCard({ contribution, product, selected, onToggleSelect, onOpenStudies }) {
+// Manager-only delete control for a Knowledge contribution, shared by both
+// the visual image card and the plain-text fallback line so a bad entry
+// (wrong product, mis-typed data, etc.) can be removed from either.
+function DeleteContributionControl({ contributionId, confirmDeleteId, deletingId, onRequestDelete, onConfirmDelete, onCancelDelete }) {
+  if (confirmDeleteId === contributionId) {
+    return (
+      <span style={{ display: "inline-flex", gap: 4, marginLeft: 6 }}>
+        <button onClick={() => onConfirmDelete(contributionId)} disabled={deletingId === contributionId} style={{ fontSize: 10, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 4, padding: "2px 6px" }}>
+          {deletingId === contributionId ? "…" : "Yes"}
+        </button>
+        <button onClick={onCancelDelete} style={{ fontSize: 10, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 4, padding: "2px 6px" }}>Cancel</button>
+      </span>
+    );
+  }
+  return (
+    <button onClick={() => onRequestDelete(contributionId)} title="Delete" style={{ fontSize: 10, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 4, padding: "2px 6px", marginLeft: 6 }}>
+      Delete
+    </button>
+  );
+}
+
+function KnowledgeProductCard({ contribution, product, selected, onToggleSelect, onOpenStudies, isManager, confirmDeleteId, deletingId, onRequestDelete, onConfirmDelete, onCancelDelete }) {
   const [url, setUrl] = useState("");
   useEffect(() => {
     let cancelled = false;
@@ -9264,7 +9285,15 @@ function KnowledgeProductCard({ contribution, product, selected, onToggleSelect,
         >
           {contribution.productName}
         </button>
-        <div style={{ color: "#2E6B8F", fontSize: 11 }}>(added by {contribution.addedBy})</div>
+        <div style={{ color: "#2E6B8F", fontSize: 11, display: "flex", alignItems: "center" }}>
+          (added by {contribution.addedBy})
+          {isManager && (
+            <DeleteContributionControl
+              contributionId={contribution.id} confirmDeleteId={confirmDeleteId} deletingId={deletingId}
+              onRequestDelete={onRequestDelete} onConfirmDelete={onConfirmDelete} onCancelDelete={onCancelDelete}
+            />
+          )}
+        </div>
       </div>
     </div>
   );
@@ -9337,7 +9366,8 @@ function ProductStudiesModal({ productId, productName, onClose }) {
   );
 }
 
-function KnowledgeView({ products, productCatalog }) {
+function KnowledgeView({ products, productCatalog, role }) {
+  const isManager = role === "manager";
   const [section, setSection] = useState("specialty"); // specialty | condition | drugs | reference
   const [search, setSearch] = useState("");
   const q = search.toLowerCase().trim();
@@ -9393,6 +9423,21 @@ function KnowledgeView({ products, productCatalog }) {
     api.getKnowledgeContributions().then((data) => setContributions(data.contributions || [])).catch(() => {});
   };
   useEffect(loadContributions, []);
+
+  const [deletingId, setDeletingId] = useState(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const deleteContribution = async (id) => {
+    setDeletingId(id);
+    try {
+      await api.removeKnowledgeContribution(id);
+      setContributions((prev) => prev.filter((c) => c.id !== id));
+    } catch {
+      // Leave it in place so the manager can retry.
+    } finally {
+      setDeletingId(null);
+      setConfirmDeleteId(null);
+    }
+  };
 
   const openAddForm = (specialty, existingTopics) => {
     if (addingTo === specialty) { setAddingTo(null); return; }
@@ -9612,6 +9657,8 @@ function KnowledgeView({ products, productCatalog }) {
                                 selected={selectedForExport.has(catalogProduct.id)}
                                 onToggleSelect={() => toggleExportSelection(catalogProduct.id)}
                                 onOpenStudies={() => setOpenStudiesFor({ id: catalogProduct.id, name: c.productName })}
+                                isManager={isManager} confirmDeleteId={confirmDeleteId} deletingId={deletingId}
+                                onRequestDelete={setConfirmDeleteId} onConfirmDelete={deleteContribution} onCancelDelete={() => setConfirmDeleteId(null)}
                               />
                             );
                           }
@@ -9629,6 +9676,12 @@ function KnowledgeView({ products, productCatalog }) {
                                 <strong style={{ fontWeight: 600 }}>{c.productName}</strong>
                               )}{" "}
                               <span style={{ color: "#2E6B8F", fontSize: 11 }}>(added by {c.addedBy})</span>
+                              {isManager && (
+                                <DeleteContributionControl
+                                  contributionId={c.id} confirmDeleteId={confirmDeleteId} deletingId={deletingId}
+                                  onRequestDelete={setConfirmDeleteId} onConfirmDelete={deleteContribution} onCancelDelete={() => setConfirmDeleteId(null)}
+                                />
+                              )}
                             </div>
                           );
                         })}

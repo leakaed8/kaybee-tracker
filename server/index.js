@@ -2347,6 +2347,17 @@ app.post("/api/knowledge-contributions", async (req, res) => {
   }
 });
 
+app.delete("/api/knowledge-contributions/:id", requireManager, async (req, res) => {
+  try {
+    const ok = await db.deleteRowById("KnowledgeContributions", req.params.id);
+    if (!ok) return res.status(404).json({ error: "Contribution not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/visits", async (req, res) => {
   const startedAt = Date.now();
   try {

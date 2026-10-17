@@ -194,6 +194,7 @@ export const api = {
   getCompensationSummary: (params) => request(`/compensation/summary${qs(params)}`),
   getKnowledgeContributions: () => request("/knowledge-contributions"),
   addKnowledgeContribution: (contribution) => request("/knowledge-contributions", { method: "POST", body: JSON.stringify(contribution) }),
+  removeKnowledgeContribution: (id) => request(`/knowledge-contributions/${id}`, { method: "DELETE" }),
   addCompetitor: (competitor) => request("/competitors", { method: "POST", body: JSON.stringify(competitor) }),
   updateCompetitor: (id, patch) => request(`/competitors/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   removeCompetitor: (id) => request(`/competitors/${id}`, { method: "DELETE" }),
