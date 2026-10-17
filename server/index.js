@@ -12361,11 +12361,12 @@ app.get("/api/product-catalog/:id/studies", requireTabAccess("knowledge"), async
     await ensurePhase9CategoriesSeeded();
     await ensureIngredientImportanceEnriched();
 
-    const [productIngredients, ingredientsAll, evidence, sources] = await Promise.all([
+    const [productIngredients, ingredientsAll, evidence, sources, advantageRows] = await Promise.all([
       db.getAllRows("RecallProductIngredients"),
       db.getAllRows("RecallIngredients"),
       db.getAllRows("RecallClinicalEvidence"),
       db.getAllRows("RecallResearchSources"),
+      db.getAllRows("RecallProductAdvantages"),
     ]);
 
     const links = productIngredients.filter((pi) => pi.productId === req.params.id);
@@ -12374,9 +12375,19 @@ app.get("/api/product-catalog/:id/studies", requireTabAccess("knowledge"), async
     const relevantEvidence = evidence.filter((e) => ingredientIds.has(e.ingredientId));
     const studies = buildStudyReferences(relevantEvidence, sources);
 
+    // Short rep-facing bullet claims (e.g. "Supports heart health") for a
+    // product export/visual card — reused as-is from Product Expert's "Why
+    // Our Products" advantages rather than inventing new copy, never shown
+    // if a manager hasn't entered any there yet.
+    const highlights = advantageRows
+      .filter((a) => (a.productIds || "").split(",").map((s) => s.trim()).includes(req.params.id))
+      .map((a) => a.benefit || a.feature)
+      .filter(Boolean);
+
     res.json({
       ingredients: ingredients.map((i) => ({ id: i.id, name: i.name, repQuickTakeaway: i.repQuickTakeaway || "" })),
       studies,
+      highlights,
     });
   } catch (e) {
     logErr(e);

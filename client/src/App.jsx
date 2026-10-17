@@ -9183,48 +9183,92 @@ async function downloadImageFile(url, filename) {
   URL.revokeObjectURL(objectUrl);
 }
 
-// Rep-facing export (requests #6/#7): approved bottle + Supplement Facts
-// photos of the selected products, as one PDF — mirrors the ensureSpace
+// Rep-facing export (requests #6/#7): a branded cover page for the
+// specialty, then a 2-column grid of the selected products — each with its
+// approved bottle + Supplement Facts photos side by side and up to 3
+// rep-facing bullet claims (reused as-is from Product Expert's "Why Our
+// Products" advantages, never invented copy). Mirrors the ensureSpace
 // pagination idiom already used by downloadRepPerformancePdfForRange.
-async function downloadProductCardsPdf(selectedProducts) {
+async function downloadSpecialtyProductCardsPdf(specialtyName, selectedProducts) {
   const doc = new jsPDF();
+  const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
+
+  // ---- Cover page ----
+  doc.setFillColor(31, 42, 36);
+  doc.rect(0, 0, pageWidth, pageHeight, "F");
+  doc.setTextColor(250, 247, 242);
+  doc.setFontSize(11);
+  doc.text("KAYBEE PHARMA", 14, 20);
+  doc.setFontSize(28);
+  doc.text(specialtyName, 14, 55);
+  doc.setFontSize(15);
+  doc.text("Product Catalog", 14, 67);
+  doc.setFontSize(10.5);
+  doc.setTextColor(216, 210, 196);
+  const brands = [...new Set(selectedProducts.map((p) => p.brand).filter(Boolean))];
+  if (brands.length) doc.text(brands.join("   ·   "), 14, pageHeight - 20);
+  doc.text(`${selectedProducts.length} product${selectedProducts.length === 1 ? "" : "s"} · Generated ${new Date().toLocaleDateString("en-GB", { timeZone: "Asia/Beirut" })}`, 14, pageHeight - 14);
+
+  // ---- Product grid, 2 columns ----
+  doc.addPage();
   let y = 18;
-  const ensureSpace = (needed) => {
-    if (y + needed > pageHeight - 14) { doc.addPage(); y = 18; }
+  const marginX = 14;
+  const gap = 10;
+  const colWidth = (pageWidth - marginX * 2 - gap) / 2;
+  const imgSize = Math.min(colWidth * 0.46, 45);
+  const rowHeight = 92;
+  let col = 0;
+
+  const ensureRow = () => {
+    if (y + rowHeight > pageHeight - 14) { doc.addPage(); y = 18; }
   };
 
-  doc.setFontSize(16);
-  doc.text("KayBee Pharma — Product Sheet", 14, y);
-  y += 12;
-
   for (const product of selectedProducts) {
-    ensureSpace(90);
-    doc.setFontSize(13);
-    doc.text(product.name, 14, y);
-    y += 6;
-    const imageY = y;
-    let imgHeight = 0;
+    if (col === 0) ensureRow();
+    const x = marginX + col * (colWidth + gap);
+
+    doc.setTextColor(140, 130, 110);
+    doc.setFontSize(9);
+    if (product.brand) doc.text(product.brand, x, y);
+    doc.setTextColor(20, 30, 25);
+    doc.setFontSize(11);
+    const nameLines = doc.splitTextToSize(product.name, colWidth);
+    doc.text(nameLines, x, y + 6);
+    const imageY = y + 6 + nameLines.length * 5 + 2;
+
     if (product.hasBottleImage) {
       try {
         const { url } = await api.getCatalogProductImageUrl(product.id, "bottle");
         const dataUrl = await fetchImageAsDataUrl(url);
-        doc.addImage(dataUrl, jsPdfFormatForMime(product.bottleImageMimeType), 14, imageY, 80, 80, undefined, "FAST");
-        imgHeight = 80;
+        doc.addImage(dataUrl, jsPdfFormatForMime(product.bottleImageMimeType), x, imageY, imgSize, imgSize, undefined, "FAST");
       } catch { /* skip a slot that can't be fetched rather than failing the whole export */ }
     }
     if (product.hasSupplementFactsImage) {
       try {
         const { url } = await api.getCatalogProductImageUrl(product.id, "supplementFacts");
         const dataUrl = await fetchImageAsDataUrl(url);
-        doc.addImage(dataUrl, jsPdfFormatForMime(product.supplementFactsImageMimeType), 104, imageY, 80, 80, undefined, "FAST");
-        imgHeight = 80;
+        doc.addImage(dataUrl, jsPdfFormatForMime(product.supplementFactsImageMimeType), x + imgSize + 4, imageY, imgSize, imgSize, undefined, "FAST");
       } catch { /* same as above */ }
     }
-    y = imageY + imgHeight + 14;
+
+    let bulletY = imageY + imgSize + 5;
+    try {
+      const { highlights } = await api.getProductCatalogStudies(product.id);
+      doc.setFontSize(8.5);
+      doc.setTextColor(60, 70, 60);
+      for (const h of (highlights || []).slice(0, 3)) {
+        const lines = doc.splitTextToSize(`• ${h}`, colWidth);
+        doc.text(lines, x, bulletY);
+        bulletY += lines.length * 4;
+      }
+    } catch { /* highlights are a bonus, never block the export */ }
+
+    col = col === 0 ? 1 : 0;
+    if (col === 0) y += rowHeight;
   }
 
-  doc.save(`product-sheet-${Date.now()}.pdf`);
+  doc.save(`${specialtyName.replace(/[^a-zA-Z0-9]+/g, "-")}-product-catalog.pdf`);
 }
 
 async function downloadSelectedProductImages(selectedProducts) {
@@ -9391,12 +9435,15 @@ function KnowledgeView({ products, productCatalog, role }) {
       return next;
     });
   };
-  const selectedCatalogProducts = (productCatalog || []).filter((p) => selectedForExport.has(p.id));
-  const runExport = async (fn) => {
+  const runExport = async (fn, selectedIds) => {
     setExporting(true);
     try {
-      await fn(selectedCatalogProducts);
-      setSelectedForExport(new Set());
+      await fn((productCatalog || []).filter((p) => selectedIds.includes(p.id)));
+      setSelectedForExport((prev) => {
+        const next = new Set(prev);
+        selectedIds.forEach((id) => next.delete(id));
+        return next;
+      });
     } catch {
       // Keep the selection so the rep can retry.
     } finally {
@@ -9543,22 +9590,13 @@ function KnowledgeView({ products, productCatalog, role }) {
         </div>
       )}
 
-      {section === "specialty" && selectedForExport.size > 0 && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#1F2A24", color: "#FAF7F2", borderRadius: 8, padding: "8px 12px", marginBottom: 10 }}>
-          <span style={{ fontSize: 12.5 }}>{selectedForExport.size} product{selectedForExport.size === 1 ? "" : "s"} selected</span>
-          <button disabled={exporting} onClick={() => runExport(downloadProductCardsPdf)} style={{ fontSize: 12, background: "#FAF7F2", color: "#1F2A24", border: "none", borderRadius: 6, padding: "5px 10px" }}>
-            {exporting ? "Exporting…" : "Export as PDF"}
-          </button>
-          <button disabled={exporting} onClick={() => runExport(downloadSelectedProductImages)} style={{ fontSize: 12, background: "none", color: "#FAF7F2", border: "1px solid #FAF7F2", borderRadius: 6, padding: "5px 10px" }}>
-            Download images
-          </button>
-          <button onClick={() => setSelectedForExport(new Set())} style={{ fontSize: 12, background: "none", color: "#D8D2C4", border: "none", marginLeft: "auto" }}>Clear</button>
-        </div>
-      )}
-
       {section === "specialty" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {filteredSpecialty.map((s) => (
+          {filteredSpecialty.map((s) => {
+            const specialtySelectedIds = [...selectedForExport].filter((id) =>
+              s.topics.some((t) => t.contributedProducts?.some((c) => catalogByNormName.get(String(c.productName || "").toLowerCase().trim())?.id === id))
+            );
+            return (
             <div key={s.specialty} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                 <div style={{ fontWeight: 600, fontSize: 14 }}>{s.specialty}</div>
@@ -9690,8 +9728,26 @@ function KnowledgeView({ products, productCatalog, role }) {
                   </div>
                 ))}
               </div>
+              {specialtySelectedIds.length > 0 && (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#1F2A24", color: "#FAF7F2", borderRadius: 8, padding: "8px 12px", marginTop: 10 }}>
+                  <span style={{ fontSize: 12.5 }}>{specialtySelectedIds.length} product{specialtySelectedIds.length === 1 ? "" : "s"} selected</span>
+                  <button disabled={exporting} onClick={() => runExport((products) => downloadSpecialtyProductCardsPdf(s.specialty, products), specialtySelectedIds)} style={{ fontSize: 12, background: "#FAF7F2", color: "#1F2A24", border: "none", borderRadius: 6, padding: "5px 10px" }}>
+                    {exporting ? "Exporting…" : "Export (PDF)"}
+                  </button>
+                  <button disabled={exporting} onClick={() => runExport(downloadSelectedProductImages, specialtySelectedIds)} style={{ fontSize: 12, background: "none", color: "#FAF7F2", border: "1px solid #FAF7F2", borderRadius: 6, padding: "5px 10px" }}>
+                    Download images
+                  </button>
+                  <button
+                    onClick={() => setSelectedForExport((prev) => { const next = new Set(prev); specialtySelectedIds.forEach((id) => next.delete(id)); return next; })}
+                    style={{ fontSize: 12, background: "none", color: "#D8D2C4", border: "none", marginLeft: "auto" }}
+                  >
+                    Clear
+                  </button>
+                </div>
+              )}
             </div>
-          ))}
+            );
+          })}
           {filteredSpecialty.length === 0 && <EmptyState text="No specialty matches your search." />}
         </div>
       )}
