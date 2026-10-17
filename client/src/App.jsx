@@ -9284,6 +9284,159 @@ async function downloadSelectedProductImages(selectedProducts) {
   }
 }
 
+function loadImageFromDataUrl(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
+}
+
+// Draws an image scaled to fit entirely inside the given box, centered —
+// never cropped or stretched, matching how the bottle/facts thumbnails are
+// already shown elsewhere in the app.
+function drawImageContain(ctx, img, x, y, w, h) {
+  const scale = Math.min(w / img.width, h / img.height);
+  const dw = img.width * scale;
+  const dh = img.height * scale;
+  ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+}
+
+// Canvas has no built-in text wrapping — breaks a string onto lines at
+// word boundaries within maxWidth and returns the Y position after the
+// last line, so the caller can keep laying out content below it.
+function wrapCanvasText(ctx, text, x, y, maxWidth, lineHeight, maxLines = Infinity) {
+  const words = String(text || "").split(" ");
+  let line = "";
+  let curY = y;
+  let lines = 0;
+  for (const word of words) {
+    const testLine = line ? `${line} ${word}` : word;
+    if (ctx.measureText(testLine).width > maxWidth && line) {
+      ctx.fillText(line, x, curY);
+      line = word;
+      curY += lineHeight;
+      lines++;
+      if (lines >= maxLines) return curY;
+    } else {
+      line = testLine;
+    }
+  }
+  if (line) { ctx.fillText(line, x, curY); curY += lineHeight; }
+  return curY;
+}
+
+const PRODUCT_BRAND_DISPLAY_NAMES = { Alfa: "Alfa Vitamins", Mason: "Mason Natural" };
+
+// Rep-shareable "mobile card" (requests #6/#7's PDF-or-individual-images
+// choice, image variant): a single composited PNG per product — brand
+// header, name, bottle image, up to 4 bullet highlights (same source as the
+// PDF export), and a bordered Supplement Facts panel — sized for sharing in
+// a chat app rather than printing. Built with Canvas since this is one flat
+// image, not a multi-page document.
+async function downloadProductMobileCard(product) {
+  const W = 900;
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+
+  // Height is computed in two passes: lay out onto a tall scratch canvas
+  // first to find where content actually ends, then redraw onto a canvas
+  // sized exactly to that content — avoids either cropping a long product
+  // name/highlight list or leaving a large blank footer.
+  const SCRATCH_H = 2200;
+  canvas.width = W;
+  canvas.height = SCRATCH_H;
+
+  const bottleImg = product.hasBottleImage
+    ? await api.getCatalogProductImageUrl(product.id, "bottle").then((r) => fetchImageAsDataUrl(r.url)).then(loadImageFromDataUrl).catch(() => null)
+    : null;
+  const factsImg = product.hasSupplementFactsImage
+    ? await api.getCatalogProductImageUrl(product.id, "supplementFacts").then((r) => fetchImageAsDataUrl(r.url)).then(loadImageFromDataUrl).catch(() => null)
+    : null;
+  let highlights = [];
+  try { highlights = (await api.getProductCatalogStudies(product.id)).highlights || []; } catch { /* bonus content only */ }
+
+  const render = (targetCtx) => {
+    targetCtx.fillStyle = "#FAF7F2";
+    targetCtx.fillRect(0, 0, W, SCRATCH_H);
+
+    targetCtx.fillStyle = "#1F2A24";
+    targetCtx.fillRect(0, 0, W, 110);
+    targetCtx.fillStyle = "#FAF7F2";
+    targetCtx.font = "bold 34px sans-serif";
+    targetCtx.textAlign = "left";
+    targetCtx.fillText(PRODUCT_BRAND_DISPLAY_NAMES[product.brand] || product.brand || "KayBee Pharma", 36, 68);
+
+    targetCtx.fillStyle = "#1F2A24";
+    targetCtx.font = "bold 38px sans-serif";
+    let y = wrapCanvasText(targetCtx, product.name, 36, 170, W - 72, 46);
+    y += 20;
+
+    if (bottleImg) {
+      drawImageContain(targetCtx, bottleImg, 36, y, W - 72, 420);
+      y += 420 + 30;
+    }
+
+    if (highlights.length) {
+      targetCtx.font = "26px sans-serif";
+      targetCtx.fillStyle = "#1F2A24";
+      for (const h of highlights.slice(0, 4)) {
+        targetCtx.beginPath();
+        targetCtx.fillStyle = "#B33A3A";
+        targetCtx.arc(44, y - 9, 6, 0, Math.PI * 2);
+        targetCtx.fill();
+        targetCtx.fillStyle = "#1F2A24";
+        y = wrapCanvasText(targetCtx, h, 66, y, W - 102, 32, 2);
+        y += 6;
+      }
+      y += 16;
+    }
+
+    if (factsImg) {
+      const boxH = Math.min(500, (factsImg.height / factsImg.width) * (W - 144) + 60);
+      targetCtx.strokeStyle = "#E5DFD3";
+      targetCtx.lineWidth = 2;
+      targetCtx.strokeRect(36, y, W - 72, boxH);
+      targetCtx.font = "bold 18px sans-serif";
+      targetCtx.fillStyle = "#8A8272";
+      targetCtx.fillText("SUPPLEMENT FACTS", 52, y + 28);
+      drawImageContain(targetCtx, factsImg, 52, y + 40, W - 104, boxH - 56);
+      y += boxH;
+    }
+
+    y += 50;
+    targetCtx.font = "16px sans-serif";
+    targetCtx.fillStyle = "#8A8272";
+    targetCtx.textAlign = "center";
+    targetCtx.fillText("KayBee Pharma", W / 2, y);
+    return y + 24;
+  };
+
+  const contentHeight = render(ctx);
+
+  const finalCanvas = document.createElement("canvas");
+  finalCanvas.width = W;
+  finalCanvas.height = Math.ceil(contentHeight);
+  render(finalCanvas.getContext("2d"));
+
+  const blob = await new Promise((resolve) => finalCanvas.toBlob(resolve, "image/png"));
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objectUrl;
+  a.download = `${product.name.replace(/[^a-zA-Z0-9]+/g, "-")}-card.png`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
+async function downloadMobileProductCards(selectedProducts) {
+  for (const product of selectedProducts) {
+    await downloadProductMobileCard(product);
+  }
+}
+
 // A contributed product that has an approved bottle image becomes a small
 // visual card (thumbnail + name) instead of the plain text line — lazily
 // fetches the presigned image URL (same pattern as ProductImageSlot in the
@@ -9736,6 +9889,9 @@ function KnowledgeView({ products, productCatalog, role }) {
                   </button>
                   <button disabled={exporting} onClick={() => runExport(downloadSelectedProductImages, specialtySelectedIds)} style={{ fontSize: 12, background: "none", color: "#FAF7F2", border: "1px solid #FAF7F2", borderRadius: 6, padding: "5px 10px" }}>
                     Download images
+                  </button>
+                  <button disabled={exporting} onClick={() => runExport(downloadMobileProductCards, specialtySelectedIds)} style={{ fontSize: 12, background: "none", color: "#FAF7F2", border: "1px solid #FAF7F2", borderRadius: 6, padding: "5px 10px" }}>
+                    Mobile Card (Image)
                   </button>
                   <button
                     onClick={() => setSelectedForExport((prev) => { const next = new Set(prev); specialtySelectedIds.forEach((id) => next.delete(id)); return next; })}
