@@ -1215,7 +1215,20 @@ async function buildReferenceBootstrapPayload() {
     clients,
     doctors,
     nutritionists,
-    productCatalog,
+    productCatalog: productCatalog.map(parseProductCatalogForClient),
+  };
+}
+
+// Raw R2 image keys never leave the server (same rule as RecallProductFeatures'
+// parseRecallFeature) — the client only learns whether an image slot is filled
+// and what its approval status is; the actual bytes are only reachable through
+// the dedicated image-url route, which enforces the approval gate per-request.
+function parseProductCatalogForClient(row) {
+  const { bottleImageKey, supplementFactsImageKey, ...rest } = row;
+  return {
+    ...rest,
+    hasBottleImage: !!bottleImageKey,
+    hasSupplementFactsImage: !!supplementFactsImageKey,
   };
 }
 
@@ -1243,6 +1256,7 @@ app.get("/api/bootstrap/reference", async (req, res) => {
     // too so the Mason/ALFA master list shows up regardless of which tab a
     // user opens first, not only after visiting Recall.
     await ensureOurProductsMasterDataSeeded();
+    await ensureProductCatalogBrandBackfilled();
     const wantsFresh = req.query.fresh === "true";
     if (!wantsFresh && referenceBootstrapCache && Date.now() - referenceBootstrapCache.timestamp < REFERENCE_BOOTSTRAP_CACHE_TTL_MS) {
       return res.json(referenceBootstrapCache.data);
@@ -1616,20 +1630,29 @@ app.post("/api/product-catalog", requireManager, async (req, res) => {
       ingredients: normalizeIngredients(req.body.ingredients),
       notes: req.body.notes || "",
       sku: req.body.sku || "",
+      brand: req.body.brand || inferProductCatalogBrand(req.body.name),
+      bottleImageKey: "", bottleImageName: "", bottleImageMimeType: "",
+      supplementFactsImageKey: "", supplementFactsImageName: "", supplementFactsImageMimeType: "",
+      imageApprovalStatus: "", imageSourceUrl: "", imageMatchedBy: "", imageMatchedAt: "", imageNotes: "",
       createdBy: req.repName || "Manager",
       createdAt: new Date().toISOString(),
       updatedBy: "",
       updatedAt: "",
     };
     await db.appendRow("ProductCatalog", product);
-    res.json(product);
+    res.json(parseProductCatalogForClient(product));
+    findImagesForProductCatalogIds([product.id]).catch(logErr);
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
   }
 });
 
-app.patch("/api/product-catalog/:id", requireManager, async (req, res) => {
+app.patch(
+  "/api/product-catalog/:id",
+  requireManager,
+  uploadDocument.fields([{ name: "bottleImage", maxCount: 1 }, { name: "supplementFactsImage", maxCount: 1 }]),
+  async (req, res) => {
   try {
     if (req.body.name !== undefined && !String(req.body.name).trim()) return res.status(400).json({ error: "Product name is required." });
     const validationError = validateCompetitorProductNumbers(req.body);
@@ -1643,6 +1666,30 @@ app.patch("/api/product-catalog/:id", requireManager, async (req, res) => {
     if (req.body.ingredients !== undefined) patch.ingredients = normalizeIngredients(req.body.ingredients);
     if (req.body.notes !== undefined) patch.notes = req.body.notes || "";
     if (req.body.sku !== undefined) patch.sku = req.body.sku || "";
+    if (req.body.brand !== undefined) patch.brand = req.body.brand || "";
+
+    // A freshly uploaded image always starts at pending_review — even a
+    // manager's own upload needs the explicit approve click before it
+    // reaches reps, keeping a single approval gate instead of two paths.
+    const bottleFile = req.files?.bottleImage?.[0];
+    const factsFile = req.files?.supplementFactsImage?.[0];
+    if (bottleFile || factsFile) {
+      if (bottleFile) {
+        const key = `product-catalog/${req.params.id}-bottle-${sanitizeFilename(bottleFile.originalname)}`;
+        await uploadObjectToR2(bottleFile.buffer, key, bottleFile.mimetype);
+        patch.bottleImageKey = key; patch.bottleImageName = bottleFile.originalname; patch.bottleImageMimeType = bottleFile.mimetype;
+      }
+      if (factsFile) {
+        const key = `product-catalog/${req.params.id}-facts-${sanitizeFilename(factsFile.originalname)}`;
+        await uploadObjectToR2(factsFile.buffer, key, factsFile.mimetype);
+        patch.supplementFactsImageKey = key; patch.supplementFactsImageName = factsFile.originalname; patch.supplementFactsImageMimeType = factsFile.mimetype;
+      }
+      patch.imageApprovalStatus = "pending_review";
+      patch.imageMatchedBy = req.repName || "Manager";
+      patch.imageMatchedAt = new Date().toISOString();
+      patch.imageSourceUrl = "";
+    }
+
     const ok = await db.updateRowById("ProductCatalog", req.params.id, patch);
     if (!ok) return res.status(404).json({ error: "Product not found" });
     res.json({ ok: true });
@@ -1656,6 +1703,62 @@ app.delete("/api/product-catalog/:id", requireManager, async (req, res) => {
   try {
     await db.deleteRowById("ProductCatalog", req.params.id);
     res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Single approval gate for both manually uploaded and auto-matched images —
+// nothing reaches reps (Knowledge cards, export) until a manager clicks
+// Approve here, regardless of how the image got attached. Reject clears the
+// relevant key(s) outright so a fresh upload/retry isn't left ambiguous
+// against a half-approved slot.
+app.patch("/api/product-catalog/:id/image-approval", requireManager, async (req, res) => {
+  try {
+    const { status, which } = req.body;
+    if (!["approved", "rejected"].includes(status)) return res.status(400).json({ error: "status must be 'approved' or 'rejected'" });
+    if (!["bottle", "supplementFacts", "both"].includes(which)) return res.status(400).json({ error: "which must be 'bottle', 'supplementFacts', or 'both'" });
+
+    const patch = { updatedBy: req.repName || "Manager", updatedAt: new Date().toISOString() };
+    if (status === "rejected") {
+      if (which === "bottle" || which === "both") {
+        patch.bottleImageKey = ""; patch.bottleImageName = ""; patch.bottleImageMimeType = "";
+      }
+      if (which === "supplementFacts" || which === "both") {
+        patch.supplementFactsImageKey = ""; patch.supplementFactsImageName = ""; patch.supplementFactsImageMimeType = "";
+      }
+    }
+    patch.imageApprovalStatus = status;
+
+    const ok = await db.updateRowById("ProductCatalog", req.params.id, patch);
+    if (!ok) return res.status(404).json({ error: "Product not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/product-catalog/:id/image-url", async (req, res) => {
+  try {
+    const which = req.query.which === "supplementFacts" ? "supplementFacts" : "bottle";
+    const rows = await db.getAllRows("ProductCatalog");
+    const product = rows.find((p) => p.id === req.params.id);
+    if (!product) return res.status(404).json({ error: "Product not found" });
+
+    const key = which === "bottle" ? product.bottleImageKey : product.supplementFactsImageKey;
+    if (!key) return res.status(404).json({ error: "No image found" });
+
+    // Managers can preview a pending/rejected image to review it; anyone
+    // else (reps) only ever gets the bytes once it's approved — this is the
+    // one place that actually enforces the approval gate, since the list
+    // payload only ever tells callers whether a slot is filled, not approved.
+    const isManager = req.role === "manager" || req.isSupervisor;
+    if (!isManager && product.imageApprovalStatus !== "approved") return res.status(404).json({ error: "No image found" });
+
+    const { url, expiresAt } = await createDocumentViewUrl(key);
+    res.json({ url, expiresAt });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
@@ -8944,6 +9047,220 @@ async function ensureOurProductsMasterDataSeeded() {
 
   ourProductsMasterDataSeedChecked = true;
 }
+
+// A product's brand (Alfa/Mason) is derivable from its own name prefix for
+// every product this company actually carries, so this backfills it once
+// for rows that predate the field rather than asking a manager to re-enter
+// it by hand. Never overwrites a brand a manager already set/edited.
+function inferProductCatalogBrand(name) {
+  const n = String(name || "").trim().toLowerCase();
+  if (n.startsWith("alfa")) return "Alfa";
+  if (n.startsWith("mason")) return "Mason";
+  return "";
+}
+
+let productCatalogBrandBackfillChecked = false;
+async function ensureProductCatalogBrandBackfilled() {
+  if (productCatalogBrandBackfillChecked) return;
+  const rows = await db.getAllRows("ProductCatalog");
+  const updates = [];
+  for (const row of rows) {
+    if (row.brand) continue;
+    const brand = inferProductCatalogBrand(row.name);
+    if (brand) updates.push({ id: row.id, patch: { brand } });
+  }
+  if (updates.length) await db.batchUpdateRows("ProductCatalog", updates);
+  productCatalogBrandBackfillChecked = true;
+}
+
+// ---------- Product Catalog image matching ("Find Missing Images") ----------
+// Two tiers, both fail closed rather than guess:
+//  Tier A (high confidence): OUR_PRODUCTS_MASTER_SEED already carries a
+//    human-picked sourceUrl for ~99 real Mason/ALFA products — an exact
+//    SKU/strength/form/pack-size match done by a person. Reused directly,
+//    never re-derived.
+//  Tier B (fallback): no seed entry — search the brand's own site and only
+//    accept a result whose own page title contains every numeric
+//    strength/pack-size token from our product name. Anything short of that
+//    is left unmatched; a network failure (the site blocking/refusing the
+//    request) is reported distinctly as "blocked" rather than "not found",
+//    since that's a different, actionable finding for a manager reviewing
+//    the pilot.
+const PRODUCT_IMAGE_FETCH_TIMEOUT_MS = 10000;
+
+async function fetchWithTimeout(url, opts = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PRODUCT_IMAGE_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function brandSiteFor(brand) {
+  if (brand === "Alfa") return "https://alfavitamins.com";
+  if (brand === "Mason") return "https://masonnatural.com";
+  return "";
+}
+
+// Numeric strength/pack-size tokens (e.g. "2100mg", "60") — the most
+// discriminating part of a product name, and what "exact strength/pack size
+// match" actually means in practice since there's no real SKU on these
+// supplier sites to compare against.
+function numericTokensOf(name) {
+  return [...String(name || "").toLowerCase().matchAll(/\d+(?:\.\d+)?\s*(?:mg|mcg|g|iu)?/g)].map((m) => m[0].replace(/\s+/g, ""));
+}
+
+function pageTitleContainsAllTokens(pageTitle, tokens) {
+  const t = String(pageTitle || "").toLowerCase().replace(/\s+/g, "");
+  return tokens.length > 0 && tokens.every((tok) => t.includes(tok));
+}
+
+function extractBottleImageUrl(html, baseUrl) {
+  const og = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
+    || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+  if (og) return new URL(og[1], baseUrl).href;
+  const jsonLd = html.match(/"image"\s*:\s*"([^"]+)"/i);
+  if (jsonLd) return new URL(jsonLd[1].replace(/\\\//g, "/"), baseUrl).href;
+  const firstImg = html.match(/<img[^>]+src=["']([^"']+)["']/i);
+  if (firstImg) return new URL(firstImg[1], baseUrl).href;
+  return "";
+}
+
+function extractSupplementFactsImageUrl(html, baseUrl, excludeUrl) {
+  const imgTagRe = /<img[^>]+>/gi;
+  const keywordRe = /fact|label|nutrition|ingredient/i;
+  for (const tag of html.match(imgTagRe) || []) {
+    const srcMatch = tag.match(/src=["']([^"']+)["']/i);
+    if (!srcMatch) continue;
+    const altMatch = tag.match(/alt=["']([^"']*)["']/i);
+    if (!keywordRe.test(srcMatch[1]) && !keywordRe.test(altMatch?.[1] || "")) continue;
+    const url = new URL(srcMatch[1], baseUrl).href;
+    if (url !== excludeUrl) return url;
+  }
+  return "";
+}
+
+async function downloadImageToR2(imageUrl, keyPrefix) {
+  const resp = await fetchWithTimeout(imageUrl);
+  if (!resp.ok) throw new Error(`Image fetch failed: ${resp.status}`);
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  const contentType = resp.headers.get("content-type") || "image/jpeg";
+  const originalname = sanitizeFilename(imageUrl.split("/").pop().split("?")[0] || "image.jpg");
+  const key = `${keyPrefix}-${originalname}`;
+  await uploadObjectToR2(buffer, key, contentType);
+  return { key, name: originalname, mimeType: contentType };
+}
+
+// Locates the confirmed product page for one ProductCatalog row, Tier A then
+// Tier B. Returns { url } on a match, or { blocked: true } / {} (not found).
+async function locateProductPage(product) {
+  const norm = (s) => String(s || "").trim().toLowerCase();
+  const seedMatch = OUR_PRODUCTS_MASTER_SEED.find((item) => norm(item.name) === norm(product.name) && item.sourceUrl);
+  if (seedMatch) return { url: seedMatch.sourceUrl };
+
+  const brand = product.brand || inferProductCatalogBrand(product.name);
+  const site = brandSiteFor(brand);
+  if (!site) return {};
+
+  const tokens = numericTokensOf(product.name);
+  try {
+    const searchResp = await fetchWithTimeout(`${site}/search?q=${encodeURIComponent(product.name)}`);
+    if (!searchResp.ok) return { blocked: true };
+    const searchHtml = await searchResp.text();
+    const candidateLinks = [...new Set(
+      [...searchHtml.matchAll(/href=["'](\/products\/[^"'#?]+)["']/gi)].map((m) => new URL(m[1], site).href)
+    )].slice(0, 5);
+
+    for (const candidateUrl of candidateLinks) {
+      const pageResp = await fetchWithTimeout(candidateUrl);
+      if (!pageResp.ok) continue;
+      const pageHtml = await pageResp.text();
+      const titleMatch = pageHtml.match(/<title[^>]*>([^<]*)<\/title>/i);
+      if (pageTitleContainsAllTokens(titleMatch?.[1], tokens)) return { url: candidateUrl };
+    }
+    return {};
+  } catch (e) {
+    return { blocked: true };
+  }
+}
+
+async function findImagesForProductCatalogIds(ids) {
+  const results = [];
+  const catalog = await db.getAllRows("ProductCatalog");
+  const targets = catalog.filter((p) => ids.includes(p.id));
+
+  for (const product of targets) {
+    if (product.imageApprovalStatus === "approved") {
+      results.push({ id: product.id, name: product.name, outcome: "skipped_approved" });
+      continue;
+    }
+    try {
+      const located = await locateProductPage(product);
+      if (located.blocked) {
+        results.push({ id: product.id, name: product.name, outcome: "blocked" });
+        continue;
+      }
+      if (!located.url) {
+        results.push({ id: product.id, name: product.name, outcome: "not_found" });
+        continue;
+      }
+
+      const pageResp = await fetchWithTimeout(located.url);
+      if (!pageResp.ok) {
+        results.push({ id: product.id, name: product.name, outcome: "blocked", sourceUrl: located.url });
+        continue;
+      }
+      const pageHtml = await pageResp.text();
+      const bottleUrl = extractBottleImageUrl(pageHtml, located.url);
+      const factsUrl = bottleUrl ? extractSupplementFactsImageUrl(pageHtml, located.url, bottleUrl) : "";
+
+      const patch = {
+        updatedBy: "Find Missing Images (auto)", updatedAt: new Date().toISOString(),
+        imageMatchedBy: "auto", imageMatchedAt: new Date().toISOString(), imageSourceUrl: located.url,
+      };
+      if (bottleUrl) {
+        const uploaded = await downloadImageToR2(bottleUrl, `product-catalog/${product.id}-bottle-auto`);
+        patch.bottleImageKey = uploaded.key; patch.bottleImageName = uploaded.name; patch.bottleImageMimeType = uploaded.mimeType;
+      }
+      if (factsUrl) {
+        const uploaded = await downloadImageToR2(factsUrl, `product-catalog/${product.id}-facts-auto`);
+        patch.supplementFactsImageKey = uploaded.key; patch.supplementFactsImageName = uploaded.name; patch.supplementFactsImageMimeType = uploaded.mimeType;
+      }
+
+      if (!bottleUrl && !factsUrl) {
+        results.push({ id: product.id, name: product.name, outcome: "not_found", sourceUrl: located.url });
+        continue;
+      }
+      patch.imageApprovalStatus = "pending_review";
+      patch.imageNotes = factsUrl ? "" : "Bottle image found; Supplement Facts image not found on the product page — needs manual upload.";
+      await db.updateRowById("ProductCatalog", product.id, patch);
+      results.push({
+        id: product.id, name: product.name, sourceUrl: located.url,
+        outcome: bottleUrl && factsUrl ? "matched" : "partial",
+      });
+    } catch (e) {
+      logErr(e);
+      results.push({ id: product.id, name: product.name, outcome: "blocked" });
+    }
+  }
+  return results;
+}
+
+app.post("/api/product-catalog/find-images", requireManager, async (req, res) => {
+  try {
+    const catalog = await db.getAllRows("ProductCatalog");
+    const ids = Array.isArray(req.body.ids) && req.body.ids.length
+      ? req.body.ids
+      : catalog.filter((p) => p.imageApprovalStatus !== "approved" && (!p.bottleImageKey || !p.supplementFactsImageKey)).map((p) => p.id);
+    const results = await findImagesForProductCatalogIds(ids);
+    res.json({ results });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ---------- Recall Phase 1: Vitamin D, Vitamin C, Magnesium, Calcium ----------
 // Extends the SAME architecture the B12 category already uses (RecallIngredients

@@ -445,6 +445,9 @@ export default function App() {
   const updateCatalogProduct = (id, patch) => withSync(() => api.updateCatalogProduct(id, patch), { touchesReference: true });
   const removeCatalogProduct = (id) => withSync(() => api.removeCatalogProduct(id), { touchesReference: true });
   const bulkImportCatalogProducts = (products) => withSync(() => api.importCatalogProductsBulk(products), { touchesReference: true });
+  const uploadCatalogProductImages = (id, fields) => withSync(() => api.uploadCatalogProductImages(id, fields), { touchesReference: true });
+  const setCatalogProductImageApproval = (id, status, which) => withSync(() => api.setCatalogProductImageApproval(id, status, which), { touchesReference: true });
+  const findMissingCatalogImages = (ids) => withSync(() => api.findMissingCatalogImages(ids), { touchesReference: true });
   const bulkImportProducts = (products) => withSync(() => api.importBulkProducts(products), { touchesReference: true });
   const addVisit = (visit) => withSync(() => api.addVisit(visit), { touchesReference: true }); // can silently set a client's assignedRep server-side
   const updateVisit = (id, patch) => withSync(() => api.updateVisit(id, patch));
@@ -748,7 +751,7 @@ export default function App() {
             {tab === "cadence" && canSeeTab("cadence") && (
               <VisitCadenceView role={role} isSupervisor={isSupervisor} repNames={repNames} />
             )}
-            {tab === "knowledge" && canSeeTab("knowledge") && <KnowledgeView products={products} />}
+            {tab === "knowledge" && canSeeTab("knowledge") && <KnowledgeView products={products} productCatalog={productCatalog} />}
             {tab === "training" && canSeeTab("training") && (
               <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
             )}
@@ -831,6 +834,9 @@ export default function App() {
                 onUpdateCatalogProduct={updateCatalogProduct}
                 onRemoveCatalogProduct={removeCatalogProduct}
                 onBulkImportCatalogProducts={bulkImportCatalogProducts}
+                onUploadCatalogProductImages={uploadCatalogProductImages}
+                onSetCatalogProductImageApproval={setCatalogProductImageApproval}
+                onFindMissingCatalogImages={findMissingCatalogImages}
                 competitors={competitors}
                 onAddCompetitor={addCompetitor}
                 onUpdateCompetitor={updateCompetitor}
@@ -9147,10 +9153,153 @@ function NutritionistsView({ nutritionists, role, onAdd, onRemove, onBulkImport,
 }
 
 // ---------- Knowledge View (rep reference: talking points + drug/nutrient depletion) ----------
-function KnowledgeView({ products }) {
+async function fetchImageAsDataUrl(url) {
+  const resp = await fetch(url);
+  const blob = await resp.blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+function jsPdfFormatForMime(mime) {
+  if (mime && mime.includes("png")) return "PNG";
+  if (mime && mime.includes("webp")) return "WEBP";
+  return "JPEG";
+}
+
+async function downloadImageFile(url, filename) {
+  const resp = await fetch(url);
+  const blob = await resp.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objectUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
+// Rep-facing export (requests #6/#7): approved bottle + Supplement Facts
+// photos of the selected products, as one PDF — mirrors the ensureSpace
+// pagination idiom already used by downloadRepPerformancePdfForRange.
+async function downloadProductCardsPdf(selectedProducts) {
+  const doc = new jsPDF();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  let y = 18;
+  const ensureSpace = (needed) => {
+    if (y + needed > pageHeight - 14) { doc.addPage(); y = 18; }
+  };
+
+  doc.setFontSize(16);
+  doc.text("KayBee Pharma — Product Sheet", 14, y);
+  y += 12;
+
+  for (const product of selectedProducts) {
+    ensureSpace(90);
+    doc.setFontSize(13);
+    doc.text(product.name, 14, y);
+    y += 6;
+    const imageY = y;
+    let imgHeight = 0;
+    if (product.hasBottleImage) {
+      try {
+        const { url } = await api.getCatalogProductImageUrl(product.id, "bottle");
+        const dataUrl = await fetchImageAsDataUrl(url);
+        doc.addImage(dataUrl, jsPdfFormatForMime(product.bottleImageMimeType), 14, imageY, 80, 80, undefined, "FAST");
+        imgHeight = 80;
+      } catch { /* skip a slot that can't be fetched rather than failing the whole export */ }
+    }
+    if (product.hasSupplementFactsImage) {
+      try {
+        const { url } = await api.getCatalogProductImageUrl(product.id, "supplementFacts");
+        const dataUrl = await fetchImageAsDataUrl(url);
+        doc.addImage(dataUrl, jsPdfFormatForMime(product.supplementFactsImageMimeType), 104, imageY, 80, 80, undefined, "FAST");
+        imgHeight = 80;
+      } catch { /* same as above */ }
+    }
+    y = imageY + imgHeight + 14;
+  }
+
+  doc.save(`product-sheet-${Date.now()}.pdf`);
+}
+
+async function downloadSelectedProductImages(selectedProducts) {
+  for (const product of selectedProducts) {
+    if (product.hasBottleImage) {
+      const { url } = await api.getCatalogProductImageUrl(product.id, "bottle");
+      await downloadImageFile(url, `${product.name.replace(/[^a-zA-Z0-9]+/g, "-")}-bottle.jpg`);
+    }
+    if (product.hasSupplementFactsImage) {
+      const { url } = await api.getCatalogProductImageUrl(product.id, "supplementFacts");
+      await downloadImageFile(url, `${product.name.replace(/[^a-zA-Z0-9]+/g, "-")}-supplement-facts.jpg`);
+    }
+  }
+}
+
+// A contributed product that has an approved bottle image becomes a small
+// visual card (thumbnail + name) instead of the plain text line — lazily
+// fetches the presigned image URL (same pattern as ProductImageSlot in the
+// Product Catalog manager screen) rather than ever receiving a raw R2 key.
+function KnowledgeProductCard({ contribution, product, selected, onToggleSelect }) {
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    api.getCatalogProductImageUrl(product.id, "bottle").then((r) => { if (!cancelled) setUrl(r.url); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [product.id]);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: 6 }}>
+      <input type="checkbox" checked={selected} onChange={onToggleSelect} title="Select for export" />
+      <div style={{ width: 36, height: 36, borderRadius: 6, overflow: "hidden", background: "#FAF7F2", flexShrink: 0 }}>
+        {url && <img src={url} alt={contribution.productName} style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
+      </div>
+      <div style={{ fontSize: 12.5 }}>
+        <div style={{ fontWeight: 600 }}>{contribution.productName}</div>
+        <div style={{ color: "#2E6B8F", fontSize: 11 }}>(added by {contribution.addedBy})</div>
+      </div>
+    </div>
+  );
+}
+
+function KnowledgeView({ products, productCatalog }) {
   const [section, setSection] = useState("specialty"); // specialty | condition | drugs | reference
   const [search, setSearch] = useState("");
   const q = search.toLowerCase().trim();
+
+  // Joined by name against the Product Catalog (not products/Stock, which is
+  // what the contribution picker above searches) purely so an approved
+  // bottle image can be shown — additive and risk-free, since it never
+  // changes which product a contribution is actually attached to.
+  const catalogByNormName = useMemo(() => {
+    const m = new Map();
+    for (const p of productCatalog || []) m.set(String(p.name || "").toLowerCase().trim(), p);
+    return m;
+  }, [productCatalog]);
+  const [selectedForExport, setSelectedForExport] = useState(new Set());
+  const [exporting, setExporting] = useState(false);
+  const toggleExportSelection = (id) => {
+    setSelectedForExport((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const selectedCatalogProducts = (productCatalog || []).filter((p) => selectedForExport.has(p.id));
+  const runExport = async (fn) => {
+    setExporting(true);
+    try {
+      await fn(selectedCatalogProducts);
+      setSelectedForExport(new Set());
+    } catch {
+      // Keep the selection so the rep can retry.
+    } finally {
+      setExporting(false);
+    }
+  };
 
   // Rep-contributed additions to the static By Specialty list — any rep or
   // manager who can see this tab can tag one of our own products onto
@@ -9276,6 +9425,19 @@ function KnowledgeView({ products }) {
         </div>
       )}
 
+      {section === "specialty" && selectedForExport.size > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#1F2A24", color: "#FAF7F2", borderRadius: 8, padding: "8px 12px", marginBottom: 10 }}>
+          <span style={{ fontSize: 12.5 }}>{selectedForExport.size} product{selectedForExport.size === 1 ? "" : "s"} selected</span>
+          <button disabled={exporting} onClick={() => runExport(downloadProductCardsPdf)} style={{ fontSize: 12, background: "#FAF7F2", color: "#1F2A24", border: "none", borderRadius: 6, padding: "5px 10px" }}>
+            {exporting ? "Exporting…" : "Export as PDF"}
+          </button>
+          <button disabled={exporting} onClick={() => runExport(downloadSelectedProductImages)} style={{ fontSize: 12, background: "none", color: "#FAF7F2", border: "1px solid #FAF7F2", borderRadius: 6, padding: "5px 10px" }}>
+            Download images
+          </button>
+          <button onClick={() => setSelectedForExport(new Set())} style={{ fontSize: 12, background: "none", color: "#D8D2C4", border: "none", marginLeft: "auto" }}>Clear</button>
+        </div>
+      )}
+
       {section === "specialty" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {filteredSpecialty.map((s) => (
@@ -9367,12 +9529,25 @@ function KnowledgeView({ products }) {
                     {t.text && <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.5 }}>{t.text}</div>}
                     {t.contributedProducts?.length > 0 && (
                       <div style={{ marginTop: t.text ? 8 : 0, paddingTop: t.text ? 8 : 0, borderTop: t.text ? "1px solid #E5DFD3" : "none", display: "flex", flexDirection: "column", gap: 4 }}>
-                        {t.contributedProducts.map((c) => (
-                          <div key={c.id} style={{ fontSize: 12.5, color: "#1F2A24" }}>
-                            <strong style={{ fontWeight: 600 }}>{c.productName}</strong>{" "}
-                            <span style={{ color: "#2E6B8F", fontSize: 11 }}>(added by {c.addedBy})</span>
-                          </div>
-                        ))}
+                        {t.contributedProducts.map((c) => {
+                          const catalogProduct = catalogByNormName.get(String(c.productName || "").toLowerCase().trim());
+                          const hasApprovedImage = catalogProduct?.hasBottleImage && catalogProduct?.imageApprovalStatus === "approved";
+                          if (hasApprovedImage) {
+                            return (
+                              <KnowledgeProductCard
+                                key={c.id} contribution={c} product={catalogProduct}
+                                selected={selectedForExport.has(catalogProduct.id)}
+                                onToggleSelect={() => toggleExportSelection(catalogProduct.id)}
+                              />
+                            );
+                          }
+                          return (
+                            <div key={c.id} style={{ fontSize: 12.5, color: "#1F2A24" }}>
+                              <strong style={{ fontWeight: 600 }}>{c.productName}</strong>{" "}
+                              <span style={{ color: "#2E6B8F", fontSize: 11 }}>(added by {c.addedBy})</span>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -12660,6 +12835,8 @@ function OutreachView({ dailyTarget, contactedToday, templates, todayStr, onLog 
 // Stock tab's per-batch expiry/qty rows — this is what "Compare with our
 // product" under Competitors searches, so a product's dosage/pack-size
 // details survive regardless of which expiry batch happens to be in stock.
+const PRODUCT_CATALOG_BRANDS = ["Alfa", "Mason"];
+
 function validateCatalogProductForm(f) {
   if (!f.name?.trim()) return "Product name is required.";
   if (f.price !== "" && f.price != null) {
@@ -12684,7 +12861,7 @@ function validateCatalogProductForm(f) {
 
 function emptyCatalogProductForm() {
   return {
-    name: "", price: "", sku: "",
+    name: "", price: "", sku: "", brand: "",
     ingredients: [{ name: "", form: "", amount: "", unit: "mg" }],
     form: "", packSize: "", unitsPerDay: "1", notes: "",
   };
@@ -12693,7 +12870,7 @@ function emptyCatalogProductForm() {
 function toCatalogProductFormShape(p) {
   const ingredients = getIngredients(p);
   return {
-    name: p.name || "", price: p.price ?? "", sku: p.sku || "",
+    name: p.name || "", price: p.price ?? "", sku: p.sku || "", brand: p.brand || "",
     ingredients: ingredients.length ? ingredients.map((i) => ({ name: i.name, form: i.form || "", amount: i.amount ?? "", unit: i.unit || "mg" })) : [{ name: "", form: "", amount: "", unit: "mg" }],
     form: p.form || "", packSize: p.packSize ?? "", unitsPerDay: p.unitsPerDay || "1", notes: p.notes || "",
   };
@@ -12715,6 +12892,14 @@ function CatalogProductForm({ initial, saving, error, submitLabel, onCancel, onS
         </Field>
         <Field label="Public price">
           <input value={f.price} onChange={(e) => set({ price: e.target.value })} type="number" min="0" placeholder="e.g. 21.65" style={inputStyle} />
+        </Field>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginBottom: 10 }}>
+        <Field label="Brand">
+          <select value={f.brand} onChange={(e) => set({ brand: e.target.value })} style={inputStyle}>
+            <option value="">Select…</option>
+            {PRODUCT_CATALOG_BRANDS.map((b) => <option key={b} value={b}>{b}</option>)}
+          </select>
         </Field>
       </div>
       <Field label="Active ingredient(s)">
@@ -12863,7 +13048,70 @@ function CatalogProductExcelImportSection({ onImport, onDone }) {
   );
 }
 
-function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBulk }) {
+// One bottle/Supplement Facts image slot inside a Product Catalog row.
+// Lazily fetches the presigned view URL only when a key is actually present
+// (hasBottleImage/hasSupplementFactsImage — the raw R2 key itself is never
+// sent to the client, matching the RecallProductFeatures precedent), and
+// only ever offers Approve/Reject while the slot is pending_review — once
+// approved or rejected the buttons disappear so there's one clear path.
+function ProductImageSlot({ product, which, label, onUpload, onApprove, onReject }) {
+  const hasImage = which === "bottle" ? product.hasBottleImage : product.hasSupplementFactsImage;
+  const [url, setUrl] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    setUrl("");
+    if (!hasImage) return;
+    let cancelled = false;
+    api.getCatalogProductImageUrl(product.id, which).then((r) => { if (!cancelled) setUrl(r.url); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [hasImage, product.id, which]);
+
+  const handleFile = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      await onUpload(file);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const status = product.imageApprovalStatus;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, width: 78 }}>
+      <div
+        onClick={() => url && window.open(url, "_blank", "noopener,noreferrer")}
+        style={{
+          width: 64, height: 64, borderRadius: 6, border: "1px dashed #D8D2C4", background: "#FAF7F2",
+          display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", cursor: url ? "pointer" : "default",
+        }}
+        title={url ? "Click to view full size" : "No image yet"}
+      >
+        {url ? <img src={url} alt={label} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <Package size={18} color="#D8D2C4" />}
+      </div>
+      <div style={{ fontSize: 9.5, color: "#8A8272", textAlign: "center" }}>{label}</div>
+      {hasImage && status === "pending_review" && (
+        <div style={{ display: "flex", gap: 3 }}>
+          <button onClick={onApprove} title="Approve" style={{ display: "flex", padding: "2px 5px", borderRadius: 4, border: "1px solid #4C7A5E", color: "#4C7A5E", background: "#fff" }}><Check size={11} /></button>
+          <button onClick={onReject} title="Reject" style={{ display: "flex", padding: "2px 5px", borderRadius: 4, border: "1px solid #B33A3A", color: "#B33A3A", background: "#fff" }}><X size={11} /></button>
+        </div>
+      )}
+      {hasImage && status === "approved" && <div style={{ fontSize: 9, color: "#4C7A5E" }}>Approved</div>}
+      {hasImage && status === "rejected" && <div style={{ fontSize: 9, color: "#B33A3A" }}>Rejected</div>}
+      <label style={{ fontSize: 9.5, color: "#2E6B8F", cursor: uploading ? "default" : "pointer" }}>
+        {uploading ? "Uploading…" : hasImage ? "Replace" : "Upload"}
+        <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} disabled={uploading} />
+      </label>
+    </div>
+  );
+}
+
+function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBulk, onUploadImages, onSetImageApproval, onFindMissingImages }) {
   const [search, setSearch] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [editingId, setEditingId] = useState(null);
@@ -12871,6 +13119,9 @@ function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBu
   const [error, setError] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [showImport, setShowImport] = useState(false);
+  const [findingImages, setFindingImages] = useState(false);
+  const [findImagesResults, setFindImagesResults] = useState(null);
+  const [selectedForFind, setSelectedForFind] = useState(new Set());
 
   const list = products || [];
   const q = search.toLowerCase().trim();
@@ -12905,6 +13156,28 @@ function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBu
     }
   };
 
+  const doFindMissingImages = async (ids) => {
+    setFindingImages(true);
+    setFindImagesResults(null);
+    try {
+      const res = await onFindMissingImages(ids);
+      setFindImagesResults(res.results || []);
+      if (ids) setSelectedForFind(new Set());
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setFindingImages(false);
+    }
+  };
+
+  const toggleSelectedForFind = (id) => {
+    setSelectedForFind((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
@@ -12915,6 +13188,14 @@ function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBu
           </p>
         </div>
         <div style={{ display: "flex", gap: 6 }}>
+          {selectedForFind.size > 0 && (
+            <button onClick={() => doFindMissingImages([...selectedForFind])} disabled={findingImages} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, background: "#fff", border: "1px solid #2E6B8F", color: "#2E6B8F", borderRadius: 8, padding: "7px 12px" }}>
+            <Search size={13} /> {findingImages ? "Searching…" : `Find Images for Selected (${selectedForFind.size})`}
+          </button>
+          )}
+          <button onClick={() => doFindMissingImages()} disabled={findingImages} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "7px 12px" }}>
+            <Search size={13} /> {findingImages ? "Searching…" : "Find Missing Images (all)"}
+          </button>
           <button onClick={() => { setShowImport((v) => !v); setShowAdd(false); }} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "7px 12px" }}>
             <Upload size={13} /> Import Excel
           </button>
@@ -12923,6 +13204,25 @@ function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBu
           </button>
         </div>
       </div>
+
+      {findImagesResults && (
+        <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, marginBottom: 10, fontSize: 12 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Find Missing Images results ({findImagesResults.length})</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 220, overflowY: "auto" }}>
+            {findImagesResults.map((r) => (
+              <div key={r.id} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                <span>{r.name}</span>
+                <span style={{
+                  color: r.outcome === "matched" ? "#4C7A5E" : r.outcome === "partial" ? "#B88A2E" : r.outcome === "blocked" ? "#B33A3A" : "#8A8272",
+                  flexShrink: 0,
+                }}>
+                  {{ matched: "Matched both images", partial: "Bottle only — facts missing", not_found: "Not found", blocked: "Site blocked the request", skipped_approved: "Already approved" }[r.outcome] || r.outcome}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {showImport && <CatalogProductExcelImportSection onImport={onImportBulk} onDone={() => setShowImport(false)} />}
 
@@ -12973,7 +13273,7 @@ function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBu
                     )}
                     {p.updatedBy && (
                       <div style={{ fontSize: 10.5, color: "#8A8272", marginTop: 4 }}>
-                        Last edited by {p.updatedBy}{p.updatedAt ? ` · ${fmtDate(p.updatedAt)}` : ""}
+                        Last edited by {p.updatedBy}{p.updatedAt ? ` · ${fmtDateOfInstant(p.updatedAt)}` : ""}
                       </div>
                     )}
                   </div>
@@ -12991,6 +13291,30 @@ function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBu
                       )}
                     </div>
                   </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 14, marginTop: 10, paddingTop: 10, borderTop: "1px solid #F0ECE2" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10.5, color: "#8A8272", cursor: "pointer", marginTop: 24 }} title="Select for Find Missing Images">
+                    <input type="checkbox" checked={selectedForFind.has(p.id)} onChange={() => toggleSelectedForFind(p.id)} />
+                  </label>
+                  <ProductImageSlot
+                    product={p} which="bottle" label="Bottle"
+                    onUpload={(file) => onUploadImages(p.id, { bottleImage: file })}
+                    onApprove={() => onSetImageApproval(p.id, "approved", "bottle")}
+                    onReject={() => onSetImageApproval(p.id, "rejected", "bottle")}
+                  />
+                  <ProductImageSlot
+                    product={p} which="supplementFacts" label="Supplement Facts"
+                    onUpload={(file) => onUploadImages(p.id, { supplementFactsImage: file })}
+                    onApprove={() => onSetImageApproval(p.id, "approved", "supplementFacts")}
+                    onReject={() => onSetImageApproval(p.id, "rejected", "supplementFacts")}
+                  />
+                  {p.imageSourceUrl && (
+                    <div style={{ fontSize: 10.5, color: "#8A8272", marginTop: 24 }}>
+                      Matched by {p.imageMatchedBy || "—"}{p.imageMatchedAt ? ` · ${fmtDateOfInstant(p.imageMatchedAt)}` : ""}
+                      <br /><a href={p.imageSourceUrl} target="_blank" rel="noopener noreferrer" style={{ color: "#2E6B8F" }}>Source page</a>
+                    </div>
+                  )}
+                  {p.imageNotes && <div style={{ fontSize: 10.5, color: "#B88A2E", marginTop: 24, maxWidth: 220 }}>{p.imageNotes}</div>}
                 </div>
               </div>
             );
@@ -14511,7 +14835,7 @@ function CollapsibleSection({ title, defaultOpen = false, children }) {
 }
 
 // ---------- Settings ----------
-function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts, competitors, onAddCompetitor, onUpdateCompetitor, onRemoveCompetitor, onAddCompetitorProduct, onUpdateCompetitorProduct, onRemoveCompetitorProduct, onImportCompetitorProducts, repNames = [], tabVisibility, setTabVisibility }) {
+function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts, onUploadCatalogProductImages, onSetCatalogProductImageApproval, onFindMissingCatalogImages, competitors, onAddCompetitor, onUpdateCompetitor, onRemoveCompetitor, onAddCompetitorProduct, onUpdateCompetitorProduct, onRemoveCompetitorProduct, onImportCompetitorProducts, repNames = [], tabVisibility, setTabVisibility }) {
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Settings</h2>
@@ -14558,6 +14882,9 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
             onUpdate={onUpdateCatalogProduct}
             onRemove={onRemoveCatalogProduct}
             onImportBulk={onBulkImportCatalogProducts}
+            onUploadImages={onUploadCatalogProductImages}
+            onSetImageApproval={onSetCatalogProductImageApproval}
+            onFindMissingImages={onFindMissingCatalogImages}
           />
         </CollapsibleSection>
       )}

@@ -338,7 +338,10 @@ const SCHEMAS = {
   // sku appended (this phase) so a manager can record/see it in the general
   // Settings -> Product Catalog screen, not just via the Recall research
   // editor — matches the Products/Stock tab, which already has one.
-  ProductCatalog: ["id", "name", "price", "form", "packSize", "unitsPerDay", "ingredients", "notes", "createdBy", "createdAt", "updatedBy", "updatedAt", "sku"],
+  // Image fields appended (this phase): bottle + Supplement Facts photos per
+  // product, gated by a manager approval status before they reach reps via
+  // Knowledge's specialty cards or the rep-facing export.
+  ProductCatalog: ["id", "name", "price", "form", "packSize", "unitsPerDay", "ingredients", "notes", "createdBy", "createdAt", "updatedBy", "updatedAt", "sku", "brand", "bottleImageKey", "bottleImageName", "bottleImageMimeType", "supplementFactsImageKey", "supplementFactsImageName", "supplementFactsImageMimeType", "imageApprovalStatus", "imageSourceUrl", "imageMatchedBy", "imageMatchedAt", "imageNotes"],
 
   // ---------- Recall (medical rep training/knowledge-reference module) ----------
   // Structure-only for now — no clinical content is populated. Recall sits on

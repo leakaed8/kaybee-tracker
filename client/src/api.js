@@ -103,6 +103,11 @@ export const api = {
   updateCatalogProduct: (id, patch) => request(`/product-catalog/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   removeCatalogProduct: (id) => request(`/product-catalog/${id}`, { method: "DELETE" }),
   importCatalogProductsBulk: (products) => request("/product-catalog/import-bulk", { method: "POST", body: JSON.stringify({ products }) }),
+  uploadCatalogProductImages: (id, fields) => request(`/product-catalog/${id}`, { method: "PATCH", body: toFormData(fields) }),
+  setCatalogProductImageApproval: (id, status, which) =>
+    request(`/product-catalog/${id}/image-approval`, { method: "PATCH", body: JSON.stringify({ status, which }) }),
+  getCatalogProductImageUrl: (id, which) => request(`/product-catalog/${id}/image-url?which=${which}`),
+  findMissingCatalogImages: (ids) => request("/product-catalog/find-images", { method: "POST", body: JSON.stringify(ids ? { ids } : {}) }),
   importSampleInventory: () => request("/products/import-sample", { method: "POST" }),
   importBulkProducts: (products) => request("/products/import-bulk", { method: "POST", body: JSON.stringify({ products }) }),
   addVisit: (visit) => request("/visits", { method: "POST", body: JSON.stringify(visit) }),
