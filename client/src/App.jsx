@@ -751,7 +751,7 @@ export default function App() {
             {tab === "cadence" && canSeeTab("cadence") && (
               <VisitCadenceView role={role} isSupervisor={isSupervisor} repNames={repNames} />
             )}
-            {tab === "knowledge" && canSeeTab("knowledge") && <KnowledgeView products={products} productCatalog={productCatalog} role={role} />}
+            {tab === "knowledge" && canSeeTab("knowledge") && <KnowledgeView productCatalog={productCatalog} role={role} />}
             {tab === "training" && canSeeTab("training") && (
               <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
             )}
@@ -9563,7 +9563,7 @@ function ProductStudiesModal({ productId, productName, onClose }) {
   );
 }
 
-function KnowledgeView({ products, productCatalog, role }) {
+function KnowledgeView({ productCatalog, role }) {
   const isManager = role === "manager";
   const [section, setSection] = useState("specialty"); // specialty | condition | drugs | reference
   const [search, setSearch] = useState("");
@@ -9647,10 +9647,16 @@ function KnowledgeView({ products, productCatalog, role }) {
     setNewTopic(""); setProductQuery("");
   };
 
-  const matchedProduct = (products || []).find((p) => p.name.toLowerCase().trim() === productQuery.toLowerCase().trim());
+  // Picked from the Product Catalog itself (not Stock/products) — contributions
+  // used to be matched against Stock, whose names don't reliably match the
+  // Product Catalog's own names, so a contributed product's image/studies
+  // lookup (by exact name below) silently failed to resolve for most real
+  // products. Picking from the Catalog directly guarantees every new
+  // contribution's name always matches a real Catalog row.
+  const matchedProduct = (productCatalog || []).find((p) => p.name.toLowerCase().trim() === productQuery.toLowerCase().trim());
   const productOptions = (productQuery.trim()
-    ? (products || []).filter((p) => p.name.toLowerCase().includes(productQuery.toLowerCase().trim()))
-    : (products || [])
+    ? (productCatalog || []).filter((p) => p.name.toLowerCase().includes(productQuery.toLowerCase().trim()))
+    : (productCatalog || [])
   ).slice(0, 50);
 
   const submitContribution = async (specialty) => {
