@@ -2225,13 +2225,14 @@ app.get("/api/knowledge-contributions", async (req, res) => {
 
 app.post("/api/knowledge-contributions", async (req, res) => {
   try {
-    const { specialty, topic, text } = req.body;
+    const { specialty, topic, productId, productName } = req.body;
     if (!specialty || !String(specialty).trim()) return res.status(400).json({ error: "specialty is required" });
-    if (!topic || !String(topic).trim()) return res.status(400).json({ error: "topic is required" });
-    if (!text || !String(text).trim()) return res.status(400).json({ error: "text is required" });
+    if (!topic || !String(topic).trim()) return res.status(400).json({ error: "topic (existing or new category) is required" });
+    if (!productId || !productName || !String(productName).trim()) return res.status(400).json({ error: "A product must be selected" });
     const row = {
       id: `kc${crypto.randomUUID()}`,
-      specialty: String(specialty).trim(), topic: String(topic).trim(), text: String(text).trim(),
+      specialty: String(specialty).trim(), topic: String(topic).trim(),
+      productId: String(productId), productName: String(productName).trim(),
       addedBy: req.repName || "Manager",
       createdAt: new Date().toISOString(),
     };

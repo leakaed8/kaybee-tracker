@@ -748,7 +748,7 @@ export default function App() {
             {tab === "cadence" && canSeeTab("cadence") && (
               <VisitCadenceView role={role} isSupervisor={isSupervisor} repNames={repNames} />
             )}
-            {tab === "knowledge" && canSeeTab("knowledge") && <KnowledgeView />}
+            {tab === "knowledge" && canSeeTab("knowledge") && <KnowledgeView products={products} />}
             {tab === "training" && canSeeTab("training") && (
               <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
             )}
@@ -9147,19 +9147,24 @@ function NutritionistsView({ nutritionists, role, onAdd, onRemove, onBulkImport,
 }
 
 // ---------- Knowledge View (rep reference: talking points + drug/nutrient depletion) ----------
-function KnowledgeView() {
+function KnowledgeView({ products }) {
   const [section, setSection] = useState("specialty"); // specialty | condition | drugs | reference
   const [search, setSearch] = useState("");
   const q = search.toLowerCase().trim();
 
   // Rep-contributed additions to the static By Specialty list — any rep or
-  // manager who can see this tab can add a supplement under a specialty,
-  // tagged with who added it, so the reference grows from the field without
-  // needing a code change for every new talking point.
+  // manager who can see this tab can tag one of our own products onto
+  // either an existing topic under a specialty or a new one they name,
+  // tagged with who added it. Contributions attach to the matching static
+  // topic (by name) rather than creating a visually separate duplicate card
+  // — "Cholesterol" contributions show up inside the existing Cholesterol
+  // card, not as a second "Cholesterol" card next to it.
   const [contributions, setContributions] = useState([]);
   const [addingTo, setAddingTo] = useState(null); // specialty name currently showing its add form, or null
+  const [categoryMode, setCategoryMode] = useState("existing"); // existing | new
+  const [selectedTopic, setSelectedTopic] = useState("");
   const [newTopic, setNewTopic] = useState("");
-  const [newText, setNewText] = useState("");
+  const [productQuery, setProductQuery] = useState("");
   const [savingContribution, setSavingContribution] = useState(false);
 
   const loadContributions = () => {
@@ -9167,17 +9172,27 @@ function KnowledgeView() {
   };
   useEffect(loadContributions, []);
 
-  const openAddForm = (specialty) => {
-    setAddingTo(addingTo === specialty ? null : specialty);
-    setNewTopic(""); setNewText("");
+  const openAddForm = (specialty, existingTopics) => {
+    if (addingTo === specialty) { setAddingTo(null); return; }
+    setAddingTo(specialty);
+    setCategoryMode(existingTopics.length > 0 ? "existing" : "new");
+    setSelectedTopic(existingTopics[0]?.topic || "");
+    setNewTopic(""); setProductQuery("");
   };
 
+  const matchedProduct = (products || []).find((p) => p.name.toLowerCase().trim() === productQuery.toLowerCase().trim());
+  const productOptions = (productQuery.trim()
+    ? (products || []).filter((p) => p.name.toLowerCase().includes(productQuery.toLowerCase().trim()))
+    : (products || [])
+  ).slice(0, 50);
+
   const submitContribution = async (specialty) => {
-    if (!newTopic.trim() || !newText.trim()) return;
+    const topic = categoryMode === "new" ? newTopic.trim() : selectedTopic;
+    if (!topic || !matchedProduct) return;
     setSavingContribution(true);
     try {
-      await api.addKnowledgeContribution({ specialty, topic: newTopic.trim(), text: newText.trim() });
-      setAddingTo(null); setNewTopic(""); setNewText("");
+      await api.addKnowledgeContribution({ specialty, topic, productId: matchedProduct.id, productName: matchedProduct.name });
+      setAddingTo(null); setNewTopic(""); setProductQuery("");
       loadContributions();
     } catch {
       // Keep the form open so the rep can retry.
@@ -9186,20 +9201,31 @@ function KnowledgeView() {
     }
   };
 
-  const specialtyWithContributions = SPECIALTY_TALKING_POINTS.map((s) => ({
-    ...s,
-    topics: [
-      ...s.topics,
-      ...contributions
-        .filter((c) => c.specialty === s.specialty)
-        .map((c) => ({ topic: c.topic, text: c.text, addedBy: c.addedBy, contributed: true })),
-    ],
-  }));
+  const specialtyWithContributions = SPECIALTY_TALKING_POINTS.map((s) => {
+    const specialtyContribs = contributions.filter((c) => c.specialty === s.specialty);
+    const existingTopicNames = new Set(s.topics.map((t) => t.topic.toLowerCase()));
+    const topicsWithProducts = s.topics.map((t) => ({
+      ...t,
+      contributedProducts: specialtyContribs.filter((c) => c.topic.toLowerCase() === t.topic.toLowerCase()),
+    }));
+    // New-category contributions — topic name doesn't match any existing
+    // static topic for this specialty — become their own topic card,
+    // grouped by that topic name, at the end of the list.
+    const newTopicNames = [...new Set(
+      specialtyContribs.filter((c) => !existingTopicNames.has(c.topic.toLowerCase())).map((c) => c.topic)
+    )];
+    const newTopicsFromContributions = newTopicNames.map((topicName) => ({
+      topic: topicName, text: "",
+      contributedProducts: specialtyContribs.filter((c) => c.topic === topicName),
+    }));
+    return { ...s, topics: [...topicsWithProducts, ...newTopicsFromContributions] };
+  });
 
   const filteredSpecialty = specialtyWithContributions.map((s) => ({
     ...s,
     topics: s.topics.filter((t) =>
       !q || s.specialty.toLowerCase().includes(q) || t.topic.toLowerCase().includes(q) || t.text.toLowerCase().includes(q)
+      || t.contributedProducts.some((c) => c.productName.toLowerCase().includes(q))
     ),
   })).filter((s) => s.topics.length > 0 || s.specialty.toLowerCase().includes(q));
 
@@ -9257,9 +9283,9 @@ function KnowledgeView() {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                 <div style={{ fontWeight: 600, fontSize: 14 }}>{s.specialty}</div>
                 <button
-                  onClick={() => openAddForm(s.specialty)}
-                  title={`Add a supplement under ${s.specialty}`}
-                  aria-label={`Add a supplement under ${s.specialty}`}
+                  onClick={() => openAddForm(s.specialty, s.topics)}
+                  title={`Add a product under ${s.specialty}`}
+                  aria-label={`Add a product under ${s.specialty}`}
                   style={{
                     width: 24, height: 24, borderRadius: 12, border: "1px solid #4C7A5E", flexShrink: 0,
                     background: addingTo === s.specialty ? "#4C7A5E" : "#fff", color: addingTo === s.specialty ? "#fff" : "#4C7A5E",
@@ -9271,29 +9297,62 @@ function KnowledgeView() {
               </div>
               {addingTo === s.specialty && (
                 <div style={{ background: "#FAF7F2", border: "1px dashed #4C7A5E", borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                  <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                    <button
+                      type="button" onClick={() => setCategoryMode("existing")} disabled={s.topics.length === 0}
+                      style={{
+                        flex: 1, padding: "6px 10px", borderRadius: 6, fontSize: 11.5, fontWeight: 500, cursor: s.topics.length === 0 ? "default" : "pointer",
+                        border: categoryMode === "existing" ? "1px solid #4C7A5E" : "1px solid #E5DFD3",
+                        background: categoryMode === "existing" ? "#4C7A5E" : "#fff", color: categoryMode === "existing" ? "#fff" : "#1F2A24",
+                        opacity: s.topics.length === 0 ? 0.5 : 1,
+                      }}
+                    >
+                      Existing category
+                    </button>
+                    <button
+                      type="button" onClick={() => setCategoryMode("new")}
+                      style={{
+                        flex: 1, padding: "6px 10px", borderRadius: 6, fontSize: 11.5, fontWeight: 500, cursor: "pointer",
+                        border: categoryMode === "new" ? "1px solid #4C7A5E" : "1px solid #E5DFD3",
+                        background: categoryMode === "new" ? "#4C7A5E" : "#fff", color: categoryMode === "new" ? "#fff" : "#1F2A24",
+                      }}
+                    >
+                      New category
+                    </button>
+                  </div>
+                  {categoryMode === "existing" ? (
+                    <select value={selectedTopic} onChange={(e) => setSelectedTopic(e.target.value)} style={{ ...inputStyle, marginBottom: 8, background: "#fff" }}>
+                      {s.topics.map((t) => <option key={t.topic} value={t.topic}>{t.topic}</option>)}
+                    </select>
+                  ) : (
+                    <input
+                      value={newTopic}
+                      onChange={(e) => setNewTopic(e.target.value)}
+                      placeholder="New category name (e.g. Joint Health)"
+                      style={{ ...inputStyle, marginBottom: 8, background: "#fff" }}
+                    />
+                  )}
                   <input
-                    value={newTopic}
-                    onChange={(e) => setNewTopic(e.target.value)}
-                    placeholder="Supplement or topic name"
-                    style={{ ...inputStyle, marginBottom: 6, background: "#fff" }}
+                    value={productQuery}
+                    onChange={(e) => setProductQuery(e.target.value)}
+                    placeholder="Search our products…"
+                    list="knowledge-product-options"
+                    style={{ ...inputStyle, marginBottom: 8, background: "#fff" }}
                   />
-                  <textarea
-                    value={newText}
-                    onChange={(e) => setNewText(e.target.value)}
-                    placeholder="What to mention…"
-                    rows={2}
-                    style={{ ...inputStyle, resize: "vertical", marginBottom: 8, background: "#fff" }}
-                  />
+                  <datalist id="knowledge-product-options">
+                    {productOptions.map((p) => <option key={p.id} value={p.name} />)}
+                  </datalist>
                   <div style={{ display: "flex", gap: 8 }}>
                     <button onClick={() => setAddingTo(null)} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 11.5, cursor: "pointer" }}>
                       Cancel
                     </button>
                     <button
                       onClick={() => submitContribution(s.specialty)}
-                      disabled={savingContribution || !newTopic.trim() || !newText.trim()}
+                      disabled={savingContribution || !matchedProduct || (categoryMode === "new" && !newTopic.trim()) || (categoryMode === "existing" && !selectedTopic)}
                       style={{
                         padding: "6px 12px", borderRadius: 6, border: "none", fontSize: 11.5, fontWeight: 600, cursor: "pointer",
-                        background: !newTopic.trim() || !newText.trim() ? "#D8D2C4" : "#4C7A5E", color: "#fff",
+                        background: (!matchedProduct || (categoryMode === "new" && !newTopic.trim()) || (categoryMode === "existing" && !selectedTopic)) ? "#D8D2C4" : "#4C7A5E",
+                        color: "#fff",
                       }}
                     >
                       {savingContribution ? "Saving…" : "Add"}
@@ -9303,13 +9362,19 @@ function KnowledgeView() {
               )}
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {s.topics.map((t, i) => (
-                  <div key={i} style={{
-                    background: t.contributed ? "#EEF4F8" : "#FAF7F2", border: t.contributed ? "1px solid #B8D4E3" : "1px solid #E5DFD3",
-                    borderRadius: 8, padding: 10,
-                  }}>
+                  <div key={i} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: 10 }}>
                     <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 3 }}>{t.topic}</div>
-                    <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.5 }}>{t.text}</div>
-                    {t.contributed && <div style={{ fontSize: 10.5, color: "#2E6B8F", fontWeight: 600, marginTop: 4 }}>Added by {t.addedBy}</div>}
+                    {t.text && <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.5 }}>{t.text}</div>}
+                    {t.contributedProducts?.length > 0 && (
+                      <div style={{ marginTop: t.text ? 8 : 0, paddingTop: t.text ? 8 : 0, borderTop: t.text ? "1px solid #E5DFD3" : "none", display: "flex", flexDirection: "column", gap: 4 }}>
+                        {t.contributedProducts.map((c) => (
+                          <div key={c.id} style={{ fontSize: 12.5, color: "#1F2A24" }}>
+                            <strong style={{ fontWeight: 600 }}>{c.productName}</strong>{" "}
+                            <span style={{ color: "#2E6B8F", fontSize: 11 }}>(added by {c.addedBy})</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

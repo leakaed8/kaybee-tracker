@@ -252,11 +252,13 @@ const SCHEMAS = {
   ],
   // Rep-contributed additions to the static Knowledge "By Specialty" talking
   // points (SPECIALTY_TALKING_POINTS, client/src/repKnowledge.js) — any rep
-  // or manager who can see the Knowledge tab can add a supplement under a
-  // specialty; `addedBy` records who, so the crowd-sourced entries are never
-  // anonymous. Append-only — reps add to this shared reference, they don't
-  // edit/delete each other's entries.
-  KnowledgeContributions: ["id", "specialty", "topic", "text", "addedBy", "createdAt"],
+  // or manager who can see the Knowledge tab can tag one of our own products
+  // (from the live Products catalog, by id/name — never free text) onto
+  // either an existing topic under a specialty or a brand-new one they name;
+  // `addedBy` records who, so the crowd-sourced entries are never anonymous.
+  // Append-only — reps add to this shared reference, they don't edit/delete
+  // each other's entries.
+  KnowledgeContributions: ["id", "specialty", "topic", "productId", "productName", "addedBy", "createdAt"],
   // The last analysis's flagged-client results (effective % >= 35 only —
   // same filter the client already applies before this gets saved), so
   // reopening Discount Audit shows where things stood without re-uploading
