@@ -1671,23 +1671,43 @@ app.patch(
     // A freshly uploaded image always starts at pending_review — even a
     // manager's own upload needs the explicit approve click before it
     // reaches reps, keeping a single approval gate instead of two paths.
+    // A manager can attach an image either by choosing a file OR by pasting
+    // a direct image URL (e.g. straight from the supplier's product page) —
+    // the URL path reuses the same downloadImageToR2 helper the automated
+    // "Find Missing Images" matcher uses, so both paths land identically.
     const bottleFile = req.files?.bottleImage?.[0];
     const factsFile = req.files?.supplementFactsImage?.[0];
-    if (bottleFile || factsFile) {
+    const bottleUrl = !bottleFile && req.body.bottleImageUrl ? String(req.body.bottleImageUrl).trim() : "";
+    const factsUrl = !factsFile && req.body.supplementFactsImageUrl ? String(req.body.supplementFactsImageUrl).trim() : "";
+    if (bottleFile || factsFile || bottleUrl || factsUrl) {
       if (bottleFile) {
         const key = `product-catalog/${req.params.id}-bottle-${sanitizeFilename(bottleFile.originalname)}`;
         await uploadObjectToR2(bottleFile.buffer, key, bottleFile.mimetype);
         patch.bottleImageKey = key; patch.bottleImageName = bottleFile.originalname; patch.bottleImageMimeType = bottleFile.mimetype;
+      } else if (bottleUrl) {
+        try {
+          const uploaded = await downloadImageToR2(bottleUrl, `product-catalog/${req.params.id}-bottle-manual`);
+          patch.bottleImageKey = uploaded.key; patch.bottleImageName = uploaded.name; patch.bottleImageMimeType = uploaded.mimeType;
+        } catch (e) {
+          return res.status(400).json({ error: `Couldn't fetch that bottle image URL: ${e.message}` });
+        }
       }
       if (factsFile) {
         const key = `product-catalog/${req.params.id}-facts-${sanitizeFilename(factsFile.originalname)}`;
         await uploadObjectToR2(factsFile.buffer, key, factsFile.mimetype);
         patch.supplementFactsImageKey = key; patch.supplementFactsImageName = factsFile.originalname; patch.supplementFactsImageMimeType = factsFile.mimetype;
+      } else if (factsUrl) {
+        try {
+          const uploaded = await downloadImageToR2(factsUrl, `product-catalog/${req.params.id}-facts-manual`);
+          patch.supplementFactsImageKey = uploaded.key; patch.supplementFactsImageName = uploaded.name; patch.supplementFactsImageMimeType = uploaded.mimeType;
+        } catch (e) {
+          return res.status(400).json({ error: `Couldn't fetch that Supplement Facts image URL: ${e.message}` });
+        }
       }
       patch.imageApprovalStatus = "pending_review";
       patch.imageMatchedBy = req.repName || "Manager";
       patch.imageMatchedAt = new Date().toISOString();
-      patch.imageSourceUrl = "";
+      patch.imageSourceUrl = bottleUrl || factsUrl || "";
     }
 
     const ok = await db.updateRowById("ProductCatalog", req.params.id, patch);

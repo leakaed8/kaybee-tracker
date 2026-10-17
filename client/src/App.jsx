@@ -13194,10 +13194,13 @@ function CatalogProductExcelImportSection({ onImport, onDone }) {
 // sent to the client, matching the RecallProductFeatures precedent), and
 // only ever offers Approve/Reject while the slot is pending_review — once
 // approved or rejected the buttons disappear so there's one clear path.
-function ProductImageSlot({ product, which, label, onUpload, onApprove, onReject }) {
+function ProductImageSlot({ product, which, label, onUpload, onUploadUrl, onApprove, onReject }) {
   const hasImage = which === "bottle" ? product.hasBottleImage : product.hasSupplementFactsImage;
   const [url, setUrl] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [showUrlInput, setShowUrlInput] = useState(false);
+  const [urlValue, setUrlValue] = useState("");
+  const [urlError, setUrlError] = useState("");
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -13212,6 +13215,7 @@ function ProductImageSlot({ product, which, label, onUpload, onApprove, onReject
     const file = e.target.files[0];
     if (!file) return;
     setUploading(true);
+    setUrlError("");
     try {
       await onUpload(file);
     } finally {
@@ -13220,10 +13224,25 @@ function ProductImageSlot({ product, which, label, onUpload, onApprove, onReject
     }
   };
 
+  const submitUrl = async () => {
+    if (!urlValue.trim()) return;
+    setUploading(true);
+    setUrlError("");
+    try {
+      await onUploadUrl(urlValue.trim());
+      setUrlValue("");
+      setShowUrlInput(false);
+    } catch (e) {
+      setUrlError(e.message || "Couldn't fetch that image.");
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const status = product.imageApprovalStatus;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, width: 78 }}>
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, width: 110 }}>
       <div
         onClick={() => url && window.open(url, "_blank", "noopener,noreferrer")}
         style={{
@@ -13244,9 +13263,30 @@ function ProductImageSlot({ product, which, label, onUpload, onApprove, onReject
       {hasImage && status === "approved" && <div style={{ fontSize: 9, color: "#4C7A5E" }}>Approved</div>}
       {hasImage && status === "rejected" && <div style={{ fontSize: 9, color: "#B33A3A" }}>Rejected</div>}
       <label style={{ fontSize: 9.5, color: "#2E6B8F", cursor: uploading ? "default" : "pointer" }}>
-        {uploading ? "Uploading…" : hasImage ? "Replace" : "Upload"}
+        {uploading ? "Working…" : hasImage ? "Replace file" : "Upload file"}
         <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} disabled={uploading} />
       </label>
+      {!showUrlInput ? (
+        <button type="button" onClick={() => setShowUrlInput(true)} disabled={uploading} style={{ fontSize: 9.5, color: "#2E6B8F", background: "none", border: "none", padding: 0, cursor: "pointer", textDecoration: "underline" }}>
+          or paste a URL
+        </button>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 3, width: "100%" }}>
+          <input
+            value={urlValue} onChange={(e) => setUrlValue(e.target.value)} placeholder="https://…" disabled={uploading}
+            style={{ fontSize: 10, padding: "3px 5px", borderRadius: 4, border: "1px solid #E5DFD3", width: "100%", boxSizing: "border-box" }}
+          />
+          <div style={{ display: "flex", gap: 3 }}>
+            <button type="button" onClick={submitUrl} disabled={uploading || !urlValue.trim()} style={{ fontSize: 9.5, padding: "2px 6px", borderRadius: 4, border: "none", background: "#1F2A24", color: "#FAF7F2", flex: 1 }}>
+              {uploading ? "…" : "Fetch"}
+            </button>
+            <button type="button" onClick={() => { setShowUrlInput(false); setUrlValue(""); setUrlError(""); }} disabled={uploading} style={{ fontSize: 9.5, padding: "2px 6px", borderRadius: 4, border: "1px solid #E5DFD3", background: "#fff" }}>
+              Cancel
+            </button>
+          </div>
+          {urlError && <div style={{ fontSize: 9, color: "#B33A3A" }}>{urlError}</div>}
+        </div>
+      )}
     </div>
   );
 }
@@ -13439,12 +13479,14 @@ function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBu
                   <ProductImageSlot
                     product={p} which="bottle" label="Bottle"
                     onUpload={(file) => onUploadImages(p.id, { bottleImage: file })}
+                    onUploadUrl={(url) => onUploadImages(p.id, { bottleImageUrl: url })}
                     onApprove={() => onSetImageApproval(p.id, "approved", "bottle")}
                     onReject={() => onSetImageApproval(p.id, "rejected", "bottle")}
                   />
                   <ProductImageSlot
                     product={p} which="supplementFacts" label="Supplement Facts"
                     onUpload={(file) => onUploadImages(p.id, { supplementFactsImage: file })}
+                    onUploadUrl={(url) => onUploadImages(p.id, { supplementFactsImageUrl: url })}
                     onApprove={() => onSetImageApproval(p.id, "approved", "supplementFacts")}
                     onReject={() => onSetImageApproval(p.id, "rejected", "supplementFacts")}
                   />
