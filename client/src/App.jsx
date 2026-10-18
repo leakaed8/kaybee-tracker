@@ -9544,26 +9544,53 @@ function ProductStudiesModal({ productId, productName, onClose }) {
                 ))}
               </div>
             )}
-            {data.studies.length === 0 ? (
-              <EmptyState text="No PubMed/NCBI studies have been linked to this product in Product Expert yet." />
-            ) : (
-              data.studies.map((r) => (
-                <div key={r.id} style={{ fontSize: 12, marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid #F0EBE0" }}>
-                  <div style={{ fontWeight: 600, marginBottom: 2 }}>{r.title}</div>
-                  <div style={{ color: "#8A8272", fontSize: 11 }}>
-                    {[r.studyType, r.publicationYear, r.journal || r.sourceName].filter(Boolean).join(" · ")}
-                  </div>
-                  {r.population && <div style={{ marginTop: 3, fontSize: 11 }}><strong>Population:</strong> {r.population}{r.sampleSize ? ` (N=${r.sampleSize})` : ""}</div>}
-                  {r.intervention && <div style={{ fontSize: 11 }}><strong>Intervention:</strong> {r.intervention}</div>}
-                  {r.comparator && <div style={{ fontSize: 11 }}><strong>Comparator:</strong> {r.comparator}</div>}
-                  {r.keyFinding && <div style={{ marginTop: 4, color: "#5B5445" }}><strong>Key finding:</strong> {r.keyFinding}</div>}
-                  {r.limitations && <div style={{ marginTop: 3, fontSize: 11, color: "#8A8272" }}><strong>Limitations:</strong> {r.limitations}</div>}
-                  <div style={{ marginTop: 4, fontSize: 11 }}>
-                    PMID: {r.pmid}{" — "}
-                    <a href={r.url} target="_blank" rel="noreferrer">Read full study →</a>
-                  </div>
+            {data.trainingStudies?.length > 0 && (
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: "#4C7A5E", textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>
+                  From Product Expert → Studies
                 </div>
-              ))
+                {data.trainingStudies.map((s) => (
+                  <div key={s.id} style={{ fontSize: 12, marginBottom: 8, paddingBottom: 8, borderBottom: "1px solid #F0EBE0" }}>
+                    <div style={{ fontWeight: 600, marginBottom: 2 }}>{s.title}</div>
+                    <div style={{ color: "#8A8272", fontSize: 11 }}>
+                      {[s.nutrient, s.createdBy && `added by ${s.createdBy}`].filter(Boolean).join(" · ")}
+                    </div>
+                    {s.notes && <div style={{ marginTop: 3, fontSize: 11, color: "#5B5445" }}>{s.notes}</div>}
+                    <div style={{ marginTop: 4, fontSize: 11 }}>
+                      <a href={s.url} target="_blank" rel="noreferrer">Read full study →</a>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {data.studies.length === 0 && (!data.trainingStudies || data.trainingStudies.length === 0) ? (
+              <EmptyState text="No studies have been linked to this product in Product Expert yet." />
+            ) : (
+              data.studies.length > 0 && (
+                <>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A8272", textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>
+                    PubMed/NCBI citations
+                  </div>
+                  {data.studies.map((r) => (
+                    <div key={r.id} style={{ fontSize: 12, marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid #F0EBE0" }}>
+                      <div style={{ fontWeight: 600, marginBottom: 2 }}>{r.title}</div>
+                      <div style={{ color: "#8A8272", fontSize: 11 }}>
+                        {[r.studyType, r.publicationYear, r.journal || r.sourceName].filter(Boolean).join(" · ")}
+                      </div>
+                      {r.population && <div style={{ marginTop: 3, fontSize: 11 }}><strong>Population:</strong> {r.population}{r.sampleSize ? ` (N=${r.sampleSize})` : ""}</div>}
+                      {r.intervention && <div style={{ fontSize: 11 }}><strong>Intervention:</strong> {r.intervention}</div>}
+                      {r.comparator && <div style={{ fontSize: 11 }}><strong>Comparator:</strong> {r.comparator}</div>}
+                      {r.keyFinding && <div style={{ marginTop: 4, color: "#5B5445" }}><strong>Key finding:</strong> {r.keyFinding}</div>}
+                      {r.limitations && <div style={{ marginTop: 3, fontSize: 11, color: "#8A8272" }}><strong>Limitations:</strong> {r.limitations}</div>}
+                      <div style={{ marginTop: 4, fontSize: 11 }}>
+                        PMID: {r.pmid}{" — "}
+                        <a href={r.url} target="_blank" rel="noreferrer">Read full study →</a>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )
             )}
           </>
         )}

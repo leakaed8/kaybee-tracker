@@ -12356,6 +12356,27 @@ function buildStudyReferences(relevantEvidence, sources) {
     });
 }
 
+// A product's name/linked-ingredient names are matched against a
+// TrainingStudies row's free-text "nutrient" tag (e.g. "Magnesium",
+// "Vitamin B12") on whole-word/phrase containment in either direction, so
+// "ALFA Magnesium Glycinate 200mg" matches a study tagged "Magnesium" even
+// though the two strings aren't identical, and a short tag like "Zinc"
+// can't accidentally match on a stray substring.
+function normNutrientTag(s) {
+  return String(s || "").toLowerCase().trim().replace(/[^a-z0-9]+/g, " ").trim();
+}
+function containsPhrase(haystack, needle) {
+  if (!haystack || !needle) return false;
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`).test(haystack);
+}
+function productMatchesNutrientTag(nutrientTag, productName, ingredientNames) {
+  const tag = normNutrientTag(nutrientTag);
+  if (!tag) return false;
+  const haystacks = [normNutrientTag(productName), ...ingredientNames.map(normNutrientTag)].filter(Boolean);
+  return haystacks.some((h) => containsPhrase(h, tag) || containsPhrase(tag, h));
+}
+
 // Knowledge's "By Specialty" view surfaces a contributed product's linked
 // research without requiring the viewer to also have Product Expert (Recall)
 // tab access — gated on the Knowledge tab instead, since that's who actually
@@ -12378,12 +12399,14 @@ app.get("/api/product-catalog/:id/studies", requireTabAccess("knowledge"), async
     await ensurePhase9CategoriesSeeded();
     await ensureIngredientImportanceEnriched();
 
-    const [productIngredients, ingredientsAll, evidence, sources, advantageRows] = await Promise.all([
+    const [productIngredients, ingredientsAll, evidence, sources, advantageRows, productCatalogRows, trainingStudiesAll] = await Promise.all([
       db.getAllRows("RecallProductIngredients"),
       db.getAllRows("RecallIngredients"),
       db.getAllRows("RecallClinicalEvidence"),
       db.getAllRows("RecallResearchSources"),
       db.getAllRows("RecallProductAdvantages"),
+      db.getAllRows("ProductCatalog"),
+      db.getAllRows("TrainingStudies"),
     ]);
 
     const links = productIngredients.filter((pi) => pi.productId === req.params.id);
@@ -12391,6 +12414,17 @@ app.get("/api/product-catalog/:id/studies", requireTabAccess("knowledge"), async
     const ingredients = ingredientsAll.filter((i) => ingredientIds.has(i.id));
     const relevantEvidence = evidence.filter((e) => ingredientIds.has(e.ingredientId));
     const studies = buildStudyReferences(relevantEvidence, sources);
+
+    // The real, actively-curated study library managers keep lives in
+    // TrainingStudies (surfaced today as Product Expert → Studies), tagged
+    // by free-text nutrient name rather than linked to one specific catalog
+    // product — so it's matched here by name/ingredient instead of by id.
+    const productRow = productCatalogRows.find((p) => p.id === req.params.id);
+    const ingredientNames = ingredients.map((i) => i.name);
+    const trainingStudies = trainingStudiesAll
+      .filter((s) => productMatchesNutrientTag(s.nutrient, productRow?.name, ingredientNames))
+      .map(parseTrainingStudy)
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     // Short rep-facing bullet claims (e.g. "Supports heart health") for a
     // product export/visual card — reused as-is from Product Expert's "Why
@@ -12404,6 +12438,7 @@ app.get("/api/product-catalog/:id/studies", requireTabAccess("knowledge"), async
     res.json({
       ingredients: ingredients.map((i) => ({ id: i.id, name: i.name, repQuickTakeaway: i.repQuickTakeaway || "" })),
       studies,
+      trainingStudies,
       highlights,
     });
   } catch (e) {
