@@ -5975,7 +5975,27 @@ const RECALL_CATEGORIES_SEED = [
 // has no credentials to write to the real production Sheet directly; this
 // makes the real deploy self-seed the first time anyone opens Recall.
 let recallCategoriesSeedChecked = false;
-async function ensureRecallCategoriesSeeded() {
+// Cold-start/Render-restart races: several independent incoming requests
+// can each call the SAME ensure*Seeded()-style function before its first
+// run has finished and set its own "already done" flag -- a real risk here
+// specifically because a Google Sheets 429 retry can make that first run
+// take many seconds, widening the race window. Without this, concurrent
+// callers each re-run the full migration -- duplicate Sheets reads AND
+// duplicate appendRows -- which only makes an already-rate-limited cold
+// start worse (confirmed in production: a burst of "Google API
+// rate-limited, retrying..." lines right after every deploy/wake-up).
+// Wrapping every one of these functions so concurrent callers share a
+// single in-flight promise fixes that at the source, independent of (and in
+// addition to) the read/write queue's own throttling below.
+function singleFlight(fn) {
+  let pending = null;
+  return function (...args) {
+    if (!pending) pending = fn.apply(this, args).catch((e) => { pending = null; throw e; });
+    return pending;
+  };
+}
+
+const ensureRecallCategoriesSeeded = singleFlight(async function ensureRecallCategoriesSeeded() {
   if (recallCategoriesSeedChecked) return;
   const existing = await db.getAllRows("RecallCategories");
   const existingIds = new Set(existing.map((c) => c.id));
@@ -5986,7 +6006,7 @@ async function ensureRecallCategoriesSeeded() {
     })));
   }
   recallCategoriesSeedChecked = true;
-}
+});
 
 // Taxonomy values only — how a product is administered, not clinical
 // content. Deliberately NOT auto-assigned to any existing product: a
@@ -6000,7 +6020,7 @@ const RECALL_DOSAGE_FORMS_SEED = [
 ].map((name) => ({ id: name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""), name }));
 
 let recallDosageFormsSeedChecked = false;
-async function ensureRecallDosageFormsSeeded() {
+const ensureRecallDosageFormsSeeded = singleFlight(async function ensureRecallDosageFormsSeeded() {
   if (recallDosageFormsSeedChecked) return;
   const existing = await db.getAllRows("RecallDosageForms");
   const existingIds = new Set(existing.map((f) => f.id));
@@ -6014,7 +6034,7 @@ async function ensureRecallDosageFormsSeeded() {
     })));
   }
   recallDosageFormsSeedChecked = true;
-}
+});
 
 app.get("/api/recall/dosage-forms", requireTabAccess("recall"), async (req, res) => {
   try {
@@ -6165,7 +6185,7 @@ const B12_QUIZ_SEED = [
 ];
 
 let recallB12SeedChecked = false;
-async function ensureRecallB12Seeded() {
+const ensureRecallB12Seeded = singleFlight(async function ensureRecallB12Seeded() {
   if (recallB12SeedChecked) return;
   const existing = await db.getAllRows("RecallIngredients");
   if (!existing.some((i) => i.id === "vitamin-b12")) {
@@ -6267,7 +6287,7 @@ async function ensureRecallB12Seeded() {
     })));
   }
   recallB12SeedChecked = true;
-}
+});
 
 // ---------- B12 product data layer (Recall Phase 2C) ----------
 // Populates the Mason/ALFA ("our products") and Lebanese-competitor B12
@@ -6458,7 +6478,7 @@ const B12_COMPETITOR_PRODUCTS_SEED = [
 ];
 
 let recallB12ProductDataSeedChecked = false;
-async function ensureB12ProductDataSeeded() {
+const ensureB12ProductDataSeeded = singleFlight(async function ensureB12ProductDataSeeded() {
   if (recallB12ProductDataSeedChecked) return;
   const norm = (s) => String(s || "").trim().toLowerCase();
 
@@ -6598,7 +6618,7 @@ async function ensureB12ProductDataSeeded() {
   if (newRels.length) await db.appendRows("RecallCompetitorRelationships", newRels);
 
   recallB12ProductDataSeedChecked = true;
-}
+});
 
 // ---------- Recall: competitor master data (categories beyond B12) ----------
 // Transcribed verbatim from a user-provided Lebanese-market research file
@@ -7677,7 +7697,7 @@ function reconcileRecordFields({ entityType, entityId, existing, incoming, sourc
   return { patch, conflicts };
 }
 
-async function ensureCompetitorMasterDataSeeded() {
+const ensureCompetitorMasterDataSeeded = singleFlight(async function ensureCompetitorMasterDataSeeded() {
   if (competitorMasterDataSeedChecked) return;
   // Self-sufficient rather than trusting every call site to sequence
   // prerequisites correctly — this seed's per-category linking step (below)
@@ -7841,7 +7861,7 @@ async function ensureCompetitorMasterDataSeeded() {
   }
 
   competitorMasterDataSeedChecked = true;
-}
+});
 
 // ---------- Recall: infer generic name / form / dosage from a competitor
 // product's own name text ----------
@@ -7986,7 +8006,7 @@ function inferCompetitorDosage(name) {
 
 const COMPETITOR_NAME_DERIVED_NOTE = "Generic/form/dosage/pack values added only where unambiguous from the product name; exact label verification still required.";
 let competitorNameDerivedFieldsChecked = false;
-async function ensureCompetitorNameDerivedFieldsBackfilled() {
+const ensureCompetitorNameDerivedFieldsBackfilled = singleFlight(async function ensureCompetitorNameDerivedFieldsBackfilled() {
   if (competitorNameDerivedFieldsChecked) return;
   const rows = await db.getAllRows("CompetitorProducts");
   // Collected and sent as ONE batched write (see sheetsDb.batchUpdateRows)
@@ -8021,7 +8041,7 @@ async function ensureCompetitorNameDerivedFieldsBackfilled() {
   }
   if (updates.length) await db.batchUpdateRows("CompetitorProducts", updates);
   competitorNameDerivedFieldsChecked = true;
-}
+});
 
 // ---------- Recall: our own product catalog (Mason + ALFA master list) ----------
 // Transcribed from a user-provided Excel export (100 rows: 55 Alfa Vitamins
@@ -8978,7 +8998,7 @@ const OUR_PRODUCTS_CONFIRMED_RESOLUTIONS = [
 ];
 
 let ourProductsMasterDataSeedChecked = false;
-async function ensureOurProductsMasterDataSeeded() {
+const ensureOurProductsMasterDataSeeded = singleFlight(async function ensureOurProductsMasterDataSeeded() {
   if (ourProductsMasterDataSeedChecked) return;
   // Self-sufficient for the same reason as ensureCompetitorMasterDataSeeded
   // above — the enrichment/conflict matching below needs the B12 seed's
@@ -9077,7 +9097,7 @@ async function ensureOurProductsMasterDataSeeded() {
   }
 
   ourProductsMasterDataSeedChecked = true;
-}
+});
 
 // A product's brand (Alfa/Mason) is derivable from its own name prefix for
 // every product this company actually carries, so this backfills it once
@@ -9091,7 +9111,7 @@ function inferProductCatalogBrand(name) {
 }
 
 let productCatalogBrandBackfillChecked = false;
-async function ensureProductCatalogBrandBackfilled() {
+const ensureProductCatalogBrandBackfilled = singleFlight(async function ensureProductCatalogBrandBackfilled() {
   if (productCatalogBrandBackfillChecked) return;
   const rows = await db.getAllRows("ProductCatalog");
   const updates = [];
@@ -9102,7 +9122,7 @@ async function ensureProductCatalogBrandBackfilled() {
   }
   if (updates.length) await db.batchUpdateRows("ProductCatalog", updates);
   productCatalogBrandBackfillChecked = true;
-}
+});
 
 // ---------- Product Catalog image matching ("Find Missing Images") ----------
 // Two tiers, both fail closed rather than guess:
@@ -9744,7 +9764,7 @@ const PHASE1_INGREDIENTS_SEED = [
 ];
 
 let phase1CategoriesSeedChecked = false;
-async function ensurePhase1CategoriesSeeded() {
+const ensurePhase1CategoriesSeeded = singleFlight(async function ensurePhase1CategoriesSeeded() {
   if (phase1CategoriesSeedChecked) return;
   // Self-sufficient, same reasoning as the other ensure* functions above —
   // needs RecallCategories to exist and the Mason/ALFA catalog rows these
@@ -9839,7 +9859,7 @@ async function ensurePhase1CategoriesSeeded() {
   if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
 
   phase1CategoriesSeedChecked = true;
-}
+});
 
 // ---------- Recall Phase 2: Omega-3, CoQ10, Multivitamins ----------
 // Same extension pattern as Phase 1 above — no new tables, no new UI, pure
@@ -10123,7 +10143,7 @@ const PHASE2_INGREDIENTS_SEED = [
 ];
 
 let phase2CategoriesSeedChecked = false;
-async function ensurePhase2CategoriesSeeded() {
+const ensurePhase2CategoriesSeeded = singleFlight(async function ensurePhase2CategoriesSeeded() {
   if (phase2CategoriesSeedChecked) return;
   // Self-sufficient, same reasoning as ensurePhase1CategoriesSeeded above.
   await ensureRecallCategoriesSeeded();
@@ -10217,7 +10237,7 @@ async function ensurePhase2CategoriesSeeded() {
   if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
 
   phase2CategoriesSeedChecked = true;
-}
+});
 
 // ---------- Recall Phase 3: Sleep / Stress / Mood anchor (Melatonin,
 // Valerian, Ashwagandha) ----------
@@ -10284,7 +10304,7 @@ const PHASE3_INGREDIENTS_SEED = [
 ];
 
 let phase3CategoriesSeedChecked = false;
-async function ensurePhase3CategoriesSeeded() {
+const ensurePhase3CategoriesSeeded = singleFlight(async function ensurePhase3CategoriesSeeded() {
   if (phase3CategoriesSeedChecked) return;
   // Self-sufficient, same reasoning as ensurePhase1/2CategoriesSeeded above.
   await ensureRecallCategoriesSeeded();
@@ -10350,7 +10370,7 @@ async function ensurePhase3CategoriesSeeded() {
   if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
 
   phase3CategoriesSeedChecked = true;
-}
+});
 
 // ---------- NAC / NAD / Ashwagandha (Recall Phase 4) ----------
 // Same sourcing discipline as B12/Phase1/Phase2: clinical content below is
@@ -10467,7 +10487,7 @@ const PHASE4_INGREDIENTS_SEED = [
 ];
 
 let phase4CategoriesSeedChecked = false;
-async function ensurePhase4CategoriesSeeded() {
+const ensurePhase4CategoriesSeeded = singleFlight(async function ensurePhase4CategoriesSeeded() {
   if (phase4CategoriesSeedChecked) return;
   // Self-sufficient, same reasoning as ensurePhase1/2/3CategoriesSeeded above.
   await ensureRecallCategoriesSeeded();
@@ -10522,7 +10542,7 @@ async function ensurePhase4CategoriesSeeded() {
   if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
 
   phase4CategoriesSeedChecked = true;
-}
+});
 
 // ---------- Heart-Cardiovascular / Liver-Detox-Metabolic / Weight-Management
 // (Recall Phase 5) ----------
@@ -10840,7 +10860,7 @@ const PHASE5_INGREDIENTS_SEED = [
 ];
 
 let phase5CategoriesSeedChecked = false;
-async function ensurePhase5CategoriesSeeded() {
+const ensurePhase5CategoriesSeeded = singleFlight(async function ensurePhase5CategoriesSeeded() {
   if (phase5CategoriesSeedChecked) return;
   await ensureRecallCategoriesSeeded();
   await ensureOurProductsMasterDataSeeded();
@@ -10895,7 +10915,7 @@ async function ensurePhase5CategoriesSeeded() {
   if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
 
   phase5CategoriesSeedChecked = true;
-}
+});
 
 // ---------- Men's Health / Brain-Cognitive / Joint-Bone-Mobility
 // (Recall Phase 6) ----------
@@ -11152,7 +11172,7 @@ const PHASE6_INGREDIENTS_SEED = [
 ];
 
 let phase6CategoriesSeedChecked = false;
-async function ensurePhase6CategoriesSeeded() {
+const ensurePhase6CategoriesSeeded = singleFlight(async function ensurePhase6CategoriesSeeded() {
   if (phase6CategoriesSeedChecked) return;
   await ensureRecallCategoriesSeeded();
   await ensureOurProductsMasterDataSeeded();
@@ -11208,7 +11228,7 @@ async function ensurePhase6CategoriesSeeded() {
   if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
 
   phase6CategoriesSeedChecked = true;
-}
+});
 
 // ---------- Women's Health / Immune Support / Digestive-Gut Health /
 // Collagen / Hair-Skin-Nails / Zinc / Probiotics (Recall Phase 7) ----------
@@ -11411,7 +11431,7 @@ const PHASE7_INGREDIENTS_SEED = [
 ];
 
 let phase7CategoriesSeedChecked = false;
-async function ensurePhase7CategoriesSeeded() {
+const ensurePhase7CategoriesSeeded = singleFlight(async function ensurePhase7CategoriesSeeded() {
   if (phase7CategoriesSeedChecked) return;
   await ensureRecallCategoriesSeeded();
   await ensureOurProductsMasterDataSeeded();
@@ -11468,7 +11488,7 @@ async function ensurePhase7CategoriesSeeded() {
   if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
 
   phase7CategoriesSeedChecked = true;
-}
+});
 
 // ---------- Sports Nutrition & Performance (Recall Phase 8 — final phase) ----------
 // Same sourcing discipline as every prior phase. This completes the plan to
@@ -11606,7 +11626,7 @@ const PHASE8_INGREDIENTS_SEED = [
 ];
 
 let phase8CategoriesSeedChecked = false;
-async function ensurePhase8CategoriesSeeded() {
+const ensurePhase8CategoriesSeeded = singleFlight(async function ensurePhase8CategoriesSeeded() {
   if (phase8CategoriesSeedChecked) return;
   await ensureRecallCategoriesSeeded();
   await ensureOurProductsMasterDataSeeded();
@@ -11664,7 +11684,7 @@ async function ensurePhase8CategoriesSeeded() {
   if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
 
   phase8CategoriesSeedChecked = true;
-}
+});
 
 // ---------- Eye Health & Vision / Respiratory-Allergy-Seasonal Support
 // (Recall Phase 9) ----------
@@ -11753,7 +11773,7 @@ const PHASE9_INGREDIENTS_SEED = [
 ];
 
 let phase9CategoriesSeedChecked = false;
-async function ensurePhase9CategoriesSeeded() {
+const ensurePhase9CategoriesSeeded = singleFlight(async function ensurePhase9CategoriesSeeded() {
   if (phase9CategoriesSeedChecked) return;
   await ensureRecallCategoriesSeeded();
   await ensureOurProductsMasterDataSeeded();
@@ -11812,7 +11832,7 @@ async function ensurePhase9CategoriesSeeded() {
   if (newLinkRows.length) await db.appendRows("RecallProductIngredients", newLinkRows);
 
   phase9CategoriesSeedChecked = true;
-}
+});
 
 // ---------- Recall: Phase 10 — ingredient "importance"/efficacy enrichment
 // ----------
@@ -12018,7 +12038,7 @@ const INGREDIENT_IMPORTANCE_ENRICHMENT = [
 ];
 
 let phase10ImportanceEnrichmentChecked = false;
-async function ensureIngredientImportanceEnriched() {
+const ensureIngredientImportanceEnriched = singleFlight(async function ensureIngredientImportanceEnriched() {
   if (phase10ImportanceEnrichmentChecked) return;
   await ensurePhase9CategoriesSeeded();
 
@@ -12050,7 +12070,7 @@ async function ensureIngredientImportanceEnriched() {
   if (updates.length) await db.batchUpdateRows("RecallIngredients", updates);
 
   phase10ImportanceEnrichmentChecked = true;
-}
+});
 
 // ---------- Recall: auto-link ANY competitor product into its matching
 // category, by shared ingredient ----------
@@ -12072,7 +12092,7 @@ async function ensureIngredientImportanceEnriched() {
 // each piece is checked against real RecallIngredients.name values. A term
 // that doesn't exactly match a real ingredient name is simply not linked —
 // never partially matched or inferred.
-async function ensureCompetitorIngredientAutoLinking() {
+const ensureCompetitorIngredientAutoLinking = singleFlight(async function ensureCompetitorIngredientAutoLinking() {
   const norm = (s) => String(s || "").trim().toLowerCase();
   const [allIngredients, links, competitorProducts, existingRels] = await Promise.all([
     db.getAllRows("RecallIngredients"),
@@ -12109,7 +12129,7 @@ async function ensureCompetitorIngredientAutoLinking() {
     }
   }
   if (newRels.length) await db.appendRows("RecallCompetitorRelationships", newRels);
-}
+});
 
 // ---------- Recall: one-time removal of miscategorized/excluded competitor brands ----------
 // The bulk retail price-list import that seeded most of CompetitorProducts
@@ -12130,7 +12150,7 @@ async function ensureCompetitorIngredientAutoLinking() {
 // table this size.
 const EXCLUDED_COMPETITOR_BRAND_NAMES = ["mason", "mason natural", "alfa", "alfa sports", "healthy sense"];
 let excludedCompetitorBrandsRemoved = false;
-async function ensureExcludedCompetitorBrandsRemoved() {
+const ensureExcludedCompetitorBrandsRemoved = singleFlight(async function ensureExcludedCompetitorBrandsRemoved() {
   if (excludedCompetitorBrandsRemoved) return;
   const norm = (s) => String(s || "").trim().toLowerCase();
   const [products, listings, rels, conflicts] = await Promise.all([
@@ -12155,7 +12175,7 @@ async function ensureExcludedCompetitorBrandsRemoved() {
   if (keptConflicts.length !== conflicts.length) await db.replaceAllRows("RecallFieldConflicts", keptConflicts);
 
   excludedCompetitorBrandsRemoved = true;
-}
+});
 
 // ---------- Recall Phase 2D: research status derivation + editing ----------
 // A record's researchStatus/missingFields are ALWAYS derived here from its
