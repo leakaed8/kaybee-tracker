@@ -9217,80 +9217,97 @@ async function locateProductPage(product) {
   }
 }
 
-async function findImagesForProductCatalogIds(ids) {
+async function findImageForOneProduct(product) {
+  if (product.imageApprovalStatus === "approved") {
+    return { id: product.id, name: product.name, outcome: "skipped_approved" };
+  }
+  try {
+    const located = await locateProductPage(product);
+    if (located.blocked) return { id: product.id, name: product.name, outcome: "blocked" };
+    if (!located.url) return { id: product.id, name: product.name, outcome: "not_found" };
+
+    const pageResp = await fetchWithTimeout(located.url);
+    if (!pageResp.ok) return { id: product.id, name: product.name, outcome: "blocked", sourceUrl: located.url };
+    const pageHtml = await pageResp.text();
+    const bottleUrl = extractBottleImageUrl(pageHtml, located.url);
+    const factsUrl = bottleUrl ? extractSupplementFactsImageUrl(pageHtml, located.url, bottleUrl) : "";
+
+    const patch = {
+      updatedBy: "Find Missing Images (auto)", updatedAt: new Date().toISOString(),
+      imageMatchedBy: "auto", imageMatchedAt: new Date().toISOString(), imageSourceUrl: located.url,
+    };
+    if (bottleUrl) {
+      const uploaded = await downloadImageToR2(bottleUrl, `product-catalog/${product.id}-bottle-auto`);
+      patch.bottleImageKey = uploaded.key; patch.bottleImageName = uploaded.name; patch.bottleImageMimeType = uploaded.mimeType;
+    }
+    if (factsUrl) {
+      const uploaded = await downloadImageToR2(factsUrl, `product-catalog/${product.id}-facts-auto`);
+      patch.supplementFactsImageKey = uploaded.key; patch.supplementFactsImageName = uploaded.name; patch.supplementFactsImageMimeType = uploaded.mimeType;
+    }
+
+    if (!bottleUrl && !factsUrl) return { id: product.id, name: product.name, outcome: "not_found", sourceUrl: located.url };
+
+    patch.imageApprovalStatus = "pending_review";
+    patch.imageNotes = factsUrl ? "" : "Bottle image found; Supplement Facts image not found on the product page — needs manual upload.";
+    await db.updateRowById("ProductCatalog", product.id, patch);
+    return { id: product.id, name: product.name, sourceUrl: located.url, outcome: bottleUrl && factsUrl ? "matched" : "partial" };
+  } catch (e) {
+    logErr(e);
+    return { id: product.id, name: product.name, outcome: "blocked" };
+  }
+}
+
+async function findImagesForProductCatalogIds(ids, onProgress) {
   const results = [];
   const catalog = await db.getAllRows("ProductCatalog");
   const targets = catalog.filter((p) => ids.includes(p.id));
-
   for (const product of targets) {
-    if (product.imageApprovalStatus === "approved") {
-      results.push({ id: product.id, name: product.name, outcome: "skipped_approved" });
-      continue;
-    }
-    try {
-      const located = await locateProductPage(product);
-      if (located.blocked) {
-        results.push({ id: product.id, name: product.name, outcome: "blocked" });
-        continue;
-      }
-      if (!located.url) {
-        results.push({ id: product.id, name: product.name, outcome: "not_found" });
-        continue;
-      }
-
-      const pageResp = await fetchWithTimeout(located.url);
-      if (!pageResp.ok) {
-        results.push({ id: product.id, name: product.name, outcome: "blocked", sourceUrl: located.url });
-        continue;
-      }
-      const pageHtml = await pageResp.text();
-      const bottleUrl = extractBottleImageUrl(pageHtml, located.url);
-      const factsUrl = bottleUrl ? extractSupplementFactsImageUrl(pageHtml, located.url, bottleUrl) : "";
-
-      const patch = {
-        updatedBy: "Find Missing Images (auto)", updatedAt: new Date().toISOString(),
-        imageMatchedBy: "auto", imageMatchedAt: new Date().toISOString(), imageSourceUrl: located.url,
-      };
-      if (bottleUrl) {
-        const uploaded = await downloadImageToR2(bottleUrl, `product-catalog/${product.id}-bottle-auto`);
-        patch.bottleImageKey = uploaded.key; patch.bottleImageName = uploaded.name; patch.bottleImageMimeType = uploaded.mimeType;
-      }
-      if (factsUrl) {
-        const uploaded = await downloadImageToR2(factsUrl, `product-catalog/${product.id}-facts-auto`);
-        patch.supplementFactsImageKey = uploaded.key; patch.supplementFactsImageName = uploaded.name; patch.supplementFactsImageMimeType = uploaded.mimeType;
-      }
-
-      if (!bottleUrl && !factsUrl) {
-        results.push({ id: product.id, name: product.name, outcome: "not_found", sourceUrl: located.url });
-        continue;
-      }
-      patch.imageApprovalStatus = "pending_review";
-      patch.imageNotes = factsUrl ? "" : "Bottle image found; Supplement Facts image not found on the product page — needs manual upload.";
-      await db.updateRowById("ProductCatalog", product.id, patch);
-      results.push({
-        id: product.id, name: product.name, sourceUrl: located.url,
-        outcome: bottleUrl && factsUrl ? "matched" : "partial",
-      });
-    } catch (e) {
-      logErr(e);
-      results.push({ id: product.id, name: product.name, outcome: "blocked" });
-    }
+    const result = await findImageForOneProduct(product);
+    results.push(result);
+    if (onProgress) onProgress(results.length, result);
   }
   return results;
 }
 
+// A manager's "Find Missing Images" click used to await the ENTIRE sequential
+// scan (one HTTP fetch + up to two image downloads PER product) inside a
+// single request/response cycle — with more than a handful of products this
+// routinely outran the client's own 60s request timeout, so the browser
+// reported "couldn't reach the server" while the server kept grinding away
+// in the background regardless, also starving other concurrent requests
+// (e.g. Product Catalog's own thumbnail loads) of the same event loop.
+// Fixed by returning immediately and running the scan as a background job;
+// the client polls GET .../find-images/status for live progress instead of
+// blocking on one giant request. Single in-memory job is enough here — this
+// is a manager-only, one-at-a-time admin action, not something run
+// concurrently by many users.
+let findImagesJob = { running: false, total: 0, completed: 0, results: [] };
+
 app.post("/api/product-catalog/find-images", requireManager, async (req, res) => {
   try {
+    if (findImagesJob.running) return res.status(409).json({ error: "A Find Missing Images run is already in progress." });
     const catalog = await db.getAllRows("ProductCatalog");
     const ids = Array.isArray(req.body.ids) && req.body.ids.length
       ? req.body.ids
       : catalog.filter((p) => p.imageApprovalStatus !== "approved" && (!p.bottleImageKey || !p.supplementFactsImageKey)).map((p) => p.id);
-    const results = await findImagesForProductCatalogIds(ids);
-    res.json({ results });
+
+    findImagesJob = { running: true, total: ids.length, completed: 0, results: [] };
+    res.json({ started: true, total: ids.length });
+
+    findImagesForProductCatalogIds(ids, (completed, result) => {
+      findImagesJob.completed = completed;
+      findImagesJob.results.push(result);
+    })
+      .catch((e) => logErr(e))
+      .finally(() => { findImagesJob.running = false; });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
   }
+});
+
+app.get("/api/product-catalog/find-images/status", requireManager, (req, res) => {
+  res.json(findImagesJob);
 });
 
 // ---------- Recall Phase 1: Vitamin D, Vitamin C, Magnesium, Calcium ----------

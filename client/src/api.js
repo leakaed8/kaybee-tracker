@@ -108,6 +108,7 @@ export const api = {
     request(`/product-catalog/${id}/image-approval`, { method: "PATCH", body: JSON.stringify({ status, which }) }),
   getCatalogProductImageUrl: (id, which) => request(`/product-catalog/${id}/image-url?which=${which}`),
   findMissingCatalogImages: (ids) => request("/product-catalog/find-images", { method: "POST", body: JSON.stringify(ids ? { ids } : {}) }),
+  getFindImagesStatus: () => request("/product-catalog/find-images/status"),
   getProductCatalogStudies: (id) => request(`/product-catalog/${id}/studies`),
   importSampleInventory: () => request("/products/import-sample", { method: "POST" }),
   importBulkProducts: (products) => request("/products/import-bulk", { method: "POST", body: JSON.stringify({ products }) }),

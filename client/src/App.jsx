@@ -447,7 +447,14 @@ export default function App() {
   const bulkImportCatalogProducts = (products) => withSync(() => api.importCatalogProductsBulk(products), { touchesReference: true });
   const uploadCatalogProductImages = (id, fields) => withSync(() => api.uploadCatalogProductImages(id, fields), { touchesReference: true });
   const setCatalogProductImageApproval = (id, status, which) => withSync(() => api.setCatalogProductImageApproval(id, status, which), { touchesReference: true });
-  const findMissingCatalogImages = (ids) => withSync(() => api.findMissingCatalogImages(ids), { touchesReference: true });
+  // Not wrapped in withSync: Find Missing Images now starts a background
+  // job and returns immediately (see server/index.js for why — the old
+  // synchronous version could outrun the client's 60s request timeout).
+  // The product list is refreshed once the caller's own polling loop sees
+  // the job finish, not right after this call returns.
+  const startFindMissingCatalogImages = (ids) => api.findMissingCatalogImages(ids);
+  const getFindImagesStatus = () => api.getFindImagesStatus();
+  const refreshCatalogAfterFindImages = () => refreshReference({ fresh: true });
   const bulkImportProducts = (products) => withSync(() => api.importBulkProducts(products), { touchesReference: true });
   const addVisit = (visit) => withSync(() => api.addVisit(visit), { touchesReference: true }); // can silently set a client's assignedRep server-side
   const updateVisit = (id, patch) => withSync(() => api.updateVisit(id, patch));
@@ -836,7 +843,9 @@ export default function App() {
                 onBulkImportCatalogProducts={bulkImportCatalogProducts}
                 onUploadCatalogProductImages={uploadCatalogProductImages}
                 onSetCatalogProductImageApproval={setCatalogProductImageApproval}
-                onFindMissingCatalogImages={findMissingCatalogImages}
+                onFindMissingCatalogImages={startFindMissingCatalogImages}
+                onGetFindImagesStatus={getFindImagesStatus}
+                onRefreshAfterFindImages={refreshCatalogAfterFindImages}
                 competitors={competitors}
                 onAddCompetitor={addCompetitor}
                 onUpdateCompetitor={updateCompetitor}
@@ -13509,7 +13518,7 @@ function ProductImageSlot({ product, which, label, onUpload, onUploadUrl, onAppr
   );
 }
 
-function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBulk, onUploadImages, onSetImageApproval, onFindMissingImages }) {
+function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBulk, onUploadImages, onSetImageApproval, onFindMissingImages, onGetFindImagesStatus, onRefreshAfterFindImages }) {
   const [search, setSearch] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [editingId, setEditingId] = useState(null);
@@ -13519,6 +13528,7 @@ function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBu
   const [showImport, setShowImport] = useState(false);
   const [findingImages, setFindingImages] = useState(false);
   const [findImagesResults, setFindImagesResults] = useState(null);
+  const [findImagesProgress, setFindImagesProgress] = useState(null); // { completed, total } | null
   const [selectedForFind, setSelectedForFind] = useState(new Set());
 
   const list = products || [];
@@ -13554,16 +13564,41 @@ function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBu
     }
   };
 
+  // Find Missing Images now runs as a background job (server/index.js) —
+  // the POST only starts it and returns immediately, so this polls for
+  // progress instead of awaiting one giant request that used to be able to
+  // outrun the browser's own request timeout on a large catalog.
+  const pollFindImagesStatus = async () => {
+    try {
+      const status = await onGetFindImagesStatus();
+      setFindImagesProgress({ completed: status.completed, total: status.total });
+      if (status.running) {
+        setTimeout(pollFindImagesStatus, 1500);
+      } else {
+        setFindImagesResults(status.results || []);
+        setFindingImages(false);
+        setFindImagesProgress(null);
+        onRefreshAfterFindImages();
+      }
+    } catch (e) {
+      setError(e.message);
+      setFindingImages(false);
+      setFindImagesProgress(null);
+    }
+  };
+
   const doFindMissingImages = async (ids) => {
     setFindingImages(true);
     setFindImagesResults(null);
+    setFindImagesProgress(null);
+    setError("");
     try {
-      const res = await onFindMissingImages(ids);
-      setFindImagesResults(res.results || []);
+      const started = await onFindMissingImages(ids);
+      setFindImagesProgress({ completed: 0, total: started.total });
       if (ids) setSelectedForFind(new Set());
+      setTimeout(pollFindImagesStatus, 1000);
     } catch (e) {
       setError(e.message);
-    } finally {
       setFindingImages(false);
     }
   };
@@ -13588,11 +13623,11 @@ function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBu
         <div style={{ display: "flex", gap: 6 }}>
           {selectedForFind.size > 0 && (
             <button onClick={() => doFindMissingImages([...selectedForFind])} disabled={findingImages} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, background: "#fff", border: "1px solid #2E6B8F", color: "#2E6B8F", borderRadius: 8, padding: "7px 12px" }}>
-            <Search size={13} /> {findingImages ? "Searching…" : `Find Images for Selected (${selectedForFind.size})`}
+            <Search size={13} /> {findingImages ? `Searching… ${findImagesProgress ? `${findImagesProgress.completed}/${findImagesProgress.total}` : ""}` : `Find Images for Selected (${selectedForFind.size})`}
           </button>
           )}
           <button onClick={() => doFindMissingImages()} disabled={findingImages} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "7px 12px" }}>
-            <Search size={13} /> {findingImages ? "Searching…" : "Find Missing Images (all)"}
+            <Search size={13} /> {findingImages ? `Searching… ${findImagesProgress ? `${findImagesProgress.completed}/${findImagesProgress.total}` : ""}` : "Find Missing Images (all)"}
           </button>
           <button onClick={() => { setShowImport((v) => !v); setShowAdd(false); }} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "7px 12px" }}>
             <Upload size={13} /> Import Excel
@@ -15235,7 +15270,7 @@ function CollapsibleSection({ title, defaultOpen = false, children }) {
 }
 
 // ---------- Settings ----------
-function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts, onUploadCatalogProductImages, onSetCatalogProductImageApproval, onFindMissingCatalogImages, competitors, onAddCompetitor, onUpdateCompetitor, onRemoveCompetitor, onAddCompetitorProduct, onUpdateCompetitorProduct, onRemoveCompetitorProduct, onImportCompetitorProducts, repNames = [], tabVisibility, setTabVisibility }) {
+function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts, onUploadCatalogProductImages, onSetCatalogProductImageApproval, onFindMissingCatalogImages, onGetFindImagesStatus, onRefreshAfterFindImages, competitors, onAddCompetitor, onUpdateCompetitor, onRemoveCompetitor, onAddCompetitorProduct, onUpdateCompetitorProduct, onRemoveCompetitorProduct, onImportCompetitorProducts, repNames = [], tabVisibility, setTabVisibility }) {
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Settings</h2>
@@ -15285,6 +15320,8 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
             onUploadImages={onUploadCatalogProductImages}
             onSetImageApproval={onSetCatalogProductImageApproval}
             onFindMissingImages={onFindMissingCatalogImages}
+            onGetFindImagesStatus={onGetFindImagesStatus}
+            onRefreshAfterFindImages={onRefreshAfterFindImages}
           />
         </CollapsibleSection>
       )}
