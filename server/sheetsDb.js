@@ -328,7 +328,14 @@ const SCHEMAS = {
   ],
   TrainingVideos: ["id", "title", "r2ObjectKey", "quiz", "createdAt"],
   TrainingProgress: ["id", "employeeId", "videoId", "completedAt", "quizResponses"],
-  TrainingStudies: ["id", "title", "url", "notes", "createdAt", "nutrient", "createdBy"],
+  // ingredientId appended — an explicit, optional link to the SAME Product
+  // Expert ingredient/category (RecallIngredients) a product is linked to
+  // via RecallProductIngredients. The free-text `nutrient` tag above still
+  // drives the existing chip-filter browsing UI and stays a fuzzy-match
+  // fallback for studies never explicitly linked; ingredientId is the
+  // authoritative, typo-proof link used by Knowledge's "see this product's
+  // studies" lookup. "" on every pre-existing row (not yet linked).
+  TrainingStudies: ["id", "title", "url", "notes", "createdAt", "nutrient", "createdBy", "ingredientId"],
   TrainingStudyViews: ["id", "employeeId", "studyId", "viewedAt"],
   // A master list of every product the company carries, independent of the
   // Stock/Products tab (which tracks per-batch qty + expiry and gets fully

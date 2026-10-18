@@ -910,7 +910,7 @@ function parseTrainingProgress(p) {
 }
 
 function parseTrainingStudy(s) {
-  return { id: s.id, title: s.title, url: s.url, notes: s.notes || "", createdAt: s.createdAt, nutrient: s.nutrient || "", createdBy: s.createdBy || "" };
+  return { id: s.id, title: s.title, url: s.url, notes: s.notes || "", createdAt: s.createdAt, nutrient: s.nutrient || "", createdBy: s.createdBy || "", ingredientId: s.ingredientId || "" };
 }
 
 function parsePunch(p) {
@@ -3662,7 +3662,7 @@ app.get("/api/training-studies", requireTabAccess("training"), async (req, res) 
 // competitor product list. Editing/deleting stays manager-only below.
 app.post("/api/admin/training-studies", async (req, res) => {
   try {
-    const { title, url, notes, nutrient } = req.body;
+    const { title, url, notes, nutrient, ingredientId } = req.body;
     if (!title || !String(title).trim()) return res.status(400).json({ error: "title is required" });
     if (!url || !String(url).trim()) return res.status(400).json({ error: "url is required" });
     let cleanUrl = String(url).trim();
@@ -3675,6 +3675,7 @@ app.post("/api/admin/training-studies", async (req, res) => {
       url: cleanUrl,
       notes: notes ? String(notes).trim() : "",
       nutrient: nutrient ? String(nutrient).trim() : "",
+      ingredientId: ingredientId ? String(ingredientId).trim() : "",
       createdBy: req.repName || (req.role === "manager" ? "Manager" : ""),
       createdAt: new Date().toISOString(),
     };
@@ -3694,7 +3695,7 @@ app.patch("/api/admin/training-studies/:id", requireManager, async (req, res) =>
     const study = rows.find((s) => s.id === req.params.id);
     if (!study) return res.status(404).json({ error: "Study not found" });
 
-    const { title, url, notes, nutrient } = req.body;
+    const { title, url, notes, nutrient, ingredientId } = req.body;
     const patch = {};
     if (title !== undefined) {
       if (!String(title).trim()) return res.status(400).json({ error: "title can't be empty" });
@@ -3709,6 +3710,7 @@ app.patch("/api/admin/training-studies/:id", requireManager, async (req, res) =>
     }
     if (notes !== undefined) patch.notes = String(notes).trim();
     if (nutrient !== undefined) patch.nutrient = String(nutrient).trim();
+    if (ingredientId !== undefined) patch.ingredientId = String(ingredientId).trim();
     if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
 
     await db.updateRowById("TrainingStudies", study.id, patch);
@@ -3767,6 +3769,67 @@ app.patch("/api/training-studies/:id/nutrient", requireTabAccess("training"), as
     const ok = await db.updateRowById("TrainingStudies", req.params.id, { nutrient: String(nutrient).trim() });
     if (!ok) return res.status(404).json({ error: "Study not found" });
     res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// The free-text `nutrient` tag above is a best-effort match against a
+// product's name/linked-ingredient name (see productMatchesNutrientTag) —
+// fine most of the time, but a typo or an unusual product name can leave a
+// real study invisible on the exact product it's about. ingredientId is the
+// deliberate fix: link a study directly to the SAME Product Expert
+// ingredient/category (RecallIngredients) that products are already linked
+// to via "Product Expert -> Products -> link to category", so the two
+// always line up regardless of how either side is named. Open to any
+// employee, same reasoning as the nutrient quick-tag above — whoever
+// notices a study isn't showing up where it should can fix it themselves.
+app.patch("/api/training-studies/:id/ingredient", requireTabAccess("training"), async (req, res) => {
+  try {
+    const { ingredientId } = req.body;
+    // "" is a valid value here (unlink), unlike /nutrient which requires a
+    // non-empty tag — clearing a wrong link is a real, common action.
+    const ok = await db.updateRowById("TrainingStudies", req.params.id, { ingredientId: ingredientId ? String(ingredientId).trim() : "" });
+    if (!ok) return res.status(404).json({ error: "Study not found" });
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// The flat ingredient list a study can be linked to — every
+// "category" (e.g. "Magnesium", "Vitamin B12") a product can already be
+// linked to in Product Expert -> Products. Gated on Training tab access
+// (not Recall) since tagging a study shouldn't require full Product Expert
+// access, matching the nutrient quick-tag route's own gating above.
+app.get("/api/training-studies/ingredient-options", requireTabAccess("training"), async (req, res) => {
+  try {
+    await ensureRecallCategoriesSeeded();
+    await ensureRecallB12Seeded();
+    await ensureB12ProductDataSeeded();
+    await ensureOurProductsMasterDataSeeded();
+    await ensurePhase1CategoriesSeeded();
+    await ensurePhase2CategoriesSeeded();
+    await ensurePhase3CategoriesSeeded();
+    await ensurePhase4CategoriesSeeded();
+    await ensurePhase5CategoriesSeeded();
+    await ensurePhase6CategoriesSeeded();
+    await ensurePhase7CategoriesSeeded();
+    await ensurePhase8CategoriesSeeded();
+    await ensurePhase9CategoriesSeeded();
+    await ensureIngredientImportanceEnriched();
+
+    const [ingredients, categories] = await Promise.all([
+      db.getAllRows("RecallIngredients"),
+      db.getAllRows("RecallCategories"),
+    ]);
+    const categoryNameById = new Map(categories.map((c) => [c.id, c.name]));
+    const options = ingredients
+      .map((i) => ({ id: i.id, name: i.name, categoryName: categoryNameById.get(i.categoryId) || "" }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ options });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
@@ -12441,8 +12504,13 @@ app.get("/api/product-catalog/:id/studies", requireTabAccess("knowledge"), async
     // product — so it's matched here by name/ingredient instead of by id.
     const productRow = productCatalogRows.find((p) => p.id === req.params.id);
     const ingredientNames = ingredients.map((i) => i.name);
+    // ingredientId, once set, is authoritative for that study — a
+    // deliberate link overrides the fuzzy text match entirely rather than
+    // adding to it, so a study linked to "Magnesium" never also leaks onto
+    // an unrelated product just because its free-text tag happens to share
+    // a word with that other product's name/ingredient.
     const trainingStudies = trainingStudiesAll
-      .filter((s) => productMatchesNutrientTag(s.nutrient, productRow?.name, ingredientNames))
+      .filter((s) => (s.ingredientId ? ingredientIds.has(s.ingredientId) : productMatchesNutrientTag(s.nutrient, productRow?.name, ingredientNames)))
       .map(parseTrainingStudy)
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 

@@ -574,10 +574,11 @@ export function TrainingVideosView({ role, repName, isSupervisor, repNames }) {
 
 // Admin-only: paste a study's title, URL, and an optional note on why it's
 // relevant. No file is hosted here — just a link out.
-function AddTrainingStudyForm({ onAdded }) {
+function AddTrainingStudyForm({ onAdded, ingredientOptions }) {
   const [title, setTitle] = useState("");
   const [url, setUrl] = useState("");
   const [nutrient, setNutrient] = useState("");
+  const [ingredientId, setIngredientId] = useState("");
   const [notes, setNotes] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -588,8 +589,8 @@ function AddTrainingStudyForm({ onAdded }) {
     if (!nutrient.trim()) { setError("Pick (or type) the vitamin/nutrient this study is about."); return; }
     setSaving(true);
     try {
-      await api.addTrainingStudy({ title: title.trim(), url: url.trim(), nutrient: nutrient.trim(), notes: notes.trim() });
-      setTitle(""); setUrl(""); setNutrient(""); setNotes("");
+      await api.addTrainingStudy({ title: title.trim(), url: url.trim(), nutrient: nutrient.trim(), ingredientId, notes: notes.trim() });
+      setTitle(""); setUrl(""); setNutrient(""); setIngredientId(""); setNotes("");
       onAdded();
     } catch (e) {
       setError(e.message);
@@ -605,6 +606,12 @@ function AddTrainingStudyForm({ onAdded }) {
         <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Study title" style={inputStyle} />
         <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="Link (e.g. https://pubmed.ncbi.nlm.nih.gov/...)" style={inputStyle} />
         <input value={nutrient} onChange={(e) => setNutrient(e.target.value)} placeholder="Vitamin / nutrient (e.g. Vitamin B12)" list="study-nutrient-options" style={inputStyle} />
+        <select value={ingredientId} onChange={(e) => setIngredientId(e.target.value)} style={inputStyle}>
+          <option value="">Link to a Product Expert category (optional, recommended)</option>
+          {(ingredientOptions || []).map((o) => (
+            <option key={o.id} value={o.id}>{o.categoryName ? `${o.name} (${o.categoryName})` : o.name}</option>
+          ))}
+        </select>
         <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Why it's relevant (optional)" rows={2} style={{ ...inputStyle, resize: "vertical" }} />
         {error && <div style={{ fontSize: 12, color: "#B33A3A" }}>{error}</div>}
         <div>
@@ -621,10 +628,11 @@ function AddTrainingStudyForm({ onAdded }) {
   );
 }
 
-function EditTrainingStudyForm({ study, onSaved, onCancel }) {
+function EditTrainingStudyForm({ study, onSaved, onCancel, ingredientOptions }) {
   const [title, setTitle] = useState(study.title);
   const [url, setUrl] = useState(study.url);
   const [nutrient, setNutrient] = useState(study.nutrient || "");
+  const [ingredientId, setIngredientId] = useState(study.ingredientId || "");
   const [notes, setNotes] = useState(study.notes || "");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -635,7 +643,7 @@ function EditTrainingStudyForm({ study, onSaved, onCancel }) {
     if (!nutrient.trim()) { setError("Pick (or type) the vitamin/nutrient this study is about."); return; }
     setSaving(true);
     try {
-      await api.updateTrainingStudy(study.id, { title: title.trim(), url: url.trim(), nutrient: nutrient.trim(), notes: notes.trim() });
+      await api.updateTrainingStudy(study.id, { title: title.trim(), url: url.trim(), nutrient: nutrient.trim(), ingredientId, notes: notes.trim() });
       onSaved();
     } catch (e) {
       setError(e.message);
@@ -649,6 +657,12 @@ function EditTrainingStudyForm({ study, onSaved, onCancel }) {
       <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Study title" style={inputStyle} />
       <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="Link" style={inputStyle} />
       <input value={nutrient} onChange={(e) => setNutrient(e.target.value)} placeholder="Vitamin / nutrient" list="study-nutrient-options" style={inputStyle} />
+      <select value={ingredientId} onChange={(e) => setIngredientId(e.target.value)} style={inputStyle}>
+        <option value="">Link to a Product Expert category (optional, recommended)</option>
+        {(ingredientOptions || []).map((o) => (
+          <option key={o.id} value={o.id}>{o.categoryName ? `${o.name} (${o.categoryName})` : o.name}</option>
+        ))}
+      </select>
       <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Why it's relevant (optional)" rows={2} style={{ ...inputStyle, resize: "vertical" }} />
       {error && <div style={{ fontSize: 12, color: "#B33A3A" }}>{error}</div>}
       <div style={{ display: "flex", gap: 8 }}>
@@ -720,6 +734,51 @@ function QuickTagNutrient({ study, nutrientOptions, onTagged }) {
   );
 }
 
+// The free-text nutrient tag above is a fuzzy match against a product's
+// name/linked-ingredient name — fine most of the time, but a typo or an
+// unusual product name can leave a real study invisible on the product
+// it's actually about. Linking a study directly to the same Product Expert
+// category (RecallIngredients) a product is linked to under Product Expert
+// -> Products is the deliberate, typo-proof fix — this is what makes that
+// link. Open to any employee, same reasoning as QuickTagNutrient: whoever
+// notices a study isn't showing up where it should can fix it themselves,
+// without needing the full (manager-only) edit form.
+function LinkStudyToIngredient({ study, ingredientOptions, onLinked }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (ingredientId) => {
+    setSaving(true);
+    setError("");
+    try {
+      await api.linkTrainingStudyToIngredient(study.id, ingredientId);
+      onLinked();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+      <span style={{ fontSize: 10.5, color: "#8A8272" }}>Product Expert category:</span>
+      <select
+        value={study.ingredientId || ""}
+        onChange={(e) => submit(e.target.value)}
+        disabled={saving || (ingredientOptions || []).length === 0}
+        style={{ fontSize: 11, padding: "3px 6px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", color: study.ingredientId ? "#1F2A24" : "#8A8272" }}
+      >
+        <option value="">Not linked</option>
+        {(ingredientOptions || []).map((o) => (
+          <option key={o.id} value={o.id}>{o.categoryName ? `${o.name} (${o.categoryName})` : o.name}</option>
+        ))}
+      </select>
+      {error && <span style={{ fontSize: 11, color: "#B33A3A" }}>{error}</span>}
+    </div>
+  );
+}
+
 export function TrainingStudiesView({ role, products }) {
   const [studies, setStudies] = useState(null);
   const [editingId, setEditingId] = useState(null);
@@ -728,12 +787,16 @@ export function TrainingStudiesView({ role, products }) {
   const [deleteError, setDeleteError] = useState("");
   const [selectedNutrient, setSelectedNutrient] = useState(ALL_NUTRIENTS_KEY);
   const [search, setSearch] = useState("");
+  const [ingredientOptions, setIngredientOptions] = useState([]);
   const canEdit = role === "manager";
 
   const load = useCallback(() => {
     api.getTrainingStudies().then((d) => setStudies(d.studies || [])).catch(() => setStudies([]));
   }, []);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    api.getTrainingStudyIngredientOptions().then((d) => setIngredientOptions(d.options || [])).catch(() => setIngredientOptions([]));
+  }, []);
 
   const doDelete = async (id) => {
     setDeleting(true);
@@ -786,7 +849,7 @@ export function TrainingStudiesView({ role, products }) {
         Reference studies to cite with doctors and pharmacists, organized by vitamin/nutrient — tap through to read the source.
       </p>
 
-      <AddTrainingStudyForm onAdded={load} />
+      <AddTrainingStudyForm onAdded={load} ingredientOptions={ingredientOptions} />
 
       {studies === null && <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>}
       {studies && studies.length === 0 && <EmptyState text="No studies added yet." />}
@@ -813,7 +876,7 @@ export function TrainingStudiesView({ role, products }) {
         {studies && filteredStudies.map((s) => (
           <div key={s.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
             {editingId === s.id ? (
-              <EditTrainingStudyForm study={s} onSaved={() => { setEditingId(null); load(); }} onCancel={() => setEditingId(null)} />
+              <EditTrainingStudyForm study={s} onSaved={() => { setEditingId(null); load(); }} onCancel={() => setEditingId(null)} ingredientOptions={ingredientOptions} />
             ) : (
               <>
                 {s.nutrient ? (
@@ -834,6 +897,7 @@ export function TrainingStudiesView({ role, products }) {
                 </a>
                 {s.notes && <div style={{ fontSize: 12.5, color: "#5B5445", marginTop: 4 }}>{s.notes}</div>}
                 {s.createdBy && <div style={{ fontSize: 10.5, color: "#B7AF9E", marginTop: 6 }}>Added by {s.createdBy}</div>}
+                <LinkStudyToIngredient study={s} ingredientOptions={ingredientOptions} onLinked={load} />
                 {canEdit && (
                   <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3", display: "flex", alignItems: "center", gap: 8 }}>
                     {confirmDeleteId === s.id ? (

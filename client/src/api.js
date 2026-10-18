@@ -218,6 +218,8 @@ export const api = {
   removeTrainingStudy: (id) => request(`/admin/training-studies/${id}`, { method: "DELETE" }),
   markTrainingStudyViewed: (id) => request(`/training-studies/${id}/viewed`, { method: "POST" }),
   tagTrainingStudyNutrient: (id, nutrient) => request(`/training-studies/${id}/nutrient`, { method: "PATCH", body: JSON.stringify({ nutrient }) }),
+  getTrainingStudyIngredientOptions: () => request("/training-studies/ingredient-options"),
+  linkTrainingStudyToIngredient: (id, ingredientId) => request(`/training-studies/${id}/ingredient`, { method: "PATCH", body: JSON.stringify({ ingredientId }) }),
   getRecallCategories: () => request("/recall/categories"),
   getRecallCategory: (id) => request(`/recall/categories/${id}`),
   getRecallAssignments: (repName) => request(`/recall/assignments?repName=${encodeURIComponent(repName)}`),
