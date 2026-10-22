@@ -2547,6 +2547,7 @@ app.post("/api/visits", async (req, res) => {
         repName: req.repName || "",
         visitId: visit.id,
         date: visit.time,
+        sampleType: it.sampleType === "patient" ? "patient" : "personal",
       }));
     if (sampleRows.length) await db.appendRows("Samples", sampleRows);
 
@@ -2646,6 +2647,7 @@ app.patch("/api/visits/:id", async (req, res) => {
           repName: visit.repName || "",
           visitId: req.params.id,
           date: visit.time,
+          sampleType: it.sampleType === "patient" ? "patient" : "personal",
         }));
       if (newSampleRows.length) await db.appendRows("Samples", newSampleRows);
     }
@@ -2837,9 +2839,17 @@ app.post("/api/followups", async (req, res) => {
         // the "gave" row stuck in the map and silently drop the request.
         if (!existing || new Date(s.date) >= new Date(existing.date)) latestByProduct.set(s.productId, s);
       });
+      // Manager-fulfillment fields (qty/managerStatus/prepared*/given*) live
+      // right on each item here rather than in a separate table — this
+      // array already IS the one request record a manager needs to act on,
+      // keyed by followUp.id + productId (see GET/PATCH /api/sample-fulfillments).
       const items = [...latestByProduct.values()]
         .filter((s) => s.status === "next_visit")
-        .map((s) => ({ productId: s.productId, name: s.productName }));
+        .map((s) => ({
+          productId: s.productId, name: s.productName,
+          sampleType: s.sampleType === "patient" ? "patient" : "personal",
+          qty: 1, managerStatus: "", preparedAt: "", preparedBy: "", givenAt: "", givenBy: "",
+        }));
       console.log(`sample-request check: entityName="${entityName}" visitId=${visitId || ""} samplesTotal=${samples.length} matchesForDoctor=${matches.length} itemsNeedingSample=${items.length}`);
       if (items.length) {
         await db.updateRowById("FollowUps", followUp.id, {
@@ -4897,6 +4907,142 @@ app.patch("/api/followups/:id", requireManager, async (req, res) => {
       if (String(existing[field] || "") !== String(newValue)) {
         await writeAuditLog({ entityType: "followup", entityId: req.params.id, field, oldValue: existing[field], newValue, changedBy: req.repName || "Manager" });
       }
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Sample tracking (manager fulfillment queue + patient-sample stock) ----------
+// Every "needed next visit" sample a rep tags lands as an item inside the
+// matching FollowUp's sampleItems JSON (see POST /api/followups above) —
+// this is the manager's queue for pushing each item through
+// pending -> prepared -> given_to_rep, so "did I already prep this /
+// already hand it off" lives in the app instead of scattered Telegram
+// messages. Personal-use items are just the normal retail bottle (no stock
+// effect); patient-sample items draw down SamplePrepStock when handed off.
+app.get("/api/sample-fulfillments", requireManager, async (req, res) => {
+  try {
+    const followUps = await db.getAllRows("FollowUps");
+    const relevant = followUps.filter((f) => f.needsSample === "true" && f.status !== "stopped");
+    const rows = [];
+    for (const f of relevant) {
+      let items = [];
+      try { items = JSON.parse(f.sampleItems || "[]"); } catch { items = []; }
+      for (const it of items) {
+        rows.push({
+          followUpId: f.id, productId: it.productId, name: it.name,
+          sampleType: it.sampleType === "patient" ? "patient" : "personal",
+          qty: Number(it.qty) || 1,
+          managerStatus: it.managerStatus || "",
+          preparedAt: it.preparedAt || "", preparedBy: it.preparedBy || "",
+          givenAt: it.givenAt || "", givenBy: it.givenBy || "",
+          repName: f.repName, entityName: f.entityName, dueDate: f.dueDate, followUpStatus: f.status,
+        });
+      }
+    }
+    rows.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
+    res.json({ fulfillments: rows });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/sample-fulfillments/:followUpId/:productId", requireManager, async (req, res) => {
+  try {
+    const { managerStatus, qty } = req.body;
+    if (!["prepared", "given_to_rep", ""].includes(managerStatus)) {
+      return res.status(400).json({ error: "managerStatus must be 'prepared', 'given_to_rep', or '' to revert." });
+    }
+    const followUps = await db.getAllRows("FollowUps");
+    const f = followUps.find((fu) => fu.id === req.params.followUpId);
+    if (!f) return res.status(404).json({ error: "Follow-up not found." });
+    let items = [];
+    try { items = JSON.parse(f.sampleItems || "[]"); } catch { items = []; }
+    const item = items.find((it) => it.productId === req.params.productId);
+    if (!item) return res.status(404).json({ error: "Sample item not found on this follow-up." });
+
+    const prevStatus = item.managerStatus || "";
+    const nextQty = qty !== undefined ? Math.max(1, Number(qty) || 1) : (Number(item.qty) || 1);
+    item.qty = nextQty;
+    item.managerStatus = managerStatus;
+    const who = req.repName || "Manager";
+    const now = new Date().toISOString();
+    if (managerStatus === "prepared" && prevStatus !== "prepared") { item.preparedAt = now; item.preparedBy = who; }
+    if (managerStatus === "given_to_rep" && prevStatus !== "given_to_rep") { item.givenAt = now; item.givenBy = who; }
+
+    // Handing prepared PATIENT samples off to a rep is what actually draws
+    // down the prepared pool — personal-use items never touch it, since
+    // they're just the regular retail bottle. Only moves the stock on the
+    // transition INTO given_to_rep (not on a reconfirm/no-op) and reverses
+    // it if a manager undoes a given_to_rep back to an earlier state, so
+    // re-opening/correcting a mistaken click doesn't silently leak stock.
+    if (item.sampleType === "patient") {
+      const wasGiven = prevStatus === "given_to_rep";
+      const nowGiven = managerStatus === "given_to_rep";
+      if (nowGiven && !wasGiven) await adjustSamplePrepStock(item.productId, item.name, -nextQty, who);
+      else if (wasGiven && !nowGiven) await adjustSamplePrepStock(item.productId, item.name, nextQty, who);
+    }
+
+    await db.updateRowById("FollowUps", f.id, { sampleItems: JSON.stringify(items) });
+    res.json({ ok: true, item });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+async function adjustSamplePrepStock(productId, productName, deltaQty, who) {
+  const rows = await db.getAllRows("SamplePrepStock");
+  const existing = rows.find((r) => r.productId === productId);
+  const now = new Date().toISOString();
+  if (existing) {
+    await db.updateRowById("SamplePrepStock", existing.id, {
+      preparedQty: String((Number(existing.preparedQty) || 0) + deltaQty),
+      updatedBy: who, updatedAt: now,
+    });
+  } else {
+    await db.appendRow("SamplePrepStock", {
+      id: `sps${crypto.randomUUID()}`, productId, productName,
+      preparedQty: String(deltaQty), lowStockThreshold: "5", updatedBy: who, updatedAt: now,
+    });
+  }
+}
+
+app.get("/api/sample-prep-stock", requireManager, async (req, res) => {
+  try {
+    const rows = await db.getAllRows("SamplePrepStock");
+    const stock = rows
+      .map((r) => ({
+        id: r.id, productId: r.productId, productName: r.productName,
+        preparedQty: Number(r.preparedQty) || 0, lowStockThreshold: Number(r.lowStockThreshold) || 5,
+        updatedBy: r.updatedBy || "", updatedAt: r.updatedAt || "",
+      }))
+      .sort((a, b) => a.productName.localeCompare(b.productName));
+    res.json({ stock });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Logging a prep batch ("I just made 20 more units of X") — the proactive
+// top-up this whole feature exists for, done ahead of any specific request
+// so the manager is never caught flat-footed by the next Telegram ping.
+app.post("/api/sample-prep-stock/restock", requireManager, async (req, res) => {
+  try {
+    const { productId, productName, qty, lowStockThreshold } = req.body;
+    if (!productId || !productName) return res.status(400).json({ error: "productId and productName are required." });
+    const qtyNum = Number(qty);
+    if (!Number.isFinite(qtyNum) || qtyNum <= 0) return res.status(400).json({ error: "qty must be a positive number." });
+    await adjustSamplePrepStock(productId, productName, qtyNum, req.repName || "Manager");
+    if (lowStockThreshold !== undefined) {
+      const rows = await db.getAllRows("SamplePrepStock");
+      const row = rows.find((r) => r.productId === productId);
+      if (row) await db.updateRowById("SamplePrepStock", row.id, { lowStockThreshold: String(Math.max(0, Number(lowStockThreshold) || 0)) });
     }
     res.json({ ok: true });
   } catch (e) {

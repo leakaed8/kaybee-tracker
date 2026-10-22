@@ -272,7 +272,23 @@ const SCHEMAS = {
   Offers: ["id", "label", "buyQty", "getQty", "expiresAt", "active"],
   PushSubscriptions: ["id", "role", "repName", "endpoint", "p256dh", "auth"],
   Settings: ["key", "value"],
-  Samples: ["id", "doctorName", "productName", "productId", "status", "repName", "visitId", "date", "qty"],
+  // sampleType appended ("personal" | "patient", "" on every pre-existing
+  // row) — the rep tags this themselves, right alongside "Gave it today" /
+  // "Need next visit", since they're the one who knows whether a doctor
+  // wants a bottle for personal use or trial units to hand to patients.
+  // Personal-use samples are just the normal retail bottle (no separate
+  // inventory needed); patient samples are specially prepared units drawn
+  // from SamplePrepStock below.
+  Samples: ["id", "doctorName", "productName", "productId", "status", "repName", "visitId", "date", "qty", "sampleType"],
+  // The manager's running count of already-prepared PATIENT sample units
+  // on hand per product (personal-use samples need no row here — they're
+  // just the regular retail bottle, already tracked by Stock). One row per
+  // product; `preparedQty` goes up when the manager logs a prep batch and
+  // down when they hand prepared units off to a rep for a specific request
+  // (see PATCH /api/sample-fulfillments/:followUpId/:productId). Can go
+  // negative — that's a real, useful signal ("promised 10, only had 6 on
+  // hand") rather than something to hide.
+  SamplePrepStock: ["id", "productId", "productName", "preparedQty", "lowStockThreshold", "updatedBy", "updatedAt"],
   PunchLog: ["id", "repName", "type", "time", "coordsLat", "coordsLng", "auto", "confirmed"],
   StockMovement: ["id", "productName", "year", "month", "qty"],
   MonthlyDigests: ["id", "month", "status", "payload", "createdAt"],

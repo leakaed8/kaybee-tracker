@@ -267,6 +267,13 @@ export const api = {
   getFollowUps: (params) => request(`/followups${qs(params)}`),
   updateFollowUp: (id, patch) => request(`/followups/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
 
+  // ---------- Sample tracking ----------
+  getSampleFulfillments: () => request("/sample-fulfillments"),
+  updateSampleFulfillment: (followUpId, productId, patch) =>
+    request(`/sample-fulfillments/${followUpId}/${productId}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  getSamplePrepStock: () => request("/sample-prep-stock"),
+  restockSamplePrep: (payload) => request("/sample-prep-stock/restock", { method: "POST", body: JSON.stringify(payload) }),
+
   // ---------- My Schedule ----------
   // getSchedule reuses GET /followups (same tab holds both check-in-driven
   // follow-ups and manual meetings) with an optional from/to month range.

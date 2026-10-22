@@ -13,6 +13,7 @@ import {
   TrendingDown, TrendingUp, Check, X, Loader2, MessageCircle, RotateCcw, Copy, Download, Upload,
   Navigation, Users, Target, Megaphone, ShoppingCart, Stethoscope, Radar as RadarIcon, Search, BookOpen,
   GraduationCap, Boxes, History, Brain, ClipboardList, CheckCircle2, ChevronDown, Phone, Bell, CalendarDays, Apple,
+  Gift,
 } from "lucide-react";
 import { api } from "./api.js";
 import { TrainingVideosView, TrainingStudiesView } from "./TrainingView.jsx";
@@ -633,6 +634,7 @@ export default function App() {
         {canSeeTab("knowledge") && <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />}
         {canSeeTab("recall") && <TabBtn active={tab === "recall"} onClick={() => setTab("recall")} icon={<Brain size={15} />} label="Product Expert" />}
         {canSeeTab("training") && <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />}
+        {role === "manager" && <TabBtn active={tab === "samples"} onClick={() => setTab("samples")} icon={<Gift size={15} />} label="Samples" />}
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
       </nav>
 
@@ -762,6 +764,7 @@ export default function App() {
             {tab === "training" && canSeeTab("training") && (
               <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
             )}
+            {tab === "samples" && role === "manager" && <SamplesTrackingView products={products} />}
             {tab === "recall" && canSeeTab("recall") && (
               <RecallView role={role} repName={repName} repNames={repNames} products={products} catalogProducts={productCatalog} />
             )}
@@ -2237,6 +2240,11 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   // Separate input from itemQuery above (the "Products discussed" search) so
   // the two can't ever clobber each other's typed text.
   const [samplesQuery, setSamplesQuery] = useState("");
+  // The rep tags this themselves, right alongside "Gave it today"/"Need
+  // next visit" — they're the one who knows whether this doctor wants a
+  // bottle for their own use or trial units to hand to patients, and the
+  // manager's prep tracking downstream depends on getting it right here.
+  const [sampleTypeChoice, setSampleTypeChoice] = useState("personal");
   const [sawCompetitor, setSawCompetitor] = useState(false);
   const [competitorName, setCompetitorName] = useState("");
   const [competitorNotes, setCompetitorNotes] = useState("");
@@ -2459,9 +2467,9 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
     if (!matchedSamplesItem) return;
     setMentionedItems((prev) => {
       if (prev.some((it) => it.productId === matchedSamplesItem.id)) {
-        return prev.map((it) => (it.productId === matchedSamplesItem.id ? { ...it, sampleStatus: status } : it));
+        return prev.map((it) => (it.productId === matchedSamplesItem.id ? { ...it, sampleStatus: status, sampleType: sampleTypeChoice } : it));
       }
-      return [...prev, { productId: matchedSamplesItem.id, name: matchedSamplesItem.name, sampleStatus: status }];
+      return [...prev, { productId: matchedSamplesItem.id, name: matchedSamplesItem.name, sampleStatus: status, sampleType: sampleTypeChoice }];
     });
     setSamplesQuery("");
   };
@@ -3271,6 +3279,32 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                     {samplesItemOptions.map((p) => <option key={p.id} value={p.name} />)}
                   </datalist>
                 </div>
+                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                  <button
+                    type="button"
+                    onClick={() => setSampleTypeChoice("personal")}
+                    style={{
+                      flex: 1, padding: "6px 10px", borderRadius: 6, fontSize: 11.5, fontWeight: 500,
+                      border: sampleTypeChoice === "personal" ? "1px solid #7A5B2E" : "1px solid #E9C88A",
+                      background: sampleTypeChoice === "personal" ? "#7A5B2E" : "#fff",
+                      color: sampleTypeChoice === "personal" ? "#fff" : "#7A5B2E",
+                    }}
+                  >
+                    Personal use (original bottle)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSampleTypeChoice("patient")}
+                    style={{
+                      flex: 1, padding: "6px 10px", borderRadius: 6, fontSize: 11.5, fontWeight: 500,
+                      border: sampleTypeChoice === "patient" ? "1px solid #7A5B2E" : "1px solid #E9C88A",
+                      background: sampleTypeChoice === "patient" ? "#7A5B2E" : "#fff",
+                      color: sampleTypeChoice === "patient" ? "#fff" : "#7A5B2E",
+                    }}
+                  >
+                    Patient samples (prepared)
+                  </button>
+                </div>
                 <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
                   <button
                     type="button"
@@ -3308,6 +3342,9 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                           color: it.sampleStatus === "gave" ? "#4C7A5E" : "#C17817",
                         }}>
                           {it.sampleStatus === "gave" ? "✓ Gave it today" : "→ Needed for next visit"}
+                        </span>
+                        <span style={{ fontSize: 10, fontWeight: 500, color: "#7A5B2E", background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 10, padding: "1px 6px" }}>
+                          {it.sampleType === "patient" ? "Patient" : "Personal"}
                         </span>
                         <button
                           type="button"
@@ -14836,6 +14873,206 @@ function PharmacyPickupImportSection() {
       <button disabled={!canImport || importing} onClick={doImport} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: canImport ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
         {importing ? "Importing…" : "Import pick-up list"}
       </button>
+    </div>
+  );
+}
+
+// ---------- Sample tracking ----------
+// Manager-only view that replaces "track sample prep/handoff via Telegram
+// scrollback" with an actual queue + running stock count. Every item a rep
+// tags "Need next visit" (with the Personal/Patient choice they made right
+// there in Check-In) lands here as "Pending"; the manager moves it through
+// Prepared -> Given to rep. Patient-type items also draw down a running
+// SamplePrepStock count when handed off, which the manager tops up
+// proactively via "Log a prep batch" — that's the actual point of this
+// view: see what's low *before* the next request comes in, not after.
+const SAMPLE_STATUS_LABEL = { "": "Pending", prepared: "Prepared", given_to_rep: "Given to rep" };
+function SamplesTrackingView({ products }) {
+  const [fulfillments, setFulfillments] = useState(null);
+  const [stock, setStock] = useState(null);
+  const [busyKey, setBusyKey] = useState(null);
+  const [error, setError] = useState("");
+  const [restockQuery, setRestockQuery] = useState("");
+  const [restockQty, setRestockQty] = useState("");
+  const [restocking, setRestocking] = useState(false);
+  const [showDone, setShowDone] = useState(false);
+
+  const load = useCallback(() => {
+    Promise.all([api.getSampleFulfillments(), api.getSamplePrepStock()])
+      .then(([f, s]) => { setFulfillments(f.fulfillments || []); setStock(s.stock || []); })
+      .catch(() => { setFulfillments([]); setStock([]); });
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const setStatus = async (followUpId, productId, managerStatus) => {
+    setBusyKey(`${followUpId}:${productId}`);
+    setError("");
+    try {
+      await api.updateSampleFulfillment(followUpId, productId, { managerStatus });
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const matchedRestockProduct = (products || []).find((p) => p.name.toLowerCase().trim() === restockQuery.toLowerCase().trim());
+  const restockOptions = (restockQuery.trim()
+    ? (products || []).filter((p) => p.name.toLowerCase().includes(restockQuery.toLowerCase().trim()))
+    : (products || [])
+  ).slice(0, 50);
+
+  const doRestock = async () => {
+    if (!matchedRestockProduct || !restockQty || Number(restockQty) <= 0) return;
+    setRestocking(true);
+    setError("");
+    try {
+      await api.restockSamplePrep({ productId: matchedRestockProduct.id, productName: matchedRestockProduct.name, qty: Number(restockQty) });
+      setRestockQuery(""); setRestockQty("");
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setRestocking(false);
+    }
+  };
+
+  if (fulfillments === null || stock === null) {
+    return <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>;
+  }
+
+  const pending = fulfillments.filter((f) => !f.managerStatus);
+  const prepared = fulfillments.filter((f) => f.managerStatus === "prepared");
+  const given = fulfillments.filter((f) => f.managerStatus === "given_to_rep");
+
+  const fulfillmentRow = (f) => {
+    const key = `${f.followUpId}:${f.productId}`;
+    const busy = busyKey === key;
+    return (
+      <div key={key} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12, marginBottom: 8 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontWeight: 600, fontSize: 13.5 }}>{f.name}</div>
+            <div style={{ fontSize: 11.5, color: "#5B5445", marginTop: 2 }}>
+              For <strong>{f.entityName}</strong> — {f.repName}, due {f.dueDate}
+            </div>
+          </div>
+          <span style={{
+            fontSize: 10.5, fontWeight: 600, borderRadius: 12, padding: "2px 9px", whiteSpace: "nowrap",
+            background: f.sampleType === "patient" ? "#FBF3E8" : "#F3F7F4",
+            color: f.sampleType === "patient" ? "#7A5B2E" : "#4C7A5E",
+            border: f.sampleType === "patient" ? "1px solid #E9C88A" : "1px solid #CFE0D5",
+          }}>
+            {f.sampleType === "patient" ? "Patient" : "Personal"}
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+          {!f.managerStatus && (
+            <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "prepared")}
+              style={{ fontSize: 11.5, fontWeight: 600, color: "#fff", background: busy ? "#D8D2C4" : "#C17817", border: "none", borderRadius: 6, padding: "6px 10px" }}>
+              {busy ? "Saving…" : "Mark Prepared"}
+            </button>
+          )}
+          {f.managerStatus === "prepared" && (
+            <>
+              <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "given_to_rep")}
+                style={{ fontSize: 11.5, fontWeight: 600, color: "#fff", background: busy ? "#D8D2C4" : "#4C7A5E", border: "none", borderRadius: 6, padding: "6px 10px" }}>
+                {busy ? "Saving…" : "Mark Given to rep"}
+              </button>
+              <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "")}
+                style={{ fontSize: 11.5, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>
+                Undo
+              </button>
+            </>
+          )}
+          {f.managerStatus === "given_to_rep" && (
+            <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "prepared")}
+              style={{ fontSize: 11.5, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>
+              Undo
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Samples</h2>
+      <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
+        Every sample a rep requests lands here — track prep and handoff instead of digging through Telegram, and keep ahead of patient-sample stock before the next request comes in.
+      </p>
+
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{error}</div>}
+
+      <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14, marginBottom: 20 }}>
+        <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>Patient Sample Stock</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <input
+            list="samples-restock-options"
+            value={restockQuery}
+            onChange={(e) => setRestockQuery(e.target.value)}
+            placeholder="Product you just prepared…"
+            style={{ ...inputStyle, flex: 2 }}
+          />
+          <datalist id="samples-restock-options">
+            {restockOptions.map((p) => <option key={p.id} value={p.name} />)}
+          </datalist>
+          <input
+            type="number" min="1" value={restockQty} onChange={(e) => setRestockQty(e.target.value)}
+            placeholder="Qty"
+            style={{ ...inputStyle, flex: 1 }}
+          />
+          <button
+            onClick={doRestock}
+            disabled={restocking || !matchedRestockProduct || !restockQty || Number(restockQty) <= 0}
+            style={{
+              padding: "8px 14px", borderRadius: 8, border: "none", fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap",
+              background: (!matchedRestockProduct || !restockQty) ? "#D8D2C4" : "#1F2A24", color: "#fff",
+            }}
+          >
+            {restocking ? "Logging…" : "+ Log prep batch"}
+          </button>
+        </div>
+        {stock.length === 0 ? (
+          <EmptyState text="No patient-sample batches logged yet." />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {stock.map((s) => {
+              const low = s.preparedQty <= s.lowStockThreshold;
+              return (
+                <div key={s.id} style={{
+                  display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5,
+                  background: low ? "#FBF3F0" : "#FAF7F2", border: `1px solid ${low ? "#E5B8B0" : "#E5DFD3"}`, borderRadius: 8, padding: "7px 10px",
+                }}>
+                  <span>{s.productName}</span>
+                  <span style={{ fontWeight: 700, color: low ? "#B33A3A" : "#1F2A24" }}>
+                    {s.preparedQty} on hand{low && " — low, prepare more"}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>Pending ({pending.length})</div>
+        {pending.length === 0 ? <EmptyState text="No pending sample requests." /> : pending.map(fulfillmentRow)}
+      </div>
+
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>Prepared, waiting for rep pickup ({prepared.length})</div>
+        {prepared.length === 0 ? <EmptyState text="Nothing prepared and waiting right now." /> : prepared.map(fulfillmentRow)}
+      </div>
+
+      <div>
+        <button onClick={() => setShowDone((v) => !v)} style={{ fontSize: 12.5, fontWeight: 600, color: "#4C7A5E", background: "none", border: "none", padding: 0, cursor: "pointer", marginBottom: 8 }}>
+          {showDone ? "▾" : "▸"} Given to rep ({given.length})
+        </button>
+        {showDone && (given.length === 0 ? <EmptyState text="None yet." /> : given.map(fulfillmentRow))}
+      </div>
     </div>
   );
 }
