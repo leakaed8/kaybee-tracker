@@ -200,6 +200,7 @@ const DEFAULT_TAB_VISIBILITY = {
   knowledge: { manager: true, salesRep: false, medRep: false, supervisor: false },
   recall: { manager: true, salesRep: false, medRep: false, supervisor: false },
   training: { manager: true, salesRep: false, medRep: false, supervisor: false },
+  samples: { manager: true, salesRep: false, medRep: true, supervisor: false },
 };
 function isTabVisibleFor(tabVisibility, tabKey, role, isSupervisor, isSalesRep, isMedRep) {
   const v = (tabVisibility && tabVisibility[tabKey]) || DEFAULT_TAB_VISIBILITY[tabKey];
@@ -4923,7 +4924,7 @@ app.patch("/api/followups/:id", requireManager, async (req, res) => {
 // already hand it off" lives in the app instead of scattered Telegram
 // messages. Personal-use items are just the normal retail bottle (no stock
 // effect); patient-sample items draw down SamplePrepStock when handed off.
-app.get("/api/sample-fulfillments", requireManager, async (req, res) => {
+app.get("/api/sample-fulfillments", requireTabAccess("samples"), async (req, res) => {
   try {
     const followUps = await db.getAllRows("FollowUps");
     const relevant = followUps.filter((f) => f.needsSample === "true" && f.status !== "stopped");
@@ -4951,11 +4952,29 @@ app.get("/api/sample-fulfillments", requireManager, async (req, res) => {
   }
 });
 
-app.patch("/api/sample-fulfillments/:followUpId/:productId", requireManager, async (req, res) => {
+// sampleType is editable here too (not just at request time in Check-In) —
+// the type a rep first picked, or the "personal" default stamped onto
+// every request made before this field existed, is often wrong in
+// hindsight, and anyone who can see this queue (manager or med rep, same
+// gating as the tab itself) should be able to fix it on the spot rather
+// than asking the manager to do it. managerStatus transitions (Prepared /
+// Given to rep) stay manager-only, enforced client-side by only showing
+// those buttons to a manager — the queue itself needs to stay readable
+// (and the type fixable) for reps too.
+app.patch("/api/sample-fulfillments/:followUpId/:productId", requireTabAccess("samples"), async (req, res) => {
   try {
-    const { managerStatus, qty } = req.body;
-    if (!["prepared", "given_to_rep", ""].includes(managerStatus)) {
+    const { managerStatus, qty, sampleType } = req.body;
+    if (managerStatus !== undefined && !["prepared", "given_to_rep", ""].includes(managerStatus)) {
       return res.status(400).json({ error: "managerStatus must be 'prepared', 'given_to_rep', or '' to revert." });
+    }
+    if (sampleType !== undefined && !["personal", "patient"].includes(sampleType)) {
+      return res.status(400).json({ error: "sampleType must be 'personal' or 'patient'." });
+    }
+    if (managerStatus === undefined && qty === undefined && sampleType === undefined) {
+      return res.status(400).json({ error: "Nothing to update." });
+    }
+    if (managerStatus !== undefined && req.role !== "manager") {
+      return res.status(403).json({ error: "Only a manager can change prepared/given status." });
     }
     const followUps = await db.getAllRows("FollowUps");
     const f = followUps.find((fu) => fu.id === req.params.followUpId);
@@ -4966,26 +4985,33 @@ app.patch("/api/sample-fulfillments/:followUpId/:productId", requireManager, asy
     if (!item) return res.status(404).json({ error: "Sample item not found on this follow-up." });
 
     const prevStatus = item.managerStatus || "";
-    const nextQty = qty !== undefined ? Math.max(1, Number(qty) || 1) : (Number(item.qty) || 1);
-    item.qty = nextQty;
-    item.managerStatus = managerStatus;
+    const prevType = item.sampleType === "patient" ? "patient" : "personal";
+    const prevQty = Number(item.qty) || 1;
+    const nextStatus = managerStatus !== undefined ? managerStatus : prevStatus;
+    const nextType = sampleType !== undefined ? sampleType : prevType;
+    const nextQty = qty !== undefined ? Math.max(1, Number(qty) || 1) : prevQty;
     const who = req.repName || "Manager";
     const now = new Date().toISOString();
-    if (managerStatus === "prepared" && prevStatus !== "prepared") { item.preparedAt = now; item.preparedBy = who; }
-    if (managerStatus === "given_to_rep" && prevStatus !== "given_to_rep") { item.givenAt = now; item.givenBy = who; }
+
+    item.qty = nextQty;
+    item.managerStatus = nextStatus;
+    item.sampleType = nextType;
+    if (nextStatus === "prepared" && prevStatus !== "prepared") { item.preparedAt = now; item.preparedBy = who; }
+    if (nextStatus === "given_to_rep" && prevStatus !== "given_to_rep") { item.givenAt = now; item.givenBy = who; }
 
     // Handing prepared PATIENT samples off to a rep is what actually draws
-    // down the prepared pool — personal-use items never touch it, since
-    // they're just the regular retail bottle. Only moves the stock on the
-    // transition INTO given_to_rep (not on a reconfirm/no-op) and reverses
-    // it if a manager undoes a given_to_rep back to an earlier state, so
-    // re-opening/correcting a mistaken click doesn't silently leak stock.
-    if (item.sampleType === "patient") {
-      const wasGiven = prevStatus === "given_to_rep";
-      const nowGiven = managerStatus === "given_to_rep";
-      if (nowGiven && !wasGiven) await adjustSamplePrepStock(item.productId, item.name, -nextQty, who);
-      else if (wasGiven && !nowGiven) await adjustSamplePrepStock(item.productId, item.name, nextQty, who);
-    }
+    // down the prepared pool — personal-use items never touch it. Compares
+    // "was this already counted against the pool" (given_to_rep AND
+    // patient, under the OLD status/type/qty) against "should it be
+    // counted now" (under the NEW status/type/qty), so correcting the type
+    // on an already-handed-off item — the exact case that prompted this —
+    // properly moves stock in or out instead of leaving it stuck under a
+    // type that's no longer correct.
+    const wasCounted = prevStatus === "given_to_rep" && prevType === "patient";
+    const nowCounted = nextStatus === "given_to_rep" && nextType === "patient";
+    if (nowCounted && !wasCounted) await adjustSamplePrepStock(item.productId, item.name, -nextQty, who);
+    else if (wasCounted && !nowCounted) await adjustSamplePrepStock(item.productId, item.name, prevQty, who);
+    else if (wasCounted && nowCounted && prevQty !== nextQty) await adjustSamplePrepStock(item.productId, item.name, prevQty - nextQty, who);
 
     await db.updateRowById("FollowUps", f.id, { sampleItems: JSON.stringify(items) });
     res.json({ ok: true, item });
@@ -5012,7 +5038,7 @@ async function adjustSamplePrepStock(productId, productName, deltaQty, who) {
   }
 }
 
-app.get("/api/sample-prep-stock", requireManager, async (req, res) => {
+app.get("/api/sample-prep-stock", requireTabAccess("samples"), async (req, res) => {
   try {
     const rows = await db.getAllRows("SamplePrepStock");
     const stock = rows

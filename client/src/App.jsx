@@ -149,6 +149,7 @@ const TAB_VISIBILITY_TABS = [
   { key: "knowledge", label: "Knowledge", icon: BookOpen },
   { key: "recall", label: "Product Expert", icon: Brain },
   { key: "training", label: "Training", icon: GraduationCap },
+  { key: "samples", label: "Samples", icon: Gift },
 ];
 const DEFAULT_TAB_VISIBILITY = {
   performance: { manager: true, salesRep: false, medRep: false, supervisor: false },
@@ -160,6 +161,11 @@ const DEFAULT_TAB_VISIBILITY = {
   knowledge: { manager: true, salesRep: false, medRep: false, supervisor: false },
   recall: { manager: true, salesRep: false, medRep: false, supervisor: false },
   training: { manager: true, salesRep: false, medRep: false, supervisor: false },
+  // Med reps only, not sales reps — samples are a doctor/nutritionist-visit
+  // thing, same reasoning as Doctors/Nutritionists being med-rep-only.
+  // Manager-configurable (not hardcoded) like every other tab here, so the
+  // manager can open it up further later without needing a code change.
+  samples: { manager: true, salesRep: false, medRep: true, supervisor: false },
 };
 function isTabVisibleFor(tabVisibility, tabKey, role, isSupervisor, isSalesRep, isMedRep) {
   const v = (tabVisibility && tabVisibility[tabKey]) || DEFAULT_TAB_VISIBILITY[tabKey];
@@ -634,7 +640,7 @@ export default function App() {
         {canSeeTab("knowledge") && <TabBtn active={tab === "knowledge"} onClick={() => setTab("knowledge")} icon={<BookOpen size={15} />} label="Knowledge" />}
         {canSeeTab("recall") && <TabBtn active={tab === "recall"} onClick={() => setTab("recall")} icon={<Brain size={15} />} label="Product Expert" />}
         {canSeeTab("training") && <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />}
-        {role === "manager" && <TabBtn active={tab === "samples"} onClick={() => setTab("samples")} icon={<Gift size={15} />} label="Samples" />}
+        {canSeeTab("samples") && <TabBtn active={tab === "samples"} onClick={() => setTab("samples")} icon={<Gift size={15} />} label="Samples" />}
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
       </nav>
 
@@ -764,7 +770,7 @@ export default function App() {
             {tab === "training" && canSeeTab("training") && (
               <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
             )}
-            {tab === "samples" && role === "manager" && <SamplesTrackingView products={products} />}
+            {tab === "samples" && canSeeTab("samples") && <SamplesTrackingView products={products} role={role} />}
             {tab === "recall" && canSeeTab("recall") && (
               <RecallView role={role} repName={repName} repNames={repNames} products={products} catalogProducts={productCatalog} />
             )}
@@ -14887,7 +14893,8 @@ function PharmacyPickupImportSection() {
 // proactively via "Log a prep batch" — that's the actual point of this
 // view: see what's low *before* the next request comes in, not after.
 const SAMPLE_STATUS_LABEL = { "": "Pending", prepared: "Prepared", given_to_rep: "Given to rep" };
-function SamplesTrackingView({ products }) {
+function SamplesTrackingView({ products, role }) {
+  const isManager = role === "manager";
   const [fulfillments, setFulfillments] = useState(null);
   const [stock, setStock] = useState(null);
   const [busyKey, setBusyKey] = useState(null);
@@ -14909,6 +14916,24 @@ function SamplesTrackingView({ products }) {
     setError("");
     try {
       await api.updateSampleFulfillment(followUpId, productId, { managerStatus });
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  // Open to a med rep too (not just the manager) — the "personal" default
+  // stamped onto every request made before this field existed, or a type a
+  // rep picked in a hurry, is often wrong in hindsight, and whoever
+  // notices it's wrong here should be able to fix it on the spot rather
+  // than routing it through the manager.
+  const setType = async (followUpId, productId, sampleType) => {
+    setBusyKey(`${followUpId}:${productId}`);
+    setError("");
+    try {
+      await api.updateSampleFulfillment(followUpId, productId, { sampleType });
       load();
     } catch (e) {
       setError(e.message);
@@ -14958,41 +14983,49 @@ function SamplesTrackingView({ products }) {
               For <strong>{f.entityName}</strong> — {f.repName}, due {f.dueDate}
             </div>
           </div>
-          <span style={{
-            fontSize: 10.5, fontWeight: 600, borderRadius: 12, padding: "2px 9px", whiteSpace: "nowrap",
-            background: f.sampleType === "patient" ? "#FBF3E8" : "#F3F7F4",
-            color: f.sampleType === "patient" ? "#7A5B2E" : "#4C7A5E",
-            border: f.sampleType === "patient" ? "1px solid #E9C88A" : "1px solid #CFE0D5",
-          }}>
-            {f.sampleType === "patient" ? "Patient" : "Personal"}
-          </span>
+          <select
+            value={f.sampleType === "patient" ? "patient" : "personal"}
+            onChange={(e) => setType(f.followUpId, f.productId, e.target.value)}
+            disabled={busy}
+            style={{
+              fontSize: 10.5, fontWeight: 600, borderRadius: 12, padding: "2px 8px", whiteSpace: "nowrap",
+              background: f.sampleType === "patient" ? "#FBF3E8" : "#F3F7F4",
+              color: f.sampleType === "patient" ? "#7A5B2E" : "#4C7A5E",
+              border: f.sampleType === "patient" ? "1px solid #E9C88A" : "1px solid #CFE0D5",
+            }}
+          >
+            <option value="personal">Personal</option>
+            <option value="patient">Patient</option>
+          </select>
         </div>
-        <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-          {!f.managerStatus && (
-            <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "prepared")}
-              style={{ fontSize: 11.5, fontWeight: 600, color: "#fff", background: busy ? "#D8D2C4" : "#C17817", border: "none", borderRadius: 6, padding: "6px 10px" }}>
-              {busy ? "Saving…" : "Mark Prepared"}
-            </button>
-          )}
-          {f.managerStatus === "prepared" && (
-            <>
-              <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "given_to_rep")}
-                style={{ fontSize: 11.5, fontWeight: 600, color: "#fff", background: busy ? "#D8D2C4" : "#4C7A5E", border: "none", borderRadius: 6, padding: "6px 10px" }}>
-                {busy ? "Saving…" : "Mark Given to rep"}
+        {isManager && (
+          <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+            {!f.managerStatus && (
+              <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "prepared")}
+                style={{ fontSize: 11.5, fontWeight: 600, color: "#fff", background: busy ? "#D8D2C4" : "#C17817", border: "none", borderRadius: 6, padding: "6px 10px" }}>
+                {busy ? "Saving…" : "Mark Prepared"}
               </button>
-              <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "")}
+            )}
+            {f.managerStatus === "prepared" && (
+              <>
+                <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "given_to_rep")}
+                  style={{ fontSize: 11.5, fontWeight: 600, color: "#fff", background: busy ? "#D8D2C4" : "#4C7A5E", border: "none", borderRadius: 6, padding: "6px 10px" }}>
+                  {busy ? "Saving…" : "Mark Given to rep"}
+                </button>
+                <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "")}
+                  style={{ fontSize: 11.5, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>
+                  Undo
+                </button>
+              </>
+            )}
+            {f.managerStatus === "given_to_rep" && (
+              <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "prepared")}
                 style={{ fontSize: 11.5, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>
                 Undo
               </button>
-            </>
-          )}
-          {f.managerStatus === "given_to_rep" && (
-            <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "prepared")}
-              style={{ fontSize: 11.5, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>
-              Undo
-            </button>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
     );
   };
@@ -15008,33 +15041,35 @@ function SamplesTrackingView({ products }) {
 
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14, marginBottom: 20 }}>
         <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>Patient Sample Stock</div>
-        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-          <input
-            list="samples-restock-options"
-            value={restockQuery}
-            onChange={(e) => setRestockQuery(e.target.value)}
-            placeholder="Product you just prepared…"
-            style={{ ...inputStyle, flex: 2 }}
-          />
-          <datalist id="samples-restock-options">
-            {restockOptions.map((p) => <option key={p.id} value={p.name} />)}
-          </datalist>
-          <input
-            type="number" min="1" value={restockQty} onChange={(e) => setRestockQty(e.target.value)}
-            placeholder="Qty"
-            style={{ ...inputStyle, flex: 1 }}
-          />
-          <button
-            onClick={doRestock}
-            disabled={restocking || !matchedRestockProduct || !restockQty || Number(restockQty) <= 0}
-            style={{
-              padding: "8px 14px", borderRadius: 8, border: "none", fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap",
-              background: (!matchedRestockProduct || !restockQty) ? "#D8D2C4" : "#1F2A24", color: "#fff",
-            }}
-          >
-            {restocking ? "Logging…" : "+ Log prep batch"}
-          </button>
-        </div>
+        {isManager && (
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <input
+              list="samples-restock-options"
+              value={restockQuery}
+              onChange={(e) => setRestockQuery(e.target.value)}
+              placeholder="Product you just prepared…"
+              style={{ ...inputStyle, flex: 2 }}
+            />
+            <datalist id="samples-restock-options">
+              {restockOptions.map((p) => <option key={p.id} value={p.name} />)}
+            </datalist>
+            <input
+              type="number" min="1" value={restockQty} onChange={(e) => setRestockQty(e.target.value)}
+              placeholder="Qty"
+              style={{ ...inputStyle, flex: 1 }}
+            />
+            <button
+              onClick={doRestock}
+              disabled={restocking || !matchedRestockProduct || !restockQty || Number(restockQty) <= 0}
+              style={{
+                padding: "8px 14px", borderRadius: 8, border: "none", fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap",
+                background: (!matchedRestockProduct || !restockQty) ? "#D8D2C4" : "#1F2A24", color: "#fff",
+              }}
+            >
+              {restocking ? "Logging…" : "+ Log prep batch"}
+            </button>
+          </div>
+        )}
         {stock.length === 0 ? (
           <EmptyState text="No patient-sample batches logged yet." />
         ) : (
