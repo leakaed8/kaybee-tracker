@@ -1121,6 +1121,72 @@ app.post("/api/telegram/webhook", async (req, res) => {
 
 app.use("/api", requireAuth);
 
+// ---- Generic "anything changed" Telegram alert -------------------------
+// Covers every mutating request EXCEPT check-ins (Visits — explicitly
+// requested) and the handful of flows that already send their own,
+// better-tailored Telegram message (orders, punch in/out, sample requests
+// via FollowUps, discount-audit results) so the manager never gets the
+// same event twice. Deliberately prefix-based rather than an explicit
+// per-route allowlist — a brand-new route added later is covered
+// automatically, without anyone having to remember to wire it in here.
+const CHANGE_ALERT_EXCLUDED_PREFIXES = [
+  "/api/visits",                  // check-ins — explicitly excluded
+  "/api/followups",               // part of the check-in post-call flow; sample requests already notify directly
+  "/api/punch",                   // already has its own punch-in/auto-close Telegram message
+  "/api/orders",                  // already has its own new/updated/deleted order Telegram messages
+  "/api/discount-audit/results",  // already notifies directly
+  "/api/login",                   // auth, not a data change
+  "/api/telegram/webhook",        // bot plumbing, not a rep/manager action
+  "/api/push/",                   // push-subscription registration, not a data change
+];
+const CHANGE_ALERT_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+// Best-effort human-readable detail pulled from the request body — first
+// match wins. Only ever reads a short allowlist of common naming fields,
+// never the whole body, so nothing sensitive can leak into the message.
+const CHANGE_ALERT_DETAIL_FIELDS = ["name", "title", "productName", "question", "topic", "specialty", "benefit", "feature", "description", "text", "note", "reason"];
+
+app.use("/api", (req, res, next) => {
+  res.on("finish", () => {
+    try {
+      if (!CHANGE_ALERT_METHODS.has(req.method)) return;
+      if (res.statusCode < 200 || res.statusCode >= 300) return;
+      const path = req.originalUrl.split("?")[0];
+      if (CHANGE_ALERT_EXCLUDED_PREFIXES.some((prefix) => path.startsWith(prefix))) return;
+
+      (async () => {
+        try {
+          if (!telegram.isConfigured()) return;
+          const settings = await db.getSettings();
+          if (!settings.managerTelegramChatId) return;
+
+          const verb = req.method === "POST" ? "added" : req.method === "DELETE" ? "deleted" : "updated";
+          const who = req.repName ? escapeHtml(req.repName) : "Someone";
+          const resource = path.replace(/^\/api\//, "");
+
+          let detail = "";
+          if (req.body && typeof req.body === "object") {
+            for (const field of CHANGE_ALERT_DETAIL_FIELDS) {
+              const v = req.body[field];
+              if (typeof v === "string" && v.trim()) { detail = v.trim().slice(0, 80); break; }
+            }
+          }
+          const detailText = detail ? ` — <b>${escapeHtml(detail)}</b>` : "";
+
+          await telegram.sendMessage(
+            settings.managerTelegramChatId,
+            `🔧 <b>${who}</b> ${verb} something in <code>${escapeHtml(resource)}</code>${detailText}`
+          );
+        } catch (e) {
+          console.error("generic change-alert telegram notify failed", e);
+        }
+      })();
+    } catch (e) {
+      console.error("change-alert middleware error", e);
+    }
+  });
+  next();
+});
+
 app.get("/api/session", (req, res) => res.json({ role: req.role, repName: req.repName, isSupervisor: !!req.isSupervisor, isSalesRep: !!req.isSalesRep, isMedRep: !!req.isMedRep }));
 
 app.get("/api/push/vapid-public-key", (req, res) => res.json({ publicKey: VAPID_PUBLIC_KEY || "" }));
