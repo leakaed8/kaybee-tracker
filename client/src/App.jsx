@@ -9637,6 +9637,19 @@ function buildBrochureCoverPageHtml({ specialty, productCount, pageIndex, pageCo
 // onProgress(done, total), if given, is called after each product's page is
 // rendered so the UI can show real progress instead of a single frozen
 // "Exporting…" label for the whole (possibly slow, for a large specialty) run.
+async function fetchProductBrochureData(product) {
+  const [studiesData, bottleData, factsData] = await Promise.all([
+    api.getProductCatalogStudies(product.id).catch(() => null),
+    product.hasBottleImage
+      ? loadImageBytes(product.id, "bottle", product.bottleImageMimeType).then((d) => downscaleImageIfNeeded(d, BOTTLE_IMAGE_MAX_DIM)).catch(() => null)
+      : Promise.resolve(null),
+    product.hasSupplementFactsImage
+      ? loadImageBytes(product.id, "supplementFacts", product.supplementFactsImageMimeType).then((d) => downscaleImageIfNeeded(d, FACTS_IMAGE_MAX_DIM)).catch(() => null)
+      : Promise.resolve(null),
+  ]);
+  return { studiesData, bottleData, factsData };
+}
+
 async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName, contributions, onProgress) {
   const seen = new Set();
   const products = [];
@@ -9652,31 +9665,29 @@ async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName
 
   const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
   const pageCount = products.length + 1;
+
+  // Kick off the first product's fetch immediately, in parallel with the
+  // cover page's render below, instead of waiting for the cover to finish.
+  let nextFetch = products.length ? fetchProductBrochureData(products[0]) : null;
+
   const cover = await renderBrochurePageToCanvas(buildBrochureCoverPageHtml({ specialty, productCount: products.length, pageIndex: 1, pageCount }));
   doc.addImage(cover.canvas.toDataURL("image/jpeg", 0.95), "JPEG", 0, 0, 210, 297);
   document.body.removeChild(cover.container);
 
-  // Fetch every product's bottle/Supplement Facts images and clinical
-  // studies data UP FRONT, in parallel, instead of one product at a time
-  // inside the render loop below — these are independent network calls, so
-  // doing them one-by-one meant the Nth product's fetches couldn't even
-  // start until every earlier product had both fetched AND finished
-  // rendering, which is what made a 10+ product specialty feel stuck.
-  const prefetchedByProduct = await Promise.all(products.map(async (product) => {
-    const [studiesData, bottleData, factsData] = await Promise.all([
-      api.getProductCatalogStudies(product.id).catch(() => null),
-      product.hasBottleImage ? loadImageBytes(product.id, "bottle", product.bottleImageMimeType).catch(() => null) : Promise.resolve(null),
-      product.hasSupplementFactsImage ? loadImageBytes(product.id, "supplementFacts", product.supplementFactsImageMimeType).catch(() => null) : Promise.resolve(null),
-    ]);
-    return { studiesData, bottleData, factsData };
-  }));
-
+  // Pipelined, one-ahead fetch: while product i is being rendered (CPU-bound
+  // html2canvas work), product i+1's images/studies are already downloading
+  // in the background, instead of fetching every product's data up front
+  // before any rendering (and any progress feedback) starts. This keeps
+  // peak network concurrency and memory bounded to ~2 products at a time
+  // and makes "Exporting 1/N…" appear right away even for a large specialty.
   const dedicatedFactsPages = [];
   let pageIndex = 1;
   for (let i = 0; i < products.length; i++) {
     pageIndex++;
+    const prefetched = await nextFetch;
+    if (i + 1 < products.length) nextFetch = fetchProductBrochureData(products[i + 1]);
     doc.addPage();
-    const ownPage = await renderDoctorBrochurePage(doc, products[i], { contributions: contributions || [], pageIndex, pageCount, prefetched: prefetchedByProduct[i] });
+    const ownPage = await renderDoctorBrochurePage(doc, products[i], { contributions: contributions || [], pageIndex, pageCount, prefetched });
     if (ownPage) dedicatedFactsPages.push(ownPage);
     if (onProgress) onProgress(i + 1, products.length);
   }
@@ -9698,6 +9709,35 @@ function loadImageFromDataUrl(dataUrl) {
     img.onerror = reject;
     img.src = dataUrl;
   });
+}
+
+// Real rep-uploaded photos can be several megapixels — html2canvas has to
+// decode and rasterize the source at its FULL native resolution no matter
+// how small the brochure's CSS box or page `scale` is, so an oversized
+// source is pure wasted decode time. Re-encoding down to a sane cap before
+// rendering fixes that without touching the brochure's layout/legibility
+// logic at all, since isLegibleFit/effectivePpi only ever look at
+// `img.width` (never the original file's byte size). Bottle photos get a
+// tight cap (they're only ever shown a few hundred CSS px wide); Supplement
+// Facts photos get a much more generous one so the legibility cascade still
+// has real pixel density to fall back on for fine print.
+const BOTTLE_IMAGE_MAX_DIM = 900;
+const FACTS_IMAGE_MAX_DIM = 1600;
+
+function downscaleImageIfNeeded(data, maxDim) {
+  if (!data || !data.img) return data;
+  const { img } = data;
+  const longestSide = Math.max(img.width, img.height);
+  if (longestSide <= maxDim) return data;
+  const scale = maxDim / longestSide;
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0, w, h);
+  return { ...data, dataUrl: canvas.toDataURL("image/jpeg", 0.85), img: { width: w, height: h }, format: "JPEG" };
 }
 
 // Manager-only delete control for a Knowledge contribution, shared by every
