@@ -9328,8 +9328,10 @@ function renderDedicatedFactsPage(doc, entry, { margin, contentWidth, pageHeight
     py += 18;
   }
 
-  const fit = containFitMm(data.img.width, data.img.height, contentWidth, pageHeight - py - margin);
+  const cardPad = 6;
+  const fit = containFitMm(data.img.width, data.img.height, contentWidth - cardPad * 2, pageHeight - py - margin - cardPad * 2);
   const fx = margin + (contentWidth - fit.w) / 2;
+  drawFactsCard(doc, fx, py, fit.w, fit.h, cardPad);
   doc.addImage(data.dataUrl, data.format, fx, py, fit.w, fit.h, undefined, "FAST");
 }
 
@@ -9337,7 +9339,101 @@ function renderDedicatedFactsPage(doc, entry, { margin, contentWidth, pageHeight
 // (left ~40%) beside a large Supplement Facts label (right ~60%), falling
 // back to full-width-same-page or a dedicated second page when the facts
 // image can't stay legible at the side-column size. ----
-async function renderDoctorPresentationPage(doc, product, { margin, contentWidth, contentBottom }) {
+// Soft full-page backdrop: a pale brand-green-to-white vertical wash plus a
+// couple of large, very-low-opacity circles tucked into the corners — an
+// abstract, generic decorative accent (not a claim about any product's real
+// photography) that keeps a transparent-background bottle photo from
+// looking like it's floating on a stark white page.
+// Maps a product name to a simple, hand-drawn decorative motif keyed off
+// recognizable ingredient keywords — a scalable alternative to needing a
+// real per-product "lifestyle background" image (which would require a new
+// upload/approval field in Product Catalog). Returns null for anything that
+// doesn't match a known keyword, which falls back to the generic soft blob.
+function ingredientMotifFor(productName) {
+  const n = String(productName || "").toLowerCase();
+  if (/garlic/.test(n)) return "garlic";
+  return null;
+}
+
+// A simple abstract garlic-bulb silhouette (a ring of round "cloves" around
+// a center clove, plus a stem) — not a claim about real photography, just a
+// soft, low-opacity decorative accent for a garlic product's background.
+function drawGarlicMotif(doc, cx, cy, r, opacity) {
+  doc.saveGraphicsState();
+  doc.setGState(new doc.GState({ opacity }));
+  doc.setFillColor(90, 130, 100);
+  const cloveR = r * 0.42;
+  const cloveCount = 6;
+  for (let i = 0; i < cloveCount; i++) {
+    const angle = (i / cloveCount) * Math.PI * 2;
+    doc.circle(cx + Math.cos(angle) * r * 0.5, cy + Math.sin(angle) * r * 0.5, cloveR, "F");
+  }
+  doc.circle(cx, cy, cloveR * 0.9, "F");
+  // A filled rect, not a stroked line: jsPDF's GState({opacity}) only sets
+  // fill-alpha (not stroke-alpha), so a stroked line here would render at
+  // full opacity while the circles around it faded — a stray solid line
+  // instead of a matching soft stem.
+  doc.rect(cx - 0.35, cy - r * 1.35, 0.7, r * 0.45, "F");
+  doc.restoreGraphicsState();
+}
+
+function drawSoftPageBackground(doc, pageWidth, pageHeight, productName) {
+  const bands = 20;
+  const washH = pageHeight * 0.4;
+  const bandH = washH / bands;
+  for (let i = 0; i < bands; i++) {
+    const t = i / (bands - 1);
+    doc.setFillColor(Math.round(234 + (255 - 234) * t), Math.round(242 + (255 - 242) * t), Math.round(235 + (255 - 235) * t));
+    doc.rect(0, i * bandH, pageWidth, bandH + 0.6, "F");
+  }
+  doc.setFillColor(255, 255, 255);
+  doc.rect(0, washH, pageWidth, pageHeight - washH, "F");
+
+  const motif = ingredientMotifFor(productName);
+  if (motif === "garlic") {
+    drawGarlicMotif(doc, pageWidth - 20, 30, 34, 0.1);
+    drawGarlicMotif(doc, 10, pageHeight - 20, 40, 0.07);
+  } else {
+    doc.saveGraphicsState();
+    doc.setGState(new doc.GState({ opacity: 0.07 }));
+    doc.setFillColor(76, 122, 94);
+    doc.circle(pageWidth - 8, 10, 42, "F");
+    doc.circle(pageWidth + 6, 42, 28, "F");
+    doc.restoreGraphicsState();
+
+    doc.saveGraphicsState();
+    doc.setGState(new doc.GState({ opacity: 0.05 }));
+    doc.setFillColor(76, 122, 94);
+    doc.circle(-8, pageHeight - 12, 46, "F");
+    doc.restoreGraphicsState();
+  }
+}
+
+// A small filled brand-green circle with a white checkmark — used as a
+// consistent icon badge for every highlight bullet instead of a plain "•",
+// since we have no reliable way to pick a DIFFERENT icon (heart/brain/etc.)
+// that actually matches each highlight's specific claim.
+function drawCheckBadge(doc, cx, cy, r) {
+  doc.setFillColor(46, 110, 80);
+  doc.circle(cx, cy, r, "F");
+  doc.setDrawColor(255, 255, 255);
+  doc.setLineWidth(Math.max(0.5, r * 0.22));
+  doc.line(cx - r * 0.45, cy + r * 0.02, cx - r * 0.08, cy + r * 0.4);
+  doc.line(cx - r * 0.08, cy + r * 0.4, cx + r * 0.5, cy - r * 0.35);
+}
+
+// A white rounded card behind the Supplement Facts image, matching the soft
+// floating-card look, instead of the image sitting directly on the page.
+function drawFactsCard(doc, x, y, w, h, pad) {
+  doc.setFillColor(255, 255, 255);
+  doc.setDrawColor(226, 220, 208);
+  doc.setLineWidth(0.3);
+  doc.roundedRect(x - pad, y - pad, w + pad * 2, h + pad * 2, 2.5, 2.5, "FD");
+}
+
+async function renderDoctorPresentationPage(doc, product, { margin, contentWidth, contentBottom, pageWidth, pageHeight }) {
+  drawSoftPageBackground(doc, pageWidth, pageHeight, product.name);
+
   let y = margin;
 
   doc.setTextColor(140, 130, 110);
@@ -9354,16 +9450,23 @@ async function renderDoctorPresentationPage(doc, product, { margin, contentWidth
   doc.setDrawColor(216, 210, 196);
   doc.setLineWidth(0.4);
   doc.line(margin, y, margin + contentWidth, y);
-  y += 8;
+  y += 10;
 
   const bottleData = product.hasBottleImage ? await loadImageBytes(product.id, "bottle", product.bottleImageMimeType).catch(() => null) : null;
   const factsData = product.hasSupplementFactsImage ? await loadImageBytes(product.id, "supplementFacts", product.supplementFactsImageMimeType).catch(() => null) : null;
 
+  // Highlights are now drawn as an icon-badge row near the bottom of the
+  // page rather than a bullet list, so their height needs to be reserved
+  // up front.
+  let highlights = [];
+  try { highlights = (await api.getProductCatalogStudies(product.id)).highlights || []; } catch { /* bonus content only */ }
+  const highlightRowH = highlights.length ? 24 : 0;
+
   const rowTop = y;
-  const rowMaxH = contentBottom - rowTop - 24;
+  const rowMaxH = contentBottom - rowTop - highlightRowH - 6;
   const bottleColW = contentWidth * 0.4 - 4;
-  const factsColW = contentWidth * 0.6 - 4;
-  const factsColX = margin + contentWidth * 0.4 + 4;
+  const factsColW = contentWidth * 0.6 - 4 - 8; // leave room for the card's padding
+  const factsColX = margin + contentWidth * 0.4 + 4 + 8;
 
   // Images are top-aligned and the row collapses to whichever column is
   // actually tallest, rather than reserving the full available height and
@@ -9383,37 +9486,43 @@ async function renderDoctorPresentationPage(doc, product, { margin, contentWidth
     const plan = planFactsPlacement({
       imgWidthPx: factsData.img.width, imgHeightPx: factsData.img.height,
       sideW: factsColW, sideH: rowMaxH,
-      fullW: contentWidth, fullMaxH: contentBottom - rowTop - 10,
+      fullW: contentWidth, fullMaxH: contentBottom - rowTop - highlightRowH - 10,
       ownPageW: contentWidth, ownPageMaxH: contentBottom - margin - 40,
     });
+    const cardPad = 5;
     if (plan.placement === "side") {
       const fx = factsColX + (factsColW - plan.w) / 2;
+      drawFactsCard(doc, fx, rowTop, plan.w, plan.h, cardPad);
       doc.addImage(factsData.dataUrl, factsData.format, fx, rowTop, plan.w, plan.h, undefined, "FAST");
-      factsBottom = rowTop + plan.h;
+      factsBottom = rowTop + plan.h + cardPad;
     } else if (plan.placement === "full-width") {
-      const fy = Math.max(bottleBottom, rowTop) + 6;
+      const fy = Math.max(bottleBottom, rowTop) + 8;
       const fx = margin + (contentWidth - plan.w) / 2;
+      drawFactsCard(doc, fx, fy, plan.w, plan.h, cardPad);
       doc.addImage(factsData.dataUrl, factsData.format, fx, fy, plan.w, plan.h, undefined, "FAST");
-      factsBottom = fy + plan.h;
+      factsBottom = fy + plan.h + cardPad;
     } else {
       factsOwnPage = { product, data: factsData, plan };
       factsBottom = rowTop + rowMaxH;
     }
   }
 
-  let bulletY = Math.max(bottleBottom, factsBottom) + 8;
-  try {
-    const { highlights } = await api.getProductCatalogStudies(product.id);
-    if (highlights && highlights.length) {
-      doc.setFontSize(9.5);
-      doc.setTextColor(60, 70, 60);
-      for (const h of highlights.slice(0, 3)) {
-        const lines = doc.splitTextToSize(`• ${h}`, contentWidth);
-        doc.text(lines, margin, bulletY);
-        bulletY += lines.length * 4.5;
-      }
-    }
-  } catch { /* highlights are a bonus, never block the export */ }
+  // Highlight icon-badge row, centered across up to 3 columns near the
+  // bottom of the page.
+  if (highlights.length) {
+    const shown = highlights.slice(0, 3);
+    const colW = contentWidth / shown.length;
+    const rowY = contentBottom - highlightRowH + 2;
+    const badgeR = 4.2;
+    doc.setFontSize(8);
+    doc.setTextColor(60, 70, 60);
+    shown.forEach((h, i) => {
+      const colCenter = margin + colW * i + colW / 2;
+      drawCheckBadge(doc, colCenter, rowY, badgeR);
+      const lines = doc.splitTextToSize(h, colW - 6).slice(0, 2);
+      doc.text(lines, colCenter, rowY + badgeR + 5, { align: "center" });
+    });
+  }
 
   return factsOwnPage;
 }
@@ -9431,11 +9540,12 @@ async function downloadDoctorPresentationPdf(selectedProducts, specialtyName) {
   for (const product of selectedProducts) {
     if (!firstPage) doc.addPage();
     firstPage = false;
-    const ownPage = await renderDoctorPresentationPage(doc, product, { margin, contentWidth, contentBottom });
+    const ownPage = await renderDoctorPresentationPage(doc, product, { margin, contentWidth, contentBottom, pageWidth, pageHeight });
     if (ownPage) dedicatedFactsPages.push(ownPage);
   }
   for (const entry of dedicatedFactsPages) {
     doc.addPage();
+    drawSoftPageBackground(doc, pageWidth, pageHeight, entry.product.name);
     renderDedicatedFactsPage(doc, entry, { margin, contentWidth, pageHeight });
   }
 
@@ -9486,6 +9596,7 @@ async function renderCompactCatalogSlot(doc, product, { margin, contentWidth, sl
         ownPageW: contentWidth, ownPageMaxH: 297 - margin * 2 - 40,
       });
       if (plan.placement !== "own-page") {
+        drawFactsCard(doc, textColX, ty, plan.w, plan.h, 3);
         doc.addImage(f.dataUrl, f.format, textColX, ty, plan.w, plan.h, undefined, "FAST");
       } else {
         doc.setFontSize(8.5);
@@ -9517,6 +9628,7 @@ async function downloadCompactCatalogPdf(selectedProducts, specialtyName) {
     if (slot === 0) {
       if (!firstPage) doc.addPage();
       firstPage = false;
+      drawSoftPageBackground(doc, pageWidth, pageHeight, product.name);
     }
     const slotTop = margin + slot * (slotH + slotGap);
     await renderCompactCatalogSlot(doc, product, { margin, contentWidth, slotTop, slotH, dedicatedFactsPages });
@@ -9524,6 +9636,7 @@ async function downloadCompactCatalogPdf(selectedProducts, specialtyName) {
   }
   for (const entry of dedicatedFactsPages) {
     doc.addPage();
+    drawSoftPageBackground(doc, pageWidth, pageHeight, entry.product.name);
     renderDedicatedFactsPage(doc, entry, { margin, contentWidth, pageHeight });
   }
 
@@ -9598,6 +9711,87 @@ function wrapCanvasCenteredText(ctx, text, centerX, y, maxWidth, lineHeight) {
   return curY;
 }
 
+// Canvas equivalent of drawSoftPageBackground: a soft pale-green-to-cream
+// wash across the top plus a couple of very-low-opacity corner blobs, so a
+// transparent-background bottle photo blends into the card instead of
+// sitting on a flat, stark panel. Reads the actual canvas height off
+// targetCtx so it works correctly on both the scratch-size and final-size
+// render passes.
+// Canvas version of the garlic-bulb decorative motif (see ingredientMotifFor
+// / drawGarlicMotif) — a ring of round "cloves" plus a stem, at low opacity.
+function drawCanvasGarlicMotif(ctx, cx, cy, r, opacity) {
+  ctx.save();
+  ctx.globalAlpha = opacity;
+  ctx.fillStyle = "#5A8264";
+  const cloveR = r * 0.42;
+  const cloveCount = 6;
+  for (let i = 0; i < cloveCount; i++) {
+    const angle = (i / cloveCount) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.arc(cx + Math.cos(angle) * r * 0.5, cy + Math.sin(angle) * r * 0.5, cloveR, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.beginPath();
+  ctx.arc(cx, cy, cloveR * 0.9, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#5A8264";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - r * 0.9);
+  ctx.lineTo(cx, cy - r * 1.3);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function paintSoftCanvasBackground(ctx, w, productName) {
+  const h = ctx.canvas.height;
+  const washH = h * 0.32;
+  const grad = ctx.createLinearGradient(0, 0, 0, washH);
+  grad.addColorStop(0, "#E9F2EB");
+  grad.addColorStop(1, "#FAF7F2");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, washH);
+  ctx.fillStyle = "#FAF7F2";
+  ctx.fillRect(0, washH, w, h - washH);
+
+  if (ingredientMotifFor(productName) === "garlic") {
+    drawCanvasGarlicMotif(ctx, w - 50, 60, 70, 0.1);
+    drawCanvasGarlicMotif(ctx, 30, washH * 0.85, 90, 0.07);
+    return;
+  }
+
+  ctx.save();
+  ctx.globalAlpha = 0.07;
+  ctx.fillStyle = "#4C7A5E";
+  ctx.beginPath(); ctx.arc(w - 20, 20, 110, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = 0.05;
+  ctx.fillStyle = "#4C7A5E";
+  ctx.beginPath(); ctx.arc(-20, washH * 0.8, 120, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+// Canvas equivalent of drawCheckBadge — a filled brand-green circle with a
+// white checkmark, used as a consistent icon for every highlight instead of
+// a plain bullet dot.
+function drawCanvasCheckBadge(ctx, cx, cy, r) {
+  ctx.beginPath();
+  ctx.fillStyle = "#2E6E50";
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#FFFFFF";
+  ctx.lineWidth = Math.max(1.5, r * 0.22);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(cx - r * 0.45, cy + r * 0.02);
+  ctx.lineTo(cx - r * 0.08, cy + r * 0.4);
+  ctx.lineTo(cx + r * 0.5, cy - r * 0.35);
+  ctx.stroke();
+}
+
 // Option C — "WhatsApp Images": a single composited vertical PNG per
 // product, optimized for mobile viewing — brand header, centered product
 // name, bottle image beside a stacked list of highlight bullets at the same
@@ -9626,8 +9820,7 @@ async function downloadProductMobileCard(product) {
   try { highlights = (await api.getProductCatalogStudies(product.id)).highlights || []; } catch { /* bonus content only */ }
 
   const render = (targetCtx) => {
-    targetCtx.fillStyle = "#FAF7F2";
-    targetCtx.fillRect(0, 0, W, SCRATCH_H);
+    paintSoftCanvasBackground(targetCtx, W, product.name);
 
     targetCtx.fillStyle = "#1F2A24";
     targetCtx.fillRect(0, 0, W, 100);
@@ -9661,10 +9854,7 @@ async function downloadProductMobileCard(product) {
       let linesUsed = 0;
       for (const h of highlights.slice(0, 5)) {
         if (linesUsed >= maxLinesTotal) break;
-        targetCtx.beginPath();
-        targetCtx.fillStyle = "#B33A3A";
-        targetCtx.arc(highlightsX + 8, hy - 9, 7, 0, Math.PI * 2);
-        targetCtx.fill();
+        drawCanvasCheckBadge(targetCtx, highlightsX + 8, hy - 9, 9);
         targetCtx.fillStyle = "#1F2A24";
         const before = hy;
         hy = wrapCanvasText(targetCtx, h, highlightsX + 28, hy, highlightsW - 28, lineH, maxLinesTotal - linesUsed);
@@ -9676,6 +9866,8 @@ async function downloadProductMobileCard(product) {
 
     if (factsImg) {
       const boxH = Math.min(560, (factsImg.height / factsImg.width) * (W - 144) + 60);
+      targetCtx.fillStyle = "#FFFFFF";
+      targetCtx.fillRect(36, y, W - 72, boxH);
       targetCtx.strokeStyle = "#E5DFD3";
       targetCtx.lineWidth = 2;
       targetCtx.strokeRect(36, y, W - 72, boxH);
