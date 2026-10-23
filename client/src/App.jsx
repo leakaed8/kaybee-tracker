@@ -9306,16 +9306,6 @@ function specialtySubcategoriesFor(productName, contributions) {
   return [...bySpecialty.entries()].map(([specialty, topics]) => ({ specialty, topics: [...topics] }));
 }
 
-// A short, already-curated clinical note — Recall's repQuickTakeaway is
-// written by a manager specifically as a rep-facing clinical summary for one
-// ingredient, never auto-generated — so it's the only thing quoted here.
-// Returns "" (section omitted entirely) when nothing has been curated yet.
-function clinicalDiscussionTextFor(studiesData) {
-  const withTakeaway = (studiesData?.ingredients || []).filter((i) => (i.repQuickTakeaway || "").trim());
-  if (!withTakeaway.length) return "";
-  return withTakeaway.slice(0, 2).map((i) => `${i.name}: ${i.repQuickTakeaway.trim()}`).join("  ");
-}
-
 const BROCHURE_COLORS = {
   ink: "#173F33", // deep forest green — headlines
   sage: "#4A7C59", // medium green — accents/secondary text
@@ -9324,6 +9314,16 @@ const BROCHURE_COLORS = {
   border: "#E3DFD2",
   textGray: "#6B6B63",
 };
+
+// The brochure is always KayBee Pharma's own document (never the product's
+// manufacturer brand), so its logo is loaded once per session and reused on
+// every page/cover, same caching idiom as the fonts promise below.
+const BROCHURE_LOGO_URL = "/kaybee-logo.jpg";
+let brochureLogoDataUrlPromise = null;
+function ensureBrochureLogoDataUrl() {
+  if (!brochureLogoDataUrlPromise) brochureLogoDataUrlPromise = fetchImageAsDataUrl(BROCHURE_LOGO_URL).catch(() => "");
+  return brochureLogoDataUrlPromise;
+}
 
 const BROCHURE_FONTS_URL = "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Inter:wght@400;500;600;700&display=swap";
 let brochureFontsLinkPromise = null;
@@ -9377,11 +9377,14 @@ function brochureCardWrapper(icon, title, innerHtml) {
   </div>`;
 }
 
-function buildBrochureHeaderHtml(brandDisplay, primarySpecialty) {
+// Always the KayBee Pharma logo/name — never the product's own manufacturer
+// brand (Alfa/Mason) — since this is KayBee's own rep-facing document, not
+// the manufacturer's packaging.
+function buildBrochureHeaderHtml(logoDataUrl, primarySpecialty) {
   return `<div style="display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid ${BROCHURE_COLORS.ink};padding-bottom:12px;flex:0 0 auto;">
-    <div style="display:flex;align-items:center;gap:8px;">
-      ${kbIcon("leaf", BROCHURE_COLORS.ink, 26)}
-      <span style="font-family:'Playfair Display',serif;font-weight:700;font-size:21px;color:${BROCHURE_COLORS.ink};">${escapeHtml(brandDisplay)}</span>
+    <div style="display:flex;align-items:center;gap:9px;">
+      ${logoDataUrl ? `<img src="${logoDataUrl}" style="height:32px;width:32px;object-fit:contain;border-radius:6px;"/>` : kbIcon("leaf", BROCHURE_COLORS.ink, 26)}
+      <span style="font-family:'Playfair Display',serif;font-weight:700;font-size:21px;color:${BROCHURE_COLORS.ink};">KayBee Pharma</span>
     </div>
     ${primarySpecialty ? `<span style="font-family:Inter,sans-serif;font-weight:600;font-size:12px;letter-spacing:1.5px;color:${BROCHURE_COLORS.sage};text-transform:uppercase;">${escapeHtml(primarySpecialty)}</span>` : ""}
   </div>`;
@@ -9472,22 +9475,15 @@ function buildBrochureInfoRowHtml(cards) {
   if (!present.length) return "";
   return `<div style="flex:0 0 auto;display:flex;gap:14px;margin-bottom:16px;">${present.join("")}</div>`;
 }
-function buildBrochureClinicalHtml(clinicalText) {
-  if (!clinicalText) return "";
-  return `<div style="flex:0 0 auto;margin-bottom:12px;">
-    <div style="font-family:Inter,sans-serif;font-weight:700;font-size:10.5px;letter-spacing:0.8px;color:${BROCHURE_COLORS.sage};text-transform:uppercase;margin-bottom:4px;">Clinical Discussion</div>
-    <div style="font-family:Inter,sans-serif;font-size:11px;line-height:1.5;color:#333;font-style:italic;">${escapeHtml(clinicalText)}</div>
-  </div>`;
-}
-function buildBrochureFooterHtml(brandDisplay, product, pageIndex, pageCount) {
+function buildBrochureFooterHtml(logoDataUrl, pageIndex, pageCount) {
   return `<div style="flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;border-top:1px solid ${BROCHURE_COLORS.border};padding-top:10px;font-family:Inter,sans-serif;font-size:9.5px;color:${BROCHURE_COLORS.textGray};">
-    <div style="display:flex;align-items:center;gap:5px;">${kbIcon("leaf", BROCHURE_COLORS.sage, 12)}<span style="font-weight:600;color:${BROCHURE_COLORS.ink};">KayBee Pharma</span></div>
-    <div>${escapeHtml(brandDisplay)} &nbsp;·&nbsp; ${escapeHtml(product.name)}</div>
+    <div style="display:flex;align-items:center;gap:5px;">${logoDataUrl ? `<img src="${logoDataUrl}" style="height:14px;width:14px;object-fit:contain;border-radius:3px;"/>` : kbIcon("leaf", BROCHURE_COLORS.sage, 12)}<span style="font-weight:600;color:${BROCHURE_COLORS.ink};">KayBee Pharma</span></div>
+    <div>www.kaybeepharma.com &nbsp;·&nbsp; 01-344844</div>
     <div>Page ${pageIndex} of ${pageCount}</div>
   </div>`;
 }
 
-function buildBrochurePageHtml({ product, brandDisplay, overviewRows, ingredients, subcats, clinicalText, bottleDataUrl, factsDataUrl, heroMode, pageIndex, pageCount }) {
+function buildBrochurePageHtml({ product, logoDataUrl, overviewRows, ingredients, subcats, bottleDataUrl, factsDataUrl, heroMode, pageIndex, pageCount }) {
   const primarySpecialty = subcats[0]?.specialty || "";
   const heroHtml = heroMode === "full-width"
     ? buildBrochureHeroFullWidthHtml({ bottleDataUrl, factsDataUrl })
@@ -9500,17 +9496,16 @@ function buildBrochurePageHtml({ product, brandDisplay, overviewRows, ingredient
     buildBrochureIngredientsCardHtml(ingredients),
   ]);
   return `<div style="width:794px;height:1123px;box-sizing:border-box;padding:45px;background:${BROCHURE_COLORS.ivory};display:flex;flex-direction:column;font-smooth:always;-webkit-font-smoothing:antialiased;">
-    ${buildBrochureHeaderHtml(brandDisplay, primarySpecialty)}
+    ${buildBrochureHeaderHtml(logoDataUrl, primarySpecialty)}
     ${buildBrochureHeadlineHtml(product, overviewRows)}
     ${heroHtml}
     ${infoRow}
-    ${buildBrochureClinicalHtml(clinicalText)}
-    ${buildBrochureFooterHtml(brandDisplay, product, pageIndex, pageCount)}
+    ${buildBrochureFooterHtml(logoDataUrl, pageIndex, pageCount)}
   </div>`;
 }
-function buildBrochureFactsOnlyPageHtml({ product, brandDisplay, factsDataUrl, lowRes, pageIndex, pageCount }) {
+function buildBrochureFactsOnlyPageHtml({ product, logoDataUrl, factsDataUrl, lowRes, pageIndex, pageCount }) {
   return `<div style="width:794px;height:1123px;box-sizing:border-box;padding:45px;background:${BROCHURE_COLORS.ivory};display:flex;flex-direction:column;">
-    ${buildBrochureHeaderHtml(brandDisplay, "")}
+    ${buildBrochureHeaderHtml(logoDataUrl, "")}
     <div style="font-family:'Playfair Display',serif;font-weight:700;font-size:26px;color:${BROCHURE_COLORS.ink};margin-top:18px;flex:0 0 auto;">Supplement Facts — ${escapeHtml(product.name)}</div>
     <div style="height:2px;width:72px;background:${BROCHURE_COLORS.sage};margin:14px 0 20px;border-radius:2px;flex:0 0 auto;"></div>
     ${lowRes ? `<div style="flex:0 0 auto;background:#FCEDDD;border:1px solid #E0B273;border-radius:8px;padding:10px 14px;font-family:Inter,sans-serif;font-size:11px;color:#8A5A14;margin-bottom:16px;">Low-resolution source image — replace with a higher-resolution scan for print use.</div>` : ""}
@@ -9519,7 +9514,7 @@ function buildBrochureFactsOnlyPageHtml({ product, brandDisplay, factsDataUrl, l
         <img src="${factsDataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;display:block;"/>
       </div>
     </div>
-    ${buildBrochureFooterHtml(brandDisplay, product, pageIndex, pageCount)}
+    ${buildBrochureFooterHtml(logoDataUrl, pageIndex, pageCount)}
   </div>`;
 }
 
@@ -9546,22 +9541,18 @@ async function renderBrochurePageToCanvas(innerHtml, { scale = 2 } = {}) {
   return { canvas, container, pageEl };
 }
 
-// bottleData/factsData/studiesData are fetched ahead of time (in parallel,
-// across all products in the brochure) by the caller and passed in via
-// `prefetched` — fetching them here instead, one product at a time, was the
-// main reason a 10+ product specialty took so long to export: every
-// product's 3 network calls had to finish before the NEXT product's calls
-// even started, on top of the per-page rendering work below.
-async function renderDoctorBrochurePage(doc, product, { contributions, pageIndex, pageCount, prefetched }) {
-  const brandDisplay = PRODUCT_BRAND_DISPLAY_NAMES[product.brand] || product.brand || "KayBee Pharma";
+// bottleData/factsData are fetched ahead of time (one product ahead of the
+// one currently rendering) by the caller and passed in via `prefetched` —
+// fetching them here instead, one product at a time with no overlap, was
+// the main reason a 10+ product specialty took so long to export.
+async function renderDoctorBrochurePage(doc, product, { contributions, pageIndex, pageCount, prefetched, logoDataUrl }) {
   const ingredients = parseProductIngredientsJson(product.ingredients);
   const overviewRows = buildProductOverviewRows(product, ingredients);
   const subcats = specialtySubcategoriesFor(product.name, contributions);
-  const { studiesData, bottleData, factsData } = prefetched;
-  const clinicalText = clinicalDiscussionTextFor(studiesData);
+  const { bottleData, factsData } = prefetched;
 
   const baseArgs = {
-    product, brandDisplay, overviewRows, ingredients, subcats, clinicalText,
+    product, logoDataUrl, overviewRows, ingredients, subcats,
     bottleDataUrl: bottleData?.dataUrl || "", factsDataUrl: factsData?.dataUrl || "",
     pageIndex, pageCount,
   };
@@ -9597,7 +9588,7 @@ async function renderDoctorBrochurePage(doc, product, { contributions, pageIndex
         finalCanvas = rendered.canvas;
         finalContainer = rendered.container;
         ownFactsPage = {
-          product, brandDisplay, factsDataUrl: factsData.dataUrl,
+          product, logoDataUrl, factsDataUrl: factsData.dataUrl,
           lowRes: effectivePpi(factsData.img.width, mmFromPx(rect.width)) < MIN_LEGIBLE_PPI,
         };
       }
@@ -9612,19 +9603,19 @@ async function renderDoctorBrochurePage(doc, product, { contributions, pageIndex
 // A single centered title page introducing the specialty-wide brochure —
 // reuses the same brochure chrome (leaf mark, Playfair Display, sage accent
 // underline, footer) as every per-product brochure page that follows it.
-function buildBrochureCoverPageHtml({ specialty, productCount, pageIndex, pageCount }) {
+function buildBrochureCoverPageHtml({ specialty, productCount, pageIndex, pageCount, logoDataUrl }) {
   const subtitle = productCount > 0
     ? `${productCount} product${productCount === 1 ? "" : "s"} relevant to this specialty`
     : "No products with an approved image have been added under this specialty yet.";
   return `<div style="width:794px;height:1123px;box-sizing:border-box;padding:60px;background:${BROCHURE_COLORS.ivory};display:flex;flex-direction:column;font-family:Inter,sans-serif;">
     <div style="flex:1 1 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;">
-      <span style="display:inline-flex;align-items:center;justify-content:center;width:64px;height:64px;border-radius:50%;background:${BROCHURE_COLORS.sageLight};margin-bottom:28px;">${kbIcon("leaf", BROCHURE_COLORS.sage, 34)}</span>
+      <span style="display:inline-flex;align-items:center;justify-content:center;width:64px;height:64px;border-radius:50%;background:${BROCHURE_COLORS.sageLight};margin-bottom:28px;overflow:hidden;">${logoDataUrl ? `<img src="${logoDataUrl}" style="width:50px;height:50px;object-fit:contain;"/>` : kbIcon("leaf", BROCHURE_COLORS.sage, 34)}</span>
       <div style="font-family:Inter,sans-serif;font-weight:600;font-size:13px;letter-spacing:3px;color:${BROCHURE_COLORS.sage};text-transform:uppercase;margin-bottom:16px;">Product Reference Brochure</div>
       <div style="font-family:'Playfair Display',serif;font-weight:700;font-size:48px;line-height:1.2;color:${BROCHURE_COLORS.ink};max-width:560px;">${escapeHtml(specialty)}</div>
       <div style="height:3px;width:90px;background:${BROCHURE_COLORS.sage};margin:22px 0;border-radius:2px;"></div>
       <div style="font-family:Inter,sans-serif;font-size:15px;color:${BROCHURE_COLORS.textGray};max-width:460px;">${escapeHtml(subtitle)}</div>
     </div>
-    ${buildBrochureFooterHtml("KayBee Pharma", { name: specialty }, pageIndex, pageCount)}
+    ${buildBrochureFooterHtml(logoDataUrl, pageIndex, pageCount)}
   </div>`;
 }
 
@@ -9638,8 +9629,7 @@ function buildBrochureCoverPageHtml({ specialty, productCount, pageIndex, pageCo
 // rendered so the UI can show real progress instead of a single frozen
 // "Exporting…" label for the whole (possibly slow, for a large specialty) run.
 async function fetchProductBrochureData(product) {
-  const [studiesData, bottleData, factsData] = await Promise.all([
-    api.getProductCatalogStudies(product.id).catch(() => null),
+  const [bottleData, factsData] = await Promise.all([
     product.hasBottleImage
       ? loadImageBytes(product.id, "bottle", product.bottleImageMimeType).then((d) => downscaleImageIfNeeded(d, BOTTLE_IMAGE_MAX_DIM)).catch(() => null)
       : Promise.resolve(null),
@@ -9647,7 +9637,7 @@ async function fetchProductBrochureData(product) {
       ? loadImageBytes(product.id, "supplementFacts", product.supplementFactsImageMimeType).then((d) => downscaleImageIfNeeded(d, FACTS_IMAGE_MAX_DIM)).catch(() => null)
       : Promise.resolve(null),
   ]);
-  return { studiesData, bottleData, factsData };
+  return { bottleData, factsData };
 }
 
 async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName, contributions, onProgress) {
@@ -9666,20 +9656,22 @@ async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName
   const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
   const pageCount = products.length + 1;
 
-  // Kick off the first product's fetch immediately, in parallel with the
-  // cover page's render below, instead of waiting for the cover to finish.
+  // Kick off the first product's fetch right away (it keeps downloading in
+  // the background while we await the tiny, same-origin, usually-cached
+  // logo asset needed for the cover page below).
   let nextFetch = products.length ? fetchProductBrochureData(products[0]) : null;
+  const logoDataUrl = await ensureBrochureLogoDataUrl();
 
-  const cover = await renderBrochurePageToCanvas(buildBrochureCoverPageHtml({ specialty, productCount: products.length, pageIndex: 1, pageCount }));
+  const cover = await renderBrochurePageToCanvas(buildBrochureCoverPageHtml({ specialty, productCount: products.length, pageIndex: 1, pageCount, logoDataUrl }));
   doc.addImage(cover.canvas.toDataURL("image/jpeg", 0.95), "JPEG", 0, 0, 210, 297);
   document.body.removeChild(cover.container);
 
   // Pipelined, one-ahead fetch: while product i is being rendered (CPU-bound
-  // html2canvas work), product i+1's images/studies are already downloading
-  // in the background, instead of fetching every product's data up front
-  // before any rendering (and any progress feedback) starts. This keeps
-  // peak network concurrency and memory bounded to ~2 products at a time
-  // and makes "Exporting 1/N…" appear right away even for a large specialty.
+  // html2canvas work), product i+1's images are already downloading in the
+  // background, instead of fetching every product's data up front before
+  // any rendering (and any progress feedback) starts. This keeps peak
+  // network concurrency and memory bounded to ~2 products at a time and
+  // makes "Exporting 1/N…" appear right away even for a large specialty.
   const dedicatedFactsPages = [];
   let pageIndex = 1;
   for (let i = 0; i < products.length; i++) {
@@ -9687,7 +9679,7 @@ async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName
     const prefetched = await nextFetch;
     if (i + 1 < products.length) nextFetch = fetchProductBrochureData(products[i + 1]);
     doc.addPage();
-    const ownPage = await renderDoctorBrochurePage(doc, products[i], { contributions: contributions || [], pageIndex, pageCount, prefetched });
+    const ownPage = await renderDoctorBrochurePage(doc, products[i], { contributions: contributions || [], pageIndex, pageCount, prefetched, logoDataUrl });
     if (ownPage) dedicatedFactsPages.push(ownPage);
     if (onProgress) onProgress(i + 1, products.length);
   }
