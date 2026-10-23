@@ -9205,6 +9205,17 @@ function NutritionistsView({ nutritionists, role, onAdd, onRemove, onBulkImport,
 }
 
 // ---------- Knowledge View (rep reference: talking points + drug/nutrient depletion) ----------
+// Same-origin route for code that needs the actual image BYTES (PDF embed,
+// canvas compositing, "download to device") — unlike the presigned R2 URL
+// api.getCatalogProductImageUrl returns (perfect for a plain <img src>, and
+// used nowhere near this file), a cross-origin fetch() of that URL can be
+// silently blocked by the R2 bucket's own CORS policy, which this app has
+// no way to configure. Going through our own server sidesteps that: a
+// same-origin request is never subject to CORS at all.
+function catalogImageBytesPath(productId, which) {
+  return `/api/product-catalog/${productId}/image-bytes?which=${which}`;
+}
+
 async function fetchImageAsDataUrl(url) {
   const resp = await fetch(url);
   const blob = await resp.blob();
@@ -9291,15 +9302,13 @@ async function downloadSpecialtyProductCardsPdf(specialtyName, selectedProducts)
 
     if (product.hasBottleImage) {
       try {
-        const { url } = await api.getCatalogProductImageUrl(product.id, "bottle");
-        const dataUrl = await fetchImageAsDataUrl(url);
+        const dataUrl = await fetchImageAsDataUrl(catalogImageBytesPath(product.id, "bottle"));
         doc.addImage(dataUrl, jsPdfFormatForMime(product.bottleImageMimeType), x, imageY, imgSize, imgSize, undefined, "FAST");
       } catch { /* skip a slot that can't be fetched rather than failing the whole export */ }
     }
     if (product.hasSupplementFactsImage) {
       try {
-        const { url } = await api.getCatalogProductImageUrl(product.id, "supplementFacts");
-        const dataUrl = await fetchImageAsDataUrl(url);
+        const dataUrl = await fetchImageAsDataUrl(catalogImageBytesPath(product.id, "supplementFacts"));
         doc.addImage(dataUrl, jsPdfFormatForMime(product.supplementFactsImageMimeType), x + imgSize + 4, imageY, imgSize, imgSize, undefined, "FAST");
       } catch { /* same as above */ }
     }
@@ -9326,12 +9335,10 @@ async function downloadSpecialtyProductCardsPdf(specialtyName, selectedProducts)
 async function downloadSelectedProductImages(selectedProducts) {
   for (const product of selectedProducts) {
     if (product.hasBottleImage) {
-      const { url } = await api.getCatalogProductImageUrl(product.id, "bottle");
-      await downloadImageFile(url, `${product.name.replace(/[^a-zA-Z0-9]+/g, "-")}-bottle.jpg`);
+      await downloadImageFile(catalogImageBytesPath(product.id, "bottle"), `${product.name.replace(/[^a-zA-Z0-9]+/g, "-")}-bottle.jpg`);
     }
     if (product.hasSupplementFactsImage) {
-      const { url } = await api.getCatalogProductImageUrl(product.id, "supplementFacts");
-      await downloadImageFile(url, `${product.name.replace(/[^a-zA-Z0-9]+/g, "-")}-supplement-facts.jpg`);
+      await downloadImageFile(catalogImageBytesPath(product.id, "supplementFacts"), `${product.name.replace(/[^a-zA-Z0-9]+/g, "-")}-supplement-facts.jpg`);
     }
   }
 }
@@ -9401,10 +9408,10 @@ async function downloadProductMobileCard(product) {
   canvas.height = SCRATCH_H;
 
   const bottleImg = product.hasBottleImage
-    ? await api.getCatalogProductImageUrl(product.id, "bottle").then((r) => fetchImageAsDataUrl(r.url)).then(loadImageFromDataUrl).catch(() => null)
+    ? await fetchImageAsDataUrl(catalogImageBytesPath(product.id, "bottle")).then(loadImageFromDataUrl).catch(() => null)
     : null;
   const factsImg = product.hasSupplementFactsImage
-    ? await api.getCatalogProductImageUrl(product.id, "supplementFacts").then((r) => fetchImageAsDataUrl(r.url)).then(loadImageFromDataUrl).catch(() => null)
+    ? await fetchImageAsDataUrl(catalogImageBytesPath(product.id, "supplementFacts")).then(loadImageFromDataUrl).catch(() => null)
     : null;
   let highlights = [];
   try { highlights = (await api.getProductCatalogStudies(product.id)).highlights || []; } catch { /* bonus content only */ }

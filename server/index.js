@@ -737,6 +737,24 @@ async function createDocumentViewUrl(key) {
   return { url, expiresAt: Date.now() + DOCUMENT_VIEW_TOKEN_TTL_SECONDS * 1000 };
 }
 
+// For client code that needs the actual pixel bytes (jsPDF.addImage, the
+// Mobile Card canvas composite, "Download images") rather than just
+// displaying the picture — a plain <img src="presignedUrl"> renders fine
+// with no CORS involved, but a cross-origin fetch() of that same URL
+// (the only way to pull it into a data URL or canvas) can be silently
+// blocked by the R2 bucket's own CORS policy, which this app has no way to
+// configure from here. Fetching the object server-side and streaming the
+// bytes back same-origin sidesteps that: a server-to-R2 read is never
+// subject to a browser's CORS rules at all.
+async function fetchR2ObjectBuffer(key) {
+  if (!R2_BUCKET_NAME) throw new Error("R2 isn't configured — set R2_BUCKET_NAME.");
+  const client = getR2Client();
+  const result = await client.send(new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key }));
+  const chunks = [];
+  for await (const chunk of result.Body) chunks.push(chunk);
+  return { buffer: Buffer.concat(chunks), contentType: result.ContentType || "application/octet-stream" };
+}
+
 function sanitizeFilename(name) {
   return String(name || "file").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 150);
 }
@@ -1780,6 +1798,33 @@ app.get("/api/product-catalog/:id/image-url", async (req, res) => {
 
     const { url, expiresAt } = await createDocumentViewUrl(key);
     res.json({ url, expiresAt });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Same-origin sibling of the route above, for code that needs the raw
+// image bytes (see fetchR2ObjectBuffer's comment) instead of a URL to put
+// in an <img src>. Same auth/approval gating, just a different response
+// shape (the bytes themselves, not JSON).
+app.get("/api/product-catalog/:id/image-bytes", async (req, res) => {
+  try {
+    const which = req.query.which === "supplementFacts" ? "supplementFacts" : "bottle";
+    const rows = await db.getAllRows("ProductCatalog");
+    const product = rows.find((p) => p.id === req.params.id);
+    if (!product) return res.status(404).json({ error: "Product not found" });
+
+    const key = which === "bottle" ? product.bottleImageKey : product.supplementFactsImageKey;
+    if (!key) return res.status(404).json({ error: "No image found" });
+
+    const isManager = req.role === "manager" || req.isSupervisor;
+    if (!isManager && product.imageApprovalStatus !== "approved") return res.status(404).json({ error: "No image found" });
+
+    const { buffer, contentType } = await fetchR2ObjectBuffer(key);
+    res.set("Content-Type", contentType);
+    res.set("Cache-Control", "private, max-age=300");
+    res.send(buffer);
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
