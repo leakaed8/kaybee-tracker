@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import html2canvas from "html2canvas";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {
@@ -9239,211 +9240,434 @@ async function loadImageBytes(productId, which, mime) {
   return { dataUrl, img, format: jsPdfFormatForMime(mime) };
 }
 
-// Scales an image to fit entirely inside a box (mm), preserving aspect ratio.
-function containFitMm(imgWidthPx, imgHeightPx, maxW, maxH) {
-  if (!imgWidthPx || !imgHeightPx || maxW <= 0 || maxH <= 0) return { w: 0, h: 0 };
-  const scale = Math.min(maxW / imgWidthPx, maxH / imgHeightPx);
-  return { w: imgWidthPx * scale, h: imgHeightPx * scale };
+// ---- Shared pure layout math (unit-testable independent of jsPDF/canvas) ----
+// Legibility of a Supplement Facts label depends on two independent things,
+// and a placement only counts as legible when BOTH clear their floor:
+//   1. Physical size — a label rendered narrower than ~70mm is too small for
+//      a human to read the fine print, no matter how sharp the source is.
+//      Shrinking an image into a smaller box always makes its *pixel*
+//      density look better, so this check is what actually drives falling
+//      back to a bigger box (side -> full-width -> own page).
+//   2. Source sharpness — "effective PPI" (native pixel width divided by the
+//      rendered width in inches). Below ~150, the source image itself is too
+//      low-resolution to look sharp at any practical size; enlarging it
+//      further never makes it clearer, so this is what flags an image as
+//      needing replacement rather than a bigger box.
+const MIN_LEGIBLE_WIDTH_MM = 70;
+const MIN_LEGIBLE_PPI = 150;
+
+function effectivePpi(imgWidthPx, renderedWidthMm) {
+  if (!imgWidthPx || !renderedWidthMm) return 0;
+  return imgWidthPx / (renderedWidthMm / 25.4);
 }
 
-// Stamps "<brand>" + "Page X of Y" on every page once the final page count
-// is known — must run after all pages (incl. any appended facts pages) exist.
-function stampExportFooters(doc, brandLabel) {
-  const pageCount = doc.internal.getNumberOfPages();
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const pageHeight = doc.internal.pageSize.getHeight();
-  for (let i = 1; i <= pageCount; i++) {
-    doc.setPage(i);
-    doc.setFontSize(8.5);
-    doc.setTextColor(150, 142, 125);
-    doc.text(brandLabel, 14, pageHeight - 8);
-    doc.text(`Page ${i} of ${pageCount}`, pageWidth - 14, pageHeight - 8, { align: "right" });
+function isLegibleFit(imgWidthPx, fit) {
+  return fit.w >= MIN_LEGIBLE_WIDTH_MM && effectivePpi(imgWidthPx, fit.w) >= MIN_LEGIBLE_PPI;
+}
+
+function parseProductIngredientsJson(raw) {
+  try {
+    const list = JSON.parse(raw || "[]");
+    return Array.isArray(list) ? list.filter((i) => i && String(i.name || "").trim()) : [];
+  } catch {
+    return [];
   }
 }
 
-// Soft full-page backdrop: a pale brand-green-to-white vertical wash plus a
-// couple of large, very-low-opacity circles tucked into the corners — an
-// abstract, generic decorative accent (not a claim about any product's real
-// photography) that keeps a transparent-background bottle photo from
-// looking like it's floating on a stark white page.
-// Maps a product name to a simple, hand-drawn decorative motif keyed off
-// recognizable ingredient keywords — a scalable alternative to needing a
-// real per-product "lifestyle background" image (which would require a new
-// upload/approval field in Product Catalog). Returns null for anything that
-// doesn't match a known keyword, which falls back to the generic soft blob.
-function ingredientMotifFor(productName) {
-  const n = String(productName || "").toLowerCase();
-  if (/garlic/.test(n)) return "garlic";
-  return null;
-}
+const PRODUCT_BRAND_DISPLAY_NAMES = { Alfa: "Alfa Vitamins", Mason: "Mason Natural" };
 
-// A simple abstract garlic-bulb silhouette (a ring of round "cloves" around
-// a center clove, plus a stem) — not a claim about real photography, just a
-// soft, low-opacity decorative accent for a garlic product's background.
-function drawGarlicMotif(doc, cx, cy, r, opacity) {
-  doc.saveGraphicsState();
-  doc.setGState(new doc.GState({ opacity }));
-  doc.setFillColor(90, 130, 100);
-  const cloveR = r * 0.42;
-  const cloveCount = 6;
-  for (let i = 0; i < cloveCount; i++) {
-    const angle = (i / cloveCount) * Math.PI * 2;
-    doc.circle(cx + Math.cos(angle) * r * 0.5, cy + Math.sin(angle) * r * 0.5, cloveR, "F");
+// Brand / strength (only when unambiguous — a single ingredient) / dosage
+// form / pack size: every value already lives on the Product Catalog row,
+// nothing here is derived or guessed beyond that one narrow strength case.
+function buildProductOverviewRows(product, ingredients) {
+  const rows = [];
+  const brand = PRODUCT_BRAND_DISPLAY_NAMES[product.brand] || product.brand;
+  if (brand) rows.push({ label: "Brand", value: brand });
+  if (ingredients.length === 1 && (ingredients[0].amount || ingredients[0].amount === 0)) {
+    const strength = [ingredients[0].amount, ingredients[0].unit].filter((v) => v !== "" && v != null).join(" ");
+    if (strength) rows.push({ label: "Strength", value: strength });
   }
-  doc.circle(cx, cy, cloveR * 0.9, "F");
-  // A filled rect, not a stroked line: jsPDF's GState({opacity}) only sets
-  // fill-alpha (not stroke-alpha), so a stroked line here would render at
-  // full opacity while the circles around it faded — a stray solid line
-  // instead of a matching soft stem.
-  doc.rect(cx - 0.35, cy - r * 1.35, 0.7, r * 0.45, "F");
-  doc.restoreGraphicsState();
+  if (product.form) rows.push({ label: "Dosage Form", value: product.form });
+  if (product.packSize) rows.push({ label: "Pack Size", value: String(product.packSize) });
+  return rows;
 }
 
-function drawSoftPageBackground(doc, pageWidth, pageHeight, productName) {
-  const bands = 20;
-  const washH = pageHeight * 0.4;
-  const bandH = washH / bands;
-  for (let i = 0; i < bands; i++) {
-    const t = i / (bands - 1);
-    doc.setFillColor(Math.round(234 + (255 - 234) * t), Math.round(242 + (255 - 242) * t), Math.round(235 + (255 - 235) * t));
-    doc.rect(0, i * bandH, pageWidth, bandH + 0.6, "F");
+// Groups this product's existing Knowledge → By Specialty contributions
+// (the app's own specialty/topic assignments, added by reps/managers) by
+// specialty, deduped to a plain list of topic names per specialty.
+function specialtySubcategoriesFor(productName, contributions) {
+  const norm = String(productName || "").toLowerCase().trim();
+  const bySpecialty = new Map();
+  for (const c of contributions || []) {
+    if (String(c.productName || "").toLowerCase().trim() !== norm) continue;
+    if (!bySpecialty.has(c.specialty)) bySpecialty.set(c.specialty, new Set());
+    bySpecialty.get(c.specialty).add(c.topic);
   }
-  doc.setFillColor(255, 255, 255);
-  doc.rect(0, washH, pageWidth, pageHeight - washH, "F");
+  return [...bySpecialty.entries()].map(([specialty, topics]) => ({ specialty, topics: [...topics] }));
+}
 
-  const motif = ingredientMotifFor(productName);
-  if (motif === "garlic") {
-    drawGarlicMotif(doc, pageWidth - 20, 30, 34, 0.1);
-    drawGarlicMotif(doc, 10, pageHeight - 20, 40, 0.07);
-  } else {
-    doc.saveGraphicsState();
-    doc.setGState(new doc.GState({ opacity: 0.07 }));
-    doc.setFillColor(76, 122, 94);
-    doc.circle(pageWidth - 8, 10, 42, "F");
-    doc.circle(pageWidth + 6, 42, 28, "F");
-    doc.restoreGraphicsState();
+// A short, already-curated clinical note — Recall's repQuickTakeaway is
+// written by a manager specifically as a rep-facing clinical summary for one
+// ingredient, never auto-generated — so it's the only thing quoted here.
+// Returns "" (section omitted entirely) when nothing has been curated yet.
+function clinicalDiscussionTextFor(studiesData) {
+  const withTakeaway = (studiesData?.ingredients || []).filter((i) => (i.repQuickTakeaway || "").trim());
+  if (!withTakeaway.length) return "";
+  return withTakeaway.slice(0, 2).map((i) => `${i.name}: ${i.repQuickTakeaway.trim()}`).join("  ");
+}
 
-    doc.saveGraphicsState();
-    doc.setGState(new doc.GState({ opacity: 0.05 }));
-    doc.setFillColor(76, 122, 94);
-    doc.circle(-8, pageHeight - 12, 46, "F");
-    doc.restoreGraphicsState();
+const BROCHURE_COLORS = {
+  ink: "#173F33", // deep forest green — headlines
+  sage: "#4A7C59", // medium green — accents/secondary text
+  sageLight: "#EAF2EC", // light green card-icon background
+  ivory: "#F8F6EF", // page background
+  border: "#E3DFD2",
+  textGray: "#6B6B63",
+};
+
+const BROCHURE_FONTS_URL = "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Inter:wght@400;500;600;700&display=swap";
+let brochureFontsLinkPromise = null;
+// Loads the two brochure fonts once per session (idempotent) — never blocks
+// the export if the font CDN is unreachable, it just falls back to the
+// browser's default serif/sans-serif.
+function ensureBrochureFontsLoaded() {
+  if (!brochureFontsLinkPromise) {
+    brochureFontsLinkPromise = new Promise((resolve) => {
+      if (document.querySelector("link[data-kbdoc-fonts]")) { resolve(); return; }
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = BROCHURE_FONTS_URL;
+      link.setAttribute("data-kbdoc-fonts", "1");
+      link.onload = () => resolve();
+      link.onerror = () => resolve();
+      document.head.appendChild(link);
+      setTimeout(resolve, 2500); // don't let a slow CDN stall the export
+    });
   }
+  return brochureFontsLinkPromise;
 }
 
-// A small filled brand-green circle with a white checkmark — used as a
-// consistent icon badge for every highlight bullet instead of a plain "•",
-// since we have no reliable way to pick a DIFFERENT icon (heart/brain/etc.)
-// that actually matches each highlight's specific claim.
-function drawCheckBadge(doc, cx, cy, r) {
-  doc.setFillColor(46, 110, 80);
-  doc.circle(cx, cy, r, "F");
-  doc.setDrawColor(255, 255, 255);
-  doc.setLineWidth(Math.max(0.5, r * 0.22));
-  doc.line(cx - r * 0.45, cy + r * 0.02, cx - r * 0.08, cy + r * 0.4);
-  doc.line(cx - r * 0.08, cy + r * 0.4, cx + r * 0.5, cy - r * 0.35);
+function escapeHtml(s) {
+  return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-// A white rounded card behind the Supplement Facts image, matching the soft
-// floating-card look, instead of the image sitting directly on the page.
-function drawFactsCard(doc, x, y, w, h, pad) {
-  doc.setFillColor(255, 255, 255);
-  doc.setDrawColor(226, 220, 208);
-  doc.setLineWidth(0.3);
-  doc.roundedRect(x - pad, y - pad, w + pad * 2, h + pad * 2, 2.5, 2.5, "FD");
+function mmFromPx(px) { return (px / 96) * 25.4; }
+
+// Simple, generic line-icon glyphs (not a copy of any specific icon
+// library's artwork) used throughout the brochure's header/card badges.
+function kbIcon(name, color, size) {
+  const common = `width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"`;
+  if (name === "leaf") return `<svg ${common}><path d="M4 20c6-1 9-4 9-10 0-3 2-6 7-7-1 7-3 13-9 15-3 1-5 1-7 2z"/><path d="M8 16c2-3 3-6 3-10"/></svg>`;
+  if (name === "heart") return `<svg ${common}><path d="M12 20s-7-4.4-9.5-8.6C1 8.6 2.3 5 6 5c2 0 3.5 1.2 4 2.5.5-1.3 2-2.5 4-2.5 3.7 0 5 3.6 3.5 6.4C19 15.6 12 20 12 20z"/></svg>`;
+  if (name === "pill") return `<svg ${common}><rect x="3" y="9" width="18" height="6" rx="3"/><line x1="12" y1="9" x2="12" y2="15"/></svg>`;
+  if (name === "flask") return `<svg ${common}><path d="M9 3h6M10 3v6l-5.2 9a2 2 0 0 0 1.7 3h11a2 2 0 0 0 1.7-3L14 9V3"/></svg>`;
+  return "";
+}
+function kbCheckBadgeSvg(color, size) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="${color}"/><path d="M7 12.5l3.2 3.2L17 9" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
 
-// ---- Specialty export: one click on the specialty itself (no per-item
-// selection) — every product already added under that specialty's
-// subcategories, grouped by subcategory heading, each with its Supplement
-// Facts image. Deliberately minimal (no bottle image, overview card,
-// ingredient table, or clinical text) per explicit request — just the
-// subcategory structure already visible on screen, with the facts label
-// for each item, as a simple continuous flowing document.
-async function downloadSpecialtySubcategoryExportPdf(specialty, topics, catalogByNormName) {
-  const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const pageHeight = doc.internal.pageSize.getHeight();
-  const margin = 14;
-  const contentWidth = pageWidth - margin * 2;
-  const bottomLimit = pageHeight - 18;
+function brochureCardWrapper(icon, title, innerHtml) {
+  return `<div style="flex:1 1 0;background:#fff;border:1px solid ${BROCHURE_COLORS.border};border-radius:10px;box-shadow:0 6px 14px rgba(23,63,51,0.06);padding:14px;min-width:0;display:flex;flex-direction:column;box-sizing:border-box;">
+    <div style="display:flex;align-items:center;gap:7px;margin-bottom:10px;">
+      <span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:${BROCHURE_COLORS.sageLight};flex:0 0 auto;">${kbIcon(icon, BROCHURE_COLORS.sage, 14)}</span>
+      <span style="font-family:Inter,sans-serif;font-weight:700;font-size:11px;letter-spacing:0.8px;color:${BROCHURE_COLORS.ink};text-transform:uppercase;">${title}</span>
+    </div>
+    <div style="flex:1 1 auto;">${innerHtml}</div>
+  </div>`;
+}
 
-  drawSoftPageBackground(doc, pageWidth, pageHeight, specialty);
-  let y = margin;
-  doc.setTextColor(20, 30, 25);
-  doc.setFontSize(20);
-  doc.setFont(undefined, "bold");
-  doc.text(specialty, margin, y + 6);
-  doc.setFont(undefined, "normal");
-  y += 14;
-  doc.setDrawColor(216, 210, 196);
-  doc.setLineWidth(0.4);
-  doc.line(margin, y, margin + contentWidth, y);
-  y += 10;
+function buildBrochureHeaderHtml(brandDisplay, primarySpecialty) {
+  return `<div style="display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid ${BROCHURE_COLORS.ink};padding-bottom:12px;flex:0 0 auto;">
+    <div style="display:flex;align-items:center;gap:8px;">
+      ${kbIcon("leaf", BROCHURE_COLORS.ink, 26)}
+      <span style="font-family:'Playfair Display',serif;font-weight:700;font-size:21px;color:${BROCHURE_COLORS.ink};">${escapeHtml(brandDisplay)}</span>
+    </div>
+    ${primarySpecialty ? `<span style="font-family:Inter,sans-serif;font-weight:600;font-size:12px;letter-spacing:1.5px;color:${BROCHURE_COLORS.sage};text-transform:uppercase;">${escapeHtml(primarySpecialty)}</span>` : ""}
+  </div>`;
+}
 
-  const ensureSpace = (needed) => {
-    if (y + needed > bottomLimit) {
-      doc.addPage();
-      drawSoftPageBackground(doc, pageWidth, pageHeight, specialty);
-      y = margin;
-    }
+function buildBrochureHeadlineHtml(product, overviewRows) {
+  const strengthRow = overviewRows.find((r) => r.label === "Strength");
+  const packRow = overviewRows.find((r) => r.label === "Pack Size");
+  const subtitleParts = [];
+  if (strengthRow) subtitleParts.push(strengthRow.value);
+  if (product.form) subtitleParts.push(product.form);
+  if (packRow) subtitleParts.push(`Pack of ${packRow.value}`);
+  return `<div style="margin-top:18px;flex:0 0 auto;">
+    <div style="font-family:'Playfair Display',serif;font-weight:700;font-size:36px;line-height:1.15;color:${BROCHURE_COLORS.ink};">${escapeHtml(product.name)}</div>
+    ${subtitleParts.length ? `<div style="font-family:Inter,sans-serif;font-size:15px;color:${BROCHURE_COLORS.sage};margin-top:6px;letter-spacing:0.3px;">${subtitleParts.map(escapeHtml).join("&nbsp;&nbsp;·&nbsp;&nbsp;")}</div>` : ""}
+    <div style="height:2px;width:72px;background:${BROCHURE_COLORS.sage};margin-top:14px;border-radius:2px;"></div>
+  </div>`;
+}
+
+function buildBrochureHeroSideHtml({ bottleDataUrl, factsDataUrl }) {
+  // Top-aligned, not vertically centered: with a tall bottle photo next to a
+  // much shorter landscape facts panel, centering both within the same
+  // shared-height row left the facts panel visibly floating with a large,
+  // unbalanced gap above and below it.
+  return `<div style="flex:1 1 auto;min-height:0;display:flex;align-items:flex-start;gap:28px;margin:22px 0;">
+    <div style="flex:0 0 45%;height:100%;display:flex;align-items:flex-start;justify-content:center;min-width:0;">
+      ${bottleDataUrl ? `<img class="kbdoc-bottle-img" src="${bottleDataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;filter:drop-shadow(0 14px 18px rgba(23,63,51,0.18));"/>` : ""}
+    </div>
+    <div style="flex:1 1 auto;height:100%;display:flex;align-items:flex-start;justify-content:center;min-width:0;">
+      ${factsDataUrl ? `<div style="background:#fff;border:1px solid ${BROCHURE_COLORS.border};border-radius:10px;box-shadow:0 10px 24px rgba(23,63,51,0.08);padding:14px;display:flex;align-items:center;justify-content:center;max-width:100%;max-height:100%;box-sizing:border-box;">
+        <img class="kbdoc-facts-img" src="${factsDataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;display:block;"/>
+      </div>` : ""}
+    </div>
+  </div>`;
+}
+function buildBrochureHeroFullWidthHtml({ bottleDataUrl, factsDataUrl }) {
+  return `<div style="flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:16px;margin:22px 0;">
+    <div style="flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;">
+      ${bottleDataUrl ? `<img class="kbdoc-bottle-img" src="${bottleDataUrl}" style="max-width:40%;max-height:100%;object-fit:contain;filter:drop-shadow(0 14px 18px rgba(23,63,51,0.18));"/>` : ""}
+    </div>
+    <div style="flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;">
+      <div style="background:#fff;border:1px solid ${BROCHURE_COLORS.border};border-radius:10px;box-shadow:0 10px 24px rgba(23,63,51,0.08);padding:14px;display:flex;align-items:center;justify-content:center;max-width:100%;max-height:100%;box-sizing:border-box;">
+        <img class="kbdoc-facts-img" src="${factsDataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;display:block;"/>
+      </div>
+    </div>
+  </div>`;
+}
+function buildBrochureHeroBottleOnlyHtml({ bottleDataUrl }) {
+  return `<div style="flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;margin:22px 0;">
+    ${bottleDataUrl ? `<img class="kbdoc-bottle-img" src="${bottleDataUrl}" style="max-width:60%;max-height:100%;object-fit:contain;filter:drop-shadow(0 16px 20px rgba(23,63,51,0.2));"/>` : ""}
+  </div>`;
+}
+
+function buildBrochureSpecialtyCardHtml(subcats) {
+  if (!subcats.length) return null;
+  const blocks = subcats.map(({ specialty, topics }) => `<div style="margin-bottom:8px;">
+    <div style="font-family:Inter,sans-serif;font-weight:600;font-size:11px;color:${BROCHURE_COLORS.ink};text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">${escapeHtml(specialty)}</div>
+    <div style="display:flex;flex-direction:column;gap:3px;">
+      ${topics.map((t) => `<div style="display:flex;align-items:center;gap:6px;font-family:Inter,sans-serif;font-size:11.5px;color:#333;"><span style="flex:0 0 auto;">${kbCheckBadgeSvg(BROCHURE_COLORS.sage, 13)}</span><span>${escapeHtml(t)}</span></div>`).join("")}
+    </div>
+  </div>`).join("");
+  return brochureCardWrapper("heart", "Medical Specialty", blocks + `<div style="font-family:Inter,sans-serif;font-style:italic;font-size:9px;color:${BROCHURE_COLORS.textGray};margin-top:4px;">Discussion categories, not a treatment claim.</div>`);
+}
+function buildBrochureOverviewCardHtml(overviewRows) {
+  if (!overviewRows.length) return null;
+  const rows = overviewRows.map(({ label, value }) => `<div style="display:flex;justify-content:space-between;gap:8px;font-family:Inter,sans-serif;font-size:11.5px;padding:3px 0;border-bottom:1px solid ${BROCHURE_COLORS.border};">
+    <span style="color:${BROCHURE_COLORS.textGray};">${escapeHtml(label)}</span>
+    <span style="color:#222;font-weight:600;text-align:right;">${escapeHtml(value)}</span>
+  </div>`).join("");
+  return brochureCardWrapper("pill", "Product Overview", rows);
+}
+function buildBrochureIngredientsCardHtml(ingredients) {
+  if (!ingredients.length) return null;
+  const rows = ingredients.map((ing) => {
+    const amount = [ing.amount, ing.unit].filter((v) => v !== "" && v != null).join(" ");
+    return `<div style="margin-bottom:7px;">
+      <div style="display:flex;justify-content:space-between;gap:6px;font-family:Inter,sans-serif;font-size:11.5px;">
+        <span style="color:#222;font-weight:600;">${escapeHtml(ing.name)}</span>
+        ${amount ? `<span style="color:${BROCHURE_COLORS.sage};font-weight:700;white-space:nowrap;">${escapeHtml(amount)}</span>` : ""}
+      </div>
+      ${ing.form ? `<div style="font-family:Inter,sans-serif;font-style:italic;font-size:9.5px;color:${BROCHURE_COLORS.textGray};">${escapeHtml(ing.form)}</div>` : ""}
+    </div>`;
+  }).join("");
+  return brochureCardWrapper("flask", "Key Ingredients", rows);
+}
+function buildBrochureInfoRowHtml(cards) {
+  const present = cards.filter(Boolean);
+  if (!present.length) return "";
+  return `<div style="flex:0 0 auto;display:flex;gap:14px;margin-bottom:16px;">${present.join("")}</div>`;
+}
+function buildBrochureClinicalHtml(clinicalText) {
+  if (!clinicalText) return "";
+  return `<div style="flex:0 0 auto;margin-bottom:12px;">
+    <div style="font-family:Inter,sans-serif;font-weight:700;font-size:10.5px;letter-spacing:0.8px;color:${BROCHURE_COLORS.sage};text-transform:uppercase;margin-bottom:4px;">Clinical Discussion</div>
+    <div style="font-family:Inter,sans-serif;font-size:11px;line-height:1.5;color:#333;font-style:italic;">${escapeHtml(clinicalText)}</div>
+  </div>`;
+}
+function buildBrochureFooterHtml(brandDisplay, product, pageIndex, pageCount) {
+  return `<div style="flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;border-top:1px solid ${BROCHURE_COLORS.border};padding-top:10px;font-family:Inter,sans-serif;font-size:9.5px;color:${BROCHURE_COLORS.textGray};">
+    <div style="display:flex;align-items:center;gap:5px;">${kbIcon("leaf", BROCHURE_COLORS.sage, 12)}<span style="font-weight:600;color:${BROCHURE_COLORS.ink};">KayBee Pharma</span></div>
+    <div>${escapeHtml(brandDisplay)} &nbsp;·&nbsp; ${escapeHtml(product.name)}</div>
+    <div>Page ${pageIndex} of ${pageCount}</div>
+  </div>`;
+}
+
+function buildBrochurePageHtml({ product, brandDisplay, overviewRows, ingredients, subcats, clinicalText, bottleDataUrl, factsDataUrl, heroMode, pageIndex, pageCount }) {
+  const primarySpecialty = subcats[0]?.specialty || "";
+  const heroHtml = heroMode === "full-width"
+    ? buildBrochureHeroFullWidthHtml({ bottleDataUrl, factsDataUrl })
+    : heroMode === "bottle-only"
+    ? buildBrochureHeroBottleOnlyHtml({ bottleDataUrl })
+    : buildBrochureHeroSideHtml({ bottleDataUrl, factsDataUrl });
+  const infoRow = buildBrochureInfoRowHtml([
+    buildBrochureSpecialtyCardHtml(subcats),
+    buildBrochureOverviewCardHtml(overviewRows),
+    buildBrochureIngredientsCardHtml(ingredients),
+  ]);
+  return `<div style="width:794px;height:1123px;box-sizing:border-box;padding:45px;background:${BROCHURE_COLORS.ivory};display:flex;flex-direction:column;font-smooth:always;-webkit-font-smoothing:antialiased;">
+    ${buildBrochureHeaderHtml(brandDisplay, primarySpecialty)}
+    ${buildBrochureHeadlineHtml(product, overviewRows)}
+    ${heroHtml}
+    ${infoRow}
+    ${buildBrochureClinicalHtml(clinicalText)}
+    ${buildBrochureFooterHtml(brandDisplay, product, pageIndex, pageCount)}
+  </div>`;
+}
+function buildBrochureFactsOnlyPageHtml({ product, brandDisplay, factsDataUrl, lowRes, pageIndex, pageCount }) {
+  return `<div style="width:794px;height:1123px;box-sizing:border-box;padding:45px;background:${BROCHURE_COLORS.ivory};display:flex;flex-direction:column;">
+    ${buildBrochureHeaderHtml(brandDisplay, "")}
+    <div style="font-family:'Playfair Display',serif;font-weight:700;font-size:26px;color:${BROCHURE_COLORS.ink};margin-top:18px;flex:0 0 auto;">Supplement Facts — ${escapeHtml(product.name)}</div>
+    <div style="height:2px;width:72px;background:${BROCHURE_COLORS.sage};margin:14px 0 20px;border-radius:2px;flex:0 0 auto;"></div>
+    ${lowRes ? `<div style="flex:0 0 auto;background:#FCEDDD;border:1px solid #E0B273;border-radius:8px;padding:10px 14px;font-family:Inter,sans-serif;font-size:11px;color:#8A5A14;margin-bottom:16px;">Low-resolution source image — replace with a higher-resolution scan for print use.</div>` : ""}
+    <div style="flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;">
+      <div style="background:#fff;border:1px solid ${BROCHURE_COLORS.border};border-radius:10px;box-shadow:0 10px 24px rgba(23,63,51,0.08);padding:18px;display:flex;align-items:center;justify-content:center;max-width:100%;max-height:100%;box-sizing:border-box;">
+        <img src="${factsDataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;display:block;"/>
+      </div>
+    </div>
+    ${buildBrochureFooterHtml(brandDisplay, product, pageIndex, pageCount)}
+  </div>`;
+}
+
+// Mounts a page's HTML off-screen (so it still gets real layout/paint, just
+// not visible), waits for every image to finish decoding and for the
+// brochure fonts to be ready, then rasterizes it with html2canvas. Returns
+// the canvas AND the still-mounted container/root element so the caller can
+// measure real rendered element sizes before deciding whether to keep this
+// render or try a different hero layout.
+async function renderBrochurePageToCanvas(innerHtml, { scale = 3 } = {}) {
+  await ensureBrochureFontsLoaded();
+  const container = document.createElement("div");
+  container.style.position = "fixed";
+  container.style.left = "-10000px";
+  container.style.top = "0";
+  container.style.zIndex = "-1";
+  container.innerHTML = innerHtml;
+  document.body.appendChild(container);
+  const pageEl = container.firstElementChild;
+  const imgs = [...pageEl.querySelectorAll("img")];
+  await Promise.all(imgs.map((img) => (img.decode ? img.decode().catch(() => new Promise((resolve) => { img.onload = resolve; img.onerror = resolve; })) : new Promise((resolve) => { img.onload = resolve; img.onerror = resolve; }))));
+  if (document.fonts && document.fonts.ready) await document.fonts.ready;
+  const canvas = await html2canvas(pageEl, { scale, useCORS: true, backgroundColor: BROCHURE_COLORS.ivory, logging: false });
+  return { canvas, container, pageEl };
+}
+
+async function renderDoctorBrochurePage(doc, product, { contributions, pageIndex, pageCount }) {
+  const brandDisplay = PRODUCT_BRAND_DISPLAY_NAMES[product.brand] || product.brand || "KayBee Pharma";
+  const ingredients = parseProductIngredientsJson(product.ingredients);
+  const overviewRows = buildProductOverviewRows(product, ingredients);
+  const subcats = specialtySubcategoriesFor(product.name, contributions);
+  let studiesData = null;
+  try { studiesData = await api.getProductCatalogStudies(product.id); } catch { /* bonus content only */ }
+  const clinicalText = clinicalDiscussionTextFor(studiesData);
+
+  const bottleData = product.hasBottleImage ? await loadImageBytes(product.id, "bottle", product.bottleImageMimeType).catch(() => null) : null;
+  const factsData = product.hasSupplementFactsImage ? await loadImageBytes(product.id, "supplementFacts", product.supplementFactsImageMimeType).catch(() => null) : null;
+
+  const baseArgs = {
+    product, brandDisplay, overviewRows, ingredients, subcats, clinicalText,
+    bottleDataUrl: bottleData?.dataUrl || "", factsDataUrl: factsData?.dataUrl || "",
+    pageIndex, pageCount,
   };
 
-  let anyContent = false;
-  for (const topic of topics) {
-    const matched = (topic.contributedProducts || [])
-      .map((c) => catalogByNormName.get(String(c.productName || "").toLowerCase().trim()))
-      .filter((p) => p && p.hasSupplementFactsImage);
-    const seen = new Set();
-    const items = matched.filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true)));
-    if (!items.length) continue;
-    anyContent = true;
+  let ownFactsPage = null;
+  let finalCanvas;
+  let finalContainer;
 
-    ensureSpace(14);
-    doc.setFontSize(13);
-    doc.setFont(undefined, "bold");
-    doc.setTextColor(46, 110, 80);
-    doc.text(topic.topic, margin, y + 5);
-    doc.setFont(undefined, "normal");
-    y += 11;
-
-    for (const product of items) {
-      let factsData;
-      try { factsData = await loadImageBytes(product.id, "supplementFacts", product.supplementFactsImageMimeType); } catch { continue; }
-      const fit = containFitMm(factsData.img.width, factsData.img.height, contentWidth * 0.8, 95);
-      const cardPad = 4;
-
-      doc.setFontSize(10.5);
-      const nameLines = doc.splitTextToSize(product.name, contentWidth);
-      const nameH = nameLines.length * 5;
-      // One reservation covering the name line, the gap, the card (with its
-      // own padding on both sides), and the trailing gap — drawFactsCard's
-      // padding extends the card's visual edges beyond the y it's given, so
-      // reserving space piecemeal (name, then card) let the card's top edge
-      // creep up into the name text above it.
-      ensureSpace(nameH + 6 + fit.h + cardPad * 2 + 8);
-
-      doc.setTextColor(20, 30, 25);
-      doc.setFont(undefined, "bold");
-      doc.text(nameLines, margin, y + 4);
-      doc.setFont(undefined, "normal");
-      y += nameH + 6;
-
-      const cardY = y + cardPad;
-      drawFactsCard(doc, margin, cardY, fit.w, fit.h, cardPad);
-      doc.addImage(factsData.dataUrl, factsData.format, margin, cardY, fit.w, fit.h, undefined, "FAST");
-      y = cardY + fit.h + cardPad + 8;
+  if (!factsData) {
+    const rendered = await renderBrochurePageToCanvas(buildBrochurePageHtml({ ...baseArgs, heroMode: "bottle-only" }));
+    finalCanvas = rendered.canvas;
+    finalContainer = rendered.container;
+  } else {
+    // Try side-by-side first, then measure the facts image's ACTUAL
+    // rendered box (real browser layout, not an estimate) to decide if it's
+    // still legible there — the same side -> full-width -> own-page
+    // cascade the vector version uses, just driven by real DOM measurement.
+    let rendered = await renderBrochurePageToCanvas(buildBrochurePageHtml({ ...baseArgs, heroMode: "side" }));
+    let rect = rendered.pageEl.querySelector(".kbdoc-facts-img").getBoundingClientRect();
+    if (isLegibleFit(factsData.img.width, { w: mmFromPx(rect.width) })) {
+      finalCanvas = rendered.canvas;
+      finalContainer = rendered.container;
+    } else {
+      document.body.removeChild(rendered.container);
+      rendered = await renderBrochurePageToCanvas(buildBrochurePageHtml({ ...baseArgs, heroMode: "full-width" }));
+      rect = rendered.pageEl.querySelector(".kbdoc-facts-img").getBoundingClientRect();
+      if (isLegibleFit(factsData.img.width, { w: mmFromPx(rect.width) })) {
+        finalCanvas = rendered.canvas;
+        finalContainer = rendered.container;
+      } else {
+        document.body.removeChild(rendered.container);
+        rendered = await renderBrochurePageToCanvas(buildBrochurePageHtml({ ...baseArgs, heroMode: "bottle-only" }));
+        finalCanvas = rendered.canvas;
+        finalContainer = rendered.container;
+        ownFactsPage = {
+          product, brandDisplay, factsDataUrl: factsData.dataUrl,
+          lowRes: effectivePpi(factsData.img.width, mmFromPx(rect.width)) < MIN_LEGIBLE_PPI,
+        };
+      }
     }
   }
 
-  if (!anyContent) {
-    doc.setFontSize(11);
-    doc.setTextColor(140, 130, 110);
-    doc.text("No products with an approved Supplement Facts image have been added under this specialty yet.", margin, y + 6, { maxWidth: contentWidth });
+  doc.addImage(finalCanvas.toDataURL("image/jpeg", 0.95), "JPEG", 0, 0, 210, 297);
+  document.body.removeChild(finalContainer);
+  return ownFactsPage;
+}
+
+// A single centered title page introducing the specialty-wide brochure —
+// reuses the same brochure chrome (leaf mark, Playfair Display, sage accent
+// underline, footer) as every per-product brochure page that follows it.
+function buildBrochureCoverPageHtml({ specialty, productCount, pageIndex, pageCount }) {
+  const subtitle = productCount > 0
+    ? `${productCount} product${productCount === 1 ? "" : "s"} relevant to this specialty`
+    : "No products with an approved image have been added under this specialty yet.";
+  return `<div style="width:794px;height:1123px;box-sizing:border-box;padding:60px;background:${BROCHURE_COLORS.ivory};display:flex;flex-direction:column;font-family:Inter,sans-serif;">
+    <div style="flex:1 1 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;">
+      <span style="display:inline-flex;align-items:center;justify-content:center;width:64px;height:64px;border-radius:50%;background:${BROCHURE_COLORS.sageLight};margin-bottom:28px;">${kbIcon("leaf", BROCHURE_COLORS.sage, 34)}</span>
+      <div style="font-family:Inter,sans-serif;font-weight:600;font-size:13px;letter-spacing:3px;color:${BROCHURE_COLORS.sage};text-transform:uppercase;margin-bottom:16px;">Product Reference Brochure</div>
+      <div style="font-family:'Playfair Display',serif;font-weight:700;font-size:48px;line-height:1.2;color:${BROCHURE_COLORS.ink};max-width:560px;">${escapeHtml(specialty)}</div>
+      <div style="height:3px;width:90px;background:${BROCHURE_COLORS.sage};margin:22px 0;border-radius:2px;"></div>
+      <div style="font-family:Inter,sans-serif;font-size:15px;color:${BROCHURE_COLORS.textGray};max-width:460px;">${escapeHtml(subtitle)}</div>
+    </div>
+    ${buildBrochureFooterHtml("KayBee Pharma", { name: specialty }, pageIndex, pageCount)}
+  </div>`;
+}
+
+// One combined premium brochure covering every product already contributed
+// under a specialty's subcategories — a med rep visiting, say, a
+// cardiologist exports a single document covering every relevant product
+// instead of one-at-a-time. Reuses renderDoctorBrochurePage exactly as the
+// single-item flow does (each product's own page still shows whichever
+// specialties/subcategories it belongs to), with a title page in front.
+async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName, contributions) {
+  const seen = new Set();
+  const products = [];
+  for (const topic of topics) {
+    for (const c of topic.contributedProducts || []) {
+      const p = catalogByNormName.get(String(c.productName || "").toLowerCase().trim());
+      if (p && (p.hasBottleImage || p.hasSupplementFactsImage) && !seen.has(p.id)) {
+        seen.add(p.id);
+        products.push(p);
+      }
+    }
   }
 
-  stampExportFooters(doc, "KayBee Pharma");
-  doc.save(`${specialty.replace(/[^a-zA-Z0-9]+/g, "-")}-subcategories-${Date.now()}.pdf`);
+  const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+  const pageCount = products.length + 1;
+  const cover = await renderBrochurePageToCanvas(buildBrochureCoverPageHtml({ specialty, productCount: products.length, pageIndex: 1, pageCount }));
+  doc.addImage(cover.canvas.toDataURL("image/jpeg", 0.95), "JPEG", 0, 0, 210, 297);
+  document.body.removeChild(cover.container);
+
+  const dedicatedFactsPages = [];
+  let pageIndex = 1;
+  for (const product of products) {
+    pageIndex++;
+    doc.addPage();
+    const ownPage = await renderDoctorBrochurePage(doc, product, { contributions: contributions || [], pageIndex, pageCount });
+    if (ownPage) dedicatedFactsPages.push(ownPage);
+  }
+  const totalPages = pageCount + dedicatedFactsPages.length;
+  for (const entry of dedicatedFactsPages) {
+    doc.addPage();
+    pageIndex++;
+    const { canvas, container } = await renderBrochurePageToCanvas(buildBrochureFactsOnlyPageHtml({ ...entry, pageIndex, pageCount: totalPages }));
+    doc.addImage(canvas.toDataURL("image/jpeg", 0.95), "JPEG", 0, 0, 210, 297);
+    document.body.removeChild(container);
+  }
+  doc.save(`${specialty.replace(/[^a-zA-Z0-9]+/g, "-")}-brochure-${Date.now()}.pdf`);
 }
 
 function loadImageFromDataUrl(dataUrl) {
@@ -9786,11 +10010,11 @@ function KnowledgeView({ productCatalog, role }) {
                     onClick={async () => {
                       const key = `subcat:${s.specialty}`;
                       setExportingKey(key);
-                      try { await downloadSpecialtySubcategoryExportPdf(s.specialty, s.topics, catalogByNormName); }
+                      try { await downloadSpecialtyBrochurePdf(s.specialty, s.topics, catalogByNormName, contributions); }
                       finally { setExportingKey(null); }
                     }}
                     disabled={exportingKey !== null}
-                    title={`Export every ${s.specialty} product as a PDF, grouped by subcategory`}
+                    title={`Export a premium physician-facing brochure covering every ${s.specialty} product in one PDF`}
                     style={{
                       fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 6, flexShrink: 0,
                       border: "1px solid #4C7A5E", background: "#4C7A5E", color: "#fff",
