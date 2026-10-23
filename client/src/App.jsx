@@ -10116,6 +10116,69 @@ async function downloadDoctorPresentationBrochurePdf(selectedProducts, specialty
   doc.save(`${namePrefix}doctor-presentation-brochure-${Date.now()}.pdf`);
 }
 
+// A single centered title page introducing the specialty-wide brochure —
+// reuses the same brochure chrome (leaf mark, Playfair Display, sage accent
+// underline, footer) as every per-product brochure page that follows it.
+function buildBrochureCoverPageHtml({ specialty, productCount, pageIndex, pageCount }) {
+  const subtitle = productCount > 0
+    ? `${productCount} product${productCount === 1 ? "" : "s"} relevant to this specialty`
+    : "No products with an approved image have been added under this specialty yet.";
+  return `<div style="width:794px;height:1123px;box-sizing:border-box;padding:60px;background:${BROCHURE_COLORS.ivory};display:flex;flex-direction:column;font-family:Inter,sans-serif;">
+    <div style="flex:1 1 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;">
+      <span style="display:inline-flex;align-items:center;justify-content:center;width:64px;height:64px;border-radius:50%;background:${BROCHURE_COLORS.sageLight};margin-bottom:28px;">${kbIcon("leaf", BROCHURE_COLORS.sage, 34)}</span>
+      <div style="font-family:Inter,sans-serif;font-weight:600;font-size:13px;letter-spacing:3px;color:${BROCHURE_COLORS.sage};text-transform:uppercase;margin-bottom:16px;">Product Reference Brochure</div>
+      <div style="font-family:'Playfair Display',serif;font-weight:700;font-size:48px;line-height:1.2;color:${BROCHURE_COLORS.ink};max-width:560px;">${escapeHtml(specialty)}</div>
+      <div style="height:3px;width:90px;background:${BROCHURE_COLORS.sage};margin:22px 0;border-radius:2px;"></div>
+      <div style="font-family:Inter,sans-serif;font-size:15px;color:${BROCHURE_COLORS.textGray};max-width:460px;">${escapeHtml(subtitle)}</div>
+    </div>
+    ${buildBrochureFooterHtml("KayBee Pharma", { name: specialty }, pageIndex, pageCount)}
+  </div>`;
+}
+
+// One combined premium brochure covering every product already contributed
+// under a specialty's subcategories — a med rep visiting, say, a
+// cardiologist exports a single document covering every relevant product
+// instead of one-at-a-time. Reuses renderDoctorBrochurePage exactly as the
+// single-item flow does (each product's own page still shows whichever
+// specialties/subcategories it belongs to), with a title page in front.
+async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName, contributions) {
+  const seen = new Set();
+  const products = [];
+  for (const topic of topics) {
+    for (const c of topic.contributedProducts || []) {
+      const p = catalogByNormName.get(String(c.productName || "").toLowerCase().trim());
+      if (p && (p.hasBottleImage || p.hasSupplementFactsImage) && !seen.has(p.id)) {
+        seen.add(p.id);
+        products.push(p);
+      }
+    }
+  }
+
+  const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+  const pageCount = products.length + 1;
+  const cover = await renderBrochurePageToCanvas(buildBrochureCoverPageHtml({ specialty, productCount: products.length, pageIndex: 1, pageCount }));
+  doc.addImage(cover.canvas.toDataURL("image/jpeg", 0.95), "JPEG", 0, 0, 210, 297);
+  document.body.removeChild(cover.container);
+
+  const dedicatedFactsPages = [];
+  let pageIndex = 1;
+  for (const product of products) {
+    pageIndex++;
+    doc.addPage();
+    const ownPage = await renderDoctorBrochurePage(doc, product, { contributions: contributions || [], pageIndex, pageCount });
+    if (ownPage) dedicatedFactsPages.push(ownPage);
+  }
+  const totalPages = pageCount + dedicatedFactsPages.length;
+  for (const entry of dedicatedFactsPages) {
+    doc.addPage();
+    pageIndex++;
+    const { canvas, container } = await renderBrochurePageToCanvas(buildBrochureFactsOnlyPageHtml({ ...entry, pageIndex, pageCount: totalPages }));
+    doc.addImage(canvas.toDataURL("image/jpeg", 0.95), "JPEG", 0, 0, 210, 297);
+    document.body.removeChild(container);
+  }
+  doc.save(`${specialty.replace(/[^a-zA-Z0-9]+/g, "-")}-brochure-${Date.now()}.pdf`);
+}
+
 // ---- Specialty export: one click on the specialty itself (no per-item
 // selection) — every product already added under that specialty's
 // subcategories, grouped by subcategory heading, each with its Supplement
@@ -10931,6 +10994,22 @@ function KnowledgeView({ productCatalog, role }) {
                     }}
                   >
                     {exporting ? "Exporting…" : "Export (PDF)"}
+                  </button>
+                  <button
+                    onClick={async () => {
+                      setExporting(true);
+                      try { await downloadSpecialtyBrochurePdf(s.specialty, s.topics, catalogByNormName, contributions); }
+                      finally { setExporting(false); }
+                    }}
+                    disabled={exporting}
+                    title={`Export a premium physician-facing brochure covering every ${s.specialty} product in one PDF`}
+                    style={{
+                      fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 6, flexShrink: 0,
+                      border: "1px solid #173F33", background: "#173F33", color: "#fff",
+                      cursor: exporting ? "default" : "pointer", opacity: exporting ? 0.6 : 1,
+                    }}
+                  >
+                    {exporting ? "Exporting…" : "Brochure (PDF)"}
                   </button>
                   <button
                     onClick={() => openAddForm(s.specialty, s.topics)}
