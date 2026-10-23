@@ -139,7 +139,22 @@ async function callGoogleApi(fn, { maxRetries = 5, type = "write" } = {}) {
 // read-quota bucket above filling up under real traffic. Never applied to
 // high-churn tabs (Visits, Orders, Samples, PunchLog, ...) where a request
 // needs the true current state, not a few seconds behind.
-const CACHEABLE_TABS = new Set(["Products", "Clients", "Doctors", "Nutritionists", "Reps", "Offers", "Settings"]);
+// ProductCatalog and the Recall/Product-Expert reference tables were left
+// out of this set even though they're exactly the same shape of problem —
+// edited rarely by a manager, read on every Knowledge/Product-Expert view —
+// which meant GET /api/product-catalog/:id/image-bytes and
+// GET /api/product-catalog/:id/studies each read-from-scratch on every call.
+// Exporting a specialty brochure fires one of each per product; for a
+// 5-10 product specialty that's dozens of uncached reads fired at once,
+// easily exceeding the 55/min shared quota above and sending several of
+// them into multi-second rate-limit backoff — the actual cause behind an
+// export of a handful of products taking minutes, not the per-request
+// network time itself.
+const CACHEABLE_TABS = new Set([
+  "Products", "Clients", "Doctors", "Nutritionists", "Reps", "Offers", "Settings",
+  "ProductCatalog", "RecallProductIngredients", "RecallIngredients", "RecallClinicalEvidence",
+  "RecallResearchSources", "RecallProductAdvantages", "TrainingStudies",
+]);
 const READ_CACHE_TTL_MS = 20 * 1000;
 const readCache = new Map(); // tab -> { data, expiresAt }
 
