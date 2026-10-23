@@ -13765,6 +13765,7 @@ function ProductImageSlot({ product, which, label, onUpload, onUploadUrl, onAppr
 
 function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBulk, onUploadImages, onSetImageApproval, onFindMissingImages, onGetFindImagesStatus, onRefreshAfterFindImages }) {
   const [search, setSearch] = useState("");
+  const [imageStatusFilter, setImageStatusFilter] = useState("all"); // "all" | "approved" | "needs_work"
   const [showAdd, setShowAdd] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -13777,8 +13778,13 @@ function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBu
   const [selectedForFind, setSelectedForFind] = useState(new Set());
 
   const list = products || [];
+  const approvedCount = list.filter((p) => p.imageApprovalStatus === "approved").length;
+  const needsWorkCount = list.length - approvedCount;
   const q = search.toLowerCase().trim();
-  const filtered = q ? list.filter((p) => p.name.toLowerCase().includes(q)) : list;
+  const bySearch = q ? list.filter((p) => p.name.toLowerCase().includes(q)) : list;
+  const filtered = imageStatusFilter === "approved" ? bySearch.filter((p) => p.imageApprovalStatus === "approved")
+    : imageStatusFilter === "needs_work" ? bySearch.filter((p) => p.imageApprovalStatus !== "approved")
+    : bySearch;
   const shown = filtered.slice(0, LIST_DISPLAY_CAP);
 
   const submitAdd = async (f, validationError) => {
@@ -13915,10 +13921,33 @@ function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBu
         />
       )}
 
-      <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search the catalog…" style={{ ...inputStyle, marginBottom: 10 }} />
+      <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search the catalog…" style={{ ...inputStyle, marginBottom: 8 }} />
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        {[
+          { key: "all", label: `All (${list.length})` },
+          { key: "approved", label: `Approved (${approvedCount})` },
+          { key: "needs_work", label: `Needs Work (${needsWorkCount})` },
+        ].map((opt) => (
+          <button
+            key={opt.key}
+            type="button"
+            onClick={() => setImageStatusFilter(opt.key)}
+            title={opt.key === "needs_work" ? "Products with no approved image yet — missing, pending review, or rejected" : undefined}
+            style={{
+              fontSize: 12, fontWeight: 500, padding: "6px 12px", borderRadius: 8, cursor: "pointer",
+              border: imageStatusFilter === opt.key ? "1px solid #1F2A24" : "1px solid #E5DFD3",
+              background: imageStatusFilter === opt.key ? "#1F2A24" : "#fff",
+              color: imageStatusFilter === opt.key ? "#FAF7F2" : "#1F2A24",
+            }}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
 
       {shown.length === 0 ? (
-        <EmptyState text={q ? "No products match." : "No products in the catalog yet — add one or import an Excel list."} />
+        <EmptyState text={q || imageStatusFilter !== "all" ? "No products match." : "No products in the catalog yet — add one or import an Excel list."} />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {shown.map((p) => {
