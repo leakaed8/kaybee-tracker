@@ -10799,7 +10799,11 @@ function KnowledgeView({ productCatalog, role }) {
   }, [productCatalog]);
   const [selectedForExport, setSelectedForExport] = useState(new Set());
   const [openStudiesFor, setOpenStudiesFor] = useState(null); // { id, name } | null
-  const [exporting, setExporting] = useState(false);
+  // Which single export button is currently running, e.g. "brochure:Cardiology"
+  // — null when nothing is exporting. Scoped per button (not a bare boolean)
+  // so starting one specialty's export doesn't make every OTHER specialty
+  // card's buttons flash "Exporting…" too.
+  const [exportingKey, setExportingKey] = useState(null);
   const toggleExportSelection = (id) => {
     setSelectedForExport((prev) => {
       const next = new Set(prev);
@@ -10807,8 +10811,8 @@ function KnowledgeView({ productCatalog, role }) {
       return next;
     });
   };
-  const runExport = async (fn, selectedIds) => {
-    setExporting(true);
+  const runExport = async (fn, selectedIds, key) => {
+    setExportingKey(key);
     try {
       await fn((productCatalog || []).filter((p) => selectedIds.includes(p.id)));
       setSelectedForExport((prev) => {
@@ -10819,7 +10823,7 @@ function KnowledgeView({ productCatalog, role }) {
     } catch {
       // Keep the selection so the rep can retry.
     } finally {
-      setExporting(false);
+      setExportingKey(null);
     }
   };
 
@@ -10981,35 +10985,37 @@ function KnowledgeView({ productCatalog, role }) {
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <button
                     onClick={async () => {
-                      setExporting(true);
+                      const key = `subcat:${s.specialty}`;
+                      setExportingKey(key);
                       try { await downloadSpecialtySubcategoryExportPdf(s.specialty, s.topics, catalogByNormName); }
-                      finally { setExporting(false); }
+                      finally { setExportingKey(null); }
                     }}
-                    disabled={exporting}
+                    disabled={exportingKey !== null}
                     title={`Export every ${s.specialty} product as a PDF, grouped by subcategory`}
                     style={{
                       fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 6, flexShrink: 0,
                       border: "1px solid #4C7A5E", background: "#4C7A5E", color: "#fff",
-                      cursor: exporting ? "default" : "pointer", opacity: exporting ? 0.6 : 1,
+                      cursor: exportingKey !== null ? "default" : "pointer", opacity: exportingKey !== null ? 0.6 : 1,
                     }}
                   >
-                    {exporting ? "Exporting…" : "Export (PDF)"}
+                    {exportingKey === `subcat:${s.specialty}` ? "Exporting…" : "Export (PDF)"}
                   </button>
                   <button
                     onClick={async () => {
-                      setExporting(true);
+                      const key = `brochure:${s.specialty}`;
+                      setExportingKey(key);
                       try { await downloadSpecialtyBrochurePdf(s.specialty, s.topics, catalogByNormName, contributions); }
-                      finally { setExporting(false); }
+                      finally { setExportingKey(null); }
                     }}
-                    disabled={exporting}
+                    disabled={exportingKey !== null}
                     title={`Export a premium physician-facing brochure covering every ${s.specialty} product in one PDF`}
                     style={{
                       fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 6, flexShrink: 0,
                       border: "1px solid #173F33", background: "#173F33", color: "#fff",
-                      cursor: exporting ? "default" : "pointer", opacity: exporting ? 0.6 : 1,
+                      cursor: exportingKey !== null ? "default" : "pointer", opacity: exportingKey !== null ? 0.6 : 1,
                     }}
                   >
-                    {exporting ? "Exporting…" : "Brochure (PDF)"}
+                    {exportingKey === `brochure:${s.specialty}` ? "Exporting…" : "Brochure (PDF)"}
                   </button>
                   <button
                     onClick={() => openAddForm(s.specialty, s.topics)}
@@ -11143,14 +11149,14 @@ function KnowledgeView({ productCatalog, role }) {
               {specialtySelectedIds.length > 0 && (
                 <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#1F2A24", color: "#FAF7F2", borderRadius: 8, padding: "8px 12px", marginTop: 10 }}>
                   <span style={{ fontSize: 12.5 }}>{specialtySelectedIds.length} product{specialtySelectedIds.length === 1 ? "" : "s"} selected</span>
-                  <button disabled={exporting} onClick={() => runExport((products) => downloadDoctorPresentationPdf(products, s.specialty, contributions), specialtySelectedIds)} style={{ fontSize: 12, background: "#FAF7F2", color: "#1F2A24", border: "none", borderRadius: 6, padding: "5px 10px" }}>
-                    {exporting ? "Exporting…" : "Doctor Presentation (PDF)"}
+                  <button disabled={exportingKey !== null} onClick={() => runExport((products) => downloadDoctorPresentationPdf(products, s.specialty, contributions), specialtySelectedIds, `doctor:${s.specialty}`)} style={{ fontSize: 12, background: "#FAF7F2", color: "#1F2A24", border: "none", borderRadius: 6, padding: "5px 10px" }}>
+                    {exportingKey === `doctor:${s.specialty}` ? "Exporting…" : "Doctor Presentation (PDF)"}
                   </button>
-                  <button disabled={exporting} onClick={() => runExport((products) => downloadCompactCatalogPdf(products, s.specialty), specialtySelectedIds)} style={{ fontSize: 12, background: "none", color: "#FAF7F2", border: "1px solid #FAF7F2", borderRadius: 6, padding: "5px 10px" }}>
-                    Compact Catalog (PDF)
+                  <button disabled={exportingKey !== null} onClick={() => runExport((products) => downloadCompactCatalogPdf(products, s.specialty), specialtySelectedIds, `compact:${s.specialty}`)} style={{ fontSize: 12, background: "none", color: "#FAF7F2", border: "1px solid #FAF7F2", borderRadius: 6, padding: "5px 10px" }}>
+                    {exportingKey === `compact:${s.specialty}` ? "Exporting…" : "Compact Catalog (PDF)"}
                   </button>
-                  <button disabled={exporting} onClick={() => runExport(downloadMobileProductCards, specialtySelectedIds)} style={{ fontSize: 12, background: "none", color: "#FAF7F2", border: "1px solid #FAF7F2", borderRadius: 6, padding: "5px 10px" }}>
-                    WhatsApp Images
+                  <button disabled={exportingKey !== null} onClick={() => runExport(downloadMobileProductCards, specialtySelectedIds, `whatsapp:${s.specialty}`)} style={{ fontSize: 12, background: "none", color: "#FAF7F2", border: "1px solid #FAF7F2", borderRadius: 6, padding: "5px 10px" }}>
+                    {exportingKey === `whatsapp:${s.specialty}` ? "Exporting…" : "WhatsApp Images"}
                   </button>
                   <button
                     onClick={() => setSelectedForExport((prev) => { const next = new Set(prev); specialtySelectedIds.forEach((id) => next.delete(id)); return next; })}
