@@ -9233,114 +9233,303 @@ function jsPdfFormatForMime(mime) {
   return "JPEG";
 }
 
-async function downloadImageFile(url, filename) {
-  const resp = await fetch(url);
-  const blob = await resp.blob();
-  const objectUrl = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = objectUrl;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(objectUrl);
+async function loadImageBytes(productId, which, mime) {
+  const dataUrl = await fetchImageAsDataUrl(catalogImageBytesPath(productId, which));
+  const img = await loadImageFromDataUrl(dataUrl);
+  return { dataUrl, img, format: jsPdfFormatForMime(mime) };
 }
 
-// Rep-facing export (requests #6/#7): a branded cover page for the
-// specialty, then a 2-column grid of the selected products — each with its
-// approved bottle + Supplement Facts photos side by side and up to 3
-// rep-facing bullet claims (reused as-is from Product Expert's "Why Our
-// Products" advantages, never invented copy). Mirrors the ensureSpace
-// pagination idiom already used by downloadRepPerformancePdfForRange.
-async function downloadSpecialtyProductCardsPdf(specialtyName, selectedProducts) {
-  const doc = new jsPDF();
+// ---- Shared pure layout math (unit-testable independent of jsPDF/canvas) ----
+// Legibility of a Supplement Facts label depends on two independent things,
+// and a placement only counts as legible when BOTH clear their floor:
+//   1. Physical size — a label rendered narrower than ~70mm is too small for
+//      a human to read the fine print, no matter how sharp the source is.
+//      Shrinking an image into a smaller box always makes its *pixel*
+//      density look better, so this check is what actually drives falling
+//      back to a bigger box (side -> full-width -> own page).
+//   2. Source sharpness — "effective PPI" (native pixel width divided by the
+//      rendered width in inches). Below ~150, the source image itself is too
+//      low-resolution to look sharp at any practical size; enlarging it
+//      further never makes it clearer, so this is what flags an image as
+//      needing replacement rather than a bigger box.
+const MIN_LEGIBLE_WIDTH_MM = 70;
+const MIN_LEGIBLE_PPI = 150;
+
+function effectivePpi(imgWidthPx, renderedWidthMm) {
+  if (!imgWidthPx || !renderedWidthMm) return 0;
+  return imgWidthPx / (renderedWidthMm / 25.4);
+}
+
+// Scales an image to fit entirely inside a box (mm), preserving aspect
+// ratio — the jsPDF-space equivalent of drawImageContain.
+function containFitMm(imgWidthPx, imgHeightPx, maxW, maxH) {
+  if (!imgWidthPx || !imgHeightPx || maxW <= 0 || maxH <= 0) return { w: 0, h: 0 };
+  const scale = Math.min(maxW / imgWidthPx, maxH / imgHeightPx);
+  return { w: imgWidthPx * scale, h: imgHeightPx * scale };
+}
+
+function isLegibleFit(imgWidthPx, fit) {
+  return fit.w >= MIN_LEGIBLE_WIDTH_MM && effectivePpi(imgWidthPx, fit.w) >= MIN_LEGIBLE_PPI;
+}
+
+// Decides where a Supplement Facts image can be placed and still be legible:
+// first try the side column, then a full-width band on the same page, and
+// only as a last resort a dedicated page of its own (the biggest box
+// available) — flagging the image as low-resolution if even that can't
+// clear the sharpness floor, since enlarging it further would never help.
+function planFactsPlacement({ imgWidthPx, imgHeightPx, sideW, sideH, fullW, fullMaxH, ownPageW, ownPageMaxH }) {
+  const side = containFitMm(imgWidthPx, imgHeightPx, sideW, sideH);
+  if (isLegibleFit(imgWidthPx, side)) {
+    return { placement: "side", w: side.w, h: side.h, lowRes: false };
+  }
+  const full = containFitMm(imgWidthPx, imgHeightPx, fullW, fullMaxH);
+  if (isLegibleFit(imgWidthPx, full)) {
+    return { placement: "full-width", w: full.w, h: full.h, lowRes: false };
+  }
+  const own = containFitMm(imgWidthPx, imgHeightPx, ownPageW, ownPageMaxH);
+  return { placement: "own-page", w: own.w, h: own.h, lowRes: effectivePpi(imgWidthPx, own.w) < MIN_LEGIBLE_PPI };
+}
+
+// Stamps "<brand>" + "Page X of Y" on every page once the final page count
+// is known — must run after all pages (incl. any appended facts pages) exist.
+function stampExportFooters(doc, brandLabel) {
+  const pageCount = doc.internal.getNumberOfPages();
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
-
-  // ---- Cover page ----
-  doc.setFillColor(31, 42, 36);
-  doc.rect(0, 0, pageWidth, pageHeight, "F");
-  doc.setTextColor(250, 247, 242);
-  doc.setFontSize(11);
-  doc.text("KAYBEE PHARMA", 14, 20);
-  doc.setFontSize(28);
-  doc.text(specialtyName, 14, 55);
-  doc.setFontSize(15);
-  doc.text("Product Catalog", 14, 67);
-  doc.setFontSize(10.5);
-  doc.setTextColor(216, 210, 196);
-  const brands = [...new Set(selectedProducts.map((p) => p.brand).filter(Boolean))];
-  if (brands.length) doc.text(brands.join("   ·   "), 14, pageHeight - 20);
-  doc.text(`${selectedProducts.length} product${selectedProducts.length === 1 ? "" : "s"} · Generated ${new Date().toLocaleDateString("en-GB", { timeZone: "Asia/Beirut" })}`, 14, pageHeight - 14);
-
-  // ---- Product grid, 2 columns ----
-  doc.addPage();
-  let y = 18;
-  const marginX = 14;
-  const gap = 10;
-  const colWidth = (pageWidth - marginX * 2 - gap) / 2;
-  const imgSize = Math.min(colWidth * 0.46, 45);
-  const rowHeight = 92;
-  let col = 0;
-
-  const ensureRow = () => {
-    if (y + rowHeight > pageHeight - 14) { doc.addPage(); y = 18; }
-  };
-
-  for (const product of selectedProducts) {
-    if (col === 0) ensureRow();
-    const x = marginX + col * (colWidth + gap);
-
-    doc.setTextColor(140, 130, 110);
-    doc.setFontSize(9);
-    if (product.brand) doc.text(product.brand, x, y);
-    doc.setTextColor(20, 30, 25);
-    doc.setFontSize(11);
-    const nameLines = doc.splitTextToSize(product.name, colWidth);
-    doc.text(nameLines, x, y + 6);
-    const imageY = y + 6 + nameLines.length * 5 + 2;
-
-    if (product.hasBottleImage) {
-      try {
-        const dataUrl = await fetchImageAsDataUrl(catalogImageBytesPath(product.id, "bottle"));
-        doc.addImage(dataUrl, jsPdfFormatForMime(product.bottleImageMimeType), x, imageY, imgSize, imgSize, undefined, "FAST");
-      } catch { /* skip a slot that can't be fetched rather than failing the whole export */ }
-    }
-    if (product.hasSupplementFactsImage) {
-      try {
-        const dataUrl = await fetchImageAsDataUrl(catalogImageBytesPath(product.id, "supplementFacts"));
-        doc.addImage(dataUrl, jsPdfFormatForMime(product.supplementFactsImageMimeType), x + imgSize + 4, imageY, imgSize, imgSize, undefined, "FAST");
-      } catch { /* same as above */ }
-    }
-
-    let bulletY = imageY + imgSize + 5;
-    try {
-      const { highlights } = await api.getProductCatalogStudies(product.id);
-      doc.setFontSize(8.5);
-      doc.setTextColor(60, 70, 60);
-      for (const h of (highlights || []).slice(0, 3)) {
-        const lines = doc.splitTextToSize(`• ${h}`, colWidth);
-        doc.text(lines, x, bulletY);
-        bulletY += lines.length * 4;
-      }
-    } catch { /* highlights are a bonus, never block the export */ }
-
-    col = col === 0 ? 1 : 0;
-    if (col === 0) y += rowHeight;
+  for (let i = 1; i <= pageCount; i++) {
+    doc.setPage(i);
+    doc.setFontSize(8.5);
+    doc.setTextColor(150, 142, 125);
+    doc.text(brandLabel, 14, pageHeight - 8);
+    doc.text(`Page ${i} of ${pageCount}`, pageWidth - 14, pageHeight - 8, { align: "right" });
   }
-
-  doc.save(`${specialtyName.replace(/[^a-zA-Z0-9]+/g, "-")}-product-catalog.pdf`);
 }
 
-async function downloadSelectedProductImages(selectedProducts) {
-  for (const product of selectedProducts) {
-    if (product.hasBottleImage) {
-      await downloadImageFile(catalogImageBytesPath(product.id, "bottle"), `${product.name.replace(/[^a-zA-Z0-9]+/g, "-")}-bottle.jpg`);
-    }
-    if (product.hasSupplementFactsImage) {
-      await downloadImageFile(catalogImageBytesPath(product.id, "supplementFacts"), `${product.name.replace(/[^a-zA-Z0-9]+/g, "-")}-supplement-facts.jpg`);
+function renderDedicatedFactsPage(doc, entry, { margin, contentWidth, pageHeight }) {
+  const { product, data, plan } = entry;
+  let py = margin;
+  doc.setTextColor(140, 130, 110);
+  doc.setFontSize(10);
+  doc.text("SUPPLEMENT FACTS", margin, py);
+  py += 7;
+  doc.setTextColor(20, 30, 25);
+  doc.setFontSize(15);
+  const nameLines = doc.splitTextToSize(product.name, contentWidth);
+  doc.text(nameLines, margin, py);
+  py += nameLines.length * 6 + 6;
+
+  if (plan.lowRes) {
+    doc.setFillColor(252, 237, 221);
+    doc.setDrawColor(224, 178, 115);
+    doc.rect(margin, py, contentWidth, 12, "FD");
+    doc.setTextColor(150, 100, 20);
+    doc.setFontSize(9);
+    doc.text("Low-resolution source image — replace with a higher-resolution scan for print use.", margin + 3, py + 7.5);
+    py += 18;
+  }
+
+  const fit = containFitMm(data.img.width, data.img.height, contentWidth, pageHeight - py - margin);
+  const fx = margin + (contentWidth - fit.w) / 2;
+  doc.addImage(data.dataUrl, data.format, fx, py, fit.w, fit.h, undefined, "FAST");
+}
+
+// ---- Option A: Doctor Presentation — one product per A4 page, large bottle
+// (left ~40%) beside a large Supplement Facts label (right ~60%), falling
+// back to full-width-same-page or a dedicated second page when the facts
+// image can't stay legible at the side-column size. ----
+async function renderDoctorPresentationPage(doc, product, { margin, contentWidth, contentBottom }) {
+  let y = margin;
+
+  doc.setTextColor(140, 130, 110);
+  doc.setFontSize(10);
+  if (product.brand) doc.text((PRODUCT_BRAND_DISPLAY_NAMES[product.brand] || product.brand).toUpperCase(), margin, y);
+  y += 7;
+
+  doc.setTextColor(20, 30, 25);
+  doc.setFontSize(20);
+  const nameLines = doc.splitTextToSize(product.name, contentWidth);
+  doc.text(nameLines, margin, y);
+  y += nameLines.length * 8 + 4;
+
+  doc.setDrawColor(216, 210, 196);
+  doc.setLineWidth(0.4);
+  doc.line(margin, y, margin + contentWidth, y);
+  y += 8;
+
+  const bottleData = product.hasBottleImage ? await loadImageBytes(product.id, "bottle", product.bottleImageMimeType).catch(() => null) : null;
+  const factsData = product.hasSupplementFactsImage ? await loadImageBytes(product.id, "supplementFacts", product.supplementFactsImageMimeType).catch(() => null) : null;
+
+  const rowTop = y;
+  const rowMaxH = contentBottom - rowTop - 24;
+  const bottleColW = contentWidth * 0.4 - 4;
+  const factsColW = contentWidth * 0.6 - 4;
+  const factsColX = margin + contentWidth * 0.4 + 4;
+
+  // Images are top-aligned and the row collapses to whichever column is
+  // actually tallest, rather than reserving the full available height and
+  // centering inside it — that reserved-but-unused space is exactly the
+  // "excessive white space" the old layout was flagged for.
+  let bottleBottom = rowTop;
+  if (bottleData) {
+    const fit = containFitMm(bottleData.img.width, bottleData.img.height, bottleColW, rowMaxH);
+    const bx = margin + (bottleColW - fit.w) / 2;
+    doc.addImage(bottleData.dataUrl, bottleData.format, bx, rowTop, fit.w, fit.h, undefined, "FAST");
+    bottleBottom = rowTop + fit.h;
+  }
+
+  let factsBottom = rowTop;
+  let factsOwnPage = null;
+  if (factsData) {
+    const plan = planFactsPlacement({
+      imgWidthPx: factsData.img.width, imgHeightPx: factsData.img.height,
+      sideW: factsColW, sideH: rowMaxH,
+      fullW: contentWidth, fullMaxH: contentBottom - rowTop - 10,
+      ownPageW: contentWidth, ownPageMaxH: contentBottom - margin - 40,
+    });
+    if (plan.placement === "side") {
+      const fx = factsColX + (factsColW - plan.w) / 2;
+      doc.addImage(factsData.dataUrl, factsData.format, fx, rowTop, plan.w, plan.h, undefined, "FAST");
+      factsBottom = rowTop + plan.h;
+    } else if (plan.placement === "full-width") {
+      const fy = Math.max(bottleBottom, rowTop) + 6;
+      const fx = margin + (contentWidth - plan.w) / 2;
+      doc.addImage(factsData.dataUrl, factsData.format, fx, fy, plan.w, plan.h, undefined, "FAST");
+      factsBottom = fy + plan.h;
+    } else {
+      factsOwnPage = { product, data: factsData, plan };
+      factsBottom = rowTop + rowMaxH;
     }
   }
+
+  let bulletY = Math.max(bottleBottom, factsBottom) + 8;
+  try {
+    const { highlights } = await api.getProductCatalogStudies(product.id);
+    if (highlights && highlights.length) {
+      doc.setFontSize(9.5);
+      doc.setTextColor(60, 70, 60);
+      for (const h of highlights.slice(0, 3)) {
+        const lines = doc.splitTextToSize(`• ${h}`, contentWidth);
+        doc.text(lines, margin, bulletY);
+        bulletY += lines.length * 4.5;
+      }
+    }
+  } catch { /* highlights are a bonus, never block the export */ }
+
+  return factsOwnPage;
+}
+
+async function downloadDoctorPresentationPdf(selectedProducts, specialtyName) {
+  const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 14;
+  const contentWidth = pageWidth - margin * 2;
+  const contentBottom = pageHeight - 16;
+
+  const dedicatedFactsPages = [];
+  let firstPage = true;
+  for (const product of selectedProducts) {
+    if (!firstPage) doc.addPage();
+    firstPage = false;
+    const ownPage = await renderDoctorPresentationPage(doc, product, { margin, contentWidth, contentBottom });
+    if (ownPage) dedicatedFactsPages.push(ownPage);
+  }
+  for (const entry of dedicatedFactsPages) {
+    doc.addPage();
+    renderDedicatedFactsPage(doc, entry, { margin, contentWidth, pageHeight });
+  }
+
+  stampExportFooters(doc, "KayBee Pharma");
+  const namePrefix = specialtyName ? `${specialtyName.replace(/[^a-zA-Z0-9]+/g, "-")}-` : "";
+  doc.save(`${namePrefix}doctor-presentation-${Date.now()}.pdf`);
+}
+
+// ---- Option B: Compact Catalog — 2 products per page with smaller images;
+// a product's Supplement Facts image is included inline only if it stays
+// legible at that compact size, otherwise a full-size dedicated label page
+// is appended for it at the end (same fallback helper as Option A). ----
+async function renderCompactCatalogSlot(doc, product, { margin, contentWidth, slotTop, slotH, dedicatedFactsPages }) {
+  const imgColW = contentWidth * 0.32;
+  const textColX = margin + imgColW + 6;
+  const textColW = contentWidth - imgColW - 6;
+
+  let ty = slotTop + 5;
+  doc.setTextColor(140, 130, 110);
+  doc.setFontSize(8.5);
+  if (product.brand) doc.text((PRODUCT_BRAND_DISPLAY_NAMES[product.brand] || product.brand).toUpperCase(), textColX, ty);
+  ty += 5.5;
+  doc.setTextColor(20, 30, 25);
+  doc.setFontSize(12.5);
+  const nameLines = doc.splitTextToSize(product.name, textColW);
+  doc.text(nameLines, textColX, ty);
+  ty += nameLines.length * 5.5 + 3;
+
+  if (product.hasBottleImage) {
+    try {
+      const b = await loadImageBytes(product.id, "bottle", product.bottleImageMimeType);
+      const fit = containFitMm(b.img.width, b.img.height, imgColW, slotH);
+      const bx = margin + (imgColW - fit.w) / 2;
+      const by = slotTop + (slotH - fit.h) / 2;
+      doc.addImage(b.dataUrl, b.format, bx, by, fit.w, fit.h, undefined, "FAST");
+    } catch { /* skip a slot that can't be fetched rather than failing the whole export */ }
+  }
+
+  if (product.hasSupplementFactsImage) {
+    try {
+      const f = await loadImageBytes(product.id, "supplementFacts", product.supplementFactsImageMimeType);
+      const availW = textColW;
+      const availH = Math.max(0, slotTop + slotH - ty - 2);
+      const plan = planFactsPlacement({
+        imgWidthPx: f.img.width, imgHeightPx: f.img.height,
+        sideW: availW, sideH: availH,
+        fullW: availW, fullMaxH: availH,
+        ownPageW: contentWidth, ownPageMaxH: 297 - margin * 2 - 40,
+      });
+      if (plan.placement !== "own-page") {
+        doc.addImage(f.dataUrl, f.format, textColX, ty, plan.w, plan.h, undefined, "FAST");
+      } else {
+        doc.setFontSize(8.5);
+        doc.setTextColor(140, 130, 110);
+        doc.text("Supplement Facts — see full-size label page (appendix)", textColX, ty + 4);
+        dedicatedFactsPages.push({ product, data: f, plan });
+      }
+    } catch { /* same as above */ }
+  }
+
+  doc.setDrawColor(230, 225, 215);
+  doc.setLineWidth(0.3);
+  doc.line(margin, slotTop + slotH + 5, margin + contentWidth, slotTop + slotH + 5);
+}
+
+async function downloadCompactCatalogPdf(selectedProducts, specialtyName) {
+  const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 14;
+  const contentWidth = pageWidth - margin * 2;
+  const slotGap = 10;
+  const slotH = (pageHeight - margin * 2 - 16 - slotGap) / 2;
+
+  const dedicatedFactsPages = [];
+  let slot = 0;
+  let firstPage = true;
+  for (const product of selectedProducts) {
+    if (slot === 0) {
+      if (!firstPage) doc.addPage();
+      firstPage = false;
+    }
+    const slotTop = margin + slot * (slotH + slotGap);
+    await renderCompactCatalogSlot(doc, product, { margin, contentWidth, slotTop, slotH, dedicatedFactsPages });
+    slot = slot === 0 ? 1 : 0;
+  }
+  for (const entry of dedicatedFactsPages) {
+    doc.addPage();
+    renderDedicatedFactsPage(doc, entry, { margin, contentWidth, pageHeight });
+  }
+
+  stampExportFooters(doc, "KayBee Pharma");
+  const namePrefix = specialtyName ? `${specialtyName.replace(/[^a-zA-Z0-9]+/g, "-")}-` : "";
+  doc.save(`${namePrefix}compact-catalog-${Date.now()}.pdf`);
 }
 
 function loadImageFromDataUrl(dataUrl) {
@@ -9388,12 +9577,32 @@ function wrapCanvasText(ctx, text, x, y, maxWidth, lineHeight, maxLines = Infini
 
 const PRODUCT_BRAND_DISPLAY_NAMES = { Alfa: "Alfa Vitamins", Mason: "Mason Natural" };
 
-// Rep-shareable "mobile card" (requests #6/#7's PDF-or-individual-images
-// choice, image variant): a single composited PNG per product — brand
-// header, name, bottle image, up to 4 bullet highlights (same source as the
-// PDF export), and a bordered Supplement Facts panel — sized for sharing in
-// a chat app rather than printing. Built with Canvas since this is one flat
-// image, not a multi-page document.
+// Canvas has no built-in centered text wrapping either — same word-boundary
+// wrap as wrapCanvasText but fillText'd centered on centerX, for the product
+// name under the Option C header.
+function wrapCanvasCenteredText(ctx, text, centerX, y, maxWidth, lineHeight) {
+  const words = String(text || "").split(" ");
+  let line = "";
+  let curY = y;
+  for (const word of words) {
+    const testLine = line ? `${line} ${word}` : word;
+    if (ctx.measureText(testLine).width > maxWidth && line) {
+      ctx.fillText(line, centerX, curY);
+      line = word;
+      curY += lineHeight;
+    } else {
+      line = testLine;
+    }
+  }
+  if (line) { ctx.fillText(line, centerX, curY); curY += lineHeight; }
+  return curY;
+}
+
+// Option C — "WhatsApp Images": a single composited vertical PNG per
+// product, optimized for mobile viewing — brand header, centered product
+// name, bottle image beside a stacked list of highlight bullets at the same
+// height, a full-width bordered Supplement Facts panel below, and a footer.
+// Built with Canvas since this is one flat image, not a multi-page document.
 async function downloadProductMobileCard(product) {
   const W = 900;
   const canvas = document.createElement("canvas");
@@ -9403,7 +9612,7 @@ async function downloadProductMobileCard(product) {
   // first to find where content actually ends, then redraw onto a canvas
   // sized exactly to that content — avoids either cropping a long product
   // name/highlight list or leaving a large blank footer.
-  const SCRATCH_H = 2200;
+  const SCRATCH_H = 2600;
   canvas.width = W;
   canvas.height = SCRATCH_H;
 
@@ -9421,42 +9630,56 @@ async function downloadProductMobileCard(product) {
     targetCtx.fillRect(0, 0, W, SCRATCH_H);
 
     targetCtx.fillStyle = "#1F2A24";
-    targetCtx.fillRect(0, 0, W, 110);
+    targetCtx.fillRect(0, 0, W, 100);
     targetCtx.fillStyle = "#FAF7F2";
-    targetCtx.font = "bold 34px sans-serif";
-    targetCtx.textAlign = "left";
-    targetCtx.fillText(PRODUCT_BRAND_DISPLAY_NAMES[product.brand] || product.brand || "KayBee Pharma", 36, 68);
+    targetCtx.font = "bold 30px sans-serif";
+    targetCtx.textAlign = "center";
+    targetCtx.fillText(PRODUCT_BRAND_DISPLAY_NAMES[product.brand] || product.brand || "KayBee Pharma", W / 2, 62);
 
     targetCtx.fillStyle = "#1F2A24";
-    targetCtx.font = "bold 38px sans-serif";
-    let y = wrapCanvasText(targetCtx, product.name, 36, 170, W - 72, 46);
-    y += 20;
+    targetCtx.font = "bold 36px sans-serif";
+    targetCtx.textAlign = "center";
+    let y = wrapCanvasCenteredText(targetCtx, product.name, W / 2, 158, W - 80, 44);
+    y += 24;
 
-    if (bottleImg) {
-      drawImageContain(targetCtx, bottleImg, 36, y, W - 72, 420);
-      y += 420 + 30;
-    }
+    // Bottle (left) + highlight bullets (right), sharing the same row height.
+    const rowTop = y;
+    const rowH = 460;
+    const bottleColW = W * 0.42 - 54;
+    const bottleX = 36;
+    const highlightsX = bottleX + bottleColW + 36;
+    const highlightsW = W - 36 - highlightsX;
+
+    if (bottleImg) drawImageContain(targetCtx, bottleImg, bottleX, rowTop, bottleColW, rowH);
 
     if (highlights.length) {
-      targetCtx.font = "26px sans-serif";
-      targetCtx.fillStyle = "#1F2A24";
-      for (const h of highlights.slice(0, 4)) {
+      targetCtx.textAlign = "left";
+      targetCtx.font = "24px sans-serif";
+      let hy = rowTop + 30;
+      const lineH = 30;
+      const maxLinesTotal = Math.max(1, Math.floor((rowH - 10) / lineH));
+      let linesUsed = 0;
+      for (const h of highlights.slice(0, 5)) {
+        if (linesUsed >= maxLinesTotal) break;
         targetCtx.beginPath();
         targetCtx.fillStyle = "#B33A3A";
-        targetCtx.arc(44, y - 9, 6, 0, Math.PI * 2);
+        targetCtx.arc(highlightsX + 8, hy - 9, 7, 0, Math.PI * 2);
         targetCtx.fill();
         targetCtx.fillStyle = "#1F2A24";
-        y = wrapCanvasText(targetCtx, h, 66, y, W - 102, 32, 2);
-        y += 6;
+        const before = hy;
+        hy = wrapCanvasText(targetCtx, h, highlightsX + 28, hy, highlightsW - 28, lineH, maxLinesTotal - linesUsed);
+        linesUsed += Math.round((hy - before) / lineH);
+        hy += 10;
       }
-      y += 16;
     }
+    y = rowTop + rowH + 40;
 
     if (factsImg) {
-      const boxH = Math.min(500, (factsImg.height / factsImg.width) * (W - 144) + 60);
+      const boxH = Math.min(560, (factsImg.height / factsImg.width) * (W - 144) + 60);
       targetCtx.strokeStyle = "#E5DFD3";
       targetCtx.lineWidth = 2;
       targetCtx.strokeRect(36, y, W - 72, boxH);
+      targetCtx.textAlign = "left";
       targetCtx.font = "bold 18px sans-serif";
       targetCtx.fillStyle = "#8A8272";
       targetCtx.fillText("SUPPLEMENT FACTS", 52, y + 28);
@@ -9483,7 +9706,7 @@ async function downloadProductMobileCard(product) {
   const objectUrl = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = objectUrl;
-  a.download = `${product.name.replace(/[^a-zA-Z0-9]+/g, "-")}-card.png`;
+  a.download = `${product.name.replace(/[^a-zA-Z0-9]+/g, "-")}-whatsapp.png`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -9976,14 +10199,14 @@ function KnowledgeView({ productCatalog, role }) {
               {specialtySelectedIds.length > 0 && (
                 <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#1F2A24", color: "#FAF7F2", borderRadius: 8, padding: "8px 12px", marginTop: 10 }}>
                   <span style={{ fontSize: 12.5 }}>{specialtySelectedIds.length} product{specialtySelectedIds.length === 1 ? "" : "s"} selected</span>
-                  <button disabled={exporting} onClick={() => runExport((products) => downloadSpecialtyProductCardsPdf(s.specialty, products), specialtySelectedIds)} style={{ fontSize: 12, background: "#FAF7F2", color: "#1F2A24", border: "none", borderRadius: 6, padding: "5px 10px" }}>
-                    {exporting ? "Exporting…" : "Export (PDF)"}
+                  <button disabled={exporting} onClick={() => runExport((products) => downloadDoctorPresentationPdf(products, s.specialty), specialtySelectedIds)} style={{ fontSize: 12, background: "#FAF7F2", color: "#1F2A24", border: "none", borderRadius: 6, padding: "5px 10px" }}>
+                    {exporting ? "Exporting…" : "Doctor Presentation (PDF)"}
                   </button>
-                  <button disabled={exporting} onClick={() => runExport(downloadSelectedProductImages, specialtySelectedIds)} style={{ fontSize: 12, background: "none", color: "#FAF7F2", border: "1px solid #FAF7F2", borderRadius: 6, padding: "5px 10px" }}>
-                    Download images
+                  <button disabled={exporting} onClick={() => runExport((products) => downloadCompactCatalogPdf(products, s.specialty), specialtySelectedIds)} style={{ fontSize: 12, background: "none", color: "#FAF7F2", border: "1px solid #FAF7F2", borderRadius: 6, padding: "5px 10px" }}>
+                    Compact Catalog (PDF)
                   </button>
                   <button disabled={exporting} onClick={() => runExport(downloadMobileProductCards, specialtySelectedIds)} style={{ fontSize: 12, background: "none", color: "#FAF7F2", border: "1px solid #FAF7F2", borderRadius: 6, padding: "5px 10px" }}>
-                    Mobile Card (Image)
+                    WhatsApp Images
                   </button>
                   <button
                     onClick={() => setSelectedForExport((prev) => { const next = new Set(prev); specialtySelectedIds.forEach((id) => next.delete(id)); return next; })}
