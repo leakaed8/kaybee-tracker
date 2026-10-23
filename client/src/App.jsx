@@ -9529,7 +9529,7 @@ function buildBrochureFactsOnlyPageHtml({ product, brandDisplay, factsDataUrl, l
 // the canvas AND the still-mounted container/root element so the caller can
 // measure real rendered element sizes before deciding whether to keep this
 // render or try a different hero layout.
-async function renderBrochurePageToCanvas(innerHtml, { scale = 3 } = {}) {
+async function renderBrochurePageToCanvas(innerHtml, { scale = 2 } = {}) {
   await ensureBrochureFontsLoaded();
   const container = document.createElement("div");
   container.style.position = "fixed";
@@ -9546,17 +9546,19 @@ async function renderBrochurePageToCanvas(innerHtml, { scale = 3 } = {}) {
   return { canvas, container, pageEl };
 }
 
-async function renderDoctorBrochurePage(doc, product, { contributions, pageIndex, pageCount }) {
+// bottleData/factsData/studiesData are fetched ahead of time (in parallel,
+// across all products in the brochure) by the caller and passed in via
+// `prefetched` — fetching them here instead, one product at a time, was the
+// main reason a 10+ product specialty took so long to export: every
+// product's 3 network calls had to finish before the NEXT product's calls
+// even started, on top of the per-page rendering work below.
+async function renderDoctorBrochurePage(doc, product, { contributions, pageIndex, pageCount, prefetched }) {
   const brandDisplay = PRODUCT_BRAND_DISPLAY_NAMES[product.brand] || product.brand || "KayBee Pharma";
   const ingredients = parseProductIngredientsJson(product.ingredients);
   const overviewRows = buildProductOverviewRows(product, ingredients);
   const subcats = specialtySubcategoriesFor(product.name, contributions);
-  let studiesData = null;
-  try { studiesData = await api.getProductCatalogStudies(product.id); } catch { /* bonus content only */ }
+  const { studiesData, bottleData, factsData } = prefetched;
   const clinicalText = clinicalDiscussionTextFor(studiesData);
-
-  const bottleData = product.hasBottleImage ? await loadImageBytes(product.id, "bottle", product.bottleImageMimeType).catch(() => null) : null;
-  const factsData = product.hasSupplementFactsImage ? await loadImageBytes(product.id, "supplementFacts", product.supplementFactsImageMimeType).catch(() => null) : null;
 
   const baseArgs = {
     product, brandDisplay, overviewRows, ingredients, subcats, clinicalText,
@@ -9632,7 +9634,10 @@ function buildBrochureCoverPageHtml({ specialty, productCount, pageIndex, pageCo
 // instead of one-at-a-time. Reuses renderDoctorBrochurePage exactly as the
 // single-item flow does (each product's own page still shows whichever
 // specialties/subcategories it belongs to), with a title page in front.
-async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName, contributions) {
+// onProgress(done, total), if given, is called after each product's page is
+// rendered so the UI can show real progress instead of a single frozen
+// "Exporting…" label for the whole (possibly slow, for a large specialty) run.
+async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName, contributions, onProgress) {
   const seen = new Set();
   const products = [];
   for (const topic of topics) {
@@ -9651,13 +9656,29 @@ async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName
   doc.addImage(cover.canvas.toDataURL("image/jpeg", 0.95), "JPEG", 0, 0, 210, 297);
   document.body.removeChild(cover.container);
 
+  // Fetch every product's bottle/Supplement Facts images and clinical
+  // studies data UP FRONT, in parallel, instead of one product at a time
+  // inside the render loop below — these are independent network calls, so
+  // doing them one-by-one meant the Nth product's fetches couldn't even
+  // start until every earlier product had both fetched AND finished
+  // rendering, which is what made a 10+ product specialty feel stuck.
+  const prefetchedByProduct = await Promise.all(products.map(async (product) => {
+    const [studiesData, bottleData, factsData] = await Promise.all([
+      api.getProductCatalogStudies(product.id).catch(() => null),
+      product.hasBottleImage ? loadImageBytes(product.id, "bottle", product.bottleImageMimeType).catch(() => null) : Promise.resolve(null),
+      product.hasSupplementFactsImage ? loadImageBytes(product.id, "supplementFacts", product.supplementFactsImageMimeType).catch(() => null) : Promise.resolve(null),
+    ]);
+    return { studiesData, bottleData, factsData };
+  }));
+
   const dedicatedFactsPages = [];
   let pageIndex = 1;
-  for (const product of products) {
+  for (let i = 0; i < products.length; i++) {
     pageIndex++;
     doc.addPage();
-    const ownPage = await renderDoctorBrochurePage(doc, product, { contributions: contributions || [], pageIndex, pageCount });
+    const ownPage = await renderDoctorBrochurePage(doc, products[i], { contributions: contributions || [], pageIndex, pageCount, prefetched: prefetchedByProduct[i] });
     if (ownPage) dedicatedFactsPages.push(ownPage);
+    if (onProgress) onProgress(i + 1, products.length);
   }
   const totalPages = pageCount + dedicatedFactsPages.length;
   for (const entry of dedicatedFactsPages) {
@@ -9852,6 +9873,7 @@ function KnowledgeView({ productCatalog, role }) {
   // boolean) so exporting one specialty doesn't make every OTHER specialty
   // card's button flash "Exporting…" too.
   const [exportingKey, setExportingKey] = useState(null);
+  const [exportProgress, setExportProgress] = useState(null); // { done, total } | null — for the currently exportingKey only
 
   // Rep-contributed additions to the static By Specialty list — any rep or
   // manager who can see this tab can tag one of our own products onto
@@ -10010,8 +10032,13 @@ function KnowledgeView({ productCatalog, role }) {
                     onClick={async () => {
                       const key = `subcat:${s.specialty}`;
                       setExportingKey(key);
-                      try { await downloadSpecialtyBrochurePdf(s.specialty, s.topics, catalogByNormName, contributions); }
-                      finally { setExportingKey(null); }
+                      setExportProgress(null);
+                      try {
+                        await downloadSpecialtyBrochurePdf(s.specialty, s.topics, catalogByNormName, contributions, (done, total) => setExportProgress({ done, total }));
+                      } finally {
+                        setExportingKey(null);
+                        setExportProgress(null);
+                      }
                     }}
                     disabled={exportingKey !== null}
                     title={`Export a premium physician-facing brochure covering every ${s.specialty} product in one PDF`}
@@ -10021,7 +10048,9 @@ function KnowledgeView({ productCatalog, role }) {
                       cursor: exportingKey !== null ? "default" : "pointer", opacity: exportingKey !== null ? 0.6 : 1,
                     }}
                   >
-                    {exportingKey === `subcat:${s.specialty}` ? "Exporting…" : "Export (PDF)"}
+                    {exportingKey === `subcat:${s.specialty}`
+                      ? (exportProgress ? `Exporting ${exportProgress.done}/${exportProgress.total}…` : "Exporting…")
+                      : "Export (PDF)"}
                   </button>
                   <button
                     onClick={() => openAddForm(s.specialty, s.topics)}
