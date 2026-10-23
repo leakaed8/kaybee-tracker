@@ -9700,13 +9700,9 @@ function loadImageFromDataUrl(dataUrl) {
   });
 }
 
-// A contributed product that has an approved bottle image becomes a small
-// visual card (thumbnail + name) instead of the plain text line — lazily
-// fetches the presigned image URL (same pattern as ProductImageSlot in the
-// Product Catalog manager screen) rather than ever receiving a raw R2 key.
-// Manager-only delete control for a Knowledge contribution, shared by both
-// the visual image card and the plain-text fallback line so a bad entry
-// (wrong product, mis-typed data, etc.) can be removed from either.
+// Manager-only delete control for a Knowledge contribution, shared by every
+// contributed-product line so a bad entry (wrong product, mis-typed data,
+// etc.) can be removed.
 function DeleteContributionControl({ contributionId, confirmDeleteId, deletingId, onRequestDelete, onConfirmDelete, onCancelDelete }) {
   if (confirmDeleteId === contributionId) {
     return (
@@ -9722,39 +9718,6 @@ function DeleteContributionControl({ contributionId, confirmDeleteId, deletingId
     <button onClick={() => onRequestDelete(contributionId)} title="Delete" style={{ fontSize: 10, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 4, padding: "2px 6px", marginLeft: 6 }}>
       Delete
     </button>
-  );
-}
-
-function KnowledgeProductCard({ contribution, product, onOpenStudies, isManager, confirmDeleteId, deletingId, onRequestDelete, onConfirmDelete, onCancelDelete }) {
-  const [url, setUrl] = useState("");
-  useEffect(() => {
-    let cancelled = false;
-    api.getCatalogProductImageUrl(product.id, "bottle").then((r) => { if (!cancelled) setUrl(r.url); }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [product.id]);
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: 6 }}>
-      <div style={{ width: 36, height: 36, borderRadius: 6, overflow: "hidden", background: "#FAF7F2", flexShrink: 0 }}>
-        {url && <img src={url} alt={contribution.productName} style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
-      </div>
-      <div style={{ fontSize: 12.5 }}>
-        <button
-          type="button" onClick={onOpenStudies} title="View studies from Product Expert"
-          style={{ fontWeight: 600, background: "none", border: "none", padding: 0, color: "#1F2A24", cursor: "pointer", textDecoration: "underline", textDecorationColor: "#D8D2C4", textAlign: "left" }}
-        >
-          {contribution.productName}
-        </button>
-        <div style={{ color: "#2E6B8F", fontSize: 11, display: "flex", alignItems: "center" }}>
-          (added by {contribution.addedBy})
-          {isManager && (
-            <DeleteContributionControl
-              contributionId={contribution.id} confirmDeleteId={confirmDeleteId} deletingId={deletingId}
-              onRequestDelete={onRequestDelete} onConfirmDelete={onConfirmDelete} onCancelDelete={onCancelDelete}
-            />
-          )}
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -9874,6 +9837,19 @@ function KnowledgeView({ productCatalog, role }) {
   // card's button flash "Exporting…" too.
   const [exportingKey, setExportingKey] = useState(null);
   const [exportProgress, setExportProgress] = useState(null); // { done, total } | null — for the currently exportingKey only
+  // Every specialty card starts collapsed (name + Export/+ buttons only) —
+  // a long scrolling wall of every topic and product under every specialty
+  // was the actual complaint, not any one specialty's content. Expanding one
+  // only reveals plain product-name bullets, never images; images stay
+  // exclusive to the exported brochure (downloadSpecialtyBrochurePdf).
+  const [expandedSpecialties, setExpandedSpecialties] = useState(() => new Set());
+  const toggleSpecialtyExpanded = (specialty) => {
+    setExpandedSpecialties((prev) => {
+      const next = new Set(prev);
+      if (next.has(specialty)) next.delete(specialty); else next.add(specialty);
+      return next;
+    });
+  };
 
   // Rep-contributed additions to the static By Specialty list — any rep or
   // manager who can see this tab can tag one of our own products onto
@@ -10025,8 +10001,15 @@ function KnowledgeView({ productCatalog, role }) {
           {filteredSpecialty.map((s) => {
             return (
             <div key={s.specialty} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <div style={{ fontWeight: 600, fontSize: 14 }}>{s.specialty}</div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: expandedSpecialties.has(s.specialty) ? 8 : 0 }}>
+                <button
+                  type="button" onClick={() => toggleSpecialtyExpanded(s.specialty)}
+                  aria-expanded={expandedSpecialties.has(s.specialty)}
+                  style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit" }}
+                >
+                  <ChevronDown size={15} color="#8A8272" style={{ transform: expandedSpecialties.has(s.specialty) ? "rotate(180deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }} />
+                  <span style={{ fontWeight: 600, fontSize: 14, textAlign: "left" }}>{s.specialty}</span>
+                </button>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <button
                     onClick={async () => {
@@ -10053,7 +10036,10 @@ function KnowledgeView({ productCatalog, role }) {
                       : "Export (PDF)"}
                   </button>
                   <button
-                    onClick={() => openAddForm(s.specialty, s.topics)}
+                    onClick={() => {
+                      openAddForm(s.specialty, s.topics);
+                      setExpandedSpecialties((prev) => new Set(prev).add(s.specialty));
+                    }}
                     title={`Add a product under ${s.specialty}`}
                     aria-label={`Add a product under ${s.specialty}`}
                     style={{
@@ -10066,6 +10052,8 @@ function KnowledgeView({ productCatalog, role }) {
                   </button>
                 </div>
               </div>
+              {expandedSpecialties.has(s.specialty) && (
+              <>
               {addingTo === s.specialty && (
                 <div style={{ background: "#FAF7F2", border: "1px dashed #4C7A5E", borderRadius: 8, padding: 10, marginBottom: 8 }}>
                   <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
@@ -10137,22 +10125,14 @@ function KnowledgeView({ productCatalog, role }) {
                     <div style={{ fontWeight: 600, fontSize: 12.5, marginBottom: 3 }}>{t.topic}</div>
                     {t.text && <div style={{ fontSize: 12.5, color: "#5B5445", lineHeight: 1.5 }}>{t.text}</div>}
                     {t.contributedProducts?.length > 0 && (
-                      <div style={{ marginTop: t.text ? 8 : 0, paddingTop: t.text ? 8 : 0, borderTop: t.text ? "1px solid #E5DFD3" : "none", display: "flex", flexDirection: "column", gap: 4 }}>
+                      <ul style={{
+                        margin: 0, marginTop: t.text ? 8 : 0, paddingTop: t.text ? 8 : 0, borderTop: t.text ? "1px solid #E5DFD3" : "none",
+                        paddingLeft: 18, display: "flex", flexDirection: "column", gap: 4,
+                      }}>
                         {t.contributedProducts.map((c) => {
                           const catalogProduct = catalogByNormName.get(String(c.productName || "").toLowerCase().trim());
-                          const hasApprovedImage = catalogProduct?.hasBottleImage && catalogProduct?.imageApprovalStatus === "approved";
-                          if (hasApprovedImage) {
-                            return (
-                              <KnowledgeProductCard
-                                key={c.id} contribution={c} product={catalogProduct}
-                                onOpenStudies={() => setOpenStudiesFor({ id: catalogProduct.id, name: c.productName })}
-                                isManager={isManager} confirmDeleteId={confirmDeleteId} deletingId={deletingId}
-                                onRequestDelete={setConfirmDeleteId} onConfirmDelete={deleteContribution} onCancelDelete={() => setConfirmDeleteId(null)}
-                              />
-                            );
-                          }
                           return (
-                            <div key={c.id} style={{ fontSize: 12.5, color: "#1F2A24" }}>
+                            <li key={c.id} style={{ fontSize: 12.5, color: "#1F2A24" }}>
                               {catalogProduct ? (
                                 <button
                                   type="button" onClick={() => setOpenStudiesFor({ id: catalogProduct.id, name: c.productName })}
@@ -10171,14 +10151,16 @@ function KnowledgeView({ productCatalog, role }) {
                                   onRequestDelete={setConfirmDeleteId} onConfirmDelete={deleteContribution} onCancelDelete={() => setConfirmDeleteId(null)}
                                 />
                               )}
-                            </div>
+                            </li>
                           );
                         })}
-                      </div>
+                      </ul>
                     )}
                   </div>
                 ))}
               </div>
+              </>
+              )}
             </div>
             );
           })}
