@@ -9431,7 +9431,234 @@ function drawFactsCard(doc, x, y, w, h, pad) {
   doc.roundedRect(x - pad, y - pad, w + pad * 2, h + pad * 2, 2.5, 2.5, "FD");
 }
 
-async function renderDoctorPresentationPage(doc, product, { margin, contentWidth, contentBottom, pageWidth, pageHeight }) {
+// ---- Doctor Presentation's lower-half content, all sourced from data the
+// app already stores verbatim — never invented copy. Each piece is written
+// to accept a "measureOnly" pass (identical layout math, no ink) so the page
+// can measure exactly how tall this content will be BEFORE deciding how
+// large the bottle/Supplement Facts images get to be, and then draw it for
+// real at that same computed position — the two passes can never drift
+// apart since they're the same function.
+
+function parseProductIngredientsJson(raw) {
+  try {
+    const list = JSON.parse(raw || "[]");
+    return Array.isArray(list) ? list.filter((i) => i && String(i.name || "").trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+// Brand / strength (only when unambiguous — a single ingredient) / dosage
+// form / pack size: every value already lives on the Product Catalog row,
+// nothing here is derived or guessed beyond that one narrow strength case.
+function buildProductOverviewRows(product, ingredients) {
+  const rows = [];
+  const brand = PRODUCT_BRAND_DISPLAY_NAMES[product.brand] || product.brand;
+  if (brand) rows.push({ label: "Brand", value: brand });
+  if (ingredients.length === 1 && (ingredients[0].amount || ingredients[0].amount === 0)) {
+    const strength = [ingredients[0].amount, ingredients[0].unit].filter((v) => v !== "" && v != null).join(" ");
+    if (strength) rows.push({ label: "Strength", value: strength });
+  }
+  if (product.form) rows.push({ label: "Dosage Form", value: product.form });
+  if (product.packSize) rows.push({ label: "Pack Size", value: String(product.packSize) });
+  return rows;
+}
+
+// Groups this product's existing Knowledge → By Specialty contributions
+// (the app's own specialty/topic assignments, added by reps/managers) by
+// specialty, deduped to a plain list of topic names per specialty.
+function specialtySubcategoriesFor(productName, contributions) {
+  const norm = String(productName || "").toLowerCase().trim();
+  const bySpecialty = new Map();
+  for (const c of contributions || []) {
+    if (String(c.productName || "").toLowerCase().trim() !== norm) continue;
+    if (!bySpecialty.has(c.specialty)) bySpecialty.set(c.specialty, new Set());
+    bySpecialty.get(c.specialty).add(c.topic);
+  }
+  return [...bySpecialty.entries()].map(([specialty, topics]) => ({ specialty, topics: [...topics] }));
+}
+
+// A short, already-curated clinical note — Recall's repQuickTakeaway is
+// written by a manager specifically as a rep-facing clinical summary for one
+// ingredient, never auto-generated — so it's the only thing quoted here.
+// Returns "" (section omitted entirely) when nothing has been curated yet.
+function clinicalDiscussionTextFor(studiesData) {
+  const withTakeaway = (studiesData?.ingredients || []).filter((i) => (i.repQuickTakeaway || "").trim());
+  if (!withTakeaway.length) return "";
+  return withTakeaway.slice(0, 2).map((i) => `${i.name}: ${i.repQuickTakeaway.trim()}`).join("  ");
+}
+
+// Specialty/subcategory tags — explicitly labeled as discussion categories,
+// never as a therapeutic claim. Topics wrap into as many rows as needed.
+function drawSpecialtySection(doc, subcats, x, y, width, measureOnly) {
+  if (!subcats.length) return 0;
+  const chipPadX = 2.6, chipH = 7, chipGap = 2.6, rowGap = 2.2, blockGap = 5;
+  let cy = y;
+  if (!measureOnly) {
+    doc.setFontSize(7.5);
+    doc.setFont(undefined, "italic");
+    doc.setTextColor(140, 130, 110);
+    doc.text("MEDICAL DISCUSSION CATEGORIES — FOR CLINICAL REFERENCE, NOT A TREATMENT CLAIM", x, cy + 3);
+    doc.setFont(undefined, "normal");
+  }
+  cy += 6;
+  for (const { specialty, topics } of subcats) {
+    if (!measureOnly) {
+      doc.setFontSize(9.5);
+      doc.setFont(undefined, "bold");
+      doc.setTextColor(46, 110, 80);
+      doc.text(`SPECIALTY: ${specialty.toUpperCase()}`, x, cy + 3.2);
+      doc.setFont(undefined, "normal");
+    }
+    cy += 7;
+    doc.setFontSize(8.5);
+    let rowX = x, rowY = cy;
+    for (const topic of topics) {
+      const w = doc.getTextWidth(topic) + chipPadX * 2;
+      if (rowX + w > x + width && rowX > x) { rowX = x; rowY += chipH + rowGap; }
+      if (!measureOnly) {
+        doc.setFillColor(230, 240, 232);
+        doc.setDrawColor(150, 180, 160);
+        doc.setLineWidth(0.25);
+        doc.roundedRect(rowX, rowY, w, chipH, 1.6, 1.6, "FD");
+        doc.setTextColor(30, 80, 55);
+        doc.text(topic, rowX + chipPadX, rowY + chipH - 2.4);
+      }
+      rowX += w + chipGap;
+    }
+    cy = rowY + chipH + blockGap;
+  }
+  return cy - y - blockGap + 2;
+}
+
+function drawProductOverviewCard(doc, x, y, w, overviewRows, measureOnly) {
+  const padX = 5, padY = 5, headingH = 6, lineH = 5.4;
+  const innerW = w - padX * 2;
+  // Font must be pinned BEFORE splitTextToSize measures wrap points — doing
+  // it only inside the real-draw branch (after measurement) meant the wrap
+  // width was computed against whatever font size happened to be left over
+  // from the last thing drawn, producing wrong/overlapping line breaks.
+  doc.setFont(undefined, "normal");
+  doc.setFontSize(9);
+  const wrapped = overviewRows.map(({ label, value }) => doc.splitTextToSize(`${label}: ${value}`, innerW));
+  const lineCount = wrapped.reduce((n, lines) => n + lines.length, 0);
+  const h = padY * 2 + headingH + Math.max(lineCount, 1) * lineH;
+  if (!measureOnly) {
+    doc.setFillColor(255, 255, 255);
+    doc.setDrawColor(226, 220, 208);
+    doc.setLineWidth(0.3);
+    doc.roundedRect(x, y, w, h, 2.5, 2.5, "FD");
+    doc.setFillColor(46, 110, 80);
+    doc.rect(x, y, 1.4, h, "F");
+    doc.setFontSize(9.5);
+    doc.setFont(undefined, "bold");
+    doc.setTextColor(46, 110, 80);
+    doc.text("PRODUCT OVERVIEW", x + padX, y + padY + 3.5);
+    doc.setFont(undefined, "normal");
+    doc.setFontSize(9);
+    doc.setTextColor(40, 45, 40);
+    let ty = y + padY + headingH + 3.2;
+    for (const lines of wrapped) { doc.text(lines, x + padX, ty); ty += lines.length * lineH; }
+  }
+  return h;
+}
+
+// Each ingredient is its own name line (wrapped in full, never silently cut
+// off) with the amount right-aligned on that same line, and an optional
+// smaller italic form/sub-note line underneath — e.g. "(from a special
+// garlic oil concentrate)" the way the original label itself phrases it —
+// rather than a third fixed-width column, which could collide with the
+// amount whenever the form text ran long.
+function drawKeyIngredientsCard(doc, x, y, w, ingredients, measureOnly) {
+  const padX = 5, padY = 5, headingH = 6, nameRowH = 5, formRowH = 4.2, rowGap = 1.6;
+  const amountColW = 24;
+  const nameColW = w - padX * 2 - amountColW;
+  doc.setFont(undefined, "normal");
+  doc.setFontSize(8.5);
+  const rows = ingredients.map((ing) => ({
+    ing,
+    nameLines: doc.splitTextToSize(ing.name, nameColW),
+    hasForm: !!String(ing.form || "").trim(),
+  }));
+  const contentH = rows.reduce((sum, r) => sum + r.nameLines.length * nameRowH + (r.hasForm ? formRowH : 0) + rowGap, 0);
+  const h = padY * 2 + headingH + Math.max(contentH, nameRowH);
+  if (!measureOnly) {
+    doc.setFillColor(255, 255, 255);
+    doc.setDrawColor(226, 220, 208);
+    doc.setLineWidth(0.3);
+    doc.roundedRect(x, y, w, h, 2.5, 2.5, "FD");
+    doc.setFillColor(46, 110, 80);
+    doc.rect(x, y, 1.4, h, "F");
+    doc.setFontSize(9.5);
+    doc.setFont(undefined, "bold");
+    doc.setTextColor(46, 110, 80);
+    doc.text("KEY INGREDIENTS", x + padX, y + padY + 3.5);
+    doc.setFont(undefined, "normal");
+    let ty = y + padY + headingH + 2.8;
+    for (const r of rows) {
+      doc.setFontSize(8.5);
+      doc.setTextColor(30, 35, 30);
+      doc.text(r.nameLines, x + padX, ty);
+      const amount = [r.ing.amount, r.ing.unit].filter((v) => v !== "" && v != null).join(" ");
+      if (amount) { doc.setTextColor(90, 90, 80); doc.text(amount, x + w - padX, ty, { align: "right" }); }
+      ty += r.nameLines.length * nameRowH;
+      if (r.hasForm) {
+        doc.setFontSize(7.3);
+        doc.setFont(undefined, "italic");
+        doc.setTextColor(130, 125, 110);
+        doc.text(String(r.ing.form), x + padX, ty);
+        doc.setFont(undefined, "normal");
+        ty += formRowH;
+      }
+      ty += rowGap;
+    }
+  }
+  return h;
+}
+
+// Side by side when there's an ingredient table to show; the overview card
+// takes the full width on its own when there isn't, instead of leaving an
+// empty second column.
+function drawInfoRow(doc, { overviewRows, ingredients }, x, y, width, measureOnly) {
+  if (!ingredients.length) return drawProductOverviewCard(doc, x, y, width, overviewRows, measureOnly);
+  const gap = 6;
+  const leftW = width * 0.4;
+  const rightW = width - leftW - gap;
+  const leftH = drawProductOverviewCard(doc, x, y, leftW, overviewRows, true);
+  const rightH = drawKeyIngredientsCard(doc, x + leftW + gap, y, rightW, ingredients, true);
+  if (!measureOnly) {
+    drawProductOverviewCard(doc, x, y, leftW, overviewRows, false);
+    drawKeyIngredientsCard(doc, x + leftW + gap, y, rightW, ingredients, false);
+  }
+  return Math.max(leftH, rightH);
+}
+
+function drawClinicalDiscussionCard(doc, text, x, y, width, measureOnly) {
+  const padX = 6, padY = 5.5, headingH = 6, lineH = 5;
+  doc.setFont(undefined, "normal");
+  doc.setFontSize(8.8);
+  const lines = doc.splitTextToSize(text, width - padX * 2);
+  const h = padY * 2 + headingH + lines.length * lineH;
+  if (!measureOnly) {
+    doc.setFillColor(255, 255, 255);
+    doc.setDrawColor(226, 220, 208);
+    doc.setLineWidth(0.3);
+    doc.roundedRect(x, y, width, h, 2.5, 2.5, "FD");
+    doc.setFillColor(46, 110, 80);
+    doc.rect(x, y, 1.4, h, "F");
+    doc.setFontSize(9.5);
+    doc.setFont(undefined, "bold");
+    doc.setTextColor(46, 110, 80);
+    doc.text("CLINICAL DISCUSSION", x + padX, y + padY + 3.5);
+    doc.setFont(undefined, "normal");
+    doc.setFontSize(8.8);
+    doc.setTextColor(50, 55, 48);
+    doc.text(lines, x + padX, y + padY + headingH + 3.2);
+  }
+  return h;
+}
+
+async function renderDoctorPresentationPage(doc, product, { margin, contentWidth, contentBottom, pageWidth, pageHeight, contributions }) {
   drawSoftPageBackground(doc, pageWidth, pageHeight, product.name);
 
   let y = margin;
@@ -9439,34 +9666,46 @@ async function renderDoctorPresentationPage(doc, product, { margin, contentWidth
   doc.setTextColor(140, 130, 110);
   doc.setFontSize(10);
   if (product.brand) doc.text((PRODUCT_BRAND_DISPLAY_NAMES[product.brand] || product.brand).toUpperCase(), margin, y);
-  y += 7;
+  y += 7.5;
 
   doc.setTextColor(20, 30, 25);
-  doc.setFontSize(20);
+  doc.setFontSize(23);
+  doc.setFont(undefined, "bold");
   const nameLines = doc.splitTextToSize(product.name, contentWidth);
   doc.text(nameLines, margin, y);
-  y += nameLines.length * 8 + 4;
+  doc.setFont(undefined, "normal");
+  y += nameLines.length * 9 + 3;
 
   doc.setDrawColor(216, 210, 196);
   doc.setLineWidth(0.4);
   doc.line(margin, y, margin + contentWidth, y);
-  y += 10;
+  y += 8;
+
+  const rowTop = y;
 
   const bottleData = product.hasBottleImage ? await loadImageBytes(product.id, "bottle", product.bottleImageMimeType).catch(() => null) : null;
   const factsData = product.hasSupplementFactsImage ? await loadImageBytes(product.id, "supplementFacts", product.supplementFactsImageMimeType).catch(() => null) : null;
 
-  // Highlights are now drawn as an icon-badge row near the bottom of the
-  // page rather than a bullet list, so their height needs to be reserved
-  // up front.
-  let highlights = [];
-  try { highlights = (await api.getProductCatalogStudies(product.id)).highlights || []; } catch { /* bonus content only */ }
-  const highlightRowH = highlights.length ? 24 : 0;
+  const ingredients = parseProductIngredientsJson(product.ingredients);
+  const overviewRows = buildProductOverviewRows(product, ingredients);
+  const subcats = specialtySubcategoriesFor(product.name, contributions);
+  let studiesData = null;
+  try { studiesData = await api.getProductCatalogStudies(product.id); } catch { /* lower section is a bonus, never blocks the export */ }
+  const clinicalText = clinicalDiscussionTextFor(studiesData);
 
-  const rowTop = y;
-  const rowMaxH = contentBottom - rowTop - highlightRowH - 6;
-  const bottleColW = contentWidth * 0.4 - 4;
-  const factsColW = contentWidth * 0.6 - 4 - 8; // leave room for the card's padding
-  const factsColX = margin + contentWidth * 0.4 + 4 + 8;
+  // Measure the lower-half content FIRST (pure text/layout math, no ink) so
+  // the image row above gets exactly whatever height that leaves — this is
+  // what lets a product with little extra data give its bottle/label images
+  // the whole page, and a product with a full profile still read cleanly.
+  let lowerH = drawSpecialtySection(doc, subcats, margin, 0, contentWidth, true);
+  if (lowerH) lowerH += 6;
+  lowerH += drawInfoRow(doc, { overviewRows, ingredients }, margin, 0, contentWidth, true);
+  if (clinicalText) lowerH += 6 + drawClinicalDiscussionCard(doc, clinicalText, margin, 0, contentWidth, true);
+
+  const rowMaxH = Math.max(55, contentBottom - rowTop - lowerH - (lowerH ? 10 : 0));
+  const bottleColW = contentWidth * 0.46 - 4;
+  const factsColW = contentWidth * 0.5 - 4 - 8; // leave room for the card's padding
+  const factsColX = margin + contentWidth * 0.46 + 4 + 8;
 
   // Images are top-aligned and the row collapses to whichever column is
   // actually tallest, rather than reserving the full available height and
@@ -9486,7 +9725,7 @@ async function renderDoctorPresentationPage(doc, product, { margin, contentWidth
     const plan = planFactsPlacement({
       imgWidthPx: factsData.img.width, imgHeightPx: factsData.img.height,
       sideW: factsColW, sideH: rowMaxH,
-      fullW: contentWidth, fullMaxH: contentBottom - rowTop - highlightRowH - 10,
+      fullW: contentWidth, fullMaxH: contentBottom - rowTop - lowerH - 10,
       ownPageW: contentWidth, ownPageMaxH: contentBottom - margin - 40,
     });
     const cardPad = 5;
@@ -9507,31 +9746,23 @@ async function renderDoctorPresentationPage(doc, product, { margin, contentWidth
     }
   }
 
-  // Highlight icon-badge row, centered across up to 3 columns near the
-  // bottom of the page.
-  if (highlights.length) {
-    const shown = highlights.slice(0, 3);
-    const colW = contentWidth / shown.length;
-    const rowY = contentBottom - highlightRowH + 2;
-    const badgeR = 4.2;
-    doc.setFontSize(8);
-    doc.setTextColor(60, 70, 60);
-    shown.forEach((h, i) => {
-      const colCenter = margin + colW * i + colW / 2;
-      drawCheckBadge(doc, colCenter, rowY, badgeR);
-      const lines = doc.splitTextToSize(h, colW - 6).slice(0, 2);
-      doc.text(lines, colCenter, rowY + badgeR + 5, { align: "center" });
-    });
-  }
+  // Draw the same lower-half content for real, directly below wherever the
+  // images actually ended — never at a fixed Y, so there's no gap between
+  // the images and this section regardless of how tall either image is.
+  let ly = Math.max(bottleBottom, factsBottom) + 8;
+  const specialtyH = drawSpecialtySection(doc, subcats, margin, ly, contentWidth, false);
+  if (specialtyH) ly += specialtyH + 6;
+  ly += drawInfoRow(doc, { overviewRows, ingredients }, margin, ly, contentWidth, false);
+  if (clinicalText) { ly += 6; drawClinicalDiscussionCard(doc, clinicalText, margin, ly, contentWidth, false); }
 
   return factsOwnPage;
 }
 
-async function downloadDoctorPresentationPdf(selectedProducts, specialtyName) {
+async function downloadDoctorPresentationPdf(selectedProducts, specialtyName, contributions) {
   const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
-  const margin = 14;
+  const margin = 13;
   const contentWidth = pageWidth - margin * 2;
   const contentBottom = pageHeight - 16;
 
@@ -9540,7 +9771,7 @@ async function downloadDoctorPresentationPdf(selectedProducts, specialtyName) {
   for (const product of selectedProducts) {
     if (!firstPage) doc.addPage();
     firstPage = false;
-    const ownPage = await renderDoctorPresentationPage(doc, product, { margin, contentWidth, contentBottom, pageWidth, pageHeight });
+    const ownPage = await renderDoctorPresentationPage(doc, product, { margin, contentWidth, contentBottom, pageWidth, pageHeight, contributions: contributions || [] });
     if (ownPage) dedicatedFactsPages.push(ownPage);
   }
   for (const entry of dedicatedFactsPages) {
@@ -10391,7 +10622,7 @@ function KnowledgeView({ productCatalog, role }) {
               {specialtySelectedIds.length > 0 && (
                 <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#1F2A24", color: "#FAF7F2", borderRadius: 8, padding: "8px 12px", marginTop: 10 }}>
                   <span style={{ fontSize: 12.5 }}>{specialtySelectedIds.length} product{specialtySelectedIds.length === 1 ? "" : "s"} selected</span>
-                  <button disabled={exporting} onClick={() => runExport((products) => downloadDoctorPresentationPdf(products, s.specialty), specialtySelectedIds)} style={{ fontSize: 12, background: "#FAF7F2", color: "#1F2A24", border: "none", borderRadius: 6, padding: "5px 10px" }}>
+                  <button disabled={exporting} onClick={() => runExport((products) => downloadDoctorPresentationPdf(products, s.specialty, contributions), specialtySelectedIds)} style={{ fontSize: 12, background: "#FAF7F2", color: "#1F2A24", border: "none", borderRadius: 6, padding: "5px 10px" }}>
                     {exporting ? "Exporting…" : "Doctor Presentation (PDF)"}
                   </button>
                   <button disabled={exporting} onClick={() => runExport((products) => downloadCompactCatalogPdf(products, s.specialty), specialtySelectedIds)} style={{ fontSize: 12, background: "none", color: "#FAF7F2", border: "1px solid #FAF7F2", borderRadius: 6, padding: "5px 10px" }}>
