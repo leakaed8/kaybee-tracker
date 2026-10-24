@@ -9404,36 +9404,55 @@ function buildBrochureHeadlineHtml(product, overviewRows) {
   </div>`;
 }
 
+// Fixed (not flex-grow) heights for the image area, one per hero layout —
+// previously these used flex:1 1 auto and stretched to fill whatever
+// vertical space was left on the page, which pushed the three info cards
+// far below the images with a large, inconsistent gap. A fixed height keeps
+// the images a sane, consistent size without stretching, and the leftover
+// page space is instead absorbed by a spacer placed AFTER the info cards
+// (in buildBrochurePageHtml), so the cards sit right under the images and
+// the footer still stays pinned to the bottom of the page.
+const BROCHURE_HERO_HEIGHT_PX = { side: 420, fullWidth: 540, bottleOnly: 460 };
+
 function buildBrochureHeroSideHtml({ bottleDataUrl, factsDataUrl }) {
   // Top-aligned, not vertically centered: with a tall bottle photo next to a
   // much shorter landscape facts panel, centering both within the same
   // shared-height row left the facts panel visibly floating with a large,
   // unbalanced gap above and below it.
-  return `<div style="flex:1 1 auto;min-height:0;display:flex;align-items:flex-start;gap:28px;margin:22px 0;">
+  return `<div style="flex:0 0 auto;height:${BROCHURE_HERO_HEIGHT_PX.side}px;display:flex;align-items:flex-start;gap:28px;margin:20px 0 24px;">
     <div style="flex:0 0 45%;height:100%;display:flex;align-items:flex-start;justify-content:center;min-width:0;">
       ${bottleDataUrl ? `<img class="kbdoc-bottle-img" src="${bottleDataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;filter:drop-shadow(0 14px 18px rgba(23,63,51,0.18));"/>` : ""}
     </div>
     <div style="flex:1 1 auto;height:100%;display:flex;align-items:flex-start;justify-content:center;min-width:0;">
-      ${factsDataUrl ? `<div style="background:#fff;border:1px solid ${BROCHURE_COLORS.border};border-radius:10px;box-shadow:0 10px 24px rgba(23,63,51,0.08);padding:14px;display:flex;align-items:center;justify-content:center;max-width:100%;max-height:100%;box-sizing:border-box;">
+      ${factsDataUrl ? `<div style="background:#fff;border:1px solid ${BROCHURE_COLORS.border};border-radius:10px;box-shadow:0 10px 24px rgba(23,63,51,0.08);padding:14px;display:flex;align-items:center;justify-content:center;max-width:100%;height:100%;box-sizing:border-box;">
         <img class="kbdoc-facts-img" src="${factsDataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;display:block;"/>
       </div>` : ""}
     </div>
   </div>`;
 }
 function buildBrochureHeroFullWidthHtml({ bottleDataUrl, factsDataUrl }) {
-  return `<div style="flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:16px;margin:22px 0;">
-    <div style="flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;">
+  // flex-basis 0 (not "auto") on these two rows: with a basis of "auto", the
+  // browser sizes each row from its own CONTENT first and only afterwards
+  // applies flex-grow, which made the facts image's own percentage
+  // max-height resolve against an indefinite ("auto") parent height and
+  // silently fall back to "no constraint" — letting the image ignore its
+  // vertical budget entirely and overflow past its row and into the info
+  // cards below. A 0 basis makes each row's height purely a function of
+  // flex-grow (computed immediately, independent of content), giving the
+  // image a definite height to constrain itself against from the start.
+  return `<div style="flex:0 0 auto;height:${BROCHURE_HERO_HEIGHT_PX.fullWidth}px;display:flex;flex-direction:column;gap:16px;margin:20px 0 24px;">
+    <div style="flex:1 1 0;min-height:0;display:flex;align-items:center;justify-content:center;">
       ${bottleDataUrl ? `<img class="kbdoc-bottle-img" src="${bottleDataUrl}" style="max-width:40%;max-height:100%;object-fit:contain;filter:drop-shadow(0 14px 18px rgba(23,63,51,0.18));"/>` : ""}
     </div>
-    <div style="flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;">
-      <div style="background:#fff;border:1px solid ${BROCHURE_COLORS.border};border-radius:10px;box-shadow:0 10px 24px rgba(23,63,51,0.08);padding:14px;display:flex;align-items:center;justify-content:center;max-width:100%;max-height:100%;box-sizing:border-box;">
+    <div style="flex:1 1 0;min-height:0;display:flex;align-items:center;justify-content:center;">
+      <div style="background:#fff;border:1px solid ${BROCHURE_COLORS.border};border-radius:10px;box-shadow:0 10px 24px rgba(23,63,51,0.08);padding:14px;display:flex;align-items:center;justify-content:center;max-width:100%;height:100%;box-sizing:border-box;">
         <img class="kbdoc-facts-img" src="${factsDataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;display:block;"/>
       </div>
     </div>
   </div>`;
 }
 function buildBrochureHeroBottleOnlyHtml({ bottleDataUrl }) {
-  return `<div style="flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;margin:22px 0;">
+  return `<div style="flex:0 0 auto;height:${BROCHURE_HERO_HEIGHT_PX.bottleOnly}px;display:flex;align-items:center;justify-content:center;margin:20px 0 24px;">
     ${bottleDataUrl ? `<img class="kbdoc-bottle-img" src="${bottleDataUrl}" style="max-width:60%;max-height:100%;object-fit:contain;filter:drop-shadow(0 16px 20px rgba(23,63,51,0.2));"/>` : ""}
   </div>`;
 }
@@ -9500,6 +9519,7 @@ function buildBrochurePageHtml({ product, logoDataUrl, overviewRows, ingredients
     ${buildBrochureHeadlineHtml(product, overviewRows)}
     ${heroHtml}
     ${infoRow}
+    <div style="flex:1 1 auto;min-height:0;"></div>
     ${buildBrochureFooterHtml(logoDataUrl, pageIndex, pageCount)}
   </div>`;
 }
