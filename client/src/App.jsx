@@ -2252,6 +2252,15 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   // bottle for their own use or trial units to hand to patients, and the
   // manager's prep tracking downstream depends on getting it right here.
   const [sampleTypeChoice, setSampleTypeChoice] = useState("personal");
+  // How many units — the manager's own standard recommendation is 3 (enough
+  // for a doctor to start 3 different patients and compare results at the
+  // next visit), so that's the default here rather than 1.
+  const [sampleQty, setSampleQty] = useState("3");
+  // Only the products the manager has actually prepared as patient samples
+  // (see the Samples tab) — fetched once this box becomes relevant, not on
+  // every keystroke. Personal-use samples are just the retail bottle and
+  // always search the full catalog instead (see samplesItemOptions below).
+  const [samplePrepStock, setSamplePrepStock] = useState([]);
   const [sawCompetitor, setSawCompetitor] = useState(false);
   const [competitorName, setCompetitorName] = useState("");
   const [competitorNotes, setCompetitorNotes] = useState("");
@@ -2410,6 +2419,14 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
       .catch(() => setRecentVisitsForEntity([]));
   }, [matchedEntity?.name, isDoctorStyleEntity]);
 
+  // Loaded once the Samples box can actually appear (not on every
+  // pharmacy check-in, which never shows it) — this is what restricts the
+  // Patient-type dropdown below to only products the manager has prepared.
+  useEffect(() => {
+    if (!isDoctorStyleEntity || !visitStarted) return;
+    api.getSamplePrepStock().then((data) => setSamplePrepStock(data.stock || [])).catch(() => setSamplePrepStock([]));
+  }, [isDoctorStyleEntity, visitStarted]);
+
   // Doctor-visit redesign: the richer Pre-Call brief replaces the plain
   // "last 3 visits" list above for doctors AND nutritionists/dietitians
   // (same clinical flow) — one combined read (lastVisit + memory + timeline)
@@ -2465,20 +2482,43 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   // "Gave it today" / "Need next visit" — removes the guesswork. Feeds the
   // same mentionedItems/sampleStatus mechanism either way, so POST
   // /api/visits and POST /api/followups need no changes to pick it up.
-  const matchedSamplesItem = products.find((p) => p.name.toLowerCase().trim() === samplesQuery.toLowerCase().trim());
+  //
+  // Personal-use samples are just the retail bottle, so that search still
+  // covers the whole catalog. Patient (prepared) samples instead search ONLY
+  // what the manager has actually prepared (SamplePrepStock), each carrying
+  // its current remaining count — not the catalog at large, which is what
+  // let a rep tag something nobody had actually prepared.
+  const samplesSearchList = sampleTypeChoice === "patient"
+    ? samplePrepStock.map((s) => ({ id: s.productId, name: s.productName, preparedQty: s.preparedQty }))
+    : products;
+  const matchedSamplesItem = samplesSearchList.find((p) => p.name.toLowerCase().trim() === samplesQuery.toLowerCase().trim());
   const samplesItemOptions = (samplesQuery.trim()
-    ? products.filter((p) => p.name.toLowerCase().includes(samplesQuery.toLowerCase().trim()))
-    : products
+    ? samplesSearchList.filter((p) => p.name.toLowerCase().includes(samplesQuery.toLowerCase().trim()))
+    : samplesSearchList
   ).slice(0, 50);
+  // Stock already spoken for by "Gave it today" items tagged earlier in
+  // THIS same visit (not yet submitted, so not yet reflected in
+  // samplePrepStock itself) — subtracted here so the rep can't tag more of
+  // the same product than is really left before they ever hit Save.
+  const alreadyTaggedGaveQty = matchedSamplesItem && sampleTypeChoice === "patient"
+    ? mentionedItems.filter((it) => it.productId === matchedSamplesItem.id && it.sampleStatus === "gave" && it.sampleType === "patient").reduce((sum, it) => sum + (Number(it.qty) || 1), 0)
+    : 0;
+  const remainingForMatched = matchedSamplesItem && sampleTypeChoice === "patient"
+    ? Math.max(0, (Number(matchedSamplesItem.preparedQty) || 0) - alreadyTaggedGaveQty)
+    : null;
+  const sampleQtyNum = Math.max(1, Number(sampleQty) || 1);
+  const giveExceedsStock = sampleTypeChoice === "patient" && remainingForMatched !== null && sampleQtyNum > remainingForMatched;
   const addSamplesItem = (status) => {
     if (!matchedSamplesItem) return;
+    if (status === "gave" && giveExceedsStock) return;
     setMentionedItems((prev) => {
       if (prev.some((it) => it.productId === matchedSamplesItem.id)) {
-        return prev.map((it) => (it.productId === matchedSamplesItem.id ? { ...it, sampleStatus: status, sampleType: sampleTypeChoice } : it));
+        return prev.map((it) => (it.productId === matchedSamplesItem.id ? { ...it, sampleStatus: status, sampleType: sampleTypeChoice, qty: sampleQtyNum } : it));
       }
-      return [...prev, { productId: matchedSamplesItem.id, name: matchedSamplesItem.name, sampleStatus: status, sampleType: sampleTypeChoice }];
+      return [...prev, { productId: matchedSamplesItem.id, name: matchedSamplesItem.name, sampleStatus: status, sampleType: sampleTypeChoice, qty: sampleQtyNum }];
     });
     setSamplesQuery("");
+    setSampleQty("3");
   };
   const taggedSampleItems = mentionedItems.filter((it) => it.sampleStatus === "gave" || it.sampleStatus === "next_visit");
   const requestedSampleItems = mentionedItems.filter((it) => it.sampleStatus === "next_visit");
@@ -3274,22 +3314,14 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                   <Package size={15} style={{ color: "#C17817", flexShrink: 0 }} />
                   <span style={{ fontSize: 13.5, fontWeight: 700, color: "#7A5B2E" }}>Samples</span>
                 </div>
-                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                  <input
-                    list="samples-options"
-                    value={samplesQuery}
-                    onChange={(e) => setSamplesQuery(e.target.value)}
-                    placeholder="Search a product…"
-                    style={{ ...inputStyle, flex: 1, background: "#fff" }}
-                  />
-                  <datalist id="samples-options">
-                    {samplesItemOptions.map((p) => <option key={p.id} value={p.name} />)}
-                  </datalist>
-                </div>
+                {/* Type is picked FIRST, not after searching — Personal and
+                    Patient search two completely different lists (the whole
+                    catalog vs. only what's been prepared), so the search box
+                    below can't know what to search until this is chosen. */}
                 <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                   <button
                     type="button"
-                    onClick={() => setSampleTypeChoice("personal")}
+                    onClick={() => { setSampleTypeChoice("personal"); setSamplesQuery(""); setSampleQty("3"); }}
                     style={{
                       flex: 1, padding: "6px 10px", borderRadius: 6, fontSize: 11.5, fontWeight: 500,
                       border: sampleTypeChoice === "personal" ? "1px solid #7A5B2E" : "1px solid #E9C88A",
@@ -3301,7 +3333,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                   </button>
                   <button
                     type="button"
-                    onClick={() => setSampleTypeChoice("patient")}
+                    onClick={() => { setSampleTypeChoice("patient"); setSamplesQuery(""); setSampleQty("3"); }}
                     style={{
                       flex: 1, padding: "6px 10px", borderRadius: 6, fontSize: 11.5, fontWeight: 500,
                       border: sampleTypeChoice === "patient" ? "1px solid #7A5B2E" : "1px solid #E9C88A",
@@ -3312,14 +3344,42 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                     Patient samples (prepared)
                   </button>
                 </div>
+                <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+                  <input
+                    list="samples-options"
+                    value={samplesQuery}
+                    onChange={(e) => setSamplesQuery(e.target.value)}
+                    placeholder={sampleTypeChoice === "patient" ? "Search a prepared sample…" : "Search a product…"}
+                    style={{ ...inputStyle, flex: 1, background: "#fff" }}
+                  />
+                  <datalist id="samples-options">
+                    {samplesItemOptions.map((p) => (
+                      <option key={p.id} value={p.name}>
+                        {sampleTypeChoice === "patient" ? `${p.name} — ${Number(p.preparedQty) || 0} left` : p.name}
+                      </option>
+                    ))}
+                  </datalist>
+                  <input
+                    type="number" min="1" value={sampleQty} onChange={(e) => setSampleQty(e.target.value)}
+                    title="Quantity"
+                    style={{ ...inputStyle, width: 64, background: "#fff", textAlign: "center" }}
+                  />
+                </div>
+                {sampleTypeChoice === "patient" && matchedSamplesItem && (
+                  <div style={{ fontSize: 11, color: giveExceedsStock ? "#B33A3A" : "#7A5B2E", marginBottom: 8 }}>
+                    {remainingForMatched} prepared and left for {matchedSamplesItem.name}
+                    {giveExceedsStock ? " — reduce the quantity, or tag the rest as “Need next visit.”" : ""}
+                  </div>
+                )}
                 <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
                   <button
                     type="button"
                     onClick={() => addSamplesItem("gave")}
-                    disabled={!matchedSamplesItem}
+                    disabled={!matchedSamplesItem || giveExceedsStock}
+                    title={giveExceedsStock ? "Not enough prepared stock for this quantity" : undefined}
                     style={{
                       flex: 1, padding: "8px 10px", borderRadius: 8, border: "none", whiteSpace: "nowrap",
-                      background: matchedSamplesItem ? "#4C7A5E" : "#D8D2C4", color: "#fff", fontSize: 12.5, fontWeight: 600,
+                      background: matchedSamplesItem && !giveExceedsStock ? "#4C7A5E" : "#D8D2C4", color: "#fff", fontSize: 12.5, fontWeight: 600,
                     }}
                   >
                     + Gave it today
@@ -3344,6 +3404,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                         background: "#fff", border: "1px solid #E9C88A", borderRadius: 10, padding: "6px 8px 6px 10px",
                       }}>
                         <span style={{ fontWeight: 500 }}>{it.name}</span>
+                        <span style={{ fontSize: 10.5, fontWeight: 600, color: "#5B5445" }}>× {it.qty || 1}</span>
                         <span style={{
                           fontSize: 10.5, fontWeight: 600,
                           color: it.sampleStatus === "gave" ? "#4C7A5E" : "#C17817",
@@ -15159,11 +15220,20 @@ function SamplesTrackingView({ products, role }) {
   const [restockQty, setRestockQty] = useState("");
   const [restocking, setRestocking] = useState(false);
   const [showDone, setShowDone] = useState(false);
+  // Actual hand-out history — distinct from the Pending/Prepared/Given
+  // queue below, which is only ever "need next visit" requests. Before
+  // this, an immediate "Gave it today" at check-in had no visible trace
+  // anywhere in this tab at all, only in raw data exports.
+  const [recentGiven, setRecentGiven] = useState(null);
 
   const load = useCallback(() => {
-    Promise.all([api.getSampleFulfillments(), api.getSamplePrepStock()])
-      .then(([f, s]) => { setFulfillments(f.fulfillments || []); setStock(s.stock || []); })
-      .catch(() => { setFulfillments([]); setStock([]); });
+    Promise.all([api.getSampleFulfillments(), api.getSamplePrepStock(), api.getSamples({ all: true })])
+      .then(([f, s, samples]) => {
+        setFulfillments(f.fulfillments || []);
+        setStock(s.stock || []);
+        setRecentGiven((samples.samples || []).filter((x) => x.status === "gave").slice(0, 30));
+      })
+      .catch(() => { setFulfillments([]); setStock([]); setRecentGiven([]); });
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -15219,7 +15289,7 @@ function SamplesTrackingView({ products, role }) {
     }
   };
 
-  if (fulfillments === null || stock === null) {
+  if (fulfillments === null || stock === null || recentGiven === null) {
     return <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>;
   }
 
@@ -15298,7 +15368,11 @@ function SamplesTrackingView({ products, role }) {
       <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14, marginBottom: 20 }}>
         <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>Patient Sample Stock</div>
         {isManager && (
-          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <>
+            <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>
+              Typing a product that isn't listed yet below and logging a batch for it is also how you start tracking a brand-new sample — it'll then show up for reps to pick during check-in.
+            </div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
             <input
               list="samples-restock-options"
               value={restockQuery}
@@ -15324,7 +15398,8 @@ function SamplesTrackingView({ products, role }) {
             >
               {restocking ? "Logging…" : "+ Log prep batch"}
             </button>
-          </div>
+            </div>
+          </>
         )}
         {stock.length === 0 ? (
           <EmptyState text="No patient-sample batches logged yet." />
@@ -15344,6 +15419,37 @@ function SamplesTrackingView({ products, role }) {
                 </div>
               );
             })}
+          </div>
+        )}
+      </div>
+
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>Recently given ({recentGiven.length})</div>
+        {recentGiven.length === 0 ? (
+          <EmptyState text="No samples handed out yet." />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {recentGiven.map((s) => (
+              <div key={s.id} style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6, fontSize: 12.5,
+                background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "7px 10px",
+              }}>
+                <span>
+                  <strong>{s.productName}</strong> × {Number(s.qty) || 1} to {s.doctorName}
+                </span>
+                <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{
+                    fontSize: 10, fontWeight: 600, borderRadius: 10, padding: "1px 6px",
+                    background: s.sampleType === "patient" ? "#FBF3E8" : "#F3F7F4",
+                    color: s.sampleType === "patient" ? "#7A5B2E" : "#4C7A5E",
+                    border: s.sampleType === "patient" ? "1px solid #E9C88A" : "1px solid #CFE0D5",
+                  }}>
+                    {s.sampleType === "patient" ? "Patient" : "Personal"}
+                  </span>
+                  <span style={{ color: "#8A8272" }}>{s.repName} — {fmtDateOfInstant(s.date)}</span>
+                </span>
+              </div>
+            ))}
           </div>
         )}
       </div>

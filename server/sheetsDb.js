@@ -154,6 +154,10 @@ const CACHEABLE_TABS = new Set([
   "Products", "Clients", "Doctors", "Nutritionists", "Reps", "Offers", "Settings",
   "ProductCatalog", "RecallProductIngredients", "RecallIngredients", "RecallClinicalEvidence",
   "RecallResearchSources", "RecallProductAdvantages", "TrainingStudies",
+  // Read on every doctor/nutritionist check-in (to build the Patient-sample
+  // dropdown) in addition to the existing Samples-tab reads — same
+  // every-write-invalidates-it safety net as every other cached tab above.
+  "SamplePrepStock",
 ]);
 const READ_CACHE_TTL_MS = 20 * 1000;
 const readCache = new Map(); // tab -> { data, expiresAt }

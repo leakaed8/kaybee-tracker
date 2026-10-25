@@ -2659,9 +2659,22 @@ app.post("/api/visits", async (req, res) => {
         repName: req.repName || "",
         visitId: visit.id,
         date: visit.time,
+        qty: Number(it.qty) || 1,
         sampleType: it.sampleType === "patient" ? "patient" : "personal",
       }));
     if (sampleRows.length) await db.appendRows("Samples", sampleRows);
+
+    // A patient sample physically handed over right now ("Gave it today")
+    // draws down the prepared pool immediately, same as the manager's
+    // "Given to rep" handoff already does — otherwise the stock count only
+    // ever reflected pre-staged "need next visit" requests, never a direct
+    // give. Personal-use items are the plain retail bottle and never touch
+    // this pool (see adjustSamplePrepStock's own comment on floor-at-0).
+    for (const row of sampleRows) {
+      if (row.status === "gave" && row.sampleType === "patient") {
+        await adjustSamplePrepStock(row.productId, row.productName, -row.qty, req.repName || "");
+      }
+    }
 
     if (competitorName && String(competitorName).trim()) {
       await db.appendRow("CompetitorSightings", {
@@ -2759,9 +2772,18 @@ app.patch("/api/visits/:id", async (req, res) => {
           repName: visit.repName || "",
           visitId: req.params.id,
           date: visit.time,
+          qty: Number(it.qty) || 1,
           sampleType: it.sampleType === "patient" ? "patient" : "personal",
         }));
       if (newSampleRows.length) await db.appendRows("Samples", newSampleRows);
+      // Same immediate stock draw-down as POST /api/visits — only for items
+      // newly added on this edit (alreadyLogged already excludes anything
+      // counted when the visit was first saved, so this can't double-decrement).
+      for (const row of newSampleRows) {
+        if (row.status === "gave" && row.sampleType === "patient") {
+          await adjustSamplePrepStock(row.productId, row.productName, -row.qty, visit.repName || "");
+        }
+      }
     }
 
     // Same idea for a competitor sighting flagged on this edit — only added
@@ -2960,7 +2982,9 @@ app.post("/api/followups", async (req, res) => {
         .map((s) => ({
           productId: s.productId, name: s.productName,
           sampleType: s.sampleType === "patient" ? "patient" : "personal",
-          qty: 1, managerStatus: "", preparedAt: "", preparedBy: "", givenAt: "", givenBy: "",
+          // The quantity the rep actually asked for at check-in (defaults to
+          // 1 only for pre-existing rows saved before this field existed).
+          qty: Number(s.qty) || 1, managerStatus: "", preparedAt: "", preparedBy: "", givenAt: "", givenBy: "",
         }));
       console.log(`sample-request check: entityName="${entityName}" visitId=${visitId || ""} samplesTotal=${samples.length} matchesForDoctor=${matches.length} itemsNeedingSample=${items.length}`);
       if (items.length) {
@@ -5132,19 +5156,26 @@ app.patch("/api/sample-fulfillments/:followUpId/:productId", requireTabAccess("s
   }
 });
 
+// Floors at 0 (never negative) — a check-in "gave it today" now also calls
+// this (see POST/PATCH /api/visits below) on top of the existing
+// given-to-rep handoff, and a check-in must never be blocked or lost over
+// an inventory mismatch; if the real world and the app's count disagree
+// (two reps giving out the last unit at the same time, a miscount, etc.),
+// clamping to 0 here keeps the number honest without losing the record of
+// what actually happened.
 async function adjustSamplePrepStock(productId, productName, deltaQty, who) {
   const rows = await db.getAllRows("SamplePrepStock");
   const existing = rows.find((r) => r.productId === productId);
   const now = new Date().toISOString();
   if (existing) {
     await db.updateRowById("SamplePrepStock", existing.id, {
-      preparedQty: String((Number(existing.preparedQty) || 0) + deltaQty),
+      preparedQty: String(Math.max(0, (Number(existing.preparedQty) || 0) + deltaQty)),
       updatedBy: who, updatedAt: now,
     });
   } else {
     await db.appendRow("SamplePrepStock", {
       id: `sps${crypto.randomUUID()}`, productId, productName,
-      preparedQty: String(deltaQty), lowStockThreshold: "5", updatedBy: who, updatedAt: now,
+      preparedQty: String(Math.max(0, deltaQty)), lowStockThreshold: "5", updatedBy: who, updatedAt: now,
     });
   }
 }
