@@ -11078,7 +11078,18 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
   const [mergeBusyKey, setMergeBusyKey] = useState(null);
   const [mergeError, setMergeError] = useState("");
   const [canonicalEdits, setCanonicalEdits] = useState({});
-  const normalizeSpecialty = (s) => s.trim().toLowerCase().replace(/\s+/g, " ");
+  // NFKC + stripping zero-width/invisible characters matters here, not just
+  // trim/lowercase/whitespace-collapse: a value pasted from Excel can carry
+  // a zero-width space, a BOM, or a soft hyphen that's completely invisible
+  // on screen — two specialties that look IDENTICAL to a human ("Cardio"
+  // and "Cardio") can still fail a plain string-equality check and show up
+  // as two separate rows everywhere that groups by raw specialty text.
+  const normalizeSpecialty = (s) => s
+    .normalize("NFKC")
+    .replace(/[​-‍﻿­⁠]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
   const specialtyRawCounts = new Map();
   doctors.forEach((d) => {
     const raw = (d.specialty || "").trim();
@@ -11090,6 +11101,14 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
     const norm = normalizeSpecialty(raw);
     if (!byNormalized.has(norm)) byNormalized.set(norm, []);
     byNormalized.get(norm).push({ raw, count });
+  });
+  // Used by Section 2b below to group "Visits by Specialty" on the SAME
+  // normalized key (so invisible-character duplicates never show as two
+  // rows on the dashboard, merged or not), displaying whichever raw
+  // spelling is most common under that key.
+  const canonicalRawForNorm = new Map();
+  byNormalized.forEach((raws, norm) => {
+    canonicalRawForNorm.set(norm, raws.slice().sort((a, b) => b.count - a.count)[0].raw);
   });
   const normKeys = [...byNormalized.keys()];
   const parentOf = new Map(normKeys.map((k) => [k, k]));
@@ -11258,22 +11277,31 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
   // specialty's total is always the plain sum of its reps' numbers, never a
   // separately-deduped "unique doctors across the whole team" figure.
   const doctorByNormName = new Map(doctors.map((d) => [d.name.toLowerCase().trim(), d]));
-  const specialtyRepDoctorSets = new Map(); // specialty -> Map(repName -> Map(normalizedDoctorName -> displayName))
+  // Keyed by normalizeSpecialty(...), NOT the raw specialty string — two
+  // doctors whose specialty looks identical on screen ("Cardio" / "Cardio")
+  // but differs by an invisible character (common from an Excel paste)
+  // must land in the same row here regardless of whether anyone has
+  // actually run a merge yet. The merge tool fixes the STORED data;
+  // this fixes what the dashboard SHOWS either way.
+  const specialtyRepDoctorSets = new Map(); // normKey -> { label, byRep: Map(repName -> Map(normalizedDoctorName -> displayName)) }
   monthVisits.forEach((v) => {
     const doc = doctorByNormName.get(v.client.toLowerCase().trim());
     if (!doc) return; // not a doctor visit (pharmacy/supplement store/etc.)
-    const specialty = doc.specialty || "Unspecified";
-    if (!specialtyRepDoctorSets.has(specialty)) specialtyRepDoctorSets.set(specialty, new Map());
-    const byRep = specialtyRepDoctorSets.get(specialty);
-    if (!byRep.has(v.repName)) byRep.set(v.repName, new Map());
-    byRep.get(v.repName).set(v.client.toLowerCase().trim(), doc.name);
+    const rawSpecialty = (doc.specialty || "").trim();
+    const normKey = rawSpecialty ? normalizeSpecialty(rawSpecialty) : "";
+    const key = normKey || "unspecified";
+    const label = normKey ? (canonicalRawForNorm.get(normKey) || rawSpecialty) : "Unspecified";
+    if (!specialtyRepDoctorSets.has(key)) specialtyRepDoctorSets.set(key, { label, byRep: new Map() });
+    const group = specialtyRepDoctorSets.get(key);
+    if (!group.byRep.has(v.repName)) group.byRep.set(v.repName, new Map());
+    group.byRep.get(v.repName).set(v.client.toLowerCase().trim(), doc.name);
   });
-  const specialtyBreakdown = [...specialtyRepDoctorSets.entries()]
-    .map(([specialty, byRep]) => {
+  const specialtyBreakdown = [...specialtyRepDoctorSets.values()]
+    .map(({ label, byRep }) => {
       const reps = [...byRep.entries()]
         .map(([repName, docMap]) => ({ repName, count: docMap.size, doctorNames: [...docMap.values()].sort() }))
         .sort((a, b) => b.count - a.count);
-      return { specialty, total: reps.reduce((s, r) => s + r.count, 0), reps };
+      return { specialty: label, total: reps.reduce((s, r) => s + r.count, 0), reps };
     })
     .sort((a, b) => b.total - a.total);
 
