@@ -1391,7 +1391,7 @@ const inputStyle = { width: "100%", padding: "8px 10px", borderRadius: 7, border
 // stays fully local, so typing never waits on the parent's re-render.
 const SEARCHABLE_SELECT_MAX_RESULTS = 8;
 const SEARCHABLE_SELECT_COMMIT_DEBOUNCE_MS = 150;
-export function SearchableSelect({ value, onChange, options, getLabel, placeholder, style, onFocus }) {
+export const SearchableSelect = React.forwardRef(function SearchableSelect({ value, onChange, options, getLabel, renderOption, placeholder, style, onFocus }, forwardedRef) {
   const [query, setQuery] = useState(value || "");
   const [open, setOpen] = useState(false);
   const wrapRef = useRef(null);
@@ -1449,6 +1449,7 @@ export function SearchableSelect({ value, onChange, options, getLabel, placehold
   return (
     <div ref={wrapRef} style={{ position: "relative" }}>
       <input
+        ref={forwardedRef}
         value={query}
         onChange={(e) => { setQuery(e.target.value); setOpen(true); scheduleCommit(e.target.value); }}
         onFocus={() => { setOpen(true); onFocus?.(); }}
@@ -1475,7 +1476,7 @@ export function SearchableSelect({ value, onChange, options, getLabel, placehold
                 fontSize: 13, cursor: "pointer", color: "#1F2A24",
               }}
             >
-              {getLabel(o)}
+              {renderOption ? renderOption(o) : getLabel(o)}
             </button>
           ))}
           {matches.length > shown.length && (
@@ -1487,7 +1488,7 @@ export function SearchableSelect({ value, onChange, options, getLabel, placehold
       )}
     </div>
   );
-}
+});
 
 // Every rep's own read-only visit history, reached from Check-In. Replaces
 // the old "View my visits sheet" link's role for reps who were never given
@@ -3342,20 +3343,28 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                   </button>
                 </div>
                 <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
-                  <input
-                    list="samples-options"
-                    value={samplesQuery}
-                    onChange={(e) => setSamplesQuery(e.target.value)}
-                    placeholder="Search a product…"
-                    style={{ ...inputStyle, flex: 1, background: "#fff" }}
-                  />
-                  <datalist id="samples-options">
-                    {samplesItemOptions.map((p) => (
-                      sampleTypeChoice === "patient"
-                        ? <option key={p.id} value={p.name}>{`${p.name} — ${preparedQtyFor(p.id)} left`}</option>
-                        : <option key={p.id} value={p.name} />
-                    ))}
-                  </datalist>
+                  <div style={{ flex: 1 }}>
+                    {/* A plain <input list>+<datalist> looked fine in testing
+                        but is unreliable on real phones: several mobile
+                        browsers (notably iOS Safari/Chrome) don't reliably
+                        fire a React-visible change event when a datalist
+                        suggestion is tapped, so the field can show the full
+                        product name while samplesQuery silently stays stale
+                        — "Gave it today"/"Flag as interest" then never
+                        enable even though it looks selected. SearchableSelect
+                        is our own JS-driven dropdown (a real onClick per
+                        row), so picking a suggestion always commits the
+                        exact name. */}
+                    <SearchableSelect
+                      value={samplesQuery}
+                      onChange={setSamplesQuery}
+                      options={samplesItemOptions}
+                      getLabel={(p) => p.name}
+                      renderOption={sampleTypeChoice === "patient" ? (p) => `${p.name} — ${preparedQtyFor(p.id)} left` : undefined}
+                      placeholder="Search a product…"
+                      style={{ ...inputStyle, width: "100%", background: "#fff" }}
+                    />
+                  </div>
                   <input
                     type="number" min="1" value={sampleQty} onChange={(e) => setSampleQty(e.target.value)}
                     title="Quantity"
@@ -15402,17 +15411,17 @@ function SamplesTrackingView({ products, role }) {
               Typing a product that isn't listed yet below and logging a batch for it is also how you start tracking a brand-new sample — it'll then show up for reps to pick during check-in.
             </div>
             <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-            <input
-              ref={restockInputRef}
-              list="samples-restock-options"
-              value={restockQuery}
-              onChange={(e) => setRestockQuery(e.target.value)}
-              placeholder="Product you just prepared…"
-              style={{ ...inputStyle, flex: 2 }}
-            />
-            <datalist id="samples-restock-options">
-              {restockOptions.map((p) => <option key={p.id} value={p.name} />)}
-            </datalist>
+            <div style={{ flex: 2 }}>
+              <SearchableSelect
+                ref={restockInputRef}
+                value={restockQuery}
+                onChange={setRestockQuery}
+                options={restockOptions}
+                getLabel={(p) => p.name}
+                placeholder="Product you just prepared…"
+                style={{ ...inputStyle, width: "100%" }}
+              />
+            </div>
             <input
               type="number" min="1" value={restockQty} onChange={(e) => setRestockQty(e.target.value)}
               placeholder="Qty"
