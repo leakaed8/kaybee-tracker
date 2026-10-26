@@ -11130,6 +11130,60 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
     }
   };
 
+  // Runs every suggested cluster one after another (not in parallel — same
+  // Doctors sheet, so overlapping batchUpdateRows calls could race) rather
+  // than making the manager click "Merge" once per cluster.
+  const [mergeAllBusy, setMergeAllBusy] = useState(false);
+  const mergeAllSuggested = async () => {
+    setMergeAllBusy(true);
+    setMergeError("");
+    try {
+      for (const cluster of suggestedSpecialtyMerges) {
+        const canonical = (canonicalEdits[cluster.key] ?? cluster.defaultCanonical).trim();
+        if (!canonical) continue;
+        await api.mergeDoctorSpecialty(cluster.raws.map((r) => r.raw), canonical);
+      }
+      await onDoctorsChanged?.();
+    } catch (e) {
+      setMergeError(e.message);
+    } finally {
+      setMergeAllBusy(false);
+    }
+  };
+
+  // Full list of every distinct specialty value, with a manual multi-select
+  // merge — the automatic clusters above only catch near-duplicates
+  // (whitespace/casing) and prefix abbreviations (Endo -> Endocrinology).
+  // A pair that looks nothing alike (e.g. "GI" vs "Gastroenterology") won't
+  // be suggested on its own, so this is the catch-all for "what if there's
+  // a duplicate the detector missed" — every value is right here to review.
+  const [showAllSpecialties, setShowAllSpecialties] = useState(false);
+  const [manualSelected, setManualSelected] = useState(new Set());
+  const [manualCanonical, setManualCanonical] = useState("");
+  const [manualBusy, setManualBusy] = useState(false);
+  const allSpecialtiesSorted = [...specialtyRawCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const toggleManualSelected = (raw) => setManualSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(raw)) next.delete(raw); else next.add(raw);
+    return next;
+  });
+  const mergeManualSelected = async () => {
+    const canonical = manualCanonical.trim();
+    if (!canonical || manualSelected.size < 2) return;
+    setManualBusy(true);
+    setMergeError("");
+    try {
+      await api.mergeDoctorSpecialty([...manualSelected], canonical);
+      setManualSelected(new Set());
+      setManualCanonical("");
+      await onDoctorsChanged?.();
+    } catch (e) {
+      setMergeError(e.message);
+    } finally {
+      setManualBusy(false);
+    }
+  };
+
   // Same "fetch once when this tab opens" pattern already used by
   // PerformanceView/LocationsView elsewhere in this app — purely additive
   // reads, nothing here writes anything.
@@ -11449,11 +11503,21 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
 
           {suggestedSpecialtyMerges.length > 0 && (
             <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${DASH.border}` }}>
-              <div style={{ fontSize: 12.5, fontWeight: 700, color: DASH.burgundy, marginBottom: 2 }}>
-                ⚠ {suggestedSpecialtyMerges.length} possible duplicate specialty name{suggestedSpecialtyMerges.length === 1 ? "" : "s"}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: DASH.burgundy, marginBottom: 2 }}>
+                  ⚠ {suggestedSpecialtyMerges.length} possible duplicate specialty name{suggestedSpecialtyMerges.length === 1 ? "" : "s"}
+                </div>
+                <button
+                  type="button"
+                  disabled={mergeAllBusy}
+                  onClick={mergeAllSuggested}
+                  style={{ padding: "6px 12px", borderRadius: 7, border: `1px solid ${DASH.burgundy}`, background: "none", fontSize: 11.5, fontWeight: 700, color: DASH.burgundy, whiteSpace: "nowrap" }}
+                >
+                  {mergeAllBusy ? "Merging all…" : "Merge all suggested"}
+                </button>
               </div>
               <div style={{ fontSize: 11, color: DASH.sub, marginBottom: 10 }}>
-                Specialty is free text, so reps have typed these differently over time. Edit the name if needed, then merge — every matching doctor is updated at once.
+                Specialty is free text, so reps have typed these differently over time. Edit a name if needed, then merge one at a time or all at once — every matching doctor is updated immediately.
               </div>
               {mergeError && <div style={{ fontSize: 11.5, color: DASH.burgundy, marginBottom: 8 }}>{mergeError}</div>}
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -11484,6 +11548,53 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
                   );
                 })}
               </div>
+            </div>
+          )}
+
+          {allSpecialtiesSorted.length > 0 && (
+            <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${DASH.border}` }}>
+              <button
+                type="button"
+                onClick={() => setShowAllSpecialties((v) => !v)}
+                style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 11.5, fontWeight: 700, color: DASH.sub }}
+              >
+                {showAllSpecialties ? "▾" : "▸"} All {allSpecialtiesSorted.length} specialty values — in case the detector above missed one
+              </button>
+              {showAllSpecialties && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 11, color: DASH.sub, marginBottom: 8 }}>
+                    Tick any two or more that are really the same specialty (e.g. "GI" and "Gastroenterology" won't be auto-detected since they don't share a prefix), type the name to use, then merge.
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 220, overflowY: "auto", marginBottom: 10 }}>
+                    {allSpecialtiesSorted.map(([raw, count]) => (
+                      <label key={raw} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "3px 0", cursor: "pointer" }}>
+                        <input type="checkbox" checked={manualSelected.has(raw)} onChange={() => toggleManualSelected(raw)} />
+                        <span>{raw}</span>
+                        <span style={{ color: DASH.sub, fontSize: 10.5 }}>({count})</span>
+                      </label>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <input
+                      value={manualCanonical}
+                      onChange={(e) => setManualCanonical(e.target.value)}
+                      placeholder="Specialty name to use"
+                      style={{ ...inputStyle, flex: 1, minWidth: 160, fontSize: 12.5 }}
+                    />
+                    <button
+                      type="button"
+                      disabled={manualBusy || manualSelected.size < 2 || !manualCanonical.trim()}
+                      onClick={mergeManualSelected}
+                      style={{
+                        padding: "7px 12px", borderRadius: 7, border: "none", fontSize: 12, fontWeight: 700, color: "#fff", whiteSpace: "nowrap",
+                        background: manualBusy || manualSelected.size < 2 || !manualCanonical.trim() ? "#D8D2C4" : DASH.burgundy,
+                      }}
+                    >
+                      {manualBusy ? "Merging…" : `Merge selected (${manualSelected.size})`}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </DashSection>
