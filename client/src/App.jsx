@@ -11040,6 +11040,15 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
   // true})), so this filter runs entirely client-side.
   const [freqFrom, setFreqFrom] = useState(`${new Date().getFullYear()}-01-01`);
   const [freqTo, setFreqTo] = useState(todayBeirutStr());
+  // "Unspecified" starts expanded — that's the one group that's actually
+  // actionable (go get those doctors' specialty filled in), so it shouldn't
+  // take an extra click to see who's in it.
+  const [expandedSpecialties, setExpandedSpecialties] = useState(() => new Set(["Unspecified"]));
+  const toggleSpecialty = (name) => setExpandedSpecialties((prev) => {
+    const next = new Set(prev);
+    if (next.has(name)) next.delete(name); else next.add(name);
+    return next;
+  });
 
   // Same "fetch once when this tab opens" pattern already used by
   // PerformanceView/LocationsView elsewhere in this app — purely additive
@@ -11115,19 +11124,21 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
   // specialty's total is always the plain sum of its reps' numbers, never a
   // separately-deduped "unique doctors across the whole team" figure.
   const doctorByNormName = new Map(doctors.map((d) => [d.name.toLowerCase().trim(), d]));
-  const specialtyRepDoctorSets = new Map(); // specialty -> Map(repName -> Set(normalizedDoctorName))
+  const specialtyRepDoctorSets = new Map(); // specialty -> Map(repName -> Map(normalizedDoctorName -> displayName))
   monthVisits.forEach((v) => {
     const doc = doctorByNormName.get(v.client.toLowerCase().trim());
     if (!doc) return; // not a doctor visit (pharmacy/supplement store/etc.)
     const specialty = doc.specialty || "Unspecified";
     if (!specialtyRepDoctorSets.has(specialty)) specialtyRepDoctorSets.set(specialty, new Map());
     const byRep = specialtyRepDoctorSets.get(specialty);
-    if (!byRep.has(v.repName)) byRep.set(v.repName, new Set());
-    byRep.get(v.repName).add(v.client.toLowerCase().trim());
+    if (!byRep.has(v.repName)) byRep.set(v.repName, new Map());
+    byRep.get(v.repName).set(v.client.toLowerCase().trim(), doc.name);
   });
   const specialtyBreakdown = [...specialtyRepDoctorSets.entries()]
     .map(([specialty, byRep]) => {
-      const reps = [...byRep.entries()].map(([repName, docSet]) => ({ repName, count: docSet.size })).sort((a, b) => b.count - a.count);
+      const reps = [...byRep.entries()]
+        .map(([repName, docMap]) => ({ repName, count: docMap.size, doctorNames: [...docMap.values()].sort() }))
+        .sort((a, b) => b.count - a.count);
       return { specialty, total: reps.reduce((s, r) => s + r.count, 0), reps };
     })
     .sort((a, b) => b.total - a.total);
@@ -11321,17 +11332,38 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
             <EmptyState text="No doctor visits logged this month yet." />
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {specialtyBreakdown.map((s) => (
-                <div key={s.specialty}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                    <span style={{ fontSize: 13, fontWeight: 600, color: DASH.text }}>{s.specialty}</span>
-                    <span className="kb-font-display" style={{ fontSize: 16, fontWeight: 600, color: DASH.green }}>{s.total}</span>
+              {specialtyBreakdown.map((s) => {
+                const isUnspecified = s.specialty === "Unspecified";
+                const expanded = expandedSpecialties.has(s.specialty);
+                return (
+                  <div key={s.specialty}>
+                    <button
+                      type="button"
+                      onClick={() => toggleSpecialty(s.specialty)}
+                      style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left" }}
+                    >
+                      <span style={{ fontSize: 13, fontWeight: 600, color: isUnspecified ? DASH.burgundy : DASH.text }}>
+                        {expanded ? "▾" : "▸"} {s.specialty}
+                        {isUnspecified && <span style={{ fontWeight: 500, fontSize: 11, marginLeft: 6 }}>— missing specialty, needs fixing</span>}
+                      </span>
+                      <span className="kb-font-display" style={{ fontSize: 16, fontWeight: 600, color: isUnspecified ? DASH.burgundy : DASH.green }}>{s.total}</span>
+                    </button>
+                    <div style={{ fontSize: 11, color: DASH.sub, marginTop: 2 }}>
+                      {s.reps.map((r) => `${r.repName}: ${r.count}`).join("  ·  ")}
+                    </div>
+                    {expanded && (
+                      <div style={{ marginTop: 6, background: DASH.bg, border: `1px solid ${DASH.border}`, borderRadius: 8, padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+                        {s.reps.map((r) => (
+                          <div key={r.repName} style={{ fontSize: 11.5 }}>
+                            <span style={{ fontWeight: 600, color: DASH.text }}>{r.repName}: </span>
+                            <span style={{ color: DASH.sub }}>{r.doctorNames.join(", ")}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                  <div style={{ fontSize: 11, color: DASH.sub, marginTop: 2 }}>
-                    {s.reps.map((r) => `${r.repName}: ${r.count}`).join("  ·  ")}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </DashSection>
