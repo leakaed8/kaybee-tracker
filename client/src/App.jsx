@@ -11033,6 +11033,13 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
   const [followUps, setFollowUps] = useState([]);
   const [repTargetsByName, setRepTargetsByName] = useState({});
   const [loading, setLoading] = useState(true);
+  // Doctor Visit Frequency filter — defaults to year-to-date since that's
+  // the "from the beginning of the year until today" the manager asked for,
+  // but is freely adjustable (e.g. Oct-Nov) without a second round trip:
+  // `visits` above already holds the complete history (api.getVisits({all:
+  // true})), so this filter runs entirely client-side.
+  const [freqFrom, setFreqFrom] = useState(`${new Date().getFullYear()}-01-01`);
+  const [freqTo, setFreqTo] = useState(todayBeirutStr());
 
   // Same "fetch once when this tab opens" pattern already used by
   // PerformanceView/LocationsView elsewhere in this app — purely additive
@@ -11097,6 +11104,55 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
   const territoryCoveragePct = allAccounts.length
     ? Math.round((allAccounts.filter((a) => visitedInPersonNamesThisMonth.has(a.name.toLowerCase().trim())).length / allAccounts.length) * 100)
     : null;
+
+  // ---- Section 2b: Visits by Specialty (this month, deduped per doctor) ----
+  // A visit only has `client` (free text) — joined against Doctors by
+  // normalized name, same technique already used everywhere else in this
+  // view (visitedInPersonNamesThisMonth above, accountStatusList below).
+  // Dedup is per REP per doctor — visiting Dr. X five times this month still
+  // counts as one doctor for that rep (explicitly requested), but two
+  // different reps each seeing Dr. X both get their own count, so a
+  // specialty's total is always the plain sum of its reps' numbers, never a
+  // separately-deduped "unique doctors across the whole team" figure.
+  const doctorByNormName = new Map(doctors.map((d) => [d.name.toLowerCase().trim(), d]));
+  const specialtyRepDoctorSets = new Map(); // specialty -> Map(repName -> Set(normalizedDoctorName))
+  monthVisits.forEach((v) => {
+    const doc = doctorByNormName.get(v.client.toLowerCase().trim());
+    if (!doc) return; // not a doctor visit (pharmacy/supplement store/etc.)
+    const specialty = doc.specialty || "Unspecified";
+    if (!specialtyRepDoctorSets.has(specialty)) specialtyRepDoctorSets.set(specialty, new Map());
+    const byRep = specialtyRepDoctorSets.get(specialty);
+    if (!byRep.has(v.repName)) byRep.set(v.repName, new Set());
+    byRep.get(v.repName).add(v.client.toLowerCase().trim());
+  });
+  const specialtyBreakdown = [...specialtyRepDoctorSets.entries()]
+    .map(([specialty, byRep]) => {
+      const reps = [...byRep.entries()].map(([repName, docSet]) => ({ repName, count: docSet.size })).sort((a, b) => b.count - a.count);
+      return { specialty, total: reps.reduce((s, r) => s + r.count, 0), reps };
+    })
+    .sort((a, b) => b.total - a.total);
+
+  // ---- Section 2c: Doctor Visit Frequency (freely filterable date range) ----
+  // Every visit (not deduped this time — the whole point here is "how many
+  // TIMES," unlike the specialty count above which deliberately collapses
+  // repeat visits to the same doctor).
+  const freqVisits = visits.filter((v) => {
+    const doc = doctorByNormName.get(v.client.toLowerCase().trim());
+    if (!doc) return false;
+    const d = beirutDateStrOfInstant(v.time);
+    return d >= freqFrom && d <= freqTo;
+  });
+  const doctorFreqMap = new Map(); // normalizedName -> { name, total, byRep: Map(repName -> count) }
+  freqVisits.forEach((v) => {
+    const key = v.client.toLowerCase().trim();
+    if (!doctorFreqMap.has(key)) doctorFreqMap.set(key, { name: v.client, total: 0, byRep: new Map() });
+    const entry = doctorFreqMap.get(key);
+    entry.total += 1;
+    entry.byRep.set(v.repName, (entry.byRep.get(v.repName) || 0) + 1);
+  });
+  const doctorFrequency = [...doctorFreqMap.values()]
+    .map((e) => ({ ...e, byRep: [...e.byRep.entries()].map(([repName, count]) => ({ repName, count })).sort((a, b) => b.count - a.count) }))
+    .sort((a, b) => b.total - a.total);
 
   // ---- Section 3: Customer Health ----
   // accountStatusList/TIER_CADENCE are the exact same helpers ClientsView/
@@ -11258,6 +11314,50 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
               </div>
             )}
           </div>
+        </DashSection>
+
+        <DashSection icon={<Stethoscope size={17} />} title="Visits by Specialty" subtitle={`Unique doctors seen this month — ${monthLabel}`}>
+          {specialtyBreakdown.length === 0 ? (
+            <EmptyState text="No doctor visits logged this month yet." />
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {specialtyBreakdown.map((s) => (
+                <div key={s.specialty}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: DASH.text }}>{s.specialty}</span>
+                    <span className="kb-font-display" style={{ fontSize: 16, fontWeight: 600, color: DASH.green }}>{s.total}</span>
+                  </div>
+                  <div style={{ fontSize: 11, color: DASH.sub, marginTop: 2 }}>
+                    {s.reps.map((r) => `${r.repName}: ${r.count}`).join("  ·  ")}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </DashSection>
+
+        <DashSection icon={<History size={17} />} title="Doctor Visit Frequency" subtitle="How many times each doctor was visited, by rep">
+          <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
+            <label style={{ fontSize: 11.5, color: DASH.sub }}>From</label>
+            <input type="date" value={freqFrom} onChange={(e) => setFreqFrom(e.target.value)} style={{ ...inputStyle, width: 140, padding: "6px 8px", fontSize: 12 }} />
+            <label style={{ fontSize: 11.5, color: DASH.sub }}>to</label>
+            <input type="date" value={freqTo} onChange={(e) => setFreqTo(e.target.value)} style={{ ...inputStyle, width: 140, padding: "6px 8px", fontSize: 12 }} />
+          </div>
+          {doctorFrequency.length === 0 ? (
+            <EmptyState text="No doctor visits logged in this date range." />
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 320, overflowY: "auto" }}>
+              {doctorFrequency.map((d) => (
+                <div key={d.name} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "6px 0", borderBottom: `1px solid ${DASH.border}` }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: DASH.text }}>{d.name}</div>
+                    <div style={{ fontSize: 11, color: DASH.sub }}>{d.byRep.map((r) => `${r.repName} × ${r.count}`).join("  ·  ")}</div>
+                  </div>
+                  <span className="kb-font-display" style={{ fontSize: 16, fontWeight: 600, color: DASH.text, flexShrink: 0 }}>{d.total}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </DashSection>
 
         <DashSection icon={<Users size={17} />} title="Customer Health" subtitle="Customer base and engagement" onViewDetails={() => onNavigate("clients")}>

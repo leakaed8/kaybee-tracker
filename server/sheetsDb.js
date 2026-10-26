@@ -591,6 +591,17 @@ const SCHEMAS = {
     "isKeyDifferentiator",
     "createdBy", "createdAt", "updatedBy", "updatedAt",
   ],
+  // Replaces the old real-time "something changed" Telegram ping (every
+  // mutating request fired one immediately) with a once-a-day 10pm rollup —
+  // see the generic change-alert middleware in index.js, which now appends
+  // a row here instead of messaging, and checkDailyActivityDigest, which
+  // reads today's rows and sends one summary. Manager-initiated changes are
+  // never logged here at all (filtered at the middleware), so this table is
+  // rep activity only, by construction. `resource` is the same path-derived
+  // label the old alert used (e.g. "knowledge-contributions",
+  // "admin/training-studies"); the digest job special-cases those two to
+  // call out Knowledge/Product-Expert contributions in their own section.
+  ActivityLog: ["id", "repName", "resource", "verb", "detail", "createdAt"],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];

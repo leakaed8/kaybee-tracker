@@ -1121,14 +1121,19 @@ app.post("/api/telegram/webhook", async (req, res) => {
 
 app.use("/api", requireAuth);
 
-// ---- Generic "anything changed" Telegram alert -------------------------
-// Covers every mutating request EXCEPT check-ins (Visits — explicitly
-// requested) and the handful of flows that already send their own,
-// better-tailored Telegram message (orders, punch in/out, sample requests
-// via FollowUps, discount-audit results) so the manager never gets the
-// same event twice. Deliberately prefix-based rather than an explicit
-// per-route allowlist — a brand-new route added later is covered
-// automatically, without anyone having to remember to wire it in here.
+// ---- Generic "anything changed" activity log (-> once-a-day digest) ----
+// Used to send a Telegram message immediately on every mutating request;
+// the manager asked for one 10pm rollup instead of being pinged all day
+// (see checkDailyActivityDigest below), so this now just appends a row to
+// ActivityLog and the digest job reads it back once. Covers every mutating
+// request EXCEPT check-ins (Visits — explicitly requested) and the handful
+// of flows that already send their own, better-tailored Telegram message
+// (orders, punch in/out, sample requests via FollowUps, discount-audit
+// results) so the manager never gets the same event twice. Deliberately
+// prefix-based rather than an explicit per-route allowlist — a brand-new
+// route added later is covered automatically, without anyone having to
+// remember to wire it in here. Manager-initiated changes are never logged
+// at all — the manager only wants to hear about what REPS changed.
 const CHANGE_ALERT_EXCLUDED_PREFIXES = [
   "/api/visits",                  // check-ins — explicitly excluded
   "/api/followups",               // part of the check-in post-call flow; sample requests already notify directly
@@ -1150,17 +1155,14 @@ app.use("/api", (req, res, next) => {
     try {
       if (!CHANGE_ALERT_METHODS.has(req.method)) return;
       if (res.statusCode < 200 || res.statusCode >= 300) return;
+      if (req.role === "manager") return; // manager's own changes are never logged/digested
       const path = req.originalUrl.split("?")[0];
       if (CHANGE_ALERT_EXCLUDED_PREFIXES.some((prefix) => path.startsWith(prefix))) return;
+      if (!req.repName) return; // nothing meaningful to attribute this to
 
       (async () => {
         try {
-          if (!telegram.isConfigured()) return;
-          const settings = await db.getSettings();
-          if (!settings.managerTelegramChatId) return;
-
           const verb = req.method === "POST" ? "added" : req.method === "DELETE" ? "deleted" : "updated";
-          const who = req.repName ? escapeHtml(req.repName) : "Someone";
           const resource = path.replace(/^\/api\//, "");
 
           let detail = "";
@@ -1170,14 +1172,15 @@ app.use("/api", (req, res, next) => {
               if (typeof v === "string" && v.trim()) { detail = v.trim().slice(0, 80); break; }
             }
           }
-          const detailText = detail ? ` — <b>${escapeHtml(detail)}</b>` : "";
 
-          await telegram.sendMessage(
-            settings.managerTelegramChatId,
-            `🔧 <b>${who}</b> ${verb} something in <code>${escapeHtml(resource)}</code>${detailText}`
-          );
+          await db.appendRow("ActivityLog", {
+            id: `act${crypto.randomUUID()}`,
+            repName: req.repName,
+            resource, verb, detail,
+            createdAt: new Date().toISOString(),
+          });
         } catch (e) {
-          console.error("generic change-alert telegram notify failed", e);
+          console.error("activity log append failed", e);
         }
       })();
     } catch (e) {
@@ -14313,6 +14316,83 @@ async function checkMonthlyDigest() {
 
 const MONTHLY_DIGEST_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
+// ---------- Daily activity digest (10pm Beirut) --------------------------
+// Replaces the old per-change Telegram ping (see the ActivityLog append in
+// the generic change-alert middleware above) with one rollup a day, plus a
+// same-time summary of that day's sample activity — explicitly requested
+// instead of real-time noise, so this never sends more than one message a
+// day even when every section below has content. Skips sending (but still
+// stamps the date) on a day with nothing to report, same "no news" logic as
+// every other digest job in this file.
+const DAILY_ACTIVITY_DIGEST_HOUR = 22;
+const DAILY_ACTIVITY_DIGEST_KNOWLEDGE_RESOURCES = ["knowledge-contributions", "admin/training-studies"];
+async function checkDailyActivityDigest() {
+  if (!telegram.isConfigured()) return;
+  try {
+    const now = new Date();
+    if (beirutHour(now) < DAILY_ACTIVITY_DIGEST_HOUR) return;
+    const settings = await db.getSettings();
+    const todayStr = todayBeirutStr();
+    if (settings.lastActivityDigestDate === todayStr) return;
+    if (!settings.managerTelegramChatId) {
+      await db.setSettings({ lastActivityDigestDate: todayStr });
+      return;
+    }
+
+    const [activity, samples] = await Promise.all([db.getAllRows("ActivityLog"), db.getAllRows("Samples")]);
+    const todaysActivity = activity.filter((a) => a.createdAt && beirutDateStr(new Date(a.createdAt)) === todayStr);
+    const todaysSamples = samples.filter((s) => s.date && beirutDateStr(new Date(s.date)) === todayStr);
+    const studyRows = todaysActivity.filter((a) => DAILY_ACTIVITY_DIGEST_KNOWLEDGE_RESOURCES.some((r) => a.resource.startsWith(r)));
+    const otherRows = todaysActivity.filter((a) => !DAILY_ACTIVITY_DIGEST_KNOWLEDGE_RESOURCES.some((r) => a.resource.startsWith(r)));
+
+    if (studyRows.length === 0 && otherRows.length === 0 && todaysSamples.length === 0) {
+      await db.setSettings({ lastActivityDigestDate: todayStr });
+      return;
+    }
+
+    const byRep = (rows, toLine) => {
+      const map = new Map();
+      for (const row of rows) {
+        if (!map.has(row.repName)) map.set(row.repName, []);
+        map.get(row.repName).push(toLine(row));
+      }
+      return map;
+    };
+
+    const lines = [`📅 <b>Daily activity — ${todayStr}</b>`];
+
+    if (studyRows.length) {
+      lines.push("", "📚 <b>Studies &amp; Knowledge added</b>");
+      for (const a of studyRows) {
+        const what = a.resource.startsWith("admin/training-studies") ? "added a study" : "added to Knowledge";
+        lines.push(`• ${escapeHtml(a.repName || "Someone")} ${what}${a.detail ? ` — ${escapeHtml(a.detail)}` : ""}`);
+      }
+    }
+
+    if (otherRows.length) {
+      lines.push("", "🔧 <b>Other changes</b>");
+      const map = byRep(otherRows, (a) => `${a.verb} something in ${a.resource}${a.detail ? ` — ${a.detail}` : ""}`);
+      for (const [rep, items] of map) lines.push(`<b>${escapeHtml(rep || "Someone")}</b>: ${escapeHtml(items.join("; "))}`);
+    }
+
+    if (todaysSamples.length) {
+      lines.push("", "💊 <b>Samples today</b>");
+      const map = byRep(todaysSamples, (s) => {
+        const verb = s.status === "gave" ? "gave" : "flagged interest in";
+        const type = s.sampleType === "patient" ? "Patient" : "Personal";
+        return `${verb} ${s.productName} x${Number(s.qty) || 1} to ${s.doctorName} (${type})`;
+      });
+      for (const [rep, items] of map) lines.push(`<b>${escapeHtml(rep || "Someone")}</b>: ${escapeHtml(items.join("; "))}`);
+    }
+
+    await telegram.sendMessage(settings.managerTelegramChatId, lines.join("\n"));
+    await db.setSettings({ lastActivityDigestDate: todayStr });
+  } catch (e) {
+    console.error("checkDailyActivityDigest failed", e);
+  }
+}
+const DAILY_ACTIVITY_DIGEST_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+
 // --- Visit follow-ups ---------------------------------------------------
 // A rep can schedule a follow-up (2d/3d/1w/2w/1m from now) right after
 // logging a visit. When the due date arrives, the owning rep gets a
@@ -14820,6 +14900,8 @@ if (telegram.isConfigured()) {
   setTimeout(asBackgroundJob(checkMonthlyVisitsSummary), STARTUP_BACKGROUND_JOB_DELAY_MS);
   setTimeout(asBackgroundJob(checkInventoryUpdateReminder), STARTUP_BACKGROUND_JOB_DELAY_MS);
   setTimeout(asBackgroundJob(checkStockMovementReminder), STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setTimeout(asBackgroundJob(checkDailyActivityDigest), STARTUP_BACKGROUND_JOB_DELAY_MS);
+  setInterval(asBackgroundJob(checkDailyActivityDigest), DAILY_ACTIVITY_DIGEST_CHECK_INTERVAL_MS);
   setInterval(asBackgroundJob(checkMonthlyDigest), MONTHLY_DIGEST_CHECK_INTERVAL_MS);
   setInterval(asBackgroundJob(checkFollowUpReminders), FOLLOWUP_CHECK_INTERVAL_MS);
   setInterval(asBackgroundJob(checkTomorrowScheduleDigest), FOLLOWUP_CHECK_INTERVAL_MS);
