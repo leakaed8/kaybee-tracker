@@ -2483,19 +2483,19 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   // same mentionedItems/sampleStatus mechanism either way, so POST
   // /api/visits and POST /api/followups need no changes to pick it up.
   //
-  // Personal-use samples are just the retail bottle, so that search still
-  // covers the whole catalog. Patient (prepared) samples instead search ONLY
-  // what the manager has actually prepared (SamplePrepStock), each carrying
-  // its current remaining count — not the catalog at large, which is what
-  // let a rep tag something nobody had actually prepared.
-  const samplesSearchList = sampleTypeChoice === "patient"
-    ? samplePrepStock.map((s) => ({ id: s.productId, name: s.productName, preparedQty: s.preparedQty }))
-    : products;
-  const matchedSamplesItem = samplesSearchList.find((p) => p.name.toLowerCase().trim() === samplesQuery.toLowerCase().trim());
+  // Both Personal and Patient search the full catalog — "Need next visit"
+  // has to be able to find something that's never been prepared before
+  // (that's how a brand-new sample type gets requested in the first
+  // place). What's actually restricted is "Gave it today": you can only
+  // physically hand over what's already prepared, so that button is gated
+  // by this product's real SamplePrepStock count, looked up by id, not by
+  // what's searchable.
+  const matchedSamplesItem = products.find((p) => p.name.toLowerCase().trim() === samplesQuery.toLowerCase().trim());
   const samplesItemOptions = (samplesQuery.trim()
-    ? samplesSearchList.filter((p) => p.name.toLowerCase().includes(samplesQuery.toLowerCase().trim()))
-    : samplesSearchList
+    ? products.filter((p) => p.name.toLowerCase().includes(samplesQuery.toLowerCase().trim()))
+    : products
   ).slice(0, 50);
+  const preparedQtyFor = (productId) => Number(samplePrepStock.find((s) => s.productId === productId)?.preparedQty) || 0;
   // Stock already spoken for by "Gave it today" items tagged earlier in
   // THIS same visit (not yet submitted, so not yet reflected in
   // samplePrepStock itself) — subtracted here so the rep can't tag more of
@@ -2504,7 +2504,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
     ? mentionedItems.filter((it) => it.productId === matchedSamplesItem.id && it.sampleStatus === "gave" && it.sampleType === "patient").reduce((sum, it) => sum + (Number(it.qty) || 1), 0)
     : 0;
   const remainingForMatched = matchedSamplesItem && sampleTypeChoice === "patient"
-    ? Math.max(0, (Number(matchedSamplesItem.preparedQty) || 0) - alreadyTaggedGaveQty)
+    ? Math.max(0, preparedQtyFor(matchedSamplesItem.id) - alreadyTaggedGaveQty)
     : null;
   const sampleQtyNum = Math.max(1, Number(sampleQty) || 1);
   const giveExceedsStock = sampleTypeChoice === "patient" && remainingForMatched !== null && sampleQtyNum > remainingForMatched;
@@ -3346,13 +3346,13 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                     list="samples-options"
                     value={samplesQuery}
                     onChange={(e) => setSamplesQuery(e.target.value)}
-                    placeholder={sampleTypeChoice === "patient" ? "Search a prepared sample…" : "Search a product…"}
+                    placeholder="Search a product…"
                     style={{ ...inputStyle, flex: 1, background: "#fff" }}
                   />
                   <datalist id="samples-options">
                     {samplesItemOptions.map((p) => (
                       sampleTypeChoice === "patient"
-                        ? <option key={p.id} value={p.name}>{`${p.name} — ${Number(p.preparedQty) || 0} left`}</option>
+                        ? <option key={p.id} value={p.name}>{`${p.name} — ${preparedQtyFor(p.id)} left`}</option>
                         : <option key={p.id} value={p.name} />
                     ))}
                   </datalist>
@@ -3364,8 +3364,9 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                 </div>
                 {sampleTypeChoice === "patient" && matchedSamplesItem && (
                   <div style={{ fontSize: 11, color: giveExceedsStock ? "#B33A3A" : "#7A5B2E", marginBottom: 8 }}>
-                    {remainingForMatched} prepared and left for {matchedSamplesItem.name}
-                    {giveExceedsStock ? " — reduce the quantity, or tag the rest as “Need next visit.”" : ""}
+                    {remainingForMatched === 0
+                      ? `Not prepared yet for ${matchedSamplesItem.name} — “Gave it today” is disabled; tag “Need next visit” to request it.`
+                      : <>{remainingForMatched} prepared and left for {matchedSamplesItem.name}{giveExceedsStock ? " — reduce the quantity, or tag the rest as “Need next visit.”" : ""}</>}
                   </div>
                 )}
                 <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
