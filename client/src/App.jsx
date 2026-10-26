@@ -3213,7 +3213,11 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
             )}
 
             {!isRemoteContact && (!isDoctorStyleEntity || visitStarted) && (
-              <Field label="Competitors">
+              <div style={{ background: "#FBF0F0", border: "1.5px solid #E8B4B8", borderRadius: 10, padding: 12, marginBottom: 14 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: sawCompetitor ? 8 : 0 }}>
+                  <TrendingDown size={15} style={{ color: "#B33A3A", flexShrink: 0 }} />
+                  <span style={{ fontSize: 13.5, fontWeight: 700, color: "#8F3A3A" }}>Competitors</span>
+                </div>
                 <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#5B5445", marginBottom: sawCompetitor ? 8 : 0 }}>
                   <input type="checkbox" checked={sawCompetitor} onChange={(e) => setSawCompetitor(e.target.checked)} />
                   {isDoctorStyleEntity ? "Did a competitor come up in the conversation?" : "Any competitor brands on the shelf here?"}
@@ -3225,7 +3229,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                       onChange={(e) => setCompetitorName(e.target.value)}
                       placeholder="Who's the competitor? e.g. another vitamin brand"
                       list="checkin-competitor-options"
-                      style={{ ...inputStyle, marginBottom: 8 }}
+                      style={{ ...inputStyle, marginBottom: 8, background: "#fff" }}
                     />
                     <datalist id="checkin-competitor-options">
                       {(competitors || []).map((c) => <option key={c.id} value={c.name} />)}
@@ -3234,11 +3238,11 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                       value={competitorNotes}
                       onChange={(e) => setCompetitorNotes(e.target.value)}
                       placeholder="What are they offering? (price, terms, promo…)"
-                      style={inputStyle}
+                      style={{ ...inputStyle, background: "#fff" }}
                     />
                   </>
                 )}
-              </Field>
+              </div>
             )}
 
             {!isRemoteContact && isDoctorStyleEntity && visitStarted && (
@@ -3271,26 +3275,19 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                     Add item
                   </button>
                 </div>
-                {mentionedItems.length > 0 ? (
+                {/* Once a product is tagged in the Samples box below, it moves
+                    there — showing it in both places just duplicated the
+                    same product name under two different sections. Removing
+                    it here doesn't drop any data; it's still saved and still
+                    shown (with its status) in the Samples box. */}
+                {mentionedItems.filter((it) => !it.sampleStatus).length > 0 ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {mentionedItems.map((it) => (
+                    {mentionedItems.filter((it) => !it.sampleStatus).map((it) => (
                       <div key={it.productId} style={{
                         display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6, fontSize: 12,
                         background: "#fff", border: "1px solid #B8D4E3", borderRadius: 10, padding: "6px 8px 6px 10px",
                       }}>
                         <span style={{ fontWeight: 500 }}>{it.name}</span>
-
-                        {/* Sample status is set in the dedicated "Samples" box
-                            below, not here — this is just a read-only
-                            reflection so it's still visible alongside
-                            whatever else came up about this product. */}
-                        {it.sampleStatus === "gave" && (
-                          <span style={{ fontSize: 10.5, color: "#4C7A5E", fontWeight: 600 }}>✓ Sample given</span>
-                        )}
-                        {it.sampleStatus === "next_visit" && (
-                          <span style={{ fontSize: 10.5, color: "#C17817", fontWeight: 600 }}>→ Sample needed next visit</span>
-                        )}
-
                         <button
                           type="button"
                           onClick={() => removeMentionedItem(it.productId)}
@@ -3354,9 +3351,9 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                   />
                   <datalist id="samples-options">
                     {samplesItemOptions.map((p) => (
-                      <option key={p.id} value={p.name}>
-                        {sampleTypeChoice === "patient" ? `${p.name} — ${Number(p.preparedQty) || 0} left` : p.name}
-                      </option>
+                      sampleTypeChoice === "patient"
+                        ? <option key={p.id} value={p.name}>{`${p.name} — ${Number(p.preparedQty) || 0} left`}</option>
+                        : <option key={p.id} value={p.name} />
                     ))}
                   </datalist>
                   <input
