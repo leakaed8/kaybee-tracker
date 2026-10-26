@@ -4654,6 +4654,40 @@ app.patch("/api/clients/:id/complete-info", async (req, res) => {
   }
 });
 
+// Doctors.specialty has always been a free-text field (no dropdown, no
+// validation against what's already in use) — every rep who ever typed
+// "Endo" instead of "Endocrinology," or "Family medicine" with a stray
+// trailing space, created a brand-new value that the Dashboard's "Visits by
+// Specialty" view then shows as its own separate line. This is the
+// manager's one-click fix for an already-fragmented set of values; it does
+// NOT stop new fragmentation on its own (see the SearchableSelect swap on
+// the client for that half).
+app.post("/api/doctors/merge-specialty", requireManager, async (req, res) => {
+  try {
+    const { fromValues, toValue } = req.body;
+    const to = String(toValue || "").trim();
+    if (!to) return res.status(400).json({ error: "toValue is required." });
+    if (!Array.isArray(fromValues) || fromValues.length === 0) return res.status(400).json({ error: "fromValues must be a non-empty array." });
+    const fromSet = new Set(fromValues.map((v) => String(v || "").trim()).filter(Boolean));
+    if (fromSet.size === 0) return res.status(400).json({ error: "fromValues had nothing usable." });
+
+    const doctors = await db.getAllRows("Doctors");
+    const toUpdate = doctors.filter((d) => fromSet.has((d.specialty || "").trim()) && (d.specialty || "").trim() !== to);
+    if (toUpdate.length === 0) return res.json({ ok: true, updated: 0 });
+
+    await db.batchUpdateRows("Doctors", toUpdate.map((d) => ({ id: d.id, patch: { specialty: to } })));
+    await writeAuditLog({
+      entityType: "specialty_merge", entityId: "", field: "specialty",
+      oldValue: [...fromSet].join(" / "), newValue: to, changedBy: req.repName || "Manager",
+      reason: `Merged into ${toUpdate.length} doctor(s)`,
+    });
+    res.json({ ok: true, updated: toUpdate.length });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 const DOCTOR_FILLABLE_FIELDS = ["name", "phone", "address", "registrationNumber", "area", "hospital", "specialty"];
 app.patch("/api/doctors/:id/complete-info", async (req, res) => {
   try {

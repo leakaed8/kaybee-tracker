@@ -463,6 +463,7 @@ export default function App() {
   const startFindMissingCatalogImages = (ids) => api.findMissingCatalogImages(ids);
   const getFindImagesStatus = () => api.getFindImagesStatus();
   const refreshCatalogAfterFindImages = () => refreshReference({ fresh: true });
+  const refreshDoctorsAfterSpecialtyMerge = () => refreshReference({ fresh: true });
   const bulkImportProducts = (products) => withSync(() => api.importBulkProducts(products), { touchesReference: true });
   const addVisit = (visit) => withSync(() => api.addVisit(visit), { touchesReference: true }); // can silently set a client's assignedRep server-side
   const updateVisit = (id, patch) => withSync(() => api.updateVisit(id, patch));
@@ -777,7 +778,7 @@ export default function App() {
             )}
             {tab === "route" && role === "rep" && !isSupervisor && <RouteView clients={clients} doctors={doctors} />}
             {tab === "dashboard" && role === "manager" && (
-              <DashboardView zoned={zoned} clients={clients} doctors={doctors} repNames={repNames} settings={settings} onNavigate={setTab} />
+              <DashboardView zoned={zoned} clients={clients} doctors={doctors} repNames={repNames} settings={settings} onNavigate={setTab} onDoctorsChanged={refreshDoctorsAfterSpecialtyMerge} />
             )}
             {tab === "orders" && canSeeTab("orders") && (
               <OrdersTabView
@@ -8566,6 +8567,16 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
   const [locating, setLocating] = useState(false);
   const [locError, setLocError] = useState("");
   const [statsByName, setStatsByName] = useState({});
+  // Suggested when adding a doctor, so a rep picks "Cardiology" from what's
+  // already in use instead of typing their own slightly different version
+  // ("Cardio") — the free-text field itself is exactly how specialty names
+  // fragmented in the first place. Still freely typable for a genuinely new
+  // specialty; this only narrows, never blocks.
+  const existingSpecialties = useMemo(() => {
+    const counts = new Map();
+    doctors.forEach((d) => { const s = (d.specialty || "").trim(); if (s) counts.set(s, (counts.get(s) || 0) + 1); });
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([s]) => ({ specialty: s }));
+  }, [doctors]);
 
   // Doctor-visit redesign: the History toggle now shows the full structured
   // Timeline (DoctorTimeline) via the same /api/doctors/:name/profile
@@ -8674,7 +8685,9 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
             <Field label="Hospital / clinic"><input value={hospital} onChange={(e) => setHospital(e.target.value)} placeholder="e.g. Beirut Hospital" style={inputStyle} /></Field>
             <Field label="Area"><input value={area} onChange={(e) => setArea(e.target.value)} placeholder="e.g. Jbeil" style={inputStyle} /></Field>
             <Field label="Phone"><input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+961 xx xxx xxx" style={inputStyle} /></Field>
-            <Field label="Specialty"><input value={specialty} onChange={(e) => setSpecialty(e.target.value)} placeholder="e.g. Cardiology" style={inputStyle} /></Field>
+            <Field label="Specialty">
+              <SearchableSelect value={specialty} onChange={setSpecialty} options={existingSpecialties} getLabel={(s) => s.specialty} placeholder="e.g. Cardiology — pick an existing one if it's listed" style={inputStyle} />
+            </Field>
             <Field label="Tier">
               <select value={tier} onChange={(e) => setTier(e.target.value)} style={inputStyle}>
                 <option value="A">A — high value, visit every 14d</option>
@@ -11027,7 +11040,7 @@ function DashSection({ icon, title, subtitle, onViewDetails, children }) {
   );
 }
 
-function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate }) {
+function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate, onDoctorsChanged }) {
   const [visits, setVisits] = useState([]);
   const [orders, setOrders] = useState([]);
   const [followUps, setFollowUps] = useState([]);
@@ -11049,6 +11062,73 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
     if (next.has(name)) next.delete(name); else next.add(name);
     return next;
   });
+
+  // ---- Specialty name cleanup (suggested merges) ----
+  // Doctors.specialty has always been free text, so "Endo"/"Endocrinology",
+  // "Cardio"/"Cardiology", "Neuro"/"Neurology"/"Neurologist",
+  // "Ortho"/"Orthopedic" and near-duplicate whitespace/casing variants
+  // ("Family medicine" vs "family medicine ") all end up as separate values
+  // here. Two-pass clustering: exact match after trim/lowercase/whitespace
+  // collapse catches the whitespace/casing case; a prefix match (one
+  // normalized value starting with another, min 4 chars to avoid false
+  // positives on very short strings) catches the abbreviation case — that
+  // single rule happens to cover every example above without a hardcoded
+  // synonym table. Always a SUGGESTION: the manager edits the canonical
+  // name and explicitly clicks Merge per cluster, nothing merges itself.
+  const [mergeBusyKey, setMergeBusyKey] = useState(null);
+  const [mergeError, setMergeError] = useState("");
+  const [canonicalEdits, setCanonicalEdits] = useState({});
+  const normalizeSpecialty = (s) => s.trim().toLowerCase().replace(/\s+/g, " ");
+  const specialtyRawCounts = new Map();
+  doctors.forEach((d) => {
+    const raw = (d.specialty || "").trim();
+    if (!raw) return;
+    specialtyRawCounts.set(raw, (specialtyRawCounts.get(raw) || 0) + 1);
+  });
+  const byNormalized = new Map(); // normalizedKey -> [{raw, count}]
+  [...specialtyRawCounts.entries()].forEach(([raw, count]) => {
+    const norm = normalizeSpecialty(raw);
+    if (!byNormalized.has(norm)) byNormalized.set(norm, []);
+    byNormalized.get(norm).push({ raw, count });
+  });
+  const normKeys = [...byNormalized.keys()];
+  const parentOf = new Map(normKeys.map((k) => [k, k]));
+  const findRoot = (k) => { while (parentOf.get(k) !== k) k = parentOf.get(k); return k; };
+  const unionKeys = (a, b) => { const ra = findRoot(a), rb = findRoot(b); if (ra !== rb) parentOf.set(ra, rb); };
+  for (let i = 0; i < normKeys.length; i++) {
+    for (let j = i + 1; j < normKeys.length; j++) {
+      const [shorter, longer] = normKeys[i].length <= normKeys[j].length ? [normKeys[i], normKeys[j]] : [normKeys[j], normKeys[i]];
+      if (shorter.length >= 4 && longer.startsWith(shorter)) unionKeys(normKeys[i], normKeys[j]);
+    }
+  }
+  const clusterGroups = new Map(); // root -> [{raw,count}]
+  normKeys.forEach((k) => {
+    const root = findRoot(k);
+    if (!clusterGroups.has(root)) clusterGroups.set(root, []);
+    clusterGroups.get(root).push(...byNormalized.get(k));
+  });
+  const suggestedSpecialtyMerges = [...clusterGroups.values()]
+    .filter((raws) => raws.length > 1)
+    .map((raws) => {
+      const sorted = raws.slice().sort((a, b) => b.count - a.count);
+      return { key: sorted.map((r) => r.raw).join("|"), raws: sorted, defaultCanonical: sorted[0].raw };
+    })
+    .sort((a, b) => b.raws.length - a.raws.length);
+
+  const doMergeSpecialty = async (cluster) => {
+    const canonical = (canonicalEdits[cluster.key] ?? cluster.defaultCanonical).trim();
+    if (!canonical) return;
+    setMergeBusyKey(cluster.key);
+    setMergeError("");
+    try {
+      await api.mergeDoctorSpecialty(cluster.raws.map((r) => r.raw), canonical);
+      await onDoctorsChanged?.();
+    } catch (e) {
+      setMergeError(e.message);
+    } finally {
+      setMergeBusyKey(null);
+    }
+  };
 
   // Same "fetch once when this tab opens" pattern already used by
   // PerformanceView/LocationsView elsewhere in this app — purely additive
@@ -11364,6 +11444,46 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {suggestedSpecialtyMerges.length > 0 && (
+            <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${DASH.border}` }}>
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: DASH.burgundy, marginBottom: 2 }}>
+                ⚠ {suggestedSpecialtyMerges.length} possible duplicate specialty name{suggestedSpecialtyMerges.length === 1 ? "" : "s"}
+              </div>
+              <div style={{ fontSize: 11, color: DASH.sub, marginBottom: 10 }}>
+                Specialty is free text, so reps have typed these differently over time. Edit the name if needed, then merge — every matching doctor is updated at once.
+              </div>
+              {mergeError && <div style={{ fontSize: 11.5, color: DASH.burgundy, marginBottom: 8 }}>{mergeError}</div>}
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {suggestedSpecialtyMerges.map((cluster) => {
+                  const busy = mergeBusyKey === cluster.key;
+                  const totalDoctors = cluster.raws.reduce((s, r) => s + r.count, 0);
+                  return (
+                    <div key={cluster.key} style={{ background: DASH.bg, border: `1px solid ${DASH.border}`, borderRadius: 8, padding: "10px 12px" }}>
+                      <div style={{ fontSize: 11.5, color: DASH.sub, marginBottom: 6 }}>
+                        {cluster.raws.map((r) => `"${r.raw}" (${r.count})`).join("  +  ")}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <input
+                          value={canonicalEdits[cluster.key] ?? cluster.defaultCanonical}
+                          onChange={(e) => setCanonicalEdits((prev) => ({ ...prev, [cluster.key]: e.target.value }))}
+                          style={{ ...inputStyle, flex: 1, minWidth: 160, fontSize: 12.5 }}
+                        />
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => doMergeSpecialty(cluster)}
+                          style={{ padding: "7px 12px", borderRadius: 7, border: "none", fontSize: 12, fontWeight: 700, color: "#fff", background: busy ? "#D8D2C4" : DASH.burgundy, whiteSpace: "nowrap" }}
+                        >
+                          {busy ? "Merging…" : `Merge ${totalDoctors} doctors`}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </DashSection>
