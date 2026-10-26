@@ -2044,7 +2044,7 @@ function StructuredVisitCard({ visit: v }) {
               {i > 0 && ", "}
               {it.name}
               {it.sampleStatus === "gave" && <span style={{ color: "#4C7A5E", fontWeight: 600 }}> (✓ sample given)</span>}
-              {it.sampleStatus === "next_visit" && <span style={{ color: "#C17817", fontWeight: 600 }}> (→ sample needed next visit)</span>}
+              {it.sampleStatus === "next_visit" && <span style={{ color: "#C17817", fontWeight: 600 }}> (👁 interest flagged)</span>}
             </span>
           ))}
         </div>
@@ -2764,7 +2764,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
     // manager, even though the sample itself is still saved. Block here
     // rather than let that happen quietly.
     if (isDoctorEntity && requestedSampleItems.length > 0 && (showStopFollowUp || !followUpChoice)) {
-      setVisitError("You requested a sample for next visit — pick a follow-up date below so the manager knows by when to have it ready.");
+      setVisitError("You flagged sample interest for next visit — pick a follow-up date below so your manager has that context.");
       return;
     }
     setSaving(true);
@@ -3365,8 +3365,8 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                 {sampleTypeChoice === "patient" && matchedSamplesItem && (
                   <div style={{ fontSize: 11, color: giveExceedsStock ? "#B33A3A" : "#7A5B2E", marginBottom: 8 }}>
                     {remainingForMatched === 0
-                      ? `Not prepared yet for ${matchedSamplesItem.name} — “Gave it today” is disabled; tag “Need next visit” to request it.`
-                      : <>{remainingForMatched} prepared and left for {matchedSamplesItem.name}{giveExceedsStock ? " — reduce the quantity, or tag the rest as “Need next visit.”" : ""}</>}
+                      ? `Not prepared yet for ${matchedSamplesItem.name} — “Gave it today” is disabled. Flagging interest lets your manager know — it's not a request they have to fill.`
+                      : <>{remainingForMatched} prepared and left for {matchedSamplesItem.name}{giveExceedsStock ? " — reduce the quantity, or flag the rest as interest." : ""}</>}
                   </div>
                 )}
                 <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
@@ -3391,7 +3391,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                       background: matchedSamplesItem ? "#C17817" : "#D8D2C4", color: "#fff", fontSize: 12.5, fontWeight: 600,
                     }}
                   >
-                    + Need next visit
+                    + Flag as interest
                   </button>
                 </div>
                 {taggedSampleItems.length > 0 ? (
@@ -3407,7 +3407,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                           fontSize: 10.5, fontWeight: 600,
                           color: it.sampleStatus === "gave" ? "#4C7A5E" : "#C17817",
                         }}>
-                          {it.sampleStatus === "gave" ? "✓ Gave it today" : "→ Needed for next visit"}
+                          {it.sampleStatus === "gave" ? "✓ Gave it today" : "👁 Flagged as interest"}
                         </span>
                         <span style={{ fontSize: 10, fontWeight: 500, color: "#7A5B2E", background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 10, padding: "1px 6px" }}>
                           {it.sampleType === "patient" ? "Patient" : "Personal"}
@@ -3912,7 +3912,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                   disabled={followUpSaving}
                   onClick={() => {
                     if (requestedSampleItems.length > 0) {
-                      setFollowUpError("You requested a sample for next visit — that needs an actual next visit scheduled. Remove the sample request above if you're stopping instead.");
+                      setFollowUpError("You flagged sample interest for next visit — that needs an actual next visit scheduled. Remove the flag above if you're stopping instead.");
                       return;
                     }
                     stopFollowUp();
@@ -4008,7 +4008,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                 <div style={{ fontSize: 11.5, color: "#4C7A5E", marginTop: 4 }}>
                   Mentioned: {v.mentionedItems.map((it) => (
                     it.sampleStatus === "gave" ? `${it.name} (sample given)`
-                    : it.sampleStatus === "next_visit" ? `${it.name} (sample next visit)`
+                    : it.sampleStatus === "next_visit" ? `${it.name} (interest flagged)`
                     : it.name
                   )).join(", ")}
                 </div>
@@ -15217,6 +15217,7 @@ function SamplesTrackingView({ products, role }) {
   const [restockQuery, setRestockQuery] = useState("");
   const [restockQty, setRestockQty] = useState("");
   const [restocking, setRestocking] = useState(false);
+  const restockInputRef = useRef(null);
   const [showDone, setShowDone] = useState(false);
   // Actual hand-out history — distinct from the Pending/Prepared/Given
   // queue below, which is only ever "need next visit" requests. Before
@@ -15295,6 +15296,36 @@ function SamplesTrackingView({ products, role }) {
   const prepared = fulfillments.filter((f) => f.managerStatus === "prepared");
   const given = fulfillments.filter((f) => f.managerStatus === "given_to_rep");
 
+  // A flagged-interest item for a product that already has a prep line
+  // (patient has been on it before) is cheap to act on — restocking an
+  // existing label/bottle setup — so it stays in the old actionable queue.
+  // A product with no prep line yet is where the real cost sits (new
+  // label design, printing, decanting many bottles), so those items are
+  // never auto-actionable: they're grouped here as a read-only demand
+  // signal for the manager to review and decide on their own schedule,
+  // not a per-request to-do that piles up expecting an answer.
+  const stockProductIds = new Set(stock.map((s) => s.productId));
+  const interestPending = pending.filter((f) => !stockProductIds.has(f.productId));
+  const actionablePending = pending.filter((f) => stockProductIds.has(f.productId));
+  const interestGroups = [];
+  const interestByProduct = new Map();
+  interestPending.forEach((f) => {
+    if (!interestByProduct.has(f.productId)) {
+      const g = { productId: f.productId, name: f.name, qty: 0, doctors: [] };
+      interestByProduct.set(f.productId, g);
+      interestGroups.push(g);
+    }
+    const g = interestByProduct.get(f.productId);
+    g.qty += Number(f.qty) || 1;
+    g.doctors.push({ entityName: f.entityName, repName: f.repName });
+  });
+  const planPrepBatch = (group) => {
+    setRestockQuery(group.name);
+    setRestockQty(String(group.qty));
+    restockInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    restockInputRef.current?.focus();
+  };
+
   const fulfillmentRow = (f) => {
     const key = `${f.followUpId}:${f.productId}`;
     const busy = busyKey === key;
@@ -15372,6 +15403,7 @@ function SamplesTrackingView({ products, role }) {
             </div>
             <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
             <input
+              ref={restockInputRef}
               list="samples-restock-options"
               value={restockQuery}
               onChange={(e) => setRestockQuery(e.target.value)}
@@ -15452,9 +15484,52 @@ function SamplesTrackingView({ products, role }) {
         )}
       </div>
 
+      <div style={{ background: "#F5F0FA", border: "1.5px solid #D7C3EA", borderRadius: 10, padding: 14, marginBottom: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+          <Users size={15} style={{ color: "#6A3F8F", flexShrink: 0 }} />
+          <span style={{ fontWeight: 700, fontSize: 14, color: "#5C3680" }}>Doctor interest ({interestGroups.length})</span>
+          <span style={{ fontSize: 10, color: "#8A6AA8", marginLeft: "auto" }}>not prepared yet</span>
+        </div>
+        <div style={{ fontSize: 11, color: "#7A5C99", marginBottom: 10 }}>
+          Flagged by reps during check-in for products you haven't prepared. Nothing here is a to-do — review it on your own schedule and decide what's worth a prep batch.
+        </div>
+        {interestGroups.length === 0 ? (
+          <EmptyState text="No flagged interest right now." />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {interestGroups.map((g) => (
+              <div key={g.productId} style={{ background: "#fff", border: "1px solid #E3D4F0", borderRadius: 9, padding: "9px 10px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ fontWeight: 700, fontSize: 12.5 }}>{g.name}</span>
+                  <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 20, background: "#EFE6F4", color: "#6A3F8F", whiteSpace: "nowrap" }}>
+                    {new Set(g.doctors.map((d) => d.entityName)).size} doctor{new Set(g.doctors.map((d) => d.entityName)).size === 1 ? "" : "s"}
+                  </span>
+                </div>
+                <div style={{ fontSize: 10.5, color: "#8A8276", marginTop: 3 }}>
+                  {g.doctors.map((d, i) => (
+                    <span key={i}>{i > 0 && " · "}{d.entityName} ({d.repName})</span>
+                  ))}
+                </div>
+                {isManager && (
+                  <button
+                    onClick={() => planPrepBatch(g)}
+                    style={{ marginTop: 6, width: "100%", padding: "6px 0", borderRadius: 7, border: "none", fontSize: 11, fontWeight: 700, color: "#fff", background: "#5C3680" }}
+                  >
+                    Plan a prep batch →
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div style={{ marginBottom: 18 }}>
-        <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>Pending ({pending.length})</div>
-        {pending.length === 0 ? <EmptyState text="No pending sample requests." /> : pending.map(fulfillmentRow)}
+        <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>Pending — ready to prep ({actionablePending.length})</div>
+        <div style={{ fontSize: 11, color: "#8A8272", marginBottom: 8 }}>
+          Already has a prep line going — a quick restock, not a new label/bottle setup.
+        </div>
+        {actionablePending.length === 0 ? <EmptyState text="No pending sample requests." /> : actionablePending.map(fulfillmentRow)}
       </div>
 
       <div style={{ marginBottom: 18 }}>
