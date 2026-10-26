@@ -11284,9 +11284,16 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
   // actually run a merge yet. The merge tool fixes the STORED data;
   // this fixes what the dashboard SHOWS either way.
   const specialtyRepDoctorSets = new Map(); // normKey -> { label, byRep: Map(repName -> Map(normalizedDoctorName -> displayName)) }
+  // Raw count — every doctor-matched visit this month, any interaction
+  // type, BEFORE the per-rep-per-doctor dedup below collapses repeats.
+  // Shown alongside the deduped total so "why is this lower than
+  // Performance's in-person count" has its answer right on the card,
+  // instead of looking like a second, contradictory number.
+  let totalDoctorInteractionsThisMonth = 0;
   monthVisits.forEach((v) => {
     const doc = doctorByNormName.get(v.client.toLowerCase().trim());
     if (!doc) return; // not a doctor visit (pharmacy/supplement store/etc.)
+    totalDoctorInteractionsThisMonth += 1;
     const rawSpecialty = (doc.specialty || "").trim();
     const normKey = rawSpecialty ? normalizeSpecialty(rawSpecialty) : "";
     const key = normKey || "unspecified";
@@ -11304,6 +11311,7 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
       return { specialty: label, total: reps.reduce((s, r) => s + r.count, 0), reps };
     })
     .sort((a, b) => b.total - a.total);
+  const uniqueDoctorsThisMonth = specialtyBreakdown.reduce((s, g) => s + g.total, 0);
 
   // ---- Section 2c: Doctor Visit Frequency (freely filterable date range) ----
   // Every visit (not deduped this time — the whole point here is "how many
@@ -11490,6 +11498,11 @@ function DashboardView({ zoned, clients, doctors, repNames, settings, onNavigate
         </DashSection>
 
         <DashSection icon={<Stethoscope size={17} />} title="Visits by Specialty" subtitle={`Unique doctors seen this month — ${monthLabel}`}>
+          {specialtyBreakdown.length > 0 && (
+            <div style={{ fontSize: 11, color: DASH.sub, marginBottom: 10 }}>
+              {uniqueDoctorsThisMonth} unique doctor{uniqueDoctorsThisMonth === 1 ? "" : "s"} from {totalDoctorInteractionsThisMonth} total doctor interaction{totalDoctorInteractionsThisMonth === 1 ? "" : "s"} this month — lower than Field Activity's in-person count is expected: a doctor visited more than once only counts once here, and this total also includes phone/WhatsApp/video contacts that in-person counts don't.
+            </div>
+          )}
           {specialtyBreakdown.length === 0 ? (
             <EmptyState text="No doctor visits logged this month yet." />
           ) : (
