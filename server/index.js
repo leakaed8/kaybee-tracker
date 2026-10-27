@@ -2257,7 +2257,7 @@ app.get("/api/reorder-forecast", requireManager, async (req, res) => {
     const reorderSettings = await getReorderForecastSettings();
     const today = new Date(todayBeirutStr());
 
-    const { items } = forecasting.buildReorderForecastItems(
+    const { items, possibleSameItemGroups } = forecasting.buildReorderForecastItems(
       {
         stockMovement: StockMovement, products: Products, purchases: Purchases,
         destructions: Destructions, productCatalog: ProductCatalog,
@@ -2266,7 +2266,7 @@ app.get("/api/reorder-forecast", requireManager, async (req, res) => {
       today,
     );
 
-    res.json({ items, settings: reorderSettings });
+    res.json({ items, possibleSameItemGroups, settings: reorderSettings });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });

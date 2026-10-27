@@ -1374,18 +1374,29 @@ function ReorderDetailRow({ it, fmt, colSpan }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {it.yearlyStats.map((y) => (
-                    <tr key={y.year} style={{ borderTop: "1px solid #EFE9DC" }}>
-                      <td style={{ padding: "2px 6px 2px 0" }}>{y.year}</td>
-                      <td style={{ padding: "2px 6px" }}>{y.monthsRecorded}</td>
-                      <td style={{ padding: "2px 6px" }}>{fmt(y.avgMonthlyDemand)}</td>
-                      <td style={{ padding: "2px 6px" }}>{fmt(y.stdDevMonthlyDemand)}</td>
-                      <td style={{ padding: "2px 6px" }}>{fmt(y.maxMonthlyDemand)}</td>
-                    </tr>
-                  ))}
+                  {it.yearlyStats.map((y) => {
+                    const noData = (y.monthsWithData ?? y.monthsRecorded) === 0;
+                    return (
+                      <tr key={y.year} style={{ borderTop: "1px solid #EFE9DC", color: noData ? "#B33A3A" : undefined }}>
+                        <td style={{ padding: "2px 6px 2px 0" }}>{y.year}</td>
+                        <td style={{ padding: "2px 6px" }}>
+                          {y.monthsRecorded}
+                          {noData && " (0 with data)"}
+                        </td>
+                        <td style={{ padding: "2px 6px" }}>{noData ? "no data" : fmt(y.avgMonthlyDemand)}</td>
+                        <td style={{ padding: "2px 6px" }}>{noData ? "—" : fmt(y.stdDevMonthlyDemand)}</td>
+                        <td style={{ padding: "2px 6px" }}>{noData ? "—" : fmt(y.maxMonthlyDemand)}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             ) : <div style={{ color: "#8A8272" }}>No Stock Movement history.</div>}
+            {it.yearlyStats && it.yearlyStats.some((y) => (y.monthsWithData ?? y.monthsRecorded) === 0) && (
+              <div style={{ marginTop: 6, fontSize: 11, color: "#B33A3A" }}>
+                A year shown in red has NO recorded Stock Movement for this exact item name — not a verified zero. Often caused by a mid-history rename (e.g. a strength change like 500mg → 1000mg splitting one product's real history across two different item names).
+              </div>
+            )}
             {it.dataAnomalies && it.dataAnomalies.length > 0 && (
               <div style={{ marginTop: 8, color: "#B33A3A" }}>
                 {it.dataAnomalies.map((a, i) => (
@@ -1524,6 +1535,34 @@ function ReorderForecastView() {
           </>
         )}
       </CollapsibleSection>
+
+      {data?.possibleSameItemGroups?.length > 0 && (
+        <CollapsibleSection title={`⚠ ${data.possibleSameItemGroups.length} possible same-item name variant${data.possibleSameItemGroups.length === 1 ? "" : "s"} (review before trusting a "no data" year)`}>
+          <p style={{ fontSize: 11.5, color: "#8A8272", marginTop: 0, marginBottom: 10 }}>
+            Same brand, same base name after stripping the strength/pack size — often a straight rename
+            (e.g. a dose change) logged as a brand-new item, which silently splits that product's real demand
+            history across two rows instead of updating it in place. Nothing here is combined automatically —
+            review each group and decide for yourself whether it's really one product line.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {data.possibleSameItemGroups.map((g) => (
+              <div key={`${g.brand}::${g.stem}`} style={{ background: "#FBF3F0", border: "1px solid #E5B8B0", borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ fontSize: 11.5, fontWeight: 700, color: "#B33A3A", marginBottom: 6 }}>{g.brand}</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {g.items.map((it) => (
+                    <div key={it.productName} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12 }}>
+                      <span>{it.productName}</span>
+                      <span style={{ color: "#8A8272" }}>
+                        {it.allTimeMonthsCount}mo on record · {fmt(it.allTimeAvgMonthlyDemand)}/mo avg · {it.currentStock.toLocaleString()} on hand
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </CollapsibleSection>
+      )}
 
       {error && <div style={{ fontSize: 12.5, color: "#B33A3A", margin: "10px 0" }}>{error}</div>}
 

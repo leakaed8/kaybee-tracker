@@ -7,6 +7,7 @@ const {
   normsinv, tTwoTailedPValue, buildFullCalendarGrid, computeForecastDemand,
   detectOutliers, computeReorderRecommendation, fifoExpiryRisk, allocateBudget, empiricalExposureDays,
   computeOverOrderSignal, yearlyDemandStats, demandSummaryStats, buildReorderForecastItems,
+  stemProductName, findPossibleSameItemGroups,
 } = require("./forecasting");
 
 // ---------------------------------------------------------------------
@@ -562,6 +563,20 @@ test("yearlyDemandStats reports average, stdev and max per year, oldest first", 
   assert.equal(stats[1].stdDevMonthlyDemand, 0);
 });
 
+test("yearlyDemandStats distinguishes a real zero year from a year with no data at all", () => {
+  const rows = [
+    ...calendarRows([10, 20, 30], 2024, 1).map((r) => ({ ...r, hasData: true })), // a real year
+    // 2025: fully zero-padded, none of it backed by an actual StockMovement row
+    // (e.g. the product was renamed and this old name was never updated again).
+    ...calendarRows([0, 0, 0, 0], 2025, 1).map((r) => ({ ...r, hasData: false })),
+  ];
+  const stats = yearlyDemandStats(rows);
+  assert.equal(stats[0].monthsWithData, 3); // 2024: every month backed by real data
+  assert.equal(stats[1].monthsWithData, 0); // 2025: zero-padded gap, not a measured zero
+  assert.equal(stats[1].avgMonthlyDemand, 0); // the raw average still reads 0 either way...
+  // ...which is exactly why monthsWithData has to be checked before trusting it.
+});
+
 test("buildReorderForecastItems exposes yearlyStats and totalDestroyedQty per item", () => {
   const today = new Date(2026, 0, 15);
   const stockMovement = [
@@ -669,4 +684,41 @@ test("buildReorderForecastItems: qtyExpiringWithinExposureWindow is a plain head
   );
   const item = items.find((it) => it.productKey === "bandages");
   assert.equal(item.qtyExpiringWithinExposureWindow, 40);
+});
+
+// ---------------------------------------------------------------------
+// stemProductName / findPossibleSameItemGroups - the "did this product get
+// renamed mid-history" detector (strength/pack-size changes logged as a
+// brand-new item name, silently splitting its real demand history).
+// ---------------------------------------------------------------------
+
+test("stemProductName strips strength and pack-size tokens, not the base name", () => {
+  assert.equal(stemProductName("Carnitine 500mg"), "carnitine");
+  assert.equal(stemProductName("Carnitine 800 mg"), "carnitine");
+  assert.equal(stemProductName("Carnitine 1000mg"), "carnitine");
+  assert.equal(stemProductName("Apple Cider Vinegar 1000 Mg 60 Caps."), "apple cider vinegar");
+  assert.equal(stemProductName("Omega-3 Fish Oil"), "omega 3 fish oil");
+});
+
+test("findPossibleSameItemGroups clusters same-brand items that stem to the same base name", () => {
+  const items = [
+    { productName: "Carnitine 500mg", brand: "Alfa", allTimeMonthsCount: 24, allTimeAvgMonthlyDemand: 50, currentStock: 0 },
+    { productName: "Carnitine 1000mg", brand: "Alfa", allTimeMonthsCount: 12, allTimeAvgMonthlyDemand: 80, currentStock: 200 },
+    { productName: "Vitamin D3 1000IU", brand: "Alfa", allTimeMonthsCount: 36, allTimeAvgMonthlyDemand: 100, currentStock: 50 }, // no variant - alone
+    { productName: "Carnitine 500mg", brand: "Mason", allTimeMonthsCount: 10, allTimeAvgMonthlyDemand: 20, currentStock: 10 }, // different brand - separate group
+  ];
+  const groups = findPossibleSameItemGroups(items);
+  assert.equal(groups.length, 1); // only Alfa's Carnitine variants qualify (2+ in the same brand+stem)
+  assert.equal(groups[0].brand, "Alfa");
+  assert.equal(groups[0].items.length, 2);
+  assert.equal(groups[0].items[0].productName, "Carnitine 500mg"); // more months on record sorts first
+  assert.equal(groups[0].items[1].productName, "Carnitine 1000mg");
+});
+
+test("findPossibleSameItemGroups ignores items with no brand (nothing to group by)", () => {
+  const items = [
+    { productName: "Carnitine 500mg", brand: "", allTimeMonthsCount: 12, allTimeAvgMonthlyDemand: 50, currentStock: 0 },
+    { productName: "Carnitine 1000mg", brand: "", allTimeMonthsCount: 12, allTimeAvgMonthlyDemand: 50, currentStock: 0 },
+  ];
+  assert.deepEqual(findPossibleSameItemGroups(items), []);
 });
