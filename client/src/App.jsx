@@ -15781,34 +15781,137 @@ function FlatColumnMapImportSection({
   );
 }
 
+// Unlike Stock Movement/Destructions, purchase history is NOT split into
+// one-file-per-year uploads — every row already carries its own receive
+// date, so one combined sheet covering the whole history (2020-2026,
+// whatever) uploads in a single shot. Re-uploading later (a fresh export
+// with new purchases added) is safe to do with the same combined file or
+// just the new rows - the server skips anything that exactly matches a
+// row already on file, so nothing gets double-counted either way.
 function PurchasesImportSection() {
+  const [status, setStatus] = useState(null); // { count, minYear, maxYear }
+  const [headers, setHeaders] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [colMap, setColMap] = useState({});
+  const [importing, setImporting] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+  const fileInputRef = useRef(null);
+
+  const fields = [
+    { key: "name", label: "Product name", required: true },
+    { key: "receiveDate", label: "Receive date", required: true },
+    { key: "quantity", label: "Quantity", required: true },
+    { key: "landedCost", label: "Landed cost per unit", required: false },
+    { key: "supplier", label: "Supplier", required: false },
+  ];
+
+  const load = () => api.getPurchasesStatus().then(setStatus).catch((e) => setError(e.message));
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setError(""); setResult(null);
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: "array", cellDates: true });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+        const headerRow = (json[0] || []).map((h, i) => (h === "" ? `Column ${i + 1}` : String(h)));
+        const dataRows = json.slice(1).filter((r) => r.some((cell) => cell !== ""));
+        setHeaders(headerRow);
+        setRows(dataRows);
+        setColMap({});
+      } catch (err) {
+        setError("Couldn't read that file. Make sure it's a valid Excel (.xlsx) file.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const requiredFields = fields.filter((f) => f.required);
+  const canImport = requiredFields.every((f) => colMap[f.key]) && rows.length > 0;
+
+  const runImport = async () => {
+    const idxByField = {};
+    fields.forEach((f) => { if (colMap[f.key]) idxByField[f.key] = headers.indexOf(colMap[f.key]); });
+    const out = [];
+    rows.forEach((r) => {
+      const nameIdx = idxByField.name, dateIdx = idxByField.receiveDate;
+      const productName = String(r[nameIdx] ?? "").trim();
+      const rawDate = r[dateIdx];
+      if (!productName || rawDate === "" || rawDate == null) return;
+      const receiveDate = rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate);
+      out.push({
+        productName,
+        receiveDate,
+        quantity: idxByField.quantity >= 0 ? Number(r[idxByField.quantity]) || 0 : 0,
+        landedCost: idxByField.landedCost >= 0 && r[idxByField.landedCost] !== "" ? Number(r[idxByField.landedCost]) : "",
+        supplier: idxByField.supplier >= 0 ? String(r[idxByField.supplier] || "").trim() : "",
+      });
+    });
+    setImporting(true); setError("");
+    try {
+      const res = await api.importPurchases(out);
+      setResult(res);
+      setHeaders([]); setRows([]); setColMap({});
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setImporting(false);
+    }
+  };
+
   return (
-    <FlatColumnMapImportSection
-      title="Supplier purchases"
-      description="Upload purchase receipts, one year at a time — receive date, quantity, and landed cost per unit (customs/freight included, since that varies shipment to shipment). Drives the real exposure window and Cost Price in Reorder Forecast instead of guessed constants. Past years lock once imported; this year stays open."
-      startYear={2020}
-      fields={[
-        { key: "name", label: "Product name", required: true },
-        { key: "receiveDate", label: "Receive date", required: true },
-        { key: "quantity", label: "Quantity", required: true },
-        { key: "landedCost", label: "Landed cost per unit", required: false },
-        { key: "supplier", label: "Supplier", required: false },
-      ]}
-      getStatus={api.getPurchasesStatus}
-      doImport={api.importPurchases}
-      doUnlock={api.unlockPurchasesYear}
-      formatRow={(m) => {
-        const productName = String(m.name ?? "").trim();
-        if (!productName || m.receiveDate === "") return null;
-        const receiveDate = m.receiveDate instanceof Date ? m.receiveDate.toISOString().slice(0, 10) : String(m.receiveDate);
-        return {
-          productName, receiveDate,
-          quantity: Number(m.quantity) || 0,
-          landedCost: m.landedCost === "" ? "" : Number(m.landedCost),
-          supplier: String(m.supplier || "").trim(),
-        };
-      }}
-    />
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>Supplier purchases</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>
+        Upload your full purchase history in one combined file — receive date, quantity, and landed cost per unit
+        (customs/freight included, since that varies shipment to shipment). Drives the real exposure window and
+        Cost Price in Reorder Forecast instead of guessed constants. Re-uploading later (a fresh export with newer
+        purchases added) is safe — rows that exactly match one already on file are skipped, not duplicated.
+      </p>
+      {status && (
+        <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>
+          {status.count > 0
+            ? `${status.count.toLocaleString()} purchase rows on file${status.minYear ? ` (${status.minYear}–${status.maxYear})` : ""}.`
+            : "No purchase history on file yet."}
+        </div>
+      )}
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
+      {result && (
+        <div style={{ fontSize: 12.5, color: "#4C7A5E", marginBottom: 10, display: "flex", alignItems: "center", gap: 5 }}>
+          <Check size={14} /> Added {result.count} new row{result.count === 1 ? "" : "s"}
+          {result.skipped > 0 ? ` (skipped ${result.skipped} already on file).` : "."}
+        </div>
+      )}
+
+      <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ fontSize: 12.5, marginBottom: 10 }} />
+      {headers.length > 0 && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(160px,1fr))", gap: 10, marginBottom: 10 }}>
+            {fields.map((f) => (
+              <Field key={f.key} label={f.required ? `${f.label} *` : `${f.label} (optional)`}>
+                <select value={colMap[f.key] || ""} onChange={(e) => setColMap((prev) => ({ ...prev, [f.key]: e.target.value }))} style={inputStyle}>
+                  <option value="">—</option>
+                  {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+                </select>
+              </Field>
+            ))}
+          </div>
+          <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 10 }}>{rows.length.toLocaleString()} rows detected in the file.</div>
+          <button disabled={!canImport || importing} onClick={runImport}
+            style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: canImport ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+            {importing ? "Importing…" : "Import"}
+          </button>
+        </>
+      )}
+    </div>
   );
 }
 

@@ -2085,18 +2085,29 @@ app.post("/api/stock-movement/unlock", requireManager, async (req, res) => {
 });
 
 // ---------- Supplier purchase history (feeds Reorder Forecast) ----------
-// Same year-locking rule as Stock Movement above, for the same reason: the
-// current year is uploaded incrementally as it progresses and never locks,
-// past years lock once imported so a later partial re-export can't
-// silently overwrite a complete one.
+// Unlike Stock Movement/Destructions, this is NOT split one-file-per-year:
+// every row already carries its own receiveDate, so there's no reason to
+// make the manager chop up years before uploading - one combined sheet
+// covering the whole history (2020-2026, whatever) works directly, and
+// `year` below is derived per row from receiveDate, never supplied by the
+// client. Import is additive (append), not a per-year replace, since
+// there's no natural "this upload is the complete picture for year X" to
+// replace against - duplicate protection (same product+date+qty+cost
+// already on file) makes re-uploading overlapping data harmless instead,
+// the same idea as the order log in the standalone Excel version.
+function purchaseDedupeKey(r) {
+  return `${forecasting.normalizeProductKey(r.productName)}::${r.receiveDate}::${r.quantity}::${r.landedCost}`;
+}
+
 app.get("/api/purchases/status", requireManager, async (req, res) => {
   try {
-    const settings = await db.getSettings();
-    const lockedYears = settings.purchasesLockedYears ? JSON.parse(settings.purchasesLockedYears) : [];
     const rows = await db.getAllRows("Purchases");
-    const countByYear = {};
-    rows.forEach((r) => { countByYear[r.year] = (countByYear[r.year] || 0) + 1; });
-    res.json({ lockedYears, countByYear });
+    const years = rows.map((r) => Number(r.year)).filter((y) => Number.isFinite(y) && y > 0);
+    res.json({
+      count: rows.length,
+      minYear: years.length ? Math.min(...years) : null,
+      maxYear: years.length ? Math.max(...years) : null,
+    });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
@@ -2105,51 +2116,31 @@ app.get("/api/purchases/status", requireManager, async (req, res) => {
 
 app.post("/api/purchases/import", requireManager, async (req, res) => {
   try {
-    const { year, rows } = req.body;
-    const yearNum = Number(year);
-    if (!yearNum || !Array.isArray(rows)) return res.status(400).json({ error: "year and rows are required" });
-    const currentYear = beirutDateParts(new Date()).year;
-    const settings = await db.getSettings();
-    const lockedYears = settings.purchasesLockedYears ? JSON.parse(settings.purchasesLockedYears) : [];
-    if (yearNum !== currentYear && lockedYears.includes(yearNum)) {
-      return res.status(400).json({ error: `${yearNum} is already imported and locked.` });
-    }
+    const { rows } = req.body;
+    if (!Array.isArray(rows)) return res.status(400).json({ error: "rows is required" });
     const cleanRows = rows
       .filter((r) => r.productName && r.receiveDate)
-      .map((r) => ({
-        id: `pu${crypto.randomUUID()}`,
-        productName: String(r.productName).trim(),
-        year: yearNum,
-        receiveDate: r.receiveDate,
-        quantity: Number(r.quantity) || 0,
-        // Per-shipment landed cost (customs/freight baked in) - can be
-        // blank if a given row genuinely has no cost figure; never
-        // defaulted to 0, which would silently corrupt the "most recent
-        // cost" lookup the forecast uses.
-        landedCost: r.landedCost === "" || r.landedCost == null ? "" : Number(r.landedCost),
-        supplier: r.supplier || "",
-      }));
+      .map((r) => {
+        const parsedYear = new Date(r.receiveDate).getFullYear();
+        return {
+          id: `pu${crypto.randomUUID()}`,
+          productName: String(r.productName).trim(),
+          year: Number.isFinite(parsedYear) ? parsedYear : "",
+          receiveDate: r.receiveDate,
+          quantity: Number(r.quantity) || 0,
+          // Per-shipment landed cost (customs/freight baked in) - can be
+          // blank if a given row genuinely has no cost figure; never
+          // defaulted to 0, which would silently corrupt the "most recent
+          // cost" lookup the forecast uses.
+          landedCost: r.landedCost === "" || r.landedCost == null ? "" : Number(r.landedCost),
+          supplier: r.supplier || "",
+        };
+      });
     const existing = await db.getAllRows("Purchases");
-    const kept = existing.filter((r) => Number(r.year) !== yearNum);
-    await db.replaceAllRows("Purchases", [...kept, ...cleanRows]);
-    if (yearNum !== currentYear && !lockedYears.includes(yearNum)) {
-      await db.setSettings({ purchasesLockedYears: JSON.stringify([...lockedYears, yearNum]) });
-    }
-    res.json({ ok: true, count: cleanRows.length });
-  } catch (e) {
-    logErr(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post("/api/purchases/unlock", requireManager, async (req, res) => {
-  try {
-    const yearNum = Number(req.body.year);
-    if (!yearNum) return res.status(400).json({ error: "year is required" });
-    const settings = await db.getSettings();
-    const lockedYears = settings.purchasesLockedYears ? JSON.parse(settings.purchasesLockedYears) : [];
-    await db.setSettings({ purchasesLockedYears: JSON.stringify(lockedYears.filter((y) => y !== yearNum)) });
-    res.json({ ok: true });
+    const existingKeys = new Set(existing.map(purchaseDedupeKey));
+    const toAdd = cleanRows.filter((r) => !existingKeys.has(purchaseDedupeKey(r)));
+    await db.appendRows("Purchases", toAdd);
+    res.json({ ok: true, count: toAdd.length, skipped: cleanRows.length - toAdd.length });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
