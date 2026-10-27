@@ -1340,12 +1340,28 @@ function ReorderDetailRow({ it, fmt, colSpan }) {
     </div>
   );
   const rawGap = Math.max(0, (it.targetStockLevel ?? 0) - it.currentStock);
+  const trendLabel = it.trendPValue != null && it.trendPValue < 0.05
+    ? (it.trendSlope > 0 ? "↑ rising" : it.trendSlope < 0 ? "↓ falling" : "flat")
+    : "flat / not significant";
   return (
     <tr>
       <td colSpan={colSpan} style={{ padding: "12px 16px", background: "#FBF9F3", borderBottom: "1px solid #E5DFD3" }}>
+        {(it.itemCode || it.brand || it.category || it.supplier) && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 16, fontSize: 12, color: "#5B5445", marginBottom: 12, paddingBottom: 10, borderBottom: "1px solid #E5DFD3" }}>
+            {it.itemCode && <span><span style={{ color: "#8A8272" }}>Item code:</span> {it.itemCode}</span>}
+            {it.brand && <span><span style={{ color: "#8A8272" }}>Brand:</span> {it.brand}</span>}
+            {it.category && <span><span style={{ color: "#8A8272" }}>Category:</span> {it.category}</span>}
+            {it.supplier && <span><span style={{ color: "#8A8272" }}>Supplier (most recent):</span> {it.supplier}</span>}
+          </div>
+        )}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 20, fontSize: 12 }}>
           <div>
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>Monthly demand by year (Stock Movement, raw)</div>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>Demand summary</div>
+            {row("Avg monthly demand (recent)", fmt(it.recentAvgMonthlyDemand), `(${it.recentMonthsCount}mo window)`)}
+            {row("Demand stdev (recent)", fmt(it.recentStdDevMonthlyDemand))}
+            {row("Avg monthly demand (all-time)", fmt(it.allTimeAvgMonthlyDemand), `(${it.allTimeMonthsCount}mo on record)`)}
+            {row("Trend", trendLabel, `(slope ${it.trendSlope != null ? it.trendSlope.toFixed(2) : "—"}/mo, p=${it.trendPValue == null ? "n/a" : it.trendPValue.toFixed(3)})`)}
+            <div style={{ fontWeight: 600, margin: "12px 0 6px" }}>Monthly demand by year (Stock Movement, raw)</div>
             {it.yearlyStats && it.yearlyStats.length > 0 ? (
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
@@ -1393,6 +1409,18 @@ function ReorderDetailRow({ it, fmt, colSpan }) {
                 {row("Ratio", it.overOrder.overOrderRatio != null ? `${it.overOrder.overOrderRatio.toFixed(2)}x` : "n/a")}
               </>
             )}
+          </div>
+
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>Cost/sale economics</div>
+            {row("Cost price", it.costPrice != null ? it.costPrice.toFixed(2) : "—", it.costSource ? `(${it.costSource})` : "")}
+            {row("Sale price", it.salePrice != null ? it.salePrice.toFixed(2) : "—")}
+            {row("Salvage value if destroyed", it.salvageValue != null ? it.salvageValue.toFixed(2) : "0.00 (not set)")}
+            {row("Cu (profit lost if out of stock)", it.cu != null ? it.cu.toFixed(2) : "—", "= sale − cost")}
+            {row("Co (loss if item expires)", it.co != null ? it.co.toFixed(2) : "—", "= cost − salvage")}
+            <div style={{ fontWeight: 600, margin: "12px 0 6px" }}>Expiry exposure</div>
+            {row("Qty expiring within exposure window", it.qtyExpiringWithinExposureWindow.toLocaleString(), "(plain headcount, batches only)")}
+            {row("Qty at risk of expiring unsold (FIFO)", it.qtyAtRiskOfExpiring.toLocaleString(), "(nets out projected sales)")}
           </div>
 
           <div>
@@ -14276,6 +14304,10 @@ function validateCatalogProductForm(f) {
     const upd = toNum(f.unitsPerDay);
     if (upd === null || upd <= 0) return "Units per day must be greater than zero.";
   }
+  if (f.salvageValue !== "" && f.salvageValue != null) {
+    const salvage = toNum(f.salvageValue);
+    if (salvage === null || salvage < 0) return "Salvage value can't be negative.";
+  }
   for (const ing of f.ingredients || []) {
     if (ing.amount !== "" && ing.amount != null && toNum(ing.amount) === null) {
       return `"${ing.name || "Ingredient"}" needs a valid numeric amount.`;
@@ -14286,7 +14318,7 @@ function validateCatalogProductForm(f) {
 
 function emptyCatalogProductForm() {
   return {
-    name: "", price: "", sku: "", brand: "",
+    name: "", price: "", sku: "", brand: "", salvageValue: "",
     ingredients: [{ name: "", form: "", amount: "", unit: "mg" }],
     form: "", packSize: "", unitsPerDay: "1", notes: "",
   };
@@ -14295,7 +14327,7 @@ function emptyCatalogProductForm() {
 function toCatalogProductFormShape(p) {
   const ingredients = getIngredients(p);
   return {
-    name: p.name || "", price: p.price ?? "", sku: p.sku || "", brand: p.brand || "",
+    name: p.name || "", price: p.price ?? "", sku: p.sku || "", brand: p.brand || "", salvageValue: p.salvageValue ?? "",
     ingredients: ingredients.length ? ingredients.map((i) => ({ name: i.name, form: i.form || "", amount: i.amount ?? "", unit: i.unit || "mg" })) : [{ name: "", form: "", amount: "", unit: "mg" }],
     form: p.form || "", packSize: p.packSize ?? "", unitsPerDay: p.unitsPerDay || "1", notes: p.notes || "",
   };
@@ -14344,9 +14376,16 @@ function CatalogProductForm({ initial, saving, error, submitLabel, onCancel, onS
           <input value={f.unitsPerDay} onChange={(e) => set({ unitsPerDay: e.target.value })} type="number" min="0" placeholder="1" style={inputStyle} />
         </Field>
       </div>
-      <Field label="SKU (optional)">
-        <input value={f.sku} onChange={(e) => set({ sku: e.target.value })} placeholder="e.g. MN-B12-1000" style={{ ...inputStyle, marginBottom: 10 }} />
-      </Field>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <Field label="SKU (optional)">
+          <input value={f.sku} onChange={(e) => set({ sku: e.target.value })} placeholder="e.g. MN-B12-1000" style={{ ...inputStyle, marginBottom: 10 }} />
+        </Field>
+        <Field label="Salvage value if destroyed (optional)">
+          <input value={f.salvageValue} onChange={(e) => set({ salvageValue: e.target.value })} type="number" min="0" placeholder="e.g. 0.50 (per unit)"
+            title="Credit recovered per unit if a destroyed item is returned to the supplier or scrapped for partial value. Feeds Reorder Forecast's expiry-loss cost (Co = cost price minus this). Leave blank to assume zero."
+            style={{ ...inputStyle, marginBottom: 10 }} />
+        </Field>
+      </div>
       <ProductMetricsPreview product={f} />
       <textarea value={f.notes} onChange={(e) => set({ notes: e.target.value })} placeholder="Notes (optional)" rows={2} style={{ ...inputStyle, resize: "vertical", marginBottom: 10 }} />
       {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}

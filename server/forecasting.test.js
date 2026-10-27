@@ -6,7 +6,7 @@ const assert = require("node:assert/strict");
 const {
   normsinv, tTwoTailedPValue, buildFullCalendarGrid, computeForecastDemand,
   detectOutliers, computeReorderRecommendation, fifoExpiryRisk, allocateBudget, empiricalExposureDays,
-  computeOverOrderSignal, yearlyDemandStats, buildReorderForecastItems,
+  computeOverOrderSignal, yearlyDemandStats, demandSummaryStats, buildReorderForecastItems,
 } = require("./forecasting");
 
 // ---------------------------------------------------------------------
@@ -583,4 +583,90 @@ test("buildReorderForecastItems exposes yearlyStats and totalDestroyedQty per it
   assert.equal(item.totalDestroyedQty, 8); // 5 expiry waste + 3 defect
   assert.ok(Array.isArray(item.yearlyStats));
   assert.ok(item.yearlyStats.some((y) => y.year === 2024));
+});
+
+// ---------------------------------------------------------------------
+// demandSummaryStats - the plain "recent vs all-time" averages a manager
+// expects to cross-check against the model's own forecast.
+// ---------------------------------------------------------------------
+
+test("demandSummaryStats reports recent (windowed) vs all-time raw averages", () => {
+  // 18 months: first 6 at 10/mo, last 12 (the trailing window) at 50/mo.
+  const rows = calendarRows([...Array(6).fill(10), ...Array(12).fill(50)]);
+  const stats = demandSummaryStats(rows, 12);
+  assert.ok(Math.abs(stats.recentAvgMonthlyDemand - 50) < 1e-9);
+  assert.equal(stats.recentStdDevMonthlyDemand, 0);
+  assert.equal(stats.recentMonthsCount, 12);
+  assert.ok(Math.abs(stats.allTimeAvgMonthlyDemand - (6 * 10 + 12 * 50) / 18) < 1e-9);
+  assert.equal(stats.allTimeMonthsCount, 18);
+});
+
+// ---------------------------------------------------------------------
+// Fields carried over from the original Excel tool's column list -
+// identity (item code/brand/category/supplier), the plain demand
+// averages, trend slope, salvage value feeding Co, and the simple
+// "expiring within exposure window" headcount.
+// ---------------------------------------------------------------------
+
+test("buildReorderForecastItems carries item code, brand, category and most-recent supplier", () => {
+  const today = new Date(2026, 0, 15);
+  const stockMovement = [{ productName: "Omega 3", year: 2025, month: 1, qty: 5 }];
+  const products = [{ name: "Omega 3", qty: "10", expiry: "", category: "Supplements", sku: "OM-3-OLD" }];
+  const purchases = [
+    { productName: "Omega 3", receiveDate: "2025-01-01", quantity: 10, landedCost: "1", supplier: "Old Supplier" },
+    { productName: "Omega 3", receiveDate: "2025-06-01", quantity: 10, landedCost: "1", supplier: "New Supplier" },
+  ];
+  const productCatalog = [{ name: "Omega 3", price: "9.99", packSize: "", sku: "OM-3-NEW", brand: "Alfa" }];
+
+  const { items } = buildReorderForecastItems(
+    { stockMovement, products, purchases, destructions: [], productCatalog },
+    { leadTimeDays: 10, reviewPeriodDays: 0, minServiceZ: 1.0, totalBudget: null },
+    today,
+  );
+  const item = items.find((it) => it.productKey === "omega 3");
+  assert.equal(item.itemCode, "OM-3-NEW"); // ProductCatalog wins over Products
+  assert.equal(item.brand, "Alfa");
+  assert.equal(item.category, "Supplements"); // only Products carries category
+  assert.equal(item.supplier, "New Supplier"); // most recent purchase, not the first
+  assert.ok(Number.isFinite(item.trendSlope));
+  assert.equal(item.recentMonthsCount, 12); // full 2025 calendar grid, zero-filled past the one real month
+});
+
+test("buildReorderForecastItems uses salvage value (ProductCatalog) to reduce Co, the expiry-loss cost", () => {
+  const today = new Date(2026, 0, 15);
+  const stockMovement = Array.from({ length: 14 }, (_, i) => ({
+    productName: "Thermometer", year: 2025, month: (i % 12) + 1, qty: 10,
+  }));
+  const products = [{ name: "Thermometer", qty: "0", expiry: "" }];
+  const purchases = [{ productName: "Thermometer", receiveDate: "2025-01-01", quantity: 100, landedCost: "20" }];
+  const withoutSalvage = buildReorderForecastItems(
+    { stockMovement, products, purchases, destructions: [], productCatalog: [{ name: "Thermometer", price: "35", packSize: "" }] },
+    { leadTimeDays: 30, reviewPeriodDays: 30, minServiceZ: 1.65, totalBudget: null },
+    today,
+  ).items.find((it) => it.productKey === "thermometer");
+  const withSalvage = buildReorderForecastItems(
+    { stockMovement, products, purchases, destructions: [], productCatalog: [{ name: "Thermometer", price: "35", packSize: "", salvageValue: "15" }] },
+    { leadTimeDays: 30, reviewPeriodDays: 30, minServiceZ: 1.65, totalBudget: null },
+    today,
+  ).items.find((it) => it.productKey === "thermometer");
+
+  assert.equal(withoutSalvage.co, 20); // full cost price lost
+  assert.equal(withSalvage.co, 5); // cost price minus the $15 salvage credit
+  assert.equal(withSalvage.salvageValue, 15);
+});
+
+test("buildReorderForecastItems: qtyExpiringWithinExposureWindow is a plain headcount, independent of FIFO/demand", () => {
+  const today = new Date(2026, 0, 1);
+  const stockMovement = [{ productName: "Bandages", year: 2025, month: 1, qty: 5 }];
+  const products = [
+    { name: "Bandages", qty: "40", expiry: "2026-01-20" }, // within a 30-day exposure window
+    { name: "Bandages", qty: "60", expiry: "2026-06-01" }, // outside it
+  ];
+  const { items } = buildReorderForecastItems(
+    { stockMovement, products, purchases: [], destructions: [], productCatalog: [] },
+    { leadTimeDays: 30, reviewPeriodDays: 0, minServiceZ: 1.0, totalBudget: null },
+    today,
+  );
+  const item = items.find((it) => it.productKey === "bandages");
+  assert.equal(item.qtyExpiringWithinExposureWindow, 40);
 });

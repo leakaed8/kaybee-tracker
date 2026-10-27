@@ -405,7 +405,11 @@ const SCHEMAS = {
   // Image fields appended (this phase): bottle + Supplement Facts photos per
   // product, gated by a manager approval status before they reach reps via
   // Knowledge's specialty cards or the rep-facing export.
-  ProductCatalog: ["id", "name", "price", "form", "packSize", "unitsPerDay", "ingredients", "notes", "createdBy", "createdAt", "updatedBy", "updatedAt", "sku", "brand", "bottleImageKey", "bottleImageName", "bottleImageMimeType", "supplementFactsImageKey", "supplementFactsImageName", "supplementFactsImageMimeType", "imageApprovalStatus", "imageSourceUrl", "imageMatchedBy", "imageMatchedAt", "imageNotes"],
+  // salvageValue appended - the per-unit credit recovered if a destroyed
+  // unit is returned to the supplier or scrapped for partial value (Reorder
+  // Forecast's Co = cost price minus this). Optional; "" for every
+  // pre-existing row means "assume zero salvage" (unchanged behavior).
+  ProductCatalog: ["id", "name", "price", "form", "packSize", "unitsPerDay", "ingredients", "notes", "createdBy", "createdAt", "updatedBy", "updatedAt", "sku", "brand", "bottleImageKey", "bottleImageName", "bottleImageMimeType", "supplementFactsImageKey", "supplementFactsImageName", "supplementFactsImageMimeType", "imageApprovalStatus", "imageSourceUrl", "imageMatchedBy", "imageMatchedAt", "imageNotes", "salvageValue"],
 
   // ---------- Recall (medical rep training/knowledge-reference module) ----------
   // Structure-only for now — no clinical content is populated. Recall sits on

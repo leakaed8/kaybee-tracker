@@ -1787,6 +1787,7 @@ app.post("/api/product-catalog", requireManager, async (req, res) => {
       notes: req.body.notes || "",
       sku: req.body.sku || "",
       brand: req.body.brand || inferProductCatalogBrand(req.body.name),
+      salvageValue: req.body.salvageValue === "" || req.body.salvageValue == null ? "" : Number(req.body.salvageValue),
       bottleImageKey: "", bottleImageName: "", bottleImageMimeType: "",
       supplementFactsImageKey: "", supplementFactsImageName: "", supplementFactsImageMimeType: "",
       imageApprovalStatus: "", imageSourceUrl: "", imageMatchedBy: "", imageMatchedAt: "", imageNotes: "",
@@ -1823,6 +1824,7 @@ app.patch(
     if (req.body.notes !== undefined) patch.notes = req.body.notes || "";
     if (req.body.sku !== undefined) patch.sku = req.body.sku || "";
     if (req.body.brand !== undefined) patch.brand = req.body.brand || "";
+    if (req.body.salvageValue !== undefined) patch.salvageValue = req.body.salvageValue === "" ? "" : Number(req.body.salvageValue);
 
     // A freshly uploaded image always starts at pending_review — even a
     // manager's own upload needs the explicit approve click before it

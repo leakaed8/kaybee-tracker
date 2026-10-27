@@ -699,6 +699,33 @@ function yearlyDemandStats(rows) {
 }
 
 /**
+ * The two headline demand averages a manager expects to be able to compare
+ * side by side: a "recent" figure (trailing window, raw - not the model's
+ * deseasonalized/trend-adjusted projection) and an "all-time" figure
+ * (every elapsed month on record), plus the recent window's raw stdev.
+ * Deliberately simple/raw, as a transparency cross-check against
+ * forecastedMonthlyDemand/forecastResidualStdDev (which can legitimately
+ * differ, since those are model outputs, not plain averages).
+ */
+function demandSummaryStats(rows, windowMonths = 12) {
+  const allTimeMonthsCount = rows.length;
+  const allTimeAvgMonthlyDemand = allTimeMonthsCount
+    ? rows.reduce((s, r) => s + r.netDemand, 0) / allTimeMonthsCount : 0;
+
+  const window = rows.slice(Math.max(0, rows.length - windowMonths));
+  const recentMonthsCount = window.length;
+  const recentAvgMonthlyDemand = recentMonthsCount
+    ? window.reduce((s, r) => s + r.netDemand, 0) / recentMonthsCount : 0;
+  const recentVariance = recentMonthsCount
+    ? window.reduce((s, r) => s + (r.netDemand - recentAvgMonthlyDemand) ** 2, 0) / recentMonthsCount : 0;
+
+  return {
+    recentAvgMonthlyDemand, recentStdDevMonthlyDemand: Math.sqrt(recentVariance), recentMonthsCount,
+    allTimeAvgMonthlyDemand, allTimeMonthsCount,
+  };
+}
+
+/**
  * sheets: { stockMovement, products, purchases, destructions, productCatalog }
  *   - each the raw array of row objects as returned by db.getAllRows,
  *     field names as given in sheetsDb.js's SCHEMAS (productName/name/etc,
@@ -812,6 +839,19 @@ function buildReorderForecastItems(sheets, settings, today) {
     const salePrice = salePriceRaw != null && salePriceRaw !== "" ? Number(salePriceRaw) : null;
     const minOrderQtyRaw = catalog && catalog.packSize !== "" ? catalog.packSize : productsMaster?.packSize;
     const minOrderQty = minOrderQtyRaw != null && minOrderQtyRaw !== "" ? Number(minOrderQtyRaw) : null;
+    const salvageValueRaw = catalog && catalog.salvageValue !== "" ? catalog.salvageValue : undefined;
+    const salvageValue = salvageValueRaw != null && salvageValueRaw !== "" ? Number(salvageValueRaw) : null;
+
+    const itemCode = (catalog && catalog.sku) || productsMaster?.sku || "";
+    const brand = (catalog && catalog.brand) || "";
+    const category = productsMaster?.category || "";
+    // Most recent purchase's supplier, same "latest wins" convention as
+    // costPrice - a supplier switch should surface the new one, not an
+    // old one from years back.
+    const purchasesByDate = [...itemPurchases].sort((a, b) => new Date(a.receiveDate) - new Date(b.receiveDate));
+    const supplier = purchasesByDate.length ? (purchasesByDate[purchasesByDate.length - 1].supplier || "") : "";
+
+    const demandStats = demandSummaryStats(rows, 12);
 
     const forecast = computeForecastDemand(rows, exposureMonths, 12);
     const reorder = computeReorderRecommendation(
@@ -819,11 +859,20 @@ function buildReorderForecastItems(sheets, settings, today) {
         forecastedMonthlyDemand: forecast.forecastedMonthlyDemand,
         forecastResidualStdDev: forecast.forecastResidualStdDev,
         currentStock: stock.currentStock,
-        costPrice, salePrice, salvageValue: null, minOrderQty,
+        costPrice, salePrice, salvageValue, minOrderQty,
       },
       { leadTimeDays, reviewPeriodDays, minServiceZ, exposureDaysOverride },
     );
     const expiryRisk = fifoExpiryRisk(stock.batches, forecast.forecastedMonthlyDemand, today);
+    // Simple headcount, independent of FIFO/sell-through: how much of what's
+    // on hand right now expires before the next order could even arrive.
+    // Deliberately a plain filter (not a forecast), so it reads the same
+    // regardless of demand assumptions - a second, more conservative cross-
+    // check against qtyAtRiskOfExpiring (which nets out projected sales).
+    const exposureCutoff = new Date(today.getTime() + exposureDays * 86400000);
+    const qtyExpiringWithinExposureWindow = stock.batches
+      .filter((b) => b.expiryDate <= exposureCutoff)
+      .reduce((s, b) => s + b.quantity, 0);
     const itemDestructions = destructionsByProduct.get(key) || [];
     const historicalExpiryWasteQty = itemDestructions
       .filter((d) => !(d.isDefect === true || d.isDefect === "true"))
@@ -837,24 +886,32 @@ function buildReorderForecastItems(sheets, settings, today) {
     items.push({
       productKey: key,
       productName: displayNameByKey.get(key) || key,
+      itemCode, brand, category, supplier,
       currentStock: stock.currentStock,
       batchCount: stock.batchCount,
       nearestExpiry: stock.nearestExpiry ? stock.nearestExpiry.toISOString().slice(0, 10) : null,
       nearestExpirySource: stock.nearestExpirySource,
       forecastedMonthlyDemand: forecast.forecastedMonthlyDemand,
       forecastResidualStdDev: forecast.forecastResidualStdDev,
+      trendSlope: forecast.trendSlope,
       trendPValue: forecast.trendPValue,
       forecastMethod: forecast.forecastMethod,
       dataAnomalies: forecast.dataAnomalies,
       yearlyStats,
+      recentAvgMonthlyDemand: demandStats.recentAvgMonthlyDemand,
+      recentStdDevMonthlyDemand: demandStats.recentStdDevMonthlyDemand,
+      recentMonthsCount: demandStats.recentMonthsCount,
+      allTimeAvgMonthlyDemand: demandStats.allTimeAvgMonthlyDemand,
+      allTimeMonthsCount: demandStats.allTimeMonthsCount,
       daysOfStockRemaining: Number.isFinite(reorder.daysOfStockRemaining) ? reorder.daysOfStockRemaining : null,
       exposureDays, exposureMonths,
       exposureSource: exposureDaysOverride != null ? "empirical" : "default",
       costPrice, costSource: costPrice != null ? "purchases" : null,
-      salePrice, minOrderQty,
+      salePrice, salvageValue, minOrderQty,
       cu: reorder.cu, co: reorder.co, criticalRatio: reorder.criticalRatio, serviceLevelZ: reorder.serviceLevelZ,
       safetyStock: reorder.safetyStock, targetStockLevel: reorder.targetStockLevel,
       suggestedReorderQty: reorder.suggestedReorderQty,
+      qtyExpiringWithinExposureWindow,
       qtyAtRiskOfExpiring: expiryRisk.totalAtRisk,
       historicalExpiryWasteQty,
       historicalDefectQty,
@@ -900,5 +957,6 @@ module.exports = {
   computeOverOrderSignal,
   OVER_ORDER_RATIO_THRESHOLD,
   yearlyDemandStats,
+  demandSummaryStats,
   buildReorderForecastItems,
 };
