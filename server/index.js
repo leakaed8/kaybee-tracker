@@ -13,6 +13,14 @@ const { DAHIYEH_REFERENCE_PHARMACIES } = require("./dahiyehReference");
 const { MOUNT_LEBANON_REFERENCE_NAMES } = require("./mountLebanonReferenceNames");
 
 const app = express();
+// Render sits in front of this app behind a proxy/load balancer — without
+// this, req.ip (and anything derived from it, like the login rate limiter
+// below) reports Render's proxy IP for every single request, which
+// collapses every visitor into one shared bucket and makes per-IP limits
+// meaningless. "1" trusts exactly one hop (Render's own proxy), not an
+// arbitrary chain, so a client can't spoof X-Forwarded-For to fake a
+// different IP and dodge the limiter.
+app.set("trust proxy", 1);
 app.use(express.json({ limit: "25mb" }));
 
 // console.error(e) alone truncates a Google Sheets API error to "[Object]"
@@ -38,7 +46,23 @@ const FOLLOWUP_PRESETS = {
 
 const PORT = process.env.PORT || 3001;
 const IS_PROD = process.env.NODE_ENV === "production";
-const SESSION_SECRET = process.env.SESSION_SECRET || "kaybee-tracker-default-secret-change-me";
+// Every login session (manager or rep) is just an HMAC of a short payload
+// ("manager", "rep|...") under this secret — anyone who knows it can mint
+// their own valid session and skip the passcode screen entirely. A fixed,
+// source-visible fallback here would mean exactly that: this used to default
+// to a hardcoded string when SESSION_SECRET wasn't set, which is public in
+// this repo's history, so production MUST have a real secret configured —
+// refusing to boot without one is safer than silently running on a known
+// value. Local dev gets a random one each start (sessions just don't
+// survive a restart, which is fine for dev).
+const SESSION_SECRET = process.env.SESSION_SECRET || (IS_PROD ? null : crypto.randomBytes(32).toString("hex"));
+if (IS_PROD && !SESSION_SECRET) {
+  console.error(
+    "FATAL: SESSION_SECRET is not set. Generate one (e.g. `node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"`) "
+    + "and set it as an environment variable before starting in production — refusing to boot on an insecure default."
+  );
+  process.exit(1);
+}
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
@@ -176,6 +200,40 @@ function requireAuth(req, res, next) {
 function requireManager(req, res, next) {
   if (req.role !== "manager") return res.status(403).json({ error: "Managers only." });
   next();
+}
+
+// /api/login had no attempt limit at all — a script could try passcodes
+// back-to-back with no delay or lockout. This is a simple in-memory, per-IP
+// sliding-window limiter: good enough for a small team app on a single
+// Render instance (an in-memory store wouldn't survive multiple instances
+// or restarts, which is fine here — restarting just resets everyone's
+// count to zero, it doesn't open a hole). Only failed attempts count
+// against the limit; a successful login clears it immediately so a
+// legitimate user who mistyped once isn't penalized on their next visit.
+const LOGIN_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_ATTEMPT_MAX = 10;
+const loginAttemptsByIp = new Map();
+
+function pruneExpiredLoginAttempts(entry, now) {
+  while (entry.length && now - entry[0] > LOGIN_ATTEMPT_WINDOW_MS) entry.shift();
+  return entry;
+}
+
+function isLoginRateLimited(ip) {
+  const now = Date.now();
+  const entry = pruneExpiredLoginAttempts(loginAttemptsByIp.get(ip) || [], now);
+  return entry.length >= LOGIN_ATTEMPT_MAX;
+}
+
+function recordFailedLogin(ip) {
+  const now = Date.now();
+  const entry = pruneExpiredLoginAttempts(loginAttemptsByIp.get(ip) || [], now);
+  entry.push(now);
+  loginAttemptsByIp.set(ip, entry);
+}
+
+function clearLoginAttempts(ip) {
+  loginAttemptsByIp.delete(ip);
 }
 
 // Manager-configurable per-role nav visibility (Settings → Tab visibility on
@@ -1034,15 +1092,22 @@ app.get("/api/health", (req, res) => res.json({ ok: true }));
 
 app.post("/api/login", async (req, res) => {
   try {
+    const ip = req.ip;
+    if (isLoginRateLimited(ip)) {
+      return res.status(429).json({ error: "Too many attempts. Try again later." });
+    }
+
     const { passcode } = req.body || {};
     const managerCode = process.env.MANAGER_PASSCODE;
     const legacyRepCode = process.env.REP_PASSCODE;
 
     if (managerCode && passcode === managerCode) {
+      clearLoginAttempts(ip);
       setSessionCookie(res, signPayload("manager"), 60 * 60 * 24 * 30);
       return res.json({ ok: true, role: "manager" });
     }
     if (legacyRepCode && passcode === legacyRepCode) {
+      clearLoginAttempts(ip);
       setSessionCookie(res, signPayload("rep|"), 60 * 60 * 24 * 30);
       return res.json({ ok: true, role: "rep", repName: "" });
     }
@@ -1058,10 +1123,12 @@ app.post("/api/login", async (req, res) => {
       const isSalesRep = matched.supplementStoresOnly === "true";
       const isMedRep = matched.medRepOnly === "true";
       const flags = [isSupervisor ? "sup" : "", isSalesRep ? "ssonly" : "", isMedRep ? "docsonly" : ""].filter(Boolean).join(",");
+      clearLoginAttempts(ip);
       setSessionCookie(res, signPayload(`rep|${encodeURIComponent(matched.name)}|${flags}`), 60 * 60 * 24 * 30);
       return res.json({ ok: true, role: "rep", repName: matched.name, isSupervisor, isSalesRep, isMedRep });
     }
 
+    recordFailedLogin(ip);
     res.status(401).json({ error: "Incorrect passcode." });
   } catch (e) {
     logErr(e);
