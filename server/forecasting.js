@@ -232,10 +232,25 @@ function futureYearMonths(lastYear, lastMonth, count) {
   return months;
 }
 
+// Any single month's influence on a calendar month's seasonal index is
+// bounded to this range. Real seasonality (e.g. a holiday-driven product)
+// is nowhere near a 10x swing; a ratio outside this range means the
+// preliminary trend line used to compute it was near zero for that point
+// (entirely possible with oscillating or intermittent history - a
+// declining fit can cross zero), not that the item is genuinely 1000x
+// busier that month. Confirmed as a real bug: an opening-stock-style large
+// early entry followed by sparse ordinary sales can drive the fit
+// negative later in the series, and any nonzero actual value past that
+// point divides by a ~1e-6 floor, producing ratios in the tens of
+// millions that silently corrupt the index (and, through it, both the
+// flat-level forecast and the residual stdev feeding safety stock).
+const SEASONAL_RATIO_MIN = 0.1;
+const SEASONAL_RATIO_MAX = 10;
+
 function seasonalIndices(t, y, months) {
   const prelim = olsTrend(t, y);
   const trendFit0 = t.map((v) => Math.max(prelim.intercept + prelim.slope * v, 1e-6));
-  const ratio = y.map((v, i) => v / trendFit0[i]);
+  const ratio = y.map((v, i) => Math.min(SEASONAL_RATIO_MAX, Math.max(SEASONAL_RATIO_MIN, v / trendFit0[i])));
   const index = {};
   for (let m = 1; m <= 12; m++) {
     const vals = ratio.filter((_, i) => months[i] === m);

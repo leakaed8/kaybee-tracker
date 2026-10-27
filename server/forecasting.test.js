@@ -135,6 +135,32 @@ test("seasonal pattern biases the forecast toward the season", () => {
   assert.ok(intoJune.forecastedMonthlyDemand < 100);
 });
 
+test("a declining preliminary trend crossing zero cannot blow up the seasonal index", () => {
+  // Regression for a real production bug: a few large opening-stock-style
+  // entries at the very start of the history (common when a pharmacy first
+  // starts tracking in the system) drag the seasonal decomposition's
+  // internal trend line down until it goes negative partway through the
+  // series. Any later month then divides its actual (ordinary, modest)
+  // quantity by a ~1e-6 floor instead of a real trend value, producing a
+  // seasonal-index ratio in the tens of millions for that calendar month -
+  // which corrupts every month sharing that calendar position and
+  // ultimately explodes the residual stdev (and from there, safety stock
+  // and the suggested reorder qty) to an absurd, implausible size, even
+  // though no single month looks "extreme" enough to trip detectOutliers
+  // on its own (20-80 units is ordinary for this item).
+  const n = 81;
+  const y = Array(n).fill(0);
+  y[0] = 3000; y[1] = 1500; y[2] = 500; // opening entries
+  for (let i = 3; i < n; i++) y[i] = (i % 7 === 0) ? 80 : 20; // ordinary sales afterward
+  const rows = y.map((v, i) => ({ year: 2020 + Math.floor(i / 12), month: (i % 12) + 1, netDemand: v }));
+
+  const result = computeForecastDemand(rows, 8 / 30.44, 12);
+  assert.ok(result.forecastResidualStdDev < 1000,
+    `residual stdev exploded: ${result.forecastResidualStdDev}`);
+  assert.ok(result.forecastedMonthlyDemand < 1000,
+    `forecasted demand exploded: ${result.forecastedMonthlyDemand}`);
+});
+
 // ---------------------------------------------------------------------
 // detectOutliers - regression for a real production bug: one implausible
 // month-level quantity (e.g. a fat-fingered extra digit, or a monetary
