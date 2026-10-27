@@ -590,7 +590,65 @@ function buildReorderNotes(it) {
       notes.push(`implausible qty ${a.originalQty.toLocaleString()} in ${a.month}/${a.year} — check Stock Movement`);
     }
   }
+  if (it.overOrder && it.overOrder.overOrderRatio != null
+    && it.overOrder.overOrderRatio > OVER_ORDER_RATIO_THRESHOLD && it.overOrder.wastedQtyInWindow > 0) {
+    notes.push("OVER-ORDERING HISTORY");
+    const sentThrough = Math.round(it.overOrder.soldQtyInWindow + it.overOrder.wastedQtyInWindow);
+    notes.push(`bought ${Math.round(it.overOrder.purchasedQtyTotal).toLocaleString()} vs ${sentThrough.toLocaleString()} sold+wasted over that period (${it.overOrder.overOrderRatio.toFixed(1)}x)`);
+  }
   return notes;
+}
+
+// How much more was purchased than left the shelf (sold) or was destroyed
+// as expiry waste, over the calendar window purchase history actually
+// covers, before calling it a pattern of over-ordering rather than normal
+// inventory buildup. Deliberately requires BOTH a wide ratio AND actual
+// recorded expiry waste in that same window - buying ahead of demand
+// isn't itself a problem unless it's demonstrably turning into waste.
+const OVER_ORDER_RATIO_THRESHOLD = 1.5;
+
+/**
+ * Checks purchasing history against what actually left the shelf (sales,
+ * from Stock Movement) plus what was destroyed as expiry waste, limited to
+ * the calendar window the item's purchase records span - so older
+ * Stock Movement/Destructions history outside that window (which the
+ * purchasing decision couldn't have been informed by anyway) doesn't
+ * dilute or skew the comparison.
+ *
+ * itemPurchases: raw Purchases rows for one product.
+ * calendarRows: that product's full {year, month, netDemand} grid.
+ * itemDestructions: raw Destructions rows for one product.
+ * Returns null when there's no purchase history to compare against.
+ */
+function computeOverOrderSignal(itemPurchases, calendarRows, itemDestructions) {
+  if (!itemPurchases.length) return null;
+  const dates = itemPurchases.map((p) => new Date(p.receiveDate)).filter((d) => !Number.isNaN(d.getTime()));
+  if (!dates.length) return null;
+
+  const purchasedQtyTotal = itemPurchases.reduce((s, p) => s + (Number(p.quantity) || 0), 0);
+  const yearMonths = dates.map((d) => d.getFullYear() * 12 + d.getMonth());
+  const minYM = Math.min(...yearMonths);
+  const maxYM = Math.max(...yearMonths);
+
+  const soldQtyInWindow = calendarRows
+    .filter((r) => { const ym = r.year * 12 + (r.month - 1); return ym >= minYM && ym <= maxYM; })
+    .reduce((s, r) => s + r.netDemand, 0);
+
+  const minYear = Math.floor(minYM / 12);
+  const maxYear = Math.floor(maxYM / 12);
+  const wastedQtyInWindow = itemDestructions
+    .filter((d) => {
+      const isDefect = d.isDefect === true || d.isDefect === "true";
+      const dy = Number(d.destructionYear);
+      return !isDefect && Number.isFinite(dy) && dy >= minYear && dy <= maxYear;
+    })
+    .reduce((s, d) => s + (Number(d.quantity) || 0), 0);
+
+  const denom = soldQtyInWindow + wastedQtyInWindow;
+  return {
+    purchasedQtyTotal, soldQtyInWindow, wastedQtyInWindow,
+    overOrderRatio: denom > 0 ? purchasedQtyTotal / denom : null,
+  };
 }
 
 /**
@@ -635,14 +693,30 @@ function buildReorderForecastItems(sheets, settings, today) {
     const key = normalizeProductKey(p.name);
     const qty = Number(p.qty) || 0;
     const expiry = p.expiry ? new Date(p.expiry) : null;
-    if (!stockByProduct.has(key)) stockByProduct.set(key, { currentStock: 0, batches: [], nearestExpiry: null, batchCount: 0 });
+    if (!stockByProduct.has(key)) stockByProduct.set(key, { currentStock: 0, batches: [], batchCount: 0 });
     const entry = stockByProduct.get(key);
+    // Quantity across batches of the same item (different expiry dates,
+    // e.g. separate shipments) is always summed into one stock total -
+    // never just the latest batch.
     entry.currentStock += qty;
     if (expiry && !Number.isNaN(expiry.getTime())) {
       entry.batchCount += 1;
       if (qty > 0) entry.batches.push({ expiryDate: expiry, quantity: qty });
-      if (!entry.nearestExpiry || expiry < entry.nearestExpiry) entry.nearestExpiry = expiry;
     }
+  }
+  // The "nearest expiry" worth flagging is the closest date among batches
+  // that actually carry a meaningful quantity (>30 units) - a handful of
+  // units expiring next week isn't the waste risk; a large batch is. Only
+  // falls back to the absolute closest date (regardless of quantity, and
+  // marked as such) when every batch on hand is small.
+  const NEAREST_EXPIRY_MIN_QTY = 30;
+  for (const entry of stockByProduct.values()) {
+    const meaningful = entry.batches.filter((b) => b.quantity > NEAREST_EXPIRY_MIN_QTY);
+    const pool = meaningful.length ? meaningful : entry.batches;
+    entry.nearestExpirySource = meaningful.length ? "significant" : (pool.length ? "small-batch-only" : null);
+    entry.nearestExpiry = pool.length
+      ? pool.reduce((min, b) => (!min || b.expiryDate < min ? b.expiryDate : min), null)
+      : null;
   }
 
   const purchasesByProduct = new Map();
@@ -663,11 +737,8 @@ function buildReorderForecastItems(sheets, settings, today) {
   const destructionsByProduct = new Map();
   for (const d of destructions) {
     const key = normalizeProductKey(d.productName);
-    if (!destructionsByProduct.has(key)) destructionsByProduct.set(key, { expiryWasteQty: 0, defectQty: 0 });
-    const entry = destructionsByProduct.get(key);
-    const qty = Number(d.quantity) || 0;
-    if (d.isDefect === true || d.isDefect === "true") entry.defectQty += qty;
-    else entry.expiryWasteQty += qty;
+    if (!destructionsByProduct.has(key)) destructionsByProduct.set(key, []);
+    destructionsByProduct.get(key).push(d);
   }
 
   const allKeys = new Set([...calendarGrid.keys(), ...stockByProduct.keys()]);
@@ -675,7 +746,7 @@ function buildReorderForecastItems(sheets, settings, today) {
 
   for (const key of allKeys) {
     const rows = calendarGrid.get(key) || [];
-    const stock = stockByProduct.get(key) || { currentStock: 0, batches: [], nearestExpiry: null, batchCount: 0 };
+    const stock = stockByProduct.get(key) || { currentStock: 0, batches: [], nearestExpiry: null, nearestExpirySource: null, batchCount: 0 };
     const catalog = catalogByProduct.get(key);
     const productsMaster = productsMasterByProduct.get(key);
     const itemPurchases = purchasesByProduct.get(key) || [];
@@ -706,7 +777,14 @@ function buildReorderForecastItems(sheets, settings, today) {
       { leadTimeDays, reviewPeriodDays, minServiceZ, exposureDaysOverride },
     );
     const expiryRisk = fifoExpiryRisk(stock.batches, forecast.forecastedMonthlyDemand, today);
-    const destructionsForItem = destructionsByProduct.get(key) || { expiryWasteQty: 0, defectQty: 0 };
+    const itemDestructions = destructionsByProduct.get(key) || [];
+    const historicalExpiryWasteQty = itemDestructions
+      .filter((d) => !(d.isDefect === true || d.isDefect === "true"))
+      .reduce((s, d) => s + (Number(d.quantity) || 0), 0);
+    const historicalDefectQty = itemDestructions
+      .filter((d) => d.isDefect === true || d.isDefect === "true")
+      .reduce((s, d) => s + (Number(d.quantity) || 0), 0);
+    const overOrder = computeOverOrderSignal(itemPurchases, rows, itemDestructions);
 
     items.push({
       productKey: key,
@@ -714,6 +792,7 @@ function buildReorderForecastItems(sheets, settings, today) {
       currentStock: stock.currentStock,
       batchCount: stock.batchCount,
       nearestExpiry: stock.nearestExpiry ? stock.nearestExpiry.toISOString().slice(0, 10) : null,
+      nearestExpirySource: stock.nearestExpirySource,
       forecastedMonthlyDemand: forecast.forecastedMonthlyDemand,
       forecastResidualStdDev: forecast.forecastResidualStdDev,
       trendPValue: forecast.trendPValue,
@@ -728,8 +807,9 @@ function buildReorderForecastItems(sheets, settings, today) {
       safetyStock: reorder.safetyStock, targetStockLevel: reorder.targetStockLevel,
       suggestedReorderQty: reorder.suggestedReorderQty,
       qtyAtRiskOfExpiring: expiryRisk.totalAtRisk,
-      historicalExpiryWasteQty: destructionsForItem.expiryWasteQty,
-      historicalDefectQty: destructionsForItem.defectQty,
+      historicalExpiryWasteQty,
+      historicalDefectQty,
+      overOrder,
     });
   }
 
@@ -767,5 +847,7 @@ module.exports = {
   fifoExpiryRisk,
   allocateBudget,
   normalizeProductKey,
+  computeOverOrderSignal,
+  OVER_ORDER_RATIO_THRESHOLD,
   buildReorderForecastItems,
 };

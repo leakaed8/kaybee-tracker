@@ -1318,6 +1318,7 @@ function StockView({ products }) {
 const REORDER_NOTE_COLORS = [
   ["DATA ANOMALY", "#F472B6"],
   ["STOCKOUT RISK before next order arrives", "#FCA5A5"],
+  ["OVER-ORDERING HISTORY", "#67E8F9"],
   ["REORDER", "#FDE68A"],
   ["EXPIRY WASTE RISK", "#FED7AA"],
   ["SLOW MOVER / EXCESS STOCK", "#E5E7EB"],
@@ -1465,7 +1466,12 @@ function ReorderForecastView() {
                     </div>
                   </td>
                   <td style={{ padding: "6px 8px" }}>{it.currentStock} <span style={{ color: "#8A8272" }}>({it.batchCount} batch{it.batchCount === 1 ? "" : "es"})</span></td>
-                  <td style={{ padding: "6px 8px" }}>{it.nearestExpiry || "—"}</td>
+                  <td style={{ padding: "6px 8px" }}>
+                    {it.nearestExpiry || "—"}
+                    {it.nearestExpirySource === "small-batch-only" && (
+                      <span style={{ color: "#8A8272" }} title="Every batch on hand is 30 units or fewer — shown as a reference date, not flagged as a waste risk."> (small qty)</span>
+                    )}
+                  </td>
                   <td style={{ padding: "6px 8px" }}>{fmt(it.forecastedMonthlyDemand)}</td>
                   <td style={{ padding: "6px 8px" }}>{it.daysOfStockRemaining == null ? "∞" : Math.round(it.daysOfStockRemaining)}</td>
                   <td style={{ padding: "6px 8px" }}>{Math.round(it.exposureDays)}d <span style={{ color: "#8A8272" }}>({it.exposureSource === "empirical" ? "measured" : "default"})</span></td>

@@ -6,7 +6,7 @@ const assert = require("node:assert/strict");
 const {
   normsinv, tTwoTailedPValue, buildFullCalendarGrid, computeForecastDemand,
   detectOutliers, computeReorderRecommendation, fifoExpiryRisk, allocateBudget, empiricalExposureDays,
-  buildReorderForecastItems,
+  computeOverOrderSignal, buildReorderForecastItems,
 } = require("./forecasting");
 
 // ---------------------------------------------------------------------
@@ -420,4 +420,95 @@ test("buildReorderForecastItems: a budget caps optimizedOrderQty but never sugge
   assert.equal(b.optimizedOrderQty, 0); // nothing left for B
   assert.ok(a.notes.includes("BUDGET-LIMITED") || a.optimizedOrderQty === a.suggestedReorderQty);
   assert.ok(b.notes.includes("BUDGET-LIMITED"));
+});
+
+// ---------------------------------------------------------------------
+// Nearest expiry - sum quantity across batches, but only let a batch with
+// a meaningful quantity (>30 units) set the "nearest expiry" worth acting
+// on; a handful of units expiring soon shouldn't outrank a real batch.
+// ---------------------------------------------------------------------
+
+test("nearest expiry prefers a meaningful batch (>30 units) over a smaller, closer one", () => {
+  const today = new Date(2026, 0, 15);
+  const stockMovement = [{ productName: "Syrup", year: 2025, month: 1, qty: 1 }];
+  const products = [
+    { name: "Syrup", qty: "5", expiry: "2026-02-01" }, // closer, but only 5 units
+    { name: "Syrup", qty: "200", expiry: "2026-08-01" }, // further out, a real batch
+  ];
+  const { items } = buildReorderForecastItems(
+    { stockMovement, products, purchases: [], destructions: [], productCatalog: [] },
+    { leadTimeDays: 10, reviewPeriodDays: 0, minServiceZ: 1.0, totalBudget: null },
+    today,
+  );
+  const item = items.find((it) => it.productKey === "syrup");
+  assert.equal(item.currentStock, 205); // summed across both batches
+  assert.equal(item.nearestExpiry, "2026-08-01");
+  assert.equal(item.nearestExpirySource, "significant");
+});
+
+test("nearest expiry falls back to the closest date when every batch is small", () => {
+  const today = new Date(2026, 0, 15);
+  const stockMovement = [{ productName: "Drops", year: 2025, month: 1, qty: 1 }];
+  const products = [
+    { name: "Drops", qty: "5", expiry: "2026-02-01" },
+    { name: "Drops", qty: "10", expiry: "2026-05-01" },
+  ];
+  const { items } = buildReorderForecastItems(
+    { stockMovement, products, purchases: [], destructions: [], productCatalog: [] },
+    { leadTimeDays: 10, reviewPeriodDays: 0, minServiceZ: 1.0, totalBudget: null },
+    today,
+  );
+  const item = items.find((it) => it.productKey === "drops");
+  assert.equal(item.nearestExpiry, "2026-02-01");
+  assert.equal(item.nearestExpirySource, "small-batch-only");
+});
+
+// ---------------------------------------------------------------------
+// computeOverOrderSignal / "OVER-ORDERING HISTORY" - cross-checks
+// purchasing history against what actually sold (Stock Movement) or was
+// destroyed as expiry waste (Destructions), restricted to the calendar
+// window the purchase records span.
+// ---------------------------------------------------------------------
+
+test("computeOverOrderSignal computes purchased vs sold+wasted, restricted to the purchase window", () => {
+  const itemPurchases = [
+    { receiveDate: "2025-01-01", quantity: 100 },
+    { receiveDate: "2025-06-01", quantity: 100 },
+  ];
+  // 2024 (outside the purchase window - must be excluded despite its huge
+  // demand) followed by Jan-Jun 2025 (inside the window).
+  const rows = calendarRows([...Array(12).fill(500), 5, 5, 5, 5, 5, 5], 2024, 1);
+  const itemDestructions = [
+    { destructionYear: 2024, quantity: 999, isDefect: "false" }, // outside window
+    { destructionYear: 2025, quantity: 10, isDefect: "false" }, // inside window
+    { destructionYear: 2025, quantity: 50, isDefect: "true" }, // defect - excluded regardless of year
+  ];
+
+  const result = computeOverOrderSignal(itemPurchases, rows, itemDestructions);
+  assert.equal(result.purchasedQtyTotal, 200);
+  assert.equal(result.soldQtyInWindow, 30); // 6 * 5 from Jan-Jun 2025 only
+  assert.equal(result.wastedQtyInWindow, 10); // only the non-defect 2025 row
+  assert.ok(Math.abs(result.overOrderRatio - 5) < 1e-9); // 200 / (30 + 10)
+});
+
+test("computeOverOrderSignal returns null without purchase history", () => {
+  assert.equal(computeOverOrderSignal([], [], []), null);
+});
+
+test("buildReorderForecastItems flags OVER-ORDERING HISTORY when purchases far exceed sales+waste", () => {
+  const today = new Date(2026, 0, 15);
+  const stockMovement = calendarRows([5, 5, 5, 5, 5, 5], 2025, 1)
+    .map((r) => ({ productName: "Vitamin X", year: r.year, month: r.month, qty: r.netDemand }));
+  const products = [{ name: "Vitamin X", qty: "10", expiry: "" }];
+  const purchases = [{ productName: "Vitamin X", receiveDate: "2025-01-01", quantity: 300, landedCost: "1" }];
+  const destructions = [{ productName: "Vitamin X", quantity: 20, destructionYear: 2025, isDefect: "false" }];
+
+  const { items } = buildReorderForecastItems(
+    { stockMovement, products, purchases, destructions, productCatalog: [] },
+    { leadTimeDays: 10, reviewPeriodDays: 0, minServiceZ: 1.0, totalBudget: null },
+    today,
+  );
+  const item = items.find((it) => it.productKey === "vitamin x");
+  assert.ok(item.notes.includes("OVER-ORDERING HISTORY"));
+  assert.ok(item.notes.some((n) => n.includes("bought 300") && n.includes("x)")));
 });
