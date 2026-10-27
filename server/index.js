@@ -6,6 +6,7 @@ const { S3Client, HeadObjectCommand, GetObjectCommand, PutObjectCommand } = requ
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const multer = require("multer");
 const db = require("./sheetsDb");
+const forecasting = require("./forecasting");
 const telegram = require("./telegram");
 const { beirutDateStr, beirutWeekday, beirutHour, todayBeirutStr, beirutDateParts, daysUntilFromToday, addDaysToTodayStr, beirutMonthKeyOfInstant, beirutWallClockToInstantMs } = require("./dateUtils");
 const { importedInventory, defaultTemplates } = require("./seedData");
@@ -13,6 +14,14 @@ const { DAHIYEH_REFERENCE_PHARMACIES } = require("./dahiyehReference");
 const { MOUNT_LEBANON_REFERENCE_NAMES } = require("./mountLebanonReferenceNames");
 
 const app = express();
+// Render sits in front of this app behind a proxy/load balancer — without
+// this, req.ip (and anything derived from it, like the login rate limiter
+// below) reports Render's proxy IP for every single request, which
+// collapses every visitor into one shared bucket and makes per-IP limits
+// meaningless. "1" trusts exactly one hop (Render's own proxy), not an
+// arbitrary chain, so a client can't spoof X-Forwarded-For to fake a
+// different IP and dodge the limiter.
+app.set("trust proxy", 1);
 app.use(express.json({ limit: "25mb" }));
 
 // console.error(e) alone truncates a Google Sheets API error to "[Object]"
@@ -38,7 +47,23 @@ const FOLLOWUP_PRESETS = {
 
 const PORT = process.env.PORT || 3001;
 const IS_PROD = process.env.NODE_ENV === "production";
-const SESSION_SECRET = process.env.SESSION_SECRET || "kaybee-tracker-default-secret-change-me";
+// Every login session (manager or rep) is just an HMAC of a short payload
+// ("manager", "rep|...") under this secret — anyone who knows it can mint
+// their own valid session and skip the passcode screen entirely. A fixed,
+// source-visible fallback here would mean exactly that: this used to default
+// to a hardcoded string when SESSION_SECRET wasn't set, which is public in
+// this repo's history, so production MUST have a real secret configured —
+// refusing to boot without one is safer than silently running on a known
+// value. Local dev gets a random one each start (sessions just don't
+// survive a restart, which is fine for dev).
+const SESSION_SECRET = process.env.SESSION_SECRET || (IS_PROD ? null : crypto.randomBytes(32).toString("hex"));
+if (IS_PROD && !SESSION_SECRET) {
+  console.error(
+    "FATAL: SESSION_SECRET is not set. Generate one (e.g. `node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"`) "
+    + "and set it as an environment variable before starting in production — refusing to boot on an insecure default."
+  );
+  process.exit(1);
+}
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
@@ -176,6 +201,40 @@ function requireAuth(req, res, next) {
 function requireManager(req, res, next) {
   if (req.role !== "manager") return res.status(403).json({ error: "Managers only." });
   next();
+}
+
+// /api/login had no attempt limit at all — a script could try passcodes
+// back-to-back with no delay or lockout. This is a simple in-memory, per-IP
+// sliding-window limiter: good enough for a small team app on a single
+// Render instance (an in-memory store wouldn't survive multiple instances
+// or restarts, which is fine here — restarting just resets everyone's
+// count to zero, it doesn't open a hole). Only failed attempts count
+// against the limit; a successful login clears it immediately so a
+// legitimate user who mistyped once isn't penalized on their next visit.
+const LOGIN_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_ATTEMPT_MAX = 10;
+const loginAttemptsByIp = new Map();
+
+function pruneExpiredLoginAttempts(entry, now) {
+  while (entry.length && now - entry[0] > LOGIN_ATTEMPT_WINDOW_MS) entry.shift();
+  return entry;
+}
+
+function isLoginRateLimited(ip) {
+  const now = Date.now();
+  const entry = pruneExpiredLoginAttempts(loginAttemptsByIp.get(ip) || [], now);
+  return entry.length >= LOGIN_ATTEMPT_MAX;
+}
+
+function recordFailedLogin(ip) {
+  const now = Date.now();
+  const entry = pruneExpiredLoginAttempts(loginAttemptsByIp.get(ip) || [], now);
+  entry.push(now);
+  loginAttemptsByIp.set(ip, entry);
+}
+
+function clearLoginAttempts(ip) {
+  loginAttemptsByIp.delete(ip);
 }
 
 // Manager-configurable per-role nav visibility (Settings → Tab visibility on
@@ -1034,15 +1093,22 @@ app.get("/api/health", (req, res) => res.json({ ok: true }));
 
 app.post("/api/login", async (req, res) => {
   try {
+    const ip = req.ip;
+    if (isLoginRateLimited(ip)) {
+      return res.status(429).json({ error: "Too many attempts. Try again later." });
+    }
+
     const { passcode } = req.body || {};
     const managerCode = process.env.MANAGER_PASSCODE;
     const legacyRepCode = process.env.REP_PASSCODE;
 
     if (managerCode && passcode === managerCode) {
+      clearLoginAttempts(ip);
       setSessionCookie(res, signPayload("manager"), 60 * 60 * 24 * 30);
       return res.json({ ok: true, role: "manager" });
     }
     if (legacyRepCode && passcode === legacyRepCode) {
+      clearLoginAttempts(ip);
       setSessionCookie(res, signPayload("rep|"), 60 * 60 * 24 * 30);
       return res.json({ ok: true, role: "rep", repName: "" });
     }
@@ -1058,10 +1124,12 @@ app.post("/api/login", async (req, res) => {
       const isSalesRep = matched.supplementStoresOnly === "true";
       const isMedRep = matched.medRepOnly === "true";
       const flags = [isSupervisor ? "sup" : "", isSalesRep ? "ssonly" : "", isMedRep ? "docsonly" : ""].filter(Boolean).join(",");
+      clearLoginAttempts(ip);
       setSessionCookie(res, signPayload(`rep|${encodeURIComponent(matched.name)}|${flags}`), 60 * 60 * 24 * 30);
       return res.json({ ok: true, role: "rep", repName: matched.name, isSupervisor, isSalesRep, isMedRep });
     }
 
+    recordFailedLogin(ip);
     res.status(401).json({ error: "Incorrect passcode." });
   } catch (e) {
     logErr(e);
@@ -1719,6 +1787,7 @@ app.post("/api/product-catalog", requireManager, async (req, res) => {
       notes: req.body.notes || "",
       sku: req.body.sku || "",
       brand: req.body.brand || inferProductCatalogBrand(req.body.name),
+      salvageValue: req.body.salvageValue === "" || req.body.salvageValue == null ? "" : Number(req.body.salvageValue),
       bottleImageKey: "", bottleImageName: "", bottleImageMimeType: "",
       supplementFactsImageKey: "", supplementFactsImageName: "", supplementFactsImageMimeType: "",
       imageApprovalStatus: "", imageSourceUrl: "", imageMatchedBy: "", imageMatchedAt: "", imageNotes: "",
@@ -1755,6 +1824,7 @@ app.patch(
     if (req.body.notes !== undefined) patch.notes = req.body.notes || "";
     if (req.body.sku !== undefined) patch.sku = req.body.sku || "";
     if (req.body.brand !== undefined) patch.brand = req.body.brand || "";
+    if (req.body.salvageValue !== undefined) patch.salvageValue = req.body.salvageValue === "" ? "" : Number(req.body.salvageValue);
 
     // A freshly uploaded image always starts at pending_review — even a
     // manager's own upload needs the explicit approve click before it
@@ -2010,6 +2080,210 @@ app.post("/api/stock-movement/unlock", requireManager, async (req, res) => {
     const lockedYears = settings.stockMovementLockedYears ? JSON.parse(settings.stockMovementLockedYears) : [];
     await db.setSettings({ stockMovementLockedYears: JSON.stringify(lockedYears.filter((y) => y !== yearNum)) });
     res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Supplier purchase history (feeds Reorder Forecast) ----------
+// Unlike Stock Movement/Destructions, this is NOT split one-file-per-year:
+// every row already carries its own receiveDate, so there's no reason to
+// make the manager chop up years before uploading - one combined sheet
+// covering the whole history (2020-2026, whatever) works directly, and
+// `year` below is derived per row from receiveDate, never supplied by the
+// client. Import is additive (append), not a per-year replace, since
+// there's no natural "this upload is the complete picture for year X" to
+// replace against - duplicate protection (same product+date+qty+cost
+// already on file) makes re-uploading overlapping data harmless instead,
+// the same idea as the order log in the standalone Excel version.
+function purchaseDedupeKey(r) {
+  return `${forecasting.normalizeProductKey(r.productName)}::${r.receiveDate}::${r.quantity}::${r.landedCost}`;
+}
+
+app.get("/api/purchases/status", requireManager, async (req, res) => {
+  try {
+    const rows = await db.getAllRows("Purchases");
+    const years = rows.map((r) => Number(r.year)).filter((y) => Number.isFinite(y) && y > 0);
+    res.json({
+      count: rows.length,
+      minYear: years.length ? Math.min(...years) : null,
+      maxYear: years.length ? Math.max(...years) : null,
+    });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/purchases/import", requireManager, async (req, res) => {
+  try {
+    const { rows } = req.body;
+    if (!Array.isArray(rows)) return res.status(400).json({ error: "rows is required" });
+    const cleanRows = rows
+      .filter((r) => r.productName && r.receiveDate)
+      .map((r) => {
+        const parsedYear = new Date(r.receiveDate).getFullYear();
+        return {
+          id: `pu${crypto.randomUUID()}`,
+          productName: String(r.productName).trim(),
+          year: Number.isFinite(parsedYear) ? parsedYear : "",
+          receiveDate: r.receiveDate,
+          quantity: Number(r.quantity) || 0,
+          // Per-shipment landed cost (customs/freight baked in) - can be
+          // blank if a given row genuinely has no cost figure; never
+          // defaulted to 0, which would silently corrupt the "most recent
+          // cost" lookup the forecast uses.
+          landedCost: r.landedCost === "" || r.landedCost == null ? "" : Number(r.landedCost),
+          supplier: r.supplier || "",
+        };
+      });
+    const existing = await db.getAllRows("Purchases");
+    const existingKeys = new Set(existing.map(purchaseDedupeKey));
+    const toAdd = cleanRows.filter((r) => !existingKeys.has(purchaseDedupeKey(r)));
+    await db.appendRows("Purchases", toAdd);
+    res.json({ ok: true, count: toAdd.length, skipped: cleanRows.length - toAdd.length });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Destructions (expiry waste vs. supplier/import defects) -----
+// Business rule (ported from the standalone Excel tool's destructions.py):
+// a destroyed batch is genuine expiry waste if it had already expired (or
+// expired that same year) by the time it was destroyed. If its expiry
+// falls in a LATER year than the destruction, it wasn't actually expired
+// yet - it was destroyed because it arrived damaged or was returned
+// defective, a supplier/import quality issue, not a demand-forecasting
+// signal. Quantity only (see the Purchases/Destructions schema comment in
+// sheetsDb.js for why no dollar figure is tracked here) - reported for
+// context in the Reorder Forecast tab, never affects the suggested
+// reorder quantity.
+function classifyDestructionRow(productName, quantity, expiryDate, destructionYear) {
+  const expiryYear = new Date(expiryDate).getFullYear();
+  return {
+    id: `de${crypto.randomUUID()}`,
+    productName: String(productName).trim(),
+    quantity: Number(quantity) || 0,
+    expiryDate,
+    destructionYear,
+    isDefect: expiryYear > destructionYear,
+  };
+}
+
+app.get("/api/destructions/status", requireManager, async (req, res) => {
+  try {
+    const settings = await db.getSettings();
+    const lockedYears = settings.destructionsLockedYears ? JSON.parse(settings.destructionsLockedYears) : [];
+    const rows = await db.getAllRows("Destructions");
+    const countByYear = {};
+    rows.forEach((r) => { countByYear[r.destructionYear] = (countByYear[r.destructionYear] || 0) + 1; });
+    res.json({ lockedYears, countByYear });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/destructions/import", requireManager, async (req, res) => {
+  try {
+    const { year, rows } = req.body;
+    const yearNum = Number(year);
+    if (!yearNum || !Array.isArray(rows)) return res.status(400).json({ error: "year and rows are required" });
+    const currentYear = beirutDateParts(new Date()).year;
+    const settings = await db.getSettings();
+    const lockedYears = settings.destructionsLockedYears ? JSON.parse(settings.destructionsLockedYears) : [];
+    if (yearNum !== currentYear && lockedYears.includes(yearNum)) {
+      return res.status(400).json({ error: `${yearNum} is already imported and locked.` });
+    }
+    const cleanRows = rows
+      .filter((r) => r.productName && r.quantity && r.expiryDate)
+      .map((r) => classifyDestructionRow(r.productName, r.quantity, r.expiryDate, yearNum))
+      .map((r) => ({ ...r, supplier: "" }));
+    const existing = await db.getAllRows("Destructions");
+    const kept = existing.filter((r) => Number(r.destructionYear) !== yearNum);
+    await db.replaceAllRows("Destructions", [...kept, ...cleanRows]);
+    if (yearNum !== currentYear && !lockedYears.includes(yearNum)) {
+      await db.setSettings({ destructionsLockedYears: JSON.stringify([...lockedYears, yearNum]) });
+    }
+    res.json({ ok: true, count: cleanRows.length });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/destructions/unlock", requireManager, async (req, res) => {
+  try {
+    const yearNum = Number(req.body.year);
+    if (!yearNum) return res.status(400).json({ error: "year is required" });
+    const settings = await db.getSettings();
+    const lockedYears = settings.destructionsLockedYears ? JSON.parse(settings.destructionsLockedYears) : [];
+    await db.setSettings({ destructionsLockedYears: JSON.stringify(lockedYears.filter((y) => y !== yearNum)) });
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Reorder Forecast (demand forecasting + budget-constrained ----
+// reorder recommendations). All the actual logic - joining these five
+// sheets, the forecasting math, the budget allocation - lives in
+// server/forecasting.js's buildReorderForecastItems as a pure function,
+// specifically so it's testable without live Sheets credentials (see
+// server/forecasting.test.js). This route is deliberately thin: fetch,
+// call, respond. Ported from the standalone Excel tool
+// (leakaed8/reorder-forecasting-kaybee); see that repo's
+// WORKED_EXAMPLE.md for the hand-worked numbers behind every formula.
+const REORDER_FORECAST_DEFAULTS = { leadTimeDays: 75, reviewPeriodDays: 182, minServiceZ: 1.65 };
+
+async function getReorderForecastSettings() {
+  const settings = await db.getSettings();
+  const leadTimeDays = settings.reorderLeadTimeDays ? Number(settings.reorderLeadTimeDays) : REORDER_FORECAST_DEFAULTS.leadTimeDays;
+  const reviewPeriodDays = settings.reorderReviewPeriodDays ? Number(settings.reorderReviewPeriodDays) : REORDER_FORECAST_DEFAULTS.reviewPeriodDays;
+  const minServiceZ = settings.reorderMinServiceZ ? Number(settings.reorderMinServiceZ) : REORDER_FORECAST_DEFAULTS.minServiceZ;
+  const totalBudget = settings.reorderTotalBudget && settings.reorderTotalBudget !== ""
+    ? Number(settings.reorderTotalBudget) : null;
+  return { leadTimeDays, reviewPeriodDays, minServiceZ, totalBudget };
+}
+
+app.get("/api/reorder-forecast", requireManager, async (req, res) => {
+  try {
+    const { StockMovement, Products, Purchases, Destructions, ProductCatalog } = await db.getAllRowsBatch(
+      ["StockMovement", "Products", "Purchases", "Destructions", "ProductCatalog"],
+    );
+    const reorderSettings = await getReorderForecastSettings();
+    const today = new Date(todayBeirutStr());
+
+    const { items } = forecasting.buildReorderForecastItems(
+      {
+        stockMovement: StockMovement, products: Products, purchases: Purchases,
+        destructions: Destructions, productCatalog: ProductCatalog,
+      },
+      reorderSettings,
+      today,
+    );
+
+    res.json({ items, settings: reorderSettings });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/reorder-forecast/settings", requireManager, async (req, res) => {
+  try {
+    const patch = {};
+    const { leadTimeDays, reviewPeriodDays, minServiceZ, totalBudget } = req.body || {};
+    if (leadTimeDays !== undefined) patch.reorderLeadTimeDays = leadTimeDays === "" ? "" : String(Number(leadTimeDays));
+    if (reviewPeriodDays !== undefined) patch.reorderReviewPeriodDays = reviewPeriodDays === "" ? "" : String(Number(reviewPeriodDays));
+    if (minServiceZ !== undefined) patch.reorderMinServiceZ = minServiceZ === "" ? "" : String(Number(minServiceZ));
+    if (totalBudget !== undefined) patch.reorderTotalBudget = totalBudget === "" || totalBudget == null ? "" : String(Number(totalBudget));
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
+    await db.setSettings(patch);
+    res.json({ ok: true, settings: await getReorderForecastSettings() });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });

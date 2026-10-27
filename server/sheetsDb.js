@@ -310,6 +310,28 @@ const SCHEMAS = {
   SamplePrepStock: ["id", "productId", "productName", "preparedQty", "lowStockThreshold", "updatedBy", "updatedAt"],
   PunchLog: ["id", "repName", "type", "time", "coordsLat", "coordsLng", "auto", "confirmed"],
   StockMovement: ["id", "productName", "year", "month", "qty"],
+  // Supplier purchase history (receive date + qty + landed cost per unit,
+  // which varies shipment to shipment with customs/freight - never a fixed
+  // catalog price). Feeds two things in the Reorder Forecast tab: the
+  // item's Cost Price for the critical-ratio calculation (most recent
+  // landed cost, not a manually-typed number), and - once there's enough
+  // history - the real exposure window (gap between consecutive arrivals
+  // of the same item), instead of a guessed lead time + review period.
+  // Imported per year, same locking rule as StockMovement (see
+  // /api/purchases/import): the current year stays open, past years lock
+  // once imported so a partial re-export can't silently overwrite a
+  // complete one.
+  Purchases: ["id", "productName", "year", "receiveDate", "quantity", "landedCost", "supplier"],
+  // Destroyed-stock history, classified genuine expiry waste vs.
+  // supplier/import defect by comparing the batch's expiry year to the
+  // year it was destroyed (see classifyDestructionRow in index.js -
+  // ported directly from the standalone Excel tool's destructions.py).
+  // Quantity only, deliberately - never a dollar figure, since some years'
+  // source data is in LBP with a year-dependent exchange rate and the
+  // classification itself was never cost-based to begin with. Reported
+  // for context in the Reorder Forecast tab only - never affects the
+  // suggested reorder quantity.
+  Destructions: ["id", "productName", "quantity", "expiryDate", "destructionYear", "isDefect", "supplier"],
   MonthlyDigests: ["id", "month", "status", "payload", "createdAt"],
   // My Schedule (Med Rep Schedule feature) appended 10 columns, reusing this
   // SAME tab for both check-in-driven follow-ups AND manual meetings rather
@@ -383,7 +405,11 @@ const SCHEMAS = {
   // Image fields appended (this phase): bottle + Supplement Facts photos per
   // product, gated by a manager approval status before they reach reps via
   // Knowledge's specialty cards or the rep-facing export.
-  ProductCatalog: ["id", "name", "price", "form", "packSize", "unitsPerDay", "ingredients", "notes", "createdBy", "createdAt", "updatedBy", "updatedAt", "sku", "brand", "bottleImageKey", "bottleImageName", "bottleImageMimeType", "supplementFactsImageKey", "supplementFactsImageName", "supplementFactsImageMimeType", "imageApprovalStatus", "imageSourceUrl", "imageMatchedBy", "imageMatchedAt", "imageNotes"],
+  // salvageValue appended - the per-unit credit recovered if a destroyed
+  // unit is returned to the supplier or scrapped for partial value (Reorder
+  // Forecast's Co = cost price minus this). Optional; "" for every
+  // pre-existing row means "assume zero salvage" (unchanged behavior).
+  ProductCatalog: ["id", "name", "price", "form", "packSize", "unitsPerDay", "ingredients", "notes", "createdBy", "createdAt", "updatedBy", "updatedAt", "sku", "brand", "bottleImageKey", "bottleImageName", "bottleImageMimeType", "supplementFactsImageKey", "supplementFactsImageName", "supplementFactsImageMimeType", "imageApprovalStatus", "imageSourceUrl", "imageMatchedBy", "imageMatchedAt", "imageNotes", "salvageValue"],
 
   // ---------- Recall (medical rep training/knowledge-reference module) ----------
   // Structure-only for now — no clinical content is populated. Recall sits on
