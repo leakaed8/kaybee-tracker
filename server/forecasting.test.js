@@ -6,7 +6,7 @@ const assert = require("node:assert/strict");
 const {
   normsinv, tTwoTailedPValue, buildFullCalendarGrid, computeForecastDemand,
   detectOutliers, computeReorderRecommendation, fifoExpiryRisk, allocateBudget, empiricalExposureDays,
-  computeOverOrderSignal, buildReorderForecastItems,
+  computeOverOrderSignal, yearlyDemandStats, buildReorderForecastItems,
 } = require("./forecasting");
 
 // ---------------------------------------------------------------------
@@ -511,4 +511,50 @@ test("buildReorderForecastItems flags OVER-ORDERING HISTORY when purchases far e
   const item = items.find((it) => it.productKey === "vitamin x");
   assert.ok(item.notes.includes("OVER-ORDERING HISTORY"));
   assert.ok(item.notes.some((n) => n.includes("bought 300") && n.includes("x)")));
+});
+
+// ---------------------------------------------------------------------
+// yearlyDemandStats - the transparency layer: year-by-year average and
+// stdev straight from the raw (uncapped) history, so a suspicious
+// forecast can be traced to the specific year driving it.
+// ---------------------------------------------------------------------
+
+test("yearlyDemandStats reports average, stdev and max per year, oldest first", () => {
+  const rows = [
+    ...calendarRows([10, 20, 30], 2024, 1), // mean=20, popvar=(100+0+100)/3=66.67
+    ...calendarRows([100, 100, 100, 100], 2025, 1), // mean=100, stdev=0
+  ];
+  const stats = yearlyDemandStats(rows);
+  assert.equal(stats.length, 2);
+  assert.equal(stats[0].year, 2024);
+  assert.equal(stats[0].monthsRecorded, 3);
+  assert.ok(Math.abs(stats[0].avgMonthlyDemand - 20) < 1e-9);
+  assert.ok(Math.abs(stats[0].stdDevMonthlyDemand - Math.sqrt(200 / 3)) < 1e-9);
+  assert.equal(stats[0].maxMonthlyDemand, 30);
+  assert.equal(stats[1].year, 2025);
+  assert.ok(Math.abs(stats[1].avgMonthlyDemand - 100) < 1e-9);
+  assert.equal(stats[1].stdDevMonthlyDemand, 0);
+});
+
+test("buildReorderForecastItems exposes yearlyStats and totalDestroyedQty per item", () => {
+  const today = new Date(2026, 0, 15);
+  const stockMovement = [
+    { productName: "Gauze", year: 2024, month: 1, qty: 10 },
+    { productName: "Gauze", year: 2024, month: 2, qty: 30 },
+    { productName: "Gauze", year: 2025, month: 1, qty: 20 },
+  ];
+  const products = [{ name: "Gauze", qty: "0", expiry: "" }];
+  const destructions = [
+    { productName: "Gauze", quantity: 5, destructionYear: 2024, isDefect: "false" },
+    { productName: "Gauze", quantity: 3, destructionYear: 2024, isDefect: "true" },
+  ];
+  const { items } = buildReorderForecastItems(
+    { stockMovement, products, purchases: [], destructions, productCatalog: [] },
+    { leadTimeDays: 10, reviewPeriodDays: 0, minServiceZ: 1.0, totalBudget: null },
+    today,
+  );
+  const item = items.find((it) => it.productKey === "gauze");
+  assert.equal(item.totalDestroyedQty, 8); // 5 expiry waste + 3 defect
+  assert.ok(Array.isArray(item.yearlyStats));
+  assert.ok(item.yearlyStats.some((y) => y.year === 2024));
 });

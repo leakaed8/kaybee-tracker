@@ -652,6 +652,38 @@ function computeOverOrderSignal(itemPurchases, calendarRows, itemDestructions) {
 }
 
 /**
+ * Year-by-year average monthly demand and its standard deviation, straight
+ * from the RAW (not outlier-capped) Stock Movement history - this is the
+ * transparency layer: it shows exactly what each year actually looked
+ * like, including any anomaly, so a suspicious forecast can be traced back
+ * to the specific year/month driving it instead of trusting the model's
+ * single blended number.
+ *
+ * rows: [{year, month, netDemand}], the item's full calendar grid.
+ * Returns [{year, monthsRecorded, avgMonthlyDemand, stdDevMonthlyDemand,
+ * maxMonthlyDemand}], one entry per year, oldest first.
+ */
+function yearlyDemandStats(rows) {
+  const byYear = new Map();
+  for (const r of rows) {
+    if (!byYear.has(r.year)) byYear.set(r.year, []);
+    byYear.get(r.year).push(r.netDemand);
+  }
+  return [...byYear.keys()].sort((a, b) => a - b).map((year) => {
+    const vals = byYear.get(year);
+    const mean = vals.reduce((s, v) => s + v, 0) / vals.length;
+    const variance = vals.reduce((s, v) => s + (v - mean) ** 2, 0) / vals.length;
+    return {
+      year,
+      monthsRecorded: vals.length,
+      avgMonthlyDemand: mean,
+      stdDevMonthlyDemand: Math.sqrt(variance),
+      maxMonthlyDemand: Math.max(...vals),
+    };
+  });
+}
+
+/**
  * sheets: { stockMovement, products, purchases, destructions, productCatalog }
  *   - each the raw array of row objects as returned by db.getAllRows,
  *     field names as given in sheetsDb.js's SCHEMAS (productName/name/etc,
@@ -785,6 +817,7 @@ function buildReorderForecastItems(sheets, settings, today) {
       .filter((d) => d.isDefect === true || d.isDefect === "true")
       .reduce((s, d) => s + (Number(d.quantity) || 0), 0);
     const overOrder = computeOverOrderSignal(itemPurchases, rows, itemDestructions);
+    const yearlyStats = yearlyDemandStats(rows);
 
     items.push({
       productKey: key,
@@ -798,6 +831,7 @@ function buildReorderForecastItems(sheets, settings, today) {
       trendPValue: forecast.trendPValue,
       forecastMethod: forecast.forecastMethod,
       dataAnomalies: forecast.dataAnomalies,
+      yearlyStats,
       daysOfStockRemaining: Number.isFinite(reorder.daysOfStockRemaining) ? reorder.daysOfStockRemaining : null,
       exposureDays, exposureMonths,
       exposureSource: exposureDaysOverride != null ? "empirical" : "default",
@@ -809,6 +843,7 @@ function buildReorderForecastItems(sheets, settings, today) {
       qtyAtRiskOfExpiring: expiryRisk.totalAtRisk,
       historicalExpiryWasteQty,
       historicalDefectQty,
+      totalDestroyedQty: historicalExpiryWasteQty + historicalDefectQty,
       overOrder,
     });
   }
@@ -849,5 +884,6 @@ module.exports = {
   normalizeProductKey,
   computeOverOrderSignal,
   OVER_ORDER_RATIO_THRESHOLD,
+  yearlyDemandStats,
   buildReorderForecastItems,
 };

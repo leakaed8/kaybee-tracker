@@ -1332,6 +1332,88 @@ function reorderRowColor(notes) {
   return "transparent";
 }
 
+function ReorderDetailRow({ it, fmt, colSpan }) {
+  const row = (label, value, note) => (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "3px 0", borderBottom: "1px solid #EFE9DC" }}>
+      <span style={{ color: "#8A8272" }}>{label}</span>
+      <span style={{ textAlign: "right" }}>{value}{note && <span style={{ color: "#8A8272" }}> {note}</span>}</span>
+    </div>
+  );
+  const rawGap = Math.max(0, (it.targetStockLevel ?? 0) - it.currentStock);
+  return (
+    <tr>
+      <td colSpan={colSpan} style={{ padding: "12px 16px", background: "#FBF9F3", borderBottom: "1px solid #E5DFD3" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 20, fontSize: 12 }}>
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>Monthly demand by year (Stock Movement, raw)</div>
+            {it.yearlyStats && it.yearlyStats.length > 0 ? (
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ color: "#8A8272", textAlign: "left" }}>
+                    <th style={{ padding: "2px 6px 2px 0" }}>Year</th>
+                    <th style={{ padding: "2px 6px" }}>Months</th>
+                    <th style={{ padding: "2px 6px" }}>Avg/mo</th>
+                    <th style={{ padding: "2px 6px" }}>StdDev/mo</th>
+                    <th style={{ padding: "2px 6px" }}>Max/mo</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {it.yearlyStats.map((y) => (
+                    <tr key={y.year} style={{ borderTop: "1px solid #EFE9DC" }}>
+                      <td style={{ padding: "2px 6px 2px 0" }}>{y.year}</td>
+                      <td style={{ padding: "2px 6px" }}>{y.monthsRecorded}</td>
+                      <td style={{ padding: "2px 6px" }}>{fmt(y.avgMonthlyDemand)}</td>
+                      <td style={{ padding: "2px 6px" }}>{fmt(y.stdDevMonthlyDemand)}</td>
+                      <td style={{ padding: "2px 6px" }}>{fmt(y.maxMonthlyDemand)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : <div style={{ color: "#8A8272" }}>No Stock Movement history.</div>}
+            {it.dataAnomalies && it.dataAnomalies.length > 0 && (
+              <div style={{ marginTop: 8, color: "#B33A3A" }}>
+                {it.dataAnomalies.map((a, i) => (
+                  <div key={i}>⚠ {a.originalQty.toLocaleString()} in {a.month}/{a.year} was capped as implausible before forecasting — check that month in Stock Movement.</div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>Destroyed history (Destructions)</div>
+            {row("Expiry waste (counts against nothing)", it.historicalExpiryWasteQty.toLocaleString())}
+            {row("Supplier/import defects", it.historicalDefectQty.toLocaleString())}
+            {row("Total destroyed", it.totalDestroyedQty.toLocaleString())}
+            {it.overOrder && (
+              <>
+                <div style={{ fontWeight: 600, margin: "10px 0 6px" }}>Purchases vs sold+wasted</div>
+                {row("Purchased (in purchase-history window)", Math.round(it.overOrder.purchasedQtyTotal).toLocaleString())}
+                {row("Sold in that same window", Math.round(it.overOrder.soldQtyInWindow).toLocaleString())}
+                {row("Destroyed (expiry waste) in that window", Math.round(it.overOrder.wastedQtyInWindow).toLocaleString())}
+                {row("Ratio", it.overOrder.overOrderRatio != null ? `${it.overOrder.overOrderRatio.toFixed(2)}x` : "n/a")}
+              </>
+            )}
+          </div>
+
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>How Suggested Qty was computed</div>
+            {row("Forecasted demand/mo", fmt(it.forecastedMonthlyDemand), `(residual stdev ${fmt(it.forecastResidualStdDev)})`)}
+            {row("Exposure window", `${Math.round(it.exposureDays)}d = ${it.exposureMonths.toFixed(2)}mo`, `(${it.exposureSource})`)}
+            {row("Service level Z", it.serviceLevelZ.toFixed(2), it.criticalRatio != null ? `(critical ratio ${(it.criticalRatio * 100).toFixed(1)}%)` : "(floor — no cost/sale price)")}
+            {row("Safety stock", fmt(it.safetyStock), "= Z × residual stdev × √(exposure months)")}
+            {row("Target stock level", fmt(it.targetStockLevel), "= forecast × exposure months + safety stock")}
+            {row("Current stock", it.currentStock.toLocaleString())}
+            {row("Raw gap", fmt(rawGap), "= max(0, target − current stock)")}
+            {row("Min order qty (case pack)", it.minOrderQty || "none")}
+            {row("Suggested Qty", it.suggestedReorderQty.toLocaleString(), "= raw gap rounded up to case pack")}
+            {it.optimizedOrderQty !== it.suggestedReorderQty && row("Optimized Qty (budget-capped)", it.optimizedOrderQty.toLocaleString())}
+          </div>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
 function ReorderForecastView() {
   const [data, setData] = useState(null); // { items, settings }
   const [loading, setLoading] = useState(true);
@@ -1340,6 +1422,7 @@ function ReorderForecastView() {
   const [settingsForm, setSettingsForm] = useState(null);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSaved, setSettingsSaved] = useState(false);
+  const [expandedKey, setExpandedKey] = useState(null);
 
   const load = () => {
     setLoading(true);
@@ -1443,6 +1526,7 @@ function ReorderForecastView() {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
             <thead>
               <tr style={{ textAlign: "left", color: "#8A8272", fontSize: 11 }}>
+                <th style={{ padding: "6px 8px" }}></th>
                 <th style={{ padding: "6px 8px" }}>Item</th>
                 <th style={{ padding: "6px 8px" }}>Stock</th>
                 <th style={{ padding: "6px 8px" }}>Nearest expiry</th>
@@ -1457,31 +1541,43 @@ function ReorderForecastView() {
               </tr>
             </thead>
             <tbody>
-              {shown.map((it) => (
-                <tr key={it.productKey} style={{ borderTop: "1px solid #E5DFD3", background: reorderRowColor(it.notes) }}>
-                  <td style={{ padding: "6px 8px", fontWeight: 500 }}>
-                    {it.productName}
-                    <div style={{ fontSize: 10, color: "#8A8272" }} title={`p-value: ${it.trendPValue == null ? "n/a" : it.trendPValue.toFixed(3)}`}>
-                      {it.forecastMethod}
-                    </div>
-                  </td>
-                  <td style={{ padding: "6px 8px" }}>{it.currentStock} <span style={{ color: "#8A8272" }}>({it.batchCount} batch{it.batchCount === 1 ? "" : "es"})</span></td>
-                  <td style={{ padding: "6px 8px" }}>
-                    {it.nearestExpiry || "—"}
-                    {it.nearestExpirySource === "small-batch-only" && (
-                      <span style={{ color: "#8A8272" }} title="Every batch on hand is 30 units or fewer — shown as a reference date, not flagged as a waste risk."> (small qty)</span>
-                    )}
-                  </td>
-                  <td style={{ padding: "6px 8px" }}>{fmt(it.forecastedMonthlyDemand)}</td>
-                  <td style={{ padding: "6px 8px" }}>{it.daysOfStockRemaining == null ? "∞" : Math.round(it.daysOfStockRemaining)}</td>
-                  <td style={{ padding: "6px 8px" }}>{Math.round(it.exposureDays)}d <span style={{ color: "#8A8272" }}>({it.exposureSource === "empirical" ? "measured" : "default"})</span></td>
-                  <td style={{ padding: "6px 8px" }}>{it.costPrice != null ? it.costPrice.toFixed(2) : "—"}</td>
-                  <td style={{ padding: "6px 8px" }}>{it.salePrice != null ? it.salePrice.toFixed(2) : "—"}</td>
-                  <td style={{ padding: "6px 8px", fontWeight: 700 }}>{it.suggestedReorderQty}</td>
-                  <td style={{ padding: "6px 8px" }}>{it.optimizedOrderQty}</td>
-                  <td style={{ padding: "6px 8px", fontSize: 10.5, color: "#5B5445" }}>{it.notes.join(", ") || "—"}</td>
-                </tr>
-              ))}
+              {shown.map((it) => {
+                const expanded = expandedKey === it.productKey;
+                return (
+                  <React.Fragment key={it.productKey}>
+                    <tr
+                      style={{ borderTop: "1px solid #E5DFD3", background: reorderRowColor(it.notes), cursor: "pointer" }}
+                      onClick={() => setExpandedKey(expanded ? null : it.productKey)}
+                    >
+                      <td style={{ padding: "6px 8px" }}>
+                        <ChevronDown size={14} style={{ transform: expanded ? "rotate(180deg)" : "none", color: "#8A8272" }} />
+                      </td>
+                      <td style={{ padding: "6px 8px", fontWeight: 500 }}>
+                        {it.productName}
+                        <div style={{ fontSize: 10, color: "#8A8272" }} title={`p-value: ${it.trendPValue == null ? "n/a" : it.trendPValue.toFixed(3)}`}>
+                          {it.forecastMethod}
+                        </div>
+                      </td>
+                      <td style={{ padding: "6px 8px" }}>{it.currentStock} <span style={{ color: "#8A8272" }}>({it.batchCount} batch{it.batchCount === 1 ? "" : "es"})</span></td>
+                      <td style={{ padding: "6px 8px" }}>
+                        {it.nearestExpiry || "—"}
+                        {it.nearestExpirySource === "small-batch-only" && (
+                          <span style={{ color: "#8A8272" }} title="Every batch on hand is 30 units or fewer — shown as a reference date, not flagged as a waste risk."> (small qty)</span>
+                        )}
+                      </td>
+                      <td style={{ padding: "6px 8px" }}>{fmt(it.forecastedMonthlyDemand)}</td>
+                      <td style={{ padding: "6px 8px" }}>{it.daysOfStockRemaining == null ? "∞" : Math.round(it.daysOfStockRemaining)}</td>
+                      <td style={{ padding: "6px 8px" }}>{Math.round(it.exposureDays)}d <span style={{ color: "#8A8272" }}>({it.exposureSource === "empirical" ? "measured" : "default"})</span></td>
+                      <td style={{ padding: "6px 8px" }}>{it.costPrice != null ? it.costPrice.toFixed(2) : "—"}</td>
+                      <td style={{ padding: "6px 8px" }}>{it.salePrice != null ? it.salePrice.toFixed(2) : "—"}</td>
+                      <td style={{ padding: "6px 8px", fontWeight: 700 }}>{it.suggestedReorderQty}</td>
+                      <td style={{ padding: "6px 8px" }}>{it.optimizedOrderQty}</td>
+                      <td style={{ padding: "6px 8px", fontSize: 10.5, color: "#5B5445" }}>{it.notes.join(", ") || "—"}</td>
+                    </tr>
+                    {expanded && <ReorderDetailRow it={it} fmt={fmt} colSpan={11} />}
+                  </React.Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
