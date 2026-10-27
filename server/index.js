@@ -5256,6 +5256,55 @@ app.post("/api/sample-prep-stock/restock", requireManager, async (req, res) => {
   }
 });
 
+// Direct correction of an already-logged prep-stock line (e.g. a miscount,
+// or a batch that spoiled/expired before being handed out) — an absolute
+// set, unlike restock's additive delta above, since "fix it to be exactly
+// N" is a different intent than "I just made N more."
+app.patch("/api/sample-prep-stock/:id", requireManager, async (req, res) => {
+  try {
+    const { preparedQty, lowStockThreshold } = req.body;
+    const patch = {};
+    if (preparedQty !== undefined) {
+      const qtyNum = Number(preparedQty);
+      if (!Number.isFinite(qtyNum) || qtyNum < 0) return res.status(400).json({ error: "preparedQty must be a non-negative number." });
+      patch.preparedQty = String(qtyNum);
+    }
+    if (lowStockThreshold !== undefined) {
+      const thresholdNum = Number(lowStockThreshold);
+      if (!Number.isFinite(thresholdNum) || thresholdNum < 0) return res.status(400).json({ error: "lowStockThreshold must be a non-negative number." });
+      patch.lowStockThreshold = String(thresholdNum);
+    }
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
+    const rows = await db.getAllRows("SamplePrepStock");
+    const row = rows.find((r) => r.id === req.params.id);
+    if (!row) return res.status(404).json({ error: "Sample prep stock row not found." });
+    patch.updatedBy = req.repName || "Manager";
+    patch.updatedAt = new Date().toISOString();
+    await db.updateRowById("SamplePrepStock", row.id, patch);
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Stops tracking a product as a prepared patient sample entirely — it drops
+// off the Patient-type search in Check-In (back to full-catalog-only via
+// "Flag as interest") until someone logs a fresh prep batch for it again.
+// Deliberately does NOT touch the Samples log (past gave/interest rows for
+// this product stay exactly as they were) — this only removes the running
+// stock count, which is a different, disposable thing.
+app.delete("/api/sample-prep-stock/:id", requireManager, async (req, res) => {
+  try {
+    const ok = await db.deleteRowById("SamplePrepStock", req.params.id);
+    if (!ok) return res.status(404).json({ error: "Sample prep stock row not found." });
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---------- Manager coaching notes (Manager Performance Management redesign) ----------
 // Always appended, never overwritten or edited — "Coaching Priority" is a
 // running history per rep, not a single mutable note.

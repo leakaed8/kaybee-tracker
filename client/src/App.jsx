@@ -15631,6 +15631,12 @@ function SamplesTrackingView({ products, role }) {
   const [restockQty, setRestockQty] = useState("");
   const [restocking, setRestocking] = useState(false);
   const restockInputRef = useRef(null);
+  // Edit/delete on an already-logged stock line — manager-only, for
+  // correcting a miscount or retiring a sample that's no longer prepared,
+  // without having to route it through "log another batch."
+  const [editingStockId, setEditingStockId] = useState(null);
+  const [editQty, setEditQty] = useState("");
+  const [editThreshold, setEditThreshold] = useState("");
   const [showDone, setShowDone] = useState(false);
   // Actual hand-out history — distinct from the Pending/Prepared/Given
   // queue below, which is only ever "need next visit" requests. Before
@@ -15698,6 +15704,39 @@ function SamplesTrackingView({ products, role }) {
       setError(e.message);
     } finally {
       setRestocking(false);
+    }
+  };
+
+  const startEditStock = (s) => {
+    setEditingStockId(s.id);
+    setEditQty(String(s.preparedQty));
+    setEditThreshold(String(s.lowStockThreshold));
+  };
+  const cancelEditStock = () => setEditingStockId(null);
+  const saveEditStock = async (id) => {
+    setBusyKey(id);
+    setError("");
+    try {
+      await api.updateSamplePrepStock(id, { preparedQty: Number(editQty) || 0, lowStockThreshold: Number(editThreshold) || 0 });
+      setEditingStockId(null);
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyKey(null);
+    }
+  };
+  const deleteStock = async (s) => {
+    if (!window.confirm(`Stop tracking "${s.productName}" as a prepared patient sample? Reps won't be able to give it out as Patient type until a new batch is logged.`)) return;
+    setBusyKey(s.id);
+    setError("");
+    try {
+      await api.removeSamplePrepStock(s.id);
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyKey(null);
     }
   };
 
@@ -15850,15 +15889,48 @@ function SamplesTrackingView({ products, role }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {stock.map((s) => {
               const low = s.preparedQty <= s.lowStockThreshold;
+              const busy = busyKey === s.id;
+              const editing = editingStockId === s.id;
+              if (editing) {
+                return (
+                  <div key={s.id} style={{ background: "#fff", border: "1px solid #D9A441", borderRadius: 8, padding: "8px 10px" }}>
+                    <div style={{ fontWeight: 600, marginBottom: 6 }}>{s.productName}</div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      <label style={{ fontSize: 11, color: "#8A8272" }}>On hand</label>
+                      <input type="number" min="0" value={editQty} onChange={(e) => setEditQty(e.target.value)} style={{ ...inputStyle, width: 70, padding: "5px 8px", fontSize: 12 }} />
+                      <label style={{ fontSize: 11, color: "#8A8272" }}>Low-stock alert at</label>
+                      <input type="number" min="0" value={editThreshold} onChange={(e) => setEditThreshold(e.target.value)} style={{ ...inputStyle, width: 70, padding: "5px 8px", fontSize: 12 }} />
+                      <button disabled={busy} onClick={() => saveEditStock(s.id)} style={{ fontSize: 11.5, fontWeight: 600, color: "#fff", background: busy ? "#D8D2C4" : "#4C7A5E", border: "none", borderRadius: 6, padding: "6px 10px" }}>
+                        {busy ? "Saving…" : "Save"}
+                      </button>
+                      <button disabled={busy} onClick={cancelEditStock} style={{ fontSize: 11.5, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                );
+              }
               return (
                 <div key={s.id} style={{
-                  display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5,
+                  display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12.5,
                   background: low ? "#FBF3F0" : "#FAF7F2", border: `1px solid ${low ? "#E5B8B0" : "#E5DFD3"}`, borderRadius: 8, padding: "7px 10px",
                 }}>
                   <span>{s.productName}</span>
-                  <span style={{ fontWeight: 700, color: low ? "#B33A3A" : "#1F2A24" }}>
-                    {s.preparedQty} on hand{low && " — low, prepare more"}
-                  </span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontWeight: 700, color: low ? "#B33A3A" : "#1F2A24" }}>
+                      {s.preparedQty} on hand{low && " — low, prepare more"}
+                    </span>
+                    {isManager && (
+                      <span style={{ display: "flex", gap: 6 }}>
+                        <button disabled={busy} onClick={() => startEditStock(s)} style={{ fontSize: 11, fontWeight: 600, color: "#1F2A24", background: "none", border: "1px solid #D8D2C4", borderRadius: 6, padding: "4px 8px" }}>
+                          Edit
+                        </button>
+                        <button disabled={busy} onClick={() => deleteStock(s)} style={{ fontSize: 11, fontWeight: 600, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "4px 8px" }}>
+                          {busy ? "…" : "Delete"}
+                        </button>
+                      </span>
+                    )}
+                  </div>
                 </div>
               );
             })}
