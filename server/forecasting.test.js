@@ -5,7 +5,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   normsinv, tTwoTailedPValue, buildFullCalendarGrid, computeForecastDemand,
-  computeReorderRecommendation, fifoExpiryRisk, allocateBudget, empiricalExposureDays,
+  detectOutliers, computeReorderRecommendation, fifoExpiryRisk, allocateBudget, empiricalExposureDays,
   buildReorderForecastItems,
 } = require("./forecasting");
 
@@ -133,6 +133,53 @@ test("seasonal pattern biases the forecast toward the season", () => {
   assert.ok(intoDecember.forecastedMonthlyDemand > intoJune.forecastedMonthlyDemand);
   assert.ok(intoDecember.forecastedMonthlyDemand > 100);
   assert.ok(intoJune.forecastedMonthlyDemand < 100);
+});
+
+// ---------------------------------------------------------------------
+// detectOutliers - regression for a real production bug: one implausible
+// month-level quantity (e.g. a fat-fingered extra digit, or a monetary
+// value mistakenly imported into a quantity column) blew up the residual
+// stdev by orders of magnitude, producing a suggested reorder qty in the
+// hundreds of millions for an otherwise ordinary slow-moving item.
+// ---------------------------------------------------------------------
+
+test("detectOutliers caps a single implausible month without disturbing normal months", () => {
+  const rows = calendarRows([40, 38, 42, 41, 39, 868222000, 40, 41, 39, 40]);
+  const { cleanedRows, outliers } = detectOutliers(rows);
+  assert.equal(outliers.length, 1);
+  assert.equal(outliers[0].originalQty, 868222000);
+  assert.ok(cleanedRows[5].netDemand < 1000, "the capped value should be back in a sane range");
+  assert.equal(cleanedRows[0].netDemand, 40); // untouched
+});
+
+test("detectOutliers leaves ordinary variability (even a flat series) alone", () => {
+  const rows = calendarRows([40, 38, 42, 41, 39, 45, 40, 41, 39, 40]);
+  assert.equal(detectOutliers(rows).outliers.length, 0);
+  const flat = calendarRows([40, 40, 40, 40, 40, 40]);
+  assert.equal(detectOutliers(flat).outliers.length, 0);
+});
+
+test("detectOutliers never flags small quantities, however extreme relatively", () => {
+  const rows = calendarRows([1, 1, 1, 1, 1, 50]); // "extreme" by z-score but tiny in absolute terms
+  assert.equal(detectOutliers(rows).outliers.length, 0);
+});
+
+test("a capped outlier surfaces as a DATA ANOMALY note with its original value", () => {
+  const today = new Date(2026, 0, 15);
+  const stockMovement = calendarRows([40, 38, 42, 41, 39, 868222000, 40, 41, 39, 40], 2025, 1)
+    .map((r) => ({ productName: "Apple Cider Vinegar", year: r.year, month: r.month, qty: r.netDemand }));
+  const products = [{ name: "Apple Cider Vinegar", qty: "5945", expiry: "" }];
+
+  const { items } = buildReorderForecastItems(
+    { stockMovement, products, purchases: [], destructions: [], productCatalog: [] },
+    { leadTimeDays: 5, reviewPeriodDays: 3, minServiceZ: 1.65, totalBudget: null },
+    today,
+  );
+  const item = items.find((it) => it.productKey === "apple cider vinegar");
+  assert.ok(item.notes.includes("DATA ANOMALY"));
+  assert.ok(item.notes.some((n) => n.includes("868,222,000") && n.includes("6/2025")));
+  // And the whole point: the suggested qty no longer explodes.
+  assert.ok(item.suggestedReorderQty < 1000, `expected a sane suggested qty, got ${item.suggestedReorderQty}`);
 });
 
 // ---------------------------------------------------------------------

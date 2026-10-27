@@ -1316,6 +1316,7 @@ function StockView({ products }) {
 // read + an editable settings panel, same split as the standalone Excel
 // tool this replaces (leakaed8/reorder-forecasting-kaybee).
 const REORDER_NOTE_COLORS = [
+  ["DATA ANOMALY", "#F472B6"],
   ["STOCKOUT RISK before next order arrives", "#FCA5A5"],
   ["REORDER", "#FDE68A"],
   ["EXPIRY WASTE RISK", "#FED7AA"],
@@ -1443,8 +1444,9 @@ function ReorderForecastView() {
               <tr style={{ textAlign: "left", color: "#8A8272", fontSize: 11 }}>
                 <th style={{ padding: "6px 8px" }}>Item</th>
                 <th style={{ padding: "6px 8px" }}>Stock</th>
+                <th style={{ padding: "6px 8px" }}>Nearest expiry</th>
                 <th style={{ padding: "6px 8px" }}>Forecast/mo</th>
-                <th style={{ padding: "6px 8px" }}>Days left</th>
+                <th style={{ padding: "6px 8px" }} title="Days of stock remaining at the current forecasted demand pace — not related to expiry.">Stock runway</th>
                 <th style={{ padding: "6px 8px" }}>Exposure</th>
                 <th style={{ padding: "6px 8px" }}>Cost</th>
                 <th style={{ padding: "6px 8px" }}>Sale</th>
@@ -1463,6 +1465,7 @@ function ReorderForecastView() {
                     </div>
                   </td>
                   <td style={{ padding: "6px 8px" }}>{it.currentStock} <span style={{ color: "#8A8272" }}>({it.batchCount} batch{it.batchCount === 1 ? "" : "es"})</span></td>
+                  <td style={{ padding: "6px 8px" }}>{it.nearestExpiry || "—"}</td>
                   <td style={{ padding: "6px 8px" }}>{fmt(it.forecastedMonthlyDemand)}</td>
                   <td style={{ padding: "6px 8px" }}>{it.daysOfStockRemaining == null ? "∞" : Math.round(it.daysOfStockRemaining)}</td>
                   <td style={{ padding: "6px 8px" }}>{Math.round(it.exposureDays)}d <span style={{ color: "#8A8272" }}>({it.exposureSource === "empirical" ? "measured" : "default"})</span></td>

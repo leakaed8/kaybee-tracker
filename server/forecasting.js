@@ -246,6 +246,65 @@ function seasonalIndices(t, y, months) {
   return index;
 }
 
+function medianOf(sortedValues) {
+  const len = sortedValues.length;
+  if (len === 0) return 0;
+  const mid = Math.floor(len / 2);
+  return len % 2 === 0 ? (sortedValues[mid - 1] + sortedValues[mid]) / 2 : sortedValues[mid];
+}
+
+// Modified-Z-score threshold (median/MAD based, Iglewicz & Hoaglin) for
+// flagging a month's quantity as a data-entry error rather than real
+// demand. Deliberately very conservative (real seasonal spikes are
+// nowhere near this) - the point is to catch a fat-fingered extra digit
+// or a monetary value accidentally landing in a quantity column, not to
+// second-guess genuine demand variability.
+const OUTLIER_MODIFIED_Z_THRESHOLD = 12;
+// Never flag a value below this no matter the z-score, so a near-constant
+// low-volume item (where any wobble looks "extreme" relative to its own
+// tiny MAD) can't trigger a false positive.
+const OUTLIER_MIN_ABSOLUTE_QTY = 1000;
+// Fallback multiple-of-median used only when MAD is 0 (most months tied
+// at the same value) - still needed to catch one huge outlier in an
+// otherwise flat series.
+const OUTLIER_FLAT_SERIES_MULTIPLE = 50;
+
+/**
+ * Flags and caps implausible month-level quantities (e.g. a fat-fingered
+ * extra digit, or a monetary value accidentally imported into a quantity
+ * column) before they reach the trend/residual math, where a single such
+ * outlier can inflate the residual standard deviation by orders of
+ * magnitude and blow up the resulting safety stock. Uses a median/MAD
+ * based modified z-score (robust to the outlier itself, unlike mean/stdev).
+ *
+ * rows: [{year, month, netDemand}]. Returns { cleanedRows, outliers },
+ * where outliers is [{year, month, originalQty}] for anything capped.
+ * Needs at least 5 points to judge what "normal" looks like for this item;
+ * with fewer, everything passes through unmodified.
+ */
+function detectOutliers(rows) {
+  if (rows.length < 5) return { cleanedRows: rows, outliers: [] };
+  const values = rows.map((r) => r.netDemand);
+  const sorted = [...values].sort((a, b) => a - b);
+  const median = medianOf(sorted);
+  const absDevs = values.map((v) => Math.abs(v - median)).sort((a, b) => a - b);
+  const mad = medianOf(absDevs);
+  const cap = mad > 0 ? median + (OUTLIER_MODIFIED_Z_THRESHOLD * mad) / 0.6745 : median * OUTLIER_FLAT_SERIES_MULTIPLE;
+
+  const outliers = [];
+  const cleanedRows = rows.map((r) => {
+    const isExtreme = mad > 0
+      ? (0.6745 * (r.netDemand - median)) / mad > OUTLIER_MODIFIED_Z_THRESHOLD
+      : median > 0 && r.netDemand > cap;
+    if (isExtreme && r.netDemand > OUTLIER_MIN_ABSOLUTE_QTY) {
+      outliers.push({ year: r.year, month: r.month, originalQty: r.netDemand });
+      return { ...r, netDemand: cap };
+    }
+    return r;
+  });
+  return { cleanedRows, outliers };
+}
+
 /**
  * Per-item forecasted average monthly demand over the upcoming exposure
  * window, and the residual stdev feeding safety stock. See
@@ -256,9 +315,11 @@ function seasonalIndices(t, y, months) {
  * rows: [{year, month, netDemand}] sorted chronologically, one item's full
  * calendar grid (as produced by buildFullCalendarGrid).
  * Returns {forecastedMonthlyDemand, forecastResidualStdDev, trendSlope,
- * trendPValue, forecastMethod}.
+ * trendPValue, forecastMethod, dataAnomalies}.
  */
 function computeForecastDemand(rows, exposureMonths, windowMonths = 12) {
+  const { cleanedRows, outliers } = detectOutliers(rows);
+  rows = cleanedRows;
   const nFutureMonths = Math.max(1, Math.ceil(exposureMonths));
   const n = rows.length;
   const yAll = rows.map((r) => r.netDemand);
@@ -271,6 +332,7 @@ function computeForecastDemand(rows, exposureMonths, windowMonths = 12) {
     return {
       forecastedMonthlyDemand: 0, forecastResidualStdDev: 0,
       trendSlope: 0, trendPValue: null, forecastMethod: "No demand recorded",
+      dataAnomalies: outliers,
     };
   }
 
@@ -329,6 +391,7 @@ function computeForecastDemand(rows, exposureMonths, windowMonths = 12) {
     trendSlope: significant ? slope : 0,
     trendPValue: pValue,
     forecastMethod: method,
+    dataAnomalies: outliers,
   };
 }
 
@@ -521,6 +584,12 @@ function buildReorderNotes(it) {
   if (it.forecastedMonthlyDemand === 0 && it.currentStock > 0) notes.push("SLOW MOVER / EXCESS STOCK");
   if (it.historicalDefectQty > 0) notes.push("HISTORY OF SUPPLIER/IMPORT DEFECTS");
   if (it.optimizedOrderQty != null && it.optimizedOrderQty < it.suggestedReorderQty) notes.push("BUDGET-LIMITED");
+  if (it.dataAnomalies && it.dataAnomalies.length > 0) {
+    notes.push("DATA ANOMALY");
+    for (const a of it.dataAnomalies) {
+      notes.push(`implausible qty ${a.originalQty.toLocaleString()} in ${a.month}/${a.year} — check Stock Movement`);
+    }
+  }
   return notes;
 }
 
@@ -649,6 +718,7 @@ function buildReorderForecastItems(sheets, settings, today) {
       forecastResidualStdDev: forecast.forecastResidualStdDev,
       trendPValue: forecast.trendPValue,
       forecastMethod: forecast.forecastMethod,
+      dataAnomalies: forecast.dataAnomalies,
       daysOfStockRemaining: Number.isFinite(reorder.daysOfStockRemaining) ? reorder.daysOfStockRemaining : null,
       exposureDays, exposureMonths,
       exposureSource: exposureDaysOverride != null ? "empirical" : "default",
@@ -688,6 +758,9 @@ module.exports = {
   monthsThatOccurred,
   buildFullCalendarGrid,
   computeForecastDemand,
+  detectOutliers,
+  OUTLIER_MODIFIED_Z_THRESHOLD,
+  OUTLIER_MIN_ABSOLUTE_QTY,
   empiricalExposureDays,
   MIN_PURCHASE_EVENTS_FOR_EMPIRICAL_EXPOSURE,
   computeReorderRecommendation,
