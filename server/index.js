@@ -6,6 +6,7 @@ const { S3Client, HeadObjectCommand, GetObjectCommand, PutObjectCommand } = requ
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const multer = require("multer");
 const db = require("./sheetsDb");
+const forecasting = require("./forecasting");
 const telegram = require("./telegram");
 const { beirutDateStr, beirutWeekday, beirutHour, todayBeirutStr, beirutDateParts, daysUntilFromToday, addDaysToTodayStr, beirutMonthKeyOfInstant, beirutWallClockToInstantMs } = require("./dateUtils");
 const { importedInventory, defaultTemplates } = require("./seedData");
@@ -2077,6 +2078,219 @@ app.post("/api/stock-movement/unlock", requireManager, async (req, res) => {
     const lockedYears = settings.stockMovementLockedYears ? JSON.parse(settings.stockMovementLockedYears) : [];
     await db.setSettings({ stockMovementLockedYears: JSON.stringify(lockedYears.filter((y) => y !== yearNum)) });
     res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Supplier purchase history (feeds Reorder Forecast) ----------
+// Same year-locking rule as Stock Movement above, for the same reason: the
+// current year is uploaded incrementally as it progresses and never locks,
+// past years lock once imported so a later partial re-export can't
+// silently overwrite a complete one.
+app.get("/api/purchases/status", requireManager, async (req, res) => {
+  try {
+    const settings = await db.getSettings();
+    const lockedYears = settings.purchasesLockedYears ? JSON.parse(settings.purchasesLockedYears) : [];
+    const rows = await db.getAllRows("Purchases");
+    const countByYear = {};
+    rows.forEach((r) => { countByYear[r.year] = (countByYear[r.year] || 0) + 1; });
+    res.json({ lockedYears, countByYear });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/purchases/import", requireManager, async (req, res) => {
+  try {
+    const { year, rows } = req.body;
+    const yearNum = Number(year);
+    if (!yearNum || !Array.isArray(rows)) return res.status(400).json({ error: "year and rows are required" });
+    const currentYear = beirutDateParts(new Date()).year;
+    const settings = await db.getSettings();
+    const lockedYears = settings.purchasesLockedYears ? JSON.parse(settings.purchasesLockedYears) : [];
+    if (yearNum !== currentYear && lockedYears.includes(yearNum)) {
+      return res.status(400).json({ error: `${yearNum} is already imported and locked.` });
+    }
+    const cleanRows = rows
+      .filter((r) => r.productName && r.receiveDate)
+      .map((r) => ({
+        id: `pu${crypto.randomUUID()}`,
+        productName: String(r.productName).trim(),
+        year: yearNum,
+        receiveDate: r.receiveDate,
+        quantity: Number(r.quantity) || 0,
+        // Per-shipment landed cost (customs/freight baked in) - can be
+        // blank if a given row genuinely has no cost figure; never
+        // defaulted to 0, which would silently corrupt the "most recent
+        // cost" lookup the forecast uses.
+        landedCost: r.landedCost === "" || r.landedCost == null ? "" : Number(r.landedCost),
+        supplier: r.supplier || "",
+      }));
+    const existing = await db.getAllRows("Purchases");
+    const kept = existing.filter((r) => Number(r.year) !== yearNum);
+    await db.replaceAllRows("Purchases", [...kept, ...cleanRows]);
+    if (yearNum !== currentYear && !lockedYears.includes(yearNum)) {
+      await db.setSettings({ purchasesLockedYears: JSON.stringify([...lockedYears, yearNum]) });
+    }
+    res.json({ ok: true, count: cleanRows.length });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/purchases/unlock", requireManager, async (req, res) => {
+  try {
+    const yearNum = Number(req.body.year);
+    if (!yearNum) return res.status(400).json({ error: "year is required" });
+    const settings = await db.getSettings();
+    const lockedYears = settings.purchasesLockedYears ? JSON.parse(settings.purchasesLockedYears) : [];
+    await db.setSettings({ purchasesLockedYears: JSON.stringify(lockedYears.filter((y) => y !== yearNum)) });
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Destructions (expiry waste vs. supplier/import defects) -----
+// Business rule (ported from the standalone Excel tool's destructions.py):
+// a destroyed batch is genuine expiry waste if it had already expired (or
+// expired that same year) by the time it was destroyed. If its expiry
+// falls in a LATER year than the destruction, it wasn't actually expired
+// yet - it was destroyed because it arrived damaged or was returned
+// defective, a supplier/import quality issue, not a demand-forecasting
+// signal. Quantity only (see the Purchases/Destructions schema comment in
+// sheetsDb.js for why no dollar figure is tracked here) - reported for
+// context in the Reorder Forecast tab, never affects the suggested
+// reorder quantity.
+function classifyDestructionRow(productName, quantity, expiryDate, destructionYear) {
+  const expiryYear = new Date(expiryDate).getFullYear();
+  return {
+    id: `de${crypto.randomUUID()}`,
+    productName: String(productName).trim(),
+    quantity: Number(quantity) || 0,
+    expiryDate,
+    destructionYear,
+    isDefect: expiryYear > destructionYear,
+  };
+}
+
+app.get("/api/destructions/status", requireManager, async (req, res) => {
+  try {
+    const settings = await db.getSettings();
+    const lockedYears = settings.destructionsLockedYears ? JSON.parse(settings.destructionsLockedYears) : [];
+    const rows = await db.getAllRows("Destructions");
+    const countByYear = {};
+    rows.forEach((r) => { countByYear[r.destructionYear] = (countByYear[r.destructionYear] || 0) + 1; });
+    res.json({ lockedYears, countByYear });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/destructions/import", requireManager, async (req, res) => {
+  try {
+    const { year, rows } = req.body;
+    const yearNum = Number(year);
+    if (!yearNum || !Array.isArray(rows)) return res.status(400).json({ error: "year and rows are required" });
+    const currentYear = beirutDateParts(new Date()).year;
+    const settings = await db.getSettings();
+    const lockedYears = settings.destructionsLockedYears ? JSON.parse(settings.destructionsLockedYears) : [];
+    if (yearNum !== currentYear && lockedYears.includes(yearNum)) {
+      return res.status(400).json({ error: `${yearNum} is already imported and locked.` });
+    }
+    const cleanRows = rows
+      .filter((r) => r.productName && r.quantity && r.expiryDate)
+      .map((r) => classifyDestructionRow(r.productName, r.quantity, r.expiryDate, yearNum))
+      .map((r) => ({ ...r, supplier: "" }));
+    const existing = await db.getAllRows("Destructions");
+    const kept = existing.filter((r) => Number(r.destructionYear) !== yearNum);
+    await db.replaceAllRows("Destructions", [...kept, ...cleanRows]);
+    if (yearNum !== currentYear && !lockedYears.includes(yearNum)) {
+      await db.setSettings({ destructionsLockedYears: JSON.stringify([...lockedYears, yearNum]) });
+    }
+    res.json({ ok: true, count: cleanRows.length });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/destructions/unlock", requireManager, async (req, res) => {
+  try {
+    const yearNum = Number(req.body.year);
+    if (!yearNum) return res.status(400).json({ error: "year is required" });
+    const settings = await db.getSettings();
+    const lockedYears = settings.destructionsLockedYears ? JSON.parse(settings.destructionsLockedYears) : [];
+    await db.setSettings({ destructionsLockedYears: JSON.stringify(lockedYears.filter((y) => y !== yearNum)) });
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Reorder Forecast (demand forecasting + budget-constrained ----
+// reorder recommendations). All the actual logic - joining these five
+// sheets, the forecasting math, the budget allocation - lives in
+// server/forecasting.js's buildReorderForecastItems as a pure function,
+// specifically so it's testable without live Sheets credentials (see
+// server/forecasting.test.js). This route is deliberately thin: fetch,
+// call, respond. Ported from the standalone Excel tool
+// (leakaed8/reorder-forecasting-kaybee); see that repo's
+// WORKED_EXAMPLE.md for the hand-worked numbers behind every formula.
+const REORDER_FORECAST_DEFAULTS = { leadTimeDays: 75, reviewPeriodDays: 182, minServiceZ: 1.65 };
+
+async function getReorderForecastSettings() {
+  const settings = await db.getSettings();
+  const leadTimeDays = settings.reorderLeadTimeDays ? Number(settings.reorderLeadTimeDays) : REORDER_FORECAST_DEFAULTS.leadTimeDays;
+  const reviewPeriodDays = settings.reorderReviewPeriodDays ? Number(settings.reorderReviewPeriodDays) : REORDER_FORECAST_DEFAULTS.reviewPeriodDays;
+  const minServiceZ = settings.reorderMinServiceZ ? Number(settings.reorderMinServiceZ) : REORDER_FORECAST_DEFAULTS.minServiceZ;
+  const totalBudget = settings.reorderTotalBudget && settings.reorderTotalBudget !== ""
+    ? Number(settings.reorderTotalBudget) : null;
+  return { leadTimeDays, reviewPeriodDays, minServiceZ, totalBudget };
+}
+
+app.get("/api/reorder-forecast", requireManager, async (req, res) => {
+  try {
+    const { StockMovement, Products, Purchases, Destructions, ProductCatalog } = await db.getAllRowsBatch(
+      ["StockMovement", "Products", "Purchases", "Destructions", "ProductCatalog"],
+    );
+    const reorderSettings = await getReorderForecastSettings();
+    const today = new Date(todayBeirutStr());
+
+    const { items } = forecasting.buildReorderForecastItems(
+      {
+        stockMovement: StockMovement, products: Products, purchases: Purchases,
+        destructions: Destructions, productCatalog: ProductCatalog,
+      },
+      reorderSettings,
+      today,
+    );
+
+    res.json({ items, settings: reorderSettings });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/reorder-forecast/settings", requireManager, async (req, res) => {
+  try {
+    const patch = {};
+    const { leadTimeDays, reviewPeriodDays, minServiceZ, totalBudget } = req.body || {};
+    if (leadTimeDays !== undefined) patch.reorderLeadTimeDays = leadTimeDays === "" ? "" : String(Number(leadTimeDays));
+    if (reviewPeriodDays !== undefined) patch.reorderReviewPeriodDays = reviewPeriodDays === "" ? "" : String(Number(reviewPeriodDays));
+    if (minServiceZ !== undefined) patch.reorderMinServiceZ = minServiceZ === "" ? "" : String(Number(minServiceZ));
+    if (totalBudget !== undefined) patch.reorderTotalBudget = totalBudget === "" || totalBudget == null ? "" : String(Number(totalBudget));
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
+    await db.setSettings(patch);
+    res.json({ ok: true, settings: await getReorderForecastSettings() });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });

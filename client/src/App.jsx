@@ -612,6 +612,10 @@ export default function App() {
         {role === "manager" && <TabBtn active={tab === "dashboard"} onClick={() => setTab("dashboard")} icon={<LayoutDashboard size={15} />} label="Dashboard" />}
         {canSeeTab("performance") && <TabBtn active={tab === "performance"} onClick={() => setTab("performance")} icon={<Target size={15} />} label="Performance" />}
         {canSeeTab("stock") && <TabBtn active={tab === "stock"} onClick={() => setTab("stock")} icon={<Boxes size={15} />} label="Stock" />}
+        {/* Manager-only, always — never routed through canSeeTab/tabVisibility
+            like other tabs, since this surfaces cost price and margins and
+            must never become rep/supervisor-visible via a Settings toggle. */}
+        {role === "manager" && <TabBtn active={tab === "reorderForecast"} onClick={() => setTab("reorderForecast")} icon={<TrendingUp size={15} />} label="Reorder Forecast" />}
         {canSeeTab("expiry") && <TabBtn active={tab === "expiry"} onClick={() => setTab("expiry")} icon={<Package size={15} />} label="Expiry Alerts" />}
         {canSeeTab("orders") && <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} icon={<ShoppingCart size={15} />} label="Orders" />}
         {canSeeTab("locations") && <TabBtn active={tab === "locations"} onClick={() => setTab("locations")} icon={<RadarIcon size={15} />} label="Locations" />}
@@ -708,6 +712,7 @@ export default function App() {
               />
             )}
             {tab === "stock" && canSeeTab("stock") && <StockView products={sorted} />}
+            {tab === "reorderForecast" && role === "manager" && <ReorderForecastView />}
             {tab === "clients" && canSales && (
               <ClientsView
                 clients={clients}
@@ -1298,6 +1303,185 @@ function StockView({ products }) {
       {filtered.length > LIST_DISPLAY_CAP && (
         <div style={{ fontSize: 12, color: "#8A8272", marginTop: 10 }}>
           Showing the first {LIST_DISPLAY_CAP} of {filtered.length.toLocaleString()} — narrow your search to see more.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Demand-forecast reorder recommendations - manager only (cost/margin
+// data). Computed entirely server-side (server/forecasting.js) from Stock
+// Movement, Products (current stock+expiry), Purchases, Destructions, and
+// ProductCatalog (sale price/case-pack size) - this view is just a thin
+// read + an editable settings panel, same split as the standalone Excel
+// tool this replaces (leakaed8/reorder-forecasting-kaybee).
+const REORDER_NOTE_COLORS = [
+  ["STOCKOUT RISK before next order arrives", "#FCA5A5"],
+  ["REORDER", "#FDE68A"],
+  ["EXPIRY WASTE RISK", "#FED7AA"],
+  ["SLOW MOVER / EXCESS STOCK", "#E5E7EB"],
+  ["BUDGET-LIMITED", "#DDD6FE"],
+];
+
+function reorderRowColor(notes) {
+  for (const [note, color] of REORDER_NOTE_COLORS) {
+    if (notes.includes(note)) return color;
+  }
+  return "transparent";
+}
+
+function ReorderForecastView() {
+  const [data, setData] = useState(null); // { items, settings }
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [settingsForm, setSettingsForm] = useState(null);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsSaved, setSettingsSaved] = useState(false);
+
+  const load = () => {
+    setLoading(true);
+    api.getReorderForecast()
+      .then((d) => { setData(d); setSettingsForm(d.settings); setError(""); })
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  };
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const saveSettings = async () => {
+    setSavingSettings(true);
+    setSettingsSaved(false);
+    try {
+      await api.updateReorderForecastSettings(settingsForm);
+      await load();
+      setSettingsSaved(true);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const q = search.toLowerCase().trim();
+  const items = (data?.items || []).filter((it) => !q || it.productName.toLowerCase().includes(q));
+  const shown = items.slice(0, LIST_DISPLAY_CAP);
+  const fmt = (n, digits = 1) => (n == null ? "—" : Number(n).toFixed(digits));
+
+  return (
+    <div>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Reorder Forecast</h2>
+      <p style={{ fontSize: 13, color: "#8A8272", margin: "0 0 16px" }}>
+        Demand-forecast reorder recommendations from your Stock Movement, Products, Purchases, and Destructions data.
+        Each item's demand forecast upgrades to a trend/seasonal projection once there's enough history, and its
+        safety-stock aggressiveness is derived from that item's own cost/sale economics (Purchases/ProductCatalog) —
+        never a flat guess applied to everything alike.
+      </p>
+
+      <CollapsibleSection title="Settings">
+        {settingsForm && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(180px,1fr))", gap: 10, marginBottom: 10 }}>
+              <Field label="Lead time (days)">
+                <input type="number" value={settingsForm.leadTimeDays}
+                  onChange={(e) => setSettingsForm((s) => ({ ...s, leadTimeDays: e.target.value }))} style={inputStyle} />
+              </Field>
+              <Field label="Review period (days)">
+                <input type="number" value={settingsForm.reviewPeriodDays}
+                  onChange={(e) => setSettingsForm((s) => ({ ...s, reviewPeriodDays: e.target.value }))} style={inputStyle} />
+              </Field>
+              <Field label="Min service Z (floor)">
+                <input type="number" step="0.01" value={settingsForm.minServiceZ}
+                  onChange={(e) => setSettingsForm((s) => ({ ...s, minServiceZ: e.target.value }))} style={inputStyle} />
+              </Field>
+              <Field label="Total order budget (optional)">
+                <input type="number" value={settingsForm.totalBudget ?? ""} placeholder="Leave blank for no limit"
+                  onChange={(e) => setSettingsForm((s) => ({ ...s, totalBudget: e.target.value }))} style={inputStyle} />
+              </Field>
+            </div>
+            <button onClick={saveSettings} disabled={savingSettings}
+              style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+              {savingSettings ? "Saving…" : "Save settings"}
+            </button>
+            {settingsSaved && <span style={{ fontSize: 12, color: "#4C7A5E", marginLeft: 10 }}>Saved.</span>}
+            <p style={{ fontSize: 11.5, color: "#8A8272", marginTop: 10, marginBottom: 0 }}>
+              Lead time + review period are the fallback exposure window. Once an item has at least 3 purchase
+              receipts logged (Settings → Supplier purchases import), its real measured gap between arrivals is
+              used instead — shown as "measured" rather than "default" below.
+            </p>
+          </>
+        )}
+      </CollapsibleSection>
+
+      {error && <div style={{ fontSize: 12.5, color: "#B33A3A", margin: "10px 0" }}>{error}</div>}
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", margin: "14px 0" }}>
+        <div style={{ position: "relative", flex: 1, minWidth: 220, maxWidth: 360 }}>
+          <Search size={15} style={{ position: "absolute", left: 12, top: 10, color: "#8A8272" }} />
+          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by product name…"
+            style={{ ...inputStyle, paddingLeft: 34 }} />
+        </div>
+        <div style={{ fontSize: 11.5, color: "#8A8272", display: "flex", gap: 10, flexWrap: "wrap" }}>
+          {REORDER_NOTE_COLORS.map(([label, color]) => (
+            <span key={label} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{ width: 10, height: 10, borderRadius: 3, background: color, border: "1px solid #E5DFD3", display: "inline-block" }} />
+              {label.replace(" before next order arrives", "")}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>
+        {items.length} item{items.length === 1 ? "" : "s"}{q ? ` matching "${search}"` : ""}
+      </div>
+
+      {loading ? (
+        <EmptyState text="Loading…" />
+      ) : shown.length > 0 ? (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+            <thead>
+              <tr style={{ textAlign: "left", color: "#8A8272", fontSize: 11 }}>
+                <th style={{ padding: "6px 8px" }}>Item</th>
+                <th style={{ padding: "6px 8px" }}>Stock</th>
+                <th style={{ padding: "6px 8px" }}>Forecast/mo</th>
+                <th style={{ padding: "6px 8px" }}>Days left</th>
+                <th style={{ padding: "6px 8px" }}>Exposure</th>
+                <th style={{ padding: "6px 8px" }}>Cost</th>
+                <th style={{ padding: "6px 8px" }}>Sale</th>
+                <th style={{ padding: "6px 8px" }}>Suggested Qty</th>
+                <th style={{ padding: "6px 8px" }}>Optimized Qty</th>
+                <th style={{ padding: "6px 8px" }}>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((it) => (
+                <tr key={it.productKey} style={{ borderTop: "1px solid #E5DFD3", background: reorderRowColor(it.notes) }}>
+                  <td style={{ padding: "6px 8px", fontWeight: 500 }}>
+                    {it.productName}
+                    <div style={{ fontSize: 10, color: "#8A8272" }} title={`p-value: ${it.trendPValue == null ? "n/a" : it.trendPValue.toFixed(3)}`}>
+                      {it.forecastMethod}
+                    </div>
+                  </td>
+                  <td style={{ padding: "6px 8px" }}>{it.currentStock} <span style={{ color: "#8A8272" }}>({it.batchCount} batch{it.batchCount === 1 ? "" : "es"})</span></td>
+                  <td style={{ padding: "6px 8px" }}>{fmt(it.forecastedMonthlyDemand)}</td>
+                  <td style={{ padding: "6px 8px" }}>{it.daysOfStockRemaining == null ? "∞" : Math.round(it.daysOfStockRemaining)}</td>
+                  <td style={{ padding: "6px 8px" }}>{Math.round(it.exposureDays)}d <span style={{ color: "#8A8272" }}>({it.exposureSource === "empirical" ? "measured" : "default"})</span></td>
+                  <td style={{ padding: "6px 8px" }}>{it.costPrice != null ? it.costPrice.toFixed(2) : "—"}</td>
+                  <td style={{ padding: "6px 8px" }}>{it.salePrice != null ? it.salePrice.toFixed(2) : "—"}</td>
+                  <td style={{ padding: "6px 8px", fontWeight: 700 }}>{it.suggestedReorderQty}</td>
+                  <td style={{ padding: "6px 8px" }}>{it.optimizedOrderQty}</td>
+                  <td style={{ padding: "6px 8px", fontSize: 10.5, color: "#5B5445" }}>{it.notes.join(", ") || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <EmptyState text="No items yet — import Stock Movement and Products data in Settings first." />
+      )}
+      {items.length > LIST_DISPLAY_CAP && (
+        <div style={{ fontSize: 12, color: "#8A8272", marginTop: 10 }}>
+          Showing the first {LIST_DISPLAY_CAP} of {items.length.toLocaleString()} — narrow your search to see more.
         </div>
       )}
     </div>
@@ -15421,6 +15605,238 @@ function StockMovementImportSection() {
   );
 }
 
+// Shared by Purchases and Destructions import below: unlike Stock Movement
+// (one row per product with 12 month columns), these sources are already
+// naturally "one row per event" (one purchase receipt, one destroyed
+// batch) - so importing them is just mapping a handful of flat columns,
+// not a 12-column month grid. `fields` is [{key, label, required, type}];
+// `formatRow(mapped)` turns the raw mapped values (all strings straight
+// off the sheet) into the clean object the import endpoint expects, or
+// returns null to skip a row (e.g. missing a required field).
+function FlatColumnMapImportSection({
+  title, description, fields, getStatus, doImport, doUnlock, formatRow, startYear = 2020,
+}) {
+  const [status, setStatus] = useState(null);
+  const [activeYear, setActiveYear] = useState(null);
+  const [headers, setHeaders] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [colMap, setColMap] = useState({}); // { fieldKey: "header name" }
+  const [importing, setImporting] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+  const [unlockConfirmYear, setUnlockConfirmYear] = useState(null);
+  const [unlocking, setUnlocking] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const currentYear = new Date().getFullYear();
+  const years = [];
+  for (let y = startYear; y <= currentYear; y++) years.push(y);
+
+  const load = () => getStatus().then(setStatus).catch((e) => setError(e.message));
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const startUpload = (year) => {
+    setActiveYear(year);
+    setHeaders([]); setRows([]); setColMap({}); setError(""); setResult(null);
+  };
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setError(""); setResult(null);
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: "array", cellDates: true });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+        const headerRow = (json[0] || []).map((h, i) => (h === "" ? `Column ${i + 1}` : String(h)));
+        const dataRows = json.slice(1).filter((r) => r.some((cell) => cell !== ""));
+        setHeaders(headerRow);
+        setRows(dataRows);
+      } catch (err) {
+        setError("Couldn't read that file. Make sure it's a valid Excel (.xlsx) file.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  const doUnlockYear = async (year) => {
+    setUnlocking(true);
+    setError("");
+    try {
+      await doUnlock(year);
+      setUnlockConfirmYear(null);
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setUnlocking(false);
+    }
+  };
+
+  const requiredFields = fields.filter((f) => f.required);
+  const canImport = requiredFields.every((f) => colMap[f.key]) && rows.length > 0;
+
+  const runImport = async () => {
+    const idxByField = {};
+    fields.forEach((f) => { if (colMap[f.key]) idxByField[f.key] = headers.indexOf(colMap[f.key]); });
+    const out = [];
+    rows.forEach((r) => {
+      const mapped = {};
+      fields.forEach((f) => { mapped[f.key] = idxByField[f.key] >= 0 ? r[idxByField[f.key]] : ""; });
+      const formatted = formatRow(mapped);
+      if (formatted) out.push(formatted);
+    });
+    setImporting(true); setError("");
+    try {
+      const res = await doImport(activeYear, out);
+      setResult({ year: activeYear, count: res.count });
+      setActiveYear(null);
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+      <label style={{ display: "block", fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>{title}</label>
+      <p style={{ fontSize: 12.5, color: "#5B5445", marginBottom: 10 }}>{description}</p>
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
+      {result && (
+        <div style={{ fontSize: 12.5, color: "#4C7A5E", marginBottom: 10, display: "flex", alignItems: "center", gap: 5 }}>
+          <Check size={14} /> Imported {result.count} rows for {result.year}.
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: activeYear ? 14 : 0 }}>
+        {years.map((y) => {
+          const isCurrent = y === currentYear;
+          const isLocked = !isCurrent && status?.lockedYears?.includes(y);
+          const count = status?.countByYear?.[y] || 0;
+          return (
+            <div key={y} style={{ border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px", minWidth: 110 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{y}</div>
+              {isLocked ? (
+                unlockConfirmYear === y ? (
+                  <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 10, color: "#B33A3A" }}>Unlock {y}?</span>
+                    <button onClick={() => doUnlockYear(y)} disabled={unlocking} style={{ fontSize: 10.5, background: "#B33A3A", color: "#fff", border: "none", borderRadius: 5, padding: "3px 7px" }}>
+                      {unlocking ? "…" : "Yes"}
+                    </button>
+                    <button onClick={() => setUnlockConfirmYear(null)} style={{ fontSize: 10.5, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 5, padding: "3px 7px" }}>
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <div>
+                    <div style={{ fontSize: 11, color: "#6B7280", marginBottom: 4 }}>🔒 Locked · {count} rows</div>
+                    <button onClick={() => setUnlockConfirmYear(y)} style={{ fontSize: 10.5, padding: "3px 8px", borderRadius: 6, border: "1px solid #E5B8B0", background: "#fff", color: "#B33A3A" }}>
+                      Unlock
+                    </button>
+                  </div>
+                )
+              ) : (
+                <button onClick={() => startUpload(y)} style={{ fontSize: 11.5, padding: "4px 9px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24" }}>
+                  {count > 0 ? `Update (${count} rows)` : "Upload"}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {activeYear && (
+        <div style={{ marginTop: 14, padding: 12, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Uploading {activeYear}</div>
+          <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ fontSize: 12.5, marginBottom: 10 }} />
+          {headers.length > 0 && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(160px,1fr))", gap: 10, marginBottom: 10 }}>
+                {fields.map((f) => (
+                  <Field key={f.key} label={f.required ? `${f.label} *` : `${f.label} (optional)`}>
+                    <select value={colMap[f.key] || ""} onChange={(e) => setColMap((prev) => ({ ...prev, [f.key]: e.target.value }))} style={inputStyle}>
+                      <option value="">—</option>
+                      {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+                    </select>
+                  </Field>
+                ))}
+              </div>
+              <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 10 }}>{rows.length.toLocaleString()} rows detected in the file.</div>
+            </>
+          )}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button disabled={!canImport || importing} onClick={runImport} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: canImport ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+              {importing ? "Importing…" : `Import ${activeYear}`}
+            </button>
+            <button onClick={() => setActiveYear(null)} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PurchasesImportSection() {
+  return (
+    <FlatColumnMapImportSection
+      title="Supplier purchases"
+      description="Upload purchase receipts, one year at a time — receive date, quantity, and landed cost per unit (customs/freight included, since that varies shipment to shipment). Drives the real exposure window and Cost Price in Reorder Forecast instead of guessed constants. Past years lock once imported; this year stays open."
+      startYear={2020}
+      fields={[
+        { key: "name", label: "Product name", required: true },
+        { key: "receiveDate", label: "Receive date", required: true },
+        { key: "quantity", label: "Quantity", required: true },
+        { key: "landedCost", label: "Landed cost per unit", required: false },
+        { key: "supplier", label: "Supplier", required: false },
+      ]}
+      getStatus={api.getPurchasesStatus}
+      doImport={api.importPurchases}
+      doUnlock={api.unlockPurchasesYear}
+      formatRow={(m) => {
+        const productName = String(m.name ?? "").trim();
+        if (!productName || m.receiveDate === "") return null;
+        const receiveDate = m.receiveDate instanceof Date ? m.receiveDate.toISOString().slice(0, 10) : String(m.receiveDate);
+        return {
+          productName, receiveDate,
+          quantity: Number(m.quantity) || 0,
+          landedCost: m.landedCost === "" ? "" : Number(m.landedCost),
+          supplier: String(m.supplier || "").trim(),
+        };
+      }}
+    />
+  );
+}
+
+function DestructionsImportSection() {
+  return (
+    <FlatColumnMapImportSection
+      title="Destructions"
+      description="Upload destroyed-stock records, one year at a time — product, quantity, and the batch's expiry date. Automatically classified as genuine expiry waste or a supplier/import defect by comparing expiry year to destruction year — quantity only, no cost needed. Reported for context in Reorder Forecast; never affects the suggested reorder quantity."
+      startYear={2020}
+      fields={[
+        { key: "name", label: "Product name", required: true },
+        { key: "quantity", label: "Quantity", required: true },
+        { key: "expiryDate", label: "Expiry date", required: true },
+      ]}
+      getStatus={api.getDestructionsStatus}
+      doImport={api.importDestructions}
+      doUnlock={api.unlockDestructionsYear}
+      formatRow={(m) => {
+        const productName = String(m.name ?? "").trim();
+        const quantity = Number(m.quantity) || 0;
+        if (!productName || !quantity || m.expiryDate === "") return null;
+        const expiryDate = m.expiryDate instanceof Date ? m.expiryDate.toISOString().slice(0, 10) : String(m.expiryDate);
+        return { productName, quantity, expiryDate };
+      }}
+    />
+  );
+}
+
 // Opens Google Maps (app on mobile, web on desktop) instead of an embedded
 // custom map — it gets real turn-by-turn navigation and search for free,
 // which a from-scratch map view wouldn't do without a lot more work.
@@ -16493,6 +16909,18 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
       {role === "manager" && (
         <CollapsibleSection title="Stock movement import">
           <StockMovementImportSection />
+        </CollapsibleSection>
+      )}
+
+      {role === "manager" && (
+        <CollapsibleSection title="Supplier purchases import">
+          <PurchasesImportSection />
+        </CollapsibleSection>
+      )}
+
+      {role === "manager" && (
+        <CollapsibleSection title="Destructions import">
+          <DestructionsImportSection />
         </CollapsibleSection>
       )}
 
