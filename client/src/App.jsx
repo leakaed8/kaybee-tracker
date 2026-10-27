@@ -1462,6 +1462,13 @@ function ReorderForecastView() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSaved, setSettingsSaved] = useState(false);
   const [expandedKey, setExpandedKey] = useState(null);
+  // Same-item merge (combines demand history across a renamed product's
+  // old/new names) — per-group tick boxes default to the whole detected
+  // cluster, but a manager can untick one if the heuristic over-grouped.
+  const [mergeChecked, setMergeChecked] = useState({}); // groupKey -> Set(productName)
+  const [mergeCanonical, setMergeCanonical] = useState({}); // groupKey -> string
+  const [mergeBusyKey, setMergeBusyKey] = useState(null);
+  const [mergeError, setMergeError] = useState("");
 
   const load = () => {
     setLoading(true);
@@ -1490,6 +1497,34 @@ function ReorderForecastView() {
   const items = (data?.items || []).filter((it) => !q || it.productName.toLowerCase().includes(q));
   const shown = items.slice(0, LIST_DISPLAY_CAP);
   const fmt = (n, digits = 1) => (n == null ? "—" : Number(n).toFixed(digits));
+
+  const groupKeyOf = (g) => `${g.brand}::${g.stem}`;
+  const checkedFor = (g) => mergeChecked[groupKeyOf(g)] || new Set(g.items.map((it) => it.productName));
+  const toggleMergeChecked = (g, productName) => {
+    const key = groupKeyOf(g);
+    setMergeChecked((prev) => {
+      const current = new Set(prev[key] || g.items.map((it) => it.productName));
+      if (current.has(productName)) current.delete(productName); else current.add(productName);
+      return { ...prev, [key]: current };
+    });
+  };
+  const canonicalFor = (g) => mergeCanonical[groupKeyOf(g)] ?? g.items[0].productName; // items[0] = most months on record
+  const doMergeItemNames = async (g) => {
+    const key = groupKeyOf(g);
+    const checked = [...checkedFor(g)];
+    const canonical = canonicalFor(g).trim();
+    if (checked.length < 2 || !canonical) return;
+    setMergeBusyKey(key);
+    setMergeError("");
+    try {
+      await api.mergeReorderItemNames(checked, canonical);
+      await load();
+    } catch (e) {
+      setMergeError(e.message);
+    } finally {
+      setMergeBusyKey(null);
+    }
+  };
 
   return (
     <div>
@@ -1541,25 +1576,56 @@ function ReorderForecastView() {
           <p style={{ fontSize: 11.5, color: "#8A8272", marginTop: 0, marginBottom: 10 }}>
             Same brand, same base name after stripping the strength/pack size — often a straight rename
             (e.g. a dose change) logged as a brand-new item, which silently splits that product's real demand
-            history across two rows instead of updating it in place. Nothing here is combined automatically —
-            review each group and decide for yourself whether it's really one product line.
+            history across two rows instead of updating it in place. Tick which ones are really the same
+            product, pick the name to keep, and merge — this combines their Stock Movement/Purchases/
+            Destructions history so the forecast reads them as one item going forward. It does NOT touch your
+            live Stock or Product Catalog entries — if those also need combining, that's a separate decision.
           </p>
+          {mergeError && <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 8 }}>{mergeError}</div>}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {data.possibleSameItemGroups.map((g) => (
-              <div key={`${g.brand}::${g.stem}`} style={{ background: "#FBF3F0", border: "1px solid #E5B8B0", borderRadius: 8, padding: "10px 12px" }}>
-                <div style={{ fontSize: 11.5, fontWeight: 700, color: "#B33A3A", marginBottom: 6 }}>{g.brand}</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  {g.items.map((it) => (
-                    <div key={it.productName} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12 }}>
-                      <span>{it.productName}</span>
-                      <span style={{ color: "#8A8272" }}>
-                        {it.allTimeMonthsCount}mo on record · {fmt(it.allTimeAvgMonthlyDemand)}/mo avg · {it.currentStock.toLocaleString()} on hand
-                      </span>
-                    </div>
-                  ))}
+            {data.possibleSameItemGroups.map((g) => {
+              const key = groupKeyOf(g);
+              const checked = checkedFor(g);
+              const busy = mergeBusyKey === key;
+              return (
+                <div key={key} style={{ background: "#FBF3F0", border: "1px solid #E5B8B0", borderRadius: 8, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 700, color: "#B33A3A", marginBottom: 6 }}>{g.brand}</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+                    {g.items.map((it) => (
+                      <label key={it.productName} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, fontSize: 12, cursor: "pointer" }}>
+                        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <input type="checkbox" checked={checked.has(it.productName)} onChange={() => toggleMergeChecked(g, it.productName)} />
+                          {it.productName}
+                        </span>
+                        <span style={{ color: "#8A8272" }}>
+                          {it.allTimeMonthsCount}mo on record · {fmt(it.allTimeAvgMonthlyDemand)}/mo avg · {it.currentStock.toLocaleString()} on hand
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 11, color: "#8A8272" }}>Keep the name:</span>
+                    <input
+                      value={canonicalFor(g)}
+                      onChange={(e) => setMergeCanonical((prev) => ({ ...prev, [key]: e.target.value }))}
+                      style={{ ...inputStyle, flex: 1, minWidth: 160, fontSize: 12.5 }}
+                    />
+                    <button
+                      type="button"
+                      disabled={busy || checked.size < 2}
+                      onClick={() => doMergeItemNames(g)}
+                      title={checked.size < 2 ? "Tick at least 2 to merge" : undefined}
+                      style={{
+                        padding: "7px 12px", borderRadius: 7, border: "none", fontSize: 12, fontWeight: 700, color: "#fff", whiteSpace: "nowrap",
+                        background: busy || checked.size < 2 ? "#D8D2C4" : "#B33A3A",
+                      }}
+                    >
+                      {busy ? "Merging…" : `Merge ${checked.size} as one item`}
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </CollapsibleSection>
       )}

@@ -2290,6 +2290,49 @@ app.patch("/api/reorder-forecast/settings", requireManager, async (req, res) => 
   }
 });
 
+// Combines a "possible same-item name variants" cluster into one name,
+// everywhere that drives the demand forecast — StockMovement, Purchases
+// (exposure-window measurement) and Destructions (waste history) — so
+// their sales/receiving/waste history is read as one continuous product
+// going forward, same symptom-and-fix as the specialty-name merge above.
+// Deliberately does NOT touch Products (live stock) or ProductCatalog
+// (the master catalog — brand, pricing, images, used across Knowledge/
+// Product Expert/competitor comparison far beyond this one report):
+// those are a separate, higher-stakes decision about which current SKU
+// a manager wants to keep, not something to fold into a demand-history
+// cleanup click. If both names still carry current stock under Products
+// after this, each keeps showing as its own stock row — on purpose.
+app.post("/api/reorder-forecast/merge-item-names", requireManager, async (req, res) => {
+  try {
+    const { fromNames, toName } = req.body;
+    const to = String(toName || "").trim();
+    if (!to) return res.status(400).json({ error: "toName is required." });
+    if (!Array.isArray(fromNames) || fromNames.length === 0) return res.status(400).json({ error: "fromNames must be a non-empty array." });
+    const fromSet = new Set(fromNames.map((v) => String(v || "").trim()).filter(Boolean));
+    if (fromSet.size === 0) return res.status(400).json({ error: "fromNames had nothing usable." });
+
+    const tabs = ["StockMovement", "Purchases", "Destructions"];
+    const updatedCounts = {};
+    for (const tab of tabs) {
+      const rows = await db.getAllRows(tab);
+      const toUpdate = rows.filter((r) => fromSet.has((r.productName || "").trim()) && (r.productName || "").trim() !== to);
+      updatedCounts[tab] = toUpdate.length;
+      if (toUpdate.length > 0) {
+        await db.batchUpdateRows(tab, toUpdate.map((r) => ({ id: r.id, patch: { productName: to } })));
+      }
+    }
+    await writeAuditLog({
+      entityType: "reorder_item_name_merge", entityId: "", field: "productName",
+      oldValue: [...fromSet].join(" / "), newValue: to, changedBy: req.repName || "Manager",
+      reason: `StockMovement:${updatedCounts.StockMovement} Purchases:${updatedCounts.Purchases} Destructions:${updatedCounts.Destructions}`,
+    });
+    res.json({ ok: true, updatedCounts });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---------- Pharmacy sales ledger (drives the Telegram "pick up" list) ----
 // A snapshot of which pharmacy holds how many units of which expiry-dated
 // batch — net of any returns — computed client-side from an exported sales

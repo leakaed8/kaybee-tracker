@@ -179,6 +179,7 @@ export const api = {
   unlockDestructionsYear: (year) => request("/destructions/unlock", { method: "POST", body: JSON.stringify({ year }) }),
   getReorderForecast: (params) => request(`/reorder-forecast${qs(params)}`),
   updateReorderForecastSettings: (patch) => request("/reorder-forecast/settings", { method: "PATCH", body: JSON.stringify(patch) }),
+  mergeReorderItemNames: (fromNames, toName) => request("/reorder-forecast/merge-item-names", { method: "POST", body: JSON.stringify({ fromNames, toName }) }),
   getRepTelegramLinkCode: (id) => request(`/reps/${id}/telegram-link-code`, { method: "POST" }),
   getManagerTelegramLinkCode: () => request("/settings/telegram-link-code", { method: "POST" }),
   scheduleFollowUp: (followUp) => request("/followups", { method: "POST", body: JSON.stringify(followUp) }),
