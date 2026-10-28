@@ -309,28 +309,24 @@ const SCHEMAS = {
   // hand") rather than something to hide.
   SamplePrepStock: ["id", "productId", "productName", "preparedQty", "lowStockThreshold", "updatedBy", "updatedAt"],
   PunchLog: ["id", "repName", "type", "time", "coordsLat", "coordsLng", "auto", "confirmed"],
+  // Multi-year monthly sales history, still read for slow/fast-mover
+  // calculations (avgMonthlyMovementFor/ytdMovementFor) even though the
+  // in-app Excel import UI for this was removed - the data stays, and a
+  // separate standalone forecasting app may populate it going forward.
   StockMovement: ["id", "productName", "year", "month", "qty"],
   // Supplier purchase history (receive date + qty + landed cost per unit,
   // which varies shipment to shipment with customs/freight - never a fixed
-  // catalog price). Feeds two things in the Reorder Forecast tab: the
-  // item's Cost Price for the critical-ratio calculation (most recent
-  // landed cost, not a manually-typed number), and - once there's enough
-  // history - the real exposure window (gap between consecutive arrivals
-  // of the same item), instead of a guessed lead time + review period.
-  // Imported per year, same locking rule as StockMovement (see
-  // /api/purchases/import): the current year stays open, past years lock
-  // once imported so a partial re-export can't silently overwrite a
-  // complete one.
+  // catalog price). Historical data only now - the in-app Excel import UI
+  // and the Reorder Forecast feature that read this were both removed; a
+  // separate standalone forecasting app may populate/use it going forward.
   Purchases: ["id", "productName", "year", "receiveDate", "quantity", "landedCost", "supplier"],
   // Destroyed-stock history, classified genuine expiry waste vs.
   // supplier/import defect by comparing the batch's expiry year to the
-  // year it was destroyed (see classifyDestructionRow in index.js -
-  // ported directly from the standalone Excel tool's destructions.py).
-  // Quantity only, deliberately - never a dollar figure, since some years'
-  // source data is in LBP with a year-dependent exchange rate and the
-  // classification itself was never cost-based to begin with. Reported
-  // for context in the Reorder Forecast tab only - never affects the
-  // suggested reorder quantity.
+  // year it was destroyed. Quantity only, deliberately - never a dollar
+  // figure, since some years' source data is in LBP with a year-dependent
+  // exchange rate and the classification itself was never cost-based to
+  // begin with. Historical data only now - the in-app Excel import UI and
+  // the Reorder Forecast feature that read this were both removed.
   Destructions: ["id", "productName", "quantity", "expiryDate", "destructionYear", "isDefect", "supplier"],
   MonthlyDigests: ["id", "month", "status", "payload", "createdAt"],
   // My Schedule (Med Rep Schedule feature) appended 10 columns, reusing this
@@ -628,13 +624,10 @@ const SCHEMAS = {
   // "admin/training-studies"); the digest job special-cases those two to
   // call out Knowledge/Product-Expert contributions in their own section.
   ActivityLog: ["id", "repName", "resource", "verb", "detail", "createdAt"],
-  // A manager's standing explanation for a Reorder Forecast "data gap"
-  // (a run of 2+ consecutive months with no StockMovement row at all for
-  // an item — see findDataGaps in forecasting.js) — "yes, out of stock"
-  // or "no, something else" — so the same gap doesn't keep asking every
-  // time the report is reopened. Keyed by productName + the exact
-  // start/end month, since a product can have more than one gap in its
-  // history and each is its own question.
+  // Leftover from the removed Reorder Forecast feature (a manager's
+  // standing "yes, out of stock" / "no" answer per data gap). No code
+  // reads or writes this anymore; left in place rather than dropped so no
+  // historical data is lost.
   ReorderDataGapNotes: ["id", "productName", "startYear", "startMonth", "endYear", "endMonth", "status", "confirmedBy", "confirmedAt"],
 };
 
