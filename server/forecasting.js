@@ -192,8 +192,14 @@ function monthsThatOccurred(years, today) {
 
 /** Reindex monthly demand so every item has an entry for every elapsed
  * month, filling months with no recorded movement as 0 (not missing).
+ * The calendar span itself is GLOBAL — every elapsed year/month that ANY
+ * product has a StockMovement row for, not just this one — so a product
+ * whose own history has a real gap (an upload that was never made for a
+ * given year, say) gets that gap padded with zeros exactly like a month
+ * with genuinely zero net demand. `hasData` on each row is what lets a
+ * consumer tell those two cases apart again (see yearlyDemandStats).
  * monthlyDemand: [{ productName, year, month, netDemand }]
- * Returns: Map<productName, Array<{year, month, netDemand}>> sorted chronologically. */
+ * Returns: Map<productName, Array<{year, month, netDemand, hasData}>> sorted chronologically. */
 function buildFullCalendarGrid(monthlyDemand, today) {
   const years = monthlyDemand.map((r) => r.year);
   const calendar = monthsThatOccurred(years, today);
@@ -206,12 +212,16 @@ function buildFullCalendarGrid(monthlyDemand, today) {
 
   const grid = new Map();
   for (const productName of products) {
-    const rows = calendar.map(({ year, month }) => ({
-      year, month,
-      // Demand can't be negative for forecasting purposes (a net
-      // returns-heavy month floors at 0).
-      netDemand: Math.max(0, lookup.get(`${productName}::${year}::${month}`) || 0),
-    }));
+    const rows = calendar.map(({ year, month }) => {
+      const key = `${productName}::${year}::${month}`;
+      return {
+        year, month,
+        // Demand can't be negative for forecasting purposes (a net
+        // returns-heavy month floors at 0).
+        netDemand: Math.max(0, lookup.get(key) || 0),
+        hasData: lookup.has(key),
+      };
+    });
     grid.set(productName, rows);
   }
   return grid;
@@ -690,28 +700,98 @@ function computeOverOrderSignal(itemPurchases, calendarRows, itemDestructions) {
  * to the specific year/month driving it instead of trusting the model's
  * single blended number.
  *
- * rows: [{year, month, netDemand}], the item's full calendar grid.
- * Returns [{year, monthsRecorded, avgMonthlyDemand, stdDevMonthlyDemand,
- * maxMonthlyDemand}], one entry per year, oldest first.
+ * `monthsRecorded` is the full calendar-grid month count (always 12 for a
+ * fully-elapsed year); `monthsWithData` is how many of those months had an
+ * ACTUAL StockMovement row (see buildFullCalendarGrid's `hasData`) rather
+ * than a zero-padded gap. monthsWithData === 0 means this product has no
+ * recorded history at all for that year — avgMonthlyDemand of 0 there is
+ * "we never got data," not "we measured zero demand," and the two must
+ * not be presented identically (a real zero year is actionable: stop
+ * reordering; a missing-data year is not — it would need a re-upload).
+ *
+ * rows: [{year, month, netDemand, hasData}], the item's full calendar grid.
+ * Returns [{year, monthsRecorded, monthsWithData, avgMonthlyDemand,
+ * stdDevMonthlyDemand, maxMonthlyDemand}], one entry per year, oldest first.
  */
 function yearlyDemandStats(rows) {
   const byYear = new Map();
   for (const r of rows) {
     if (!byYear.has(r.year)) byYear.set(r.year, []);
-    byYear.get(r.year).push(r.netDemand);
+    byYear.get(r.year).push(r);
   }
   return [...byYear.keys()].sort((a, b) => a - b).map((year) => {
-    const vals = byYear.get(year);
+    const yearRows = byYear.get(year);
+    const vals = yearRows.map((r) => r.netDemand);
     const mean = vals.reduce((s, v) => s + v, 0) / vals.length;
     const variance = vals.reduce((s, v) => s + (v - mean) ** 2, 0) / vals.length;
     return {
       year,
       monthsRecorded: vals.length,
+      monthsWithData: yearRows.filter((r) => r.hasData).length,
       avgMonthlyDemand: mean,
       stdDevMonthlyDemand: Math.sqrt(variance),
       maxMonthlyDemand: Math.max(...vals),
     };
   });
+}
+
+const MONTH_NAMES = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function monthLabel(year, month) { return `${MONTH_NAMES[month]} ${year}`; }
+
+/**
+ * The first and last calendar month this product has ANY real StockMovement
+ * row for (hasData === true) - lets a manager see, at a glance, whether one
+ * name's history stops right where another name's starts (a strong rename
+ * signal) versus the two overlapping in time (more likely two genuinely
+ * different, concurrently-sold items). Deliberately just surfaced as data,
+ * not turned into an automatic "is this a rename" verdict - that judgment
+ * call is exactly what the manager asked to make themselves.
+ *
+ * rows: [{year, month, hasData}], the item's full calendar grid.
+ * Returns {firstLabel, lastLabel} or null if the item has no real data at all.
+ */
+function activeDataRange(rows) {
+  const withData = rows.filter((r) => r.hasData);
+  if (withData.length === 0) return null;
+  const first = withData[0], last = withData[withData.length - 1];
+  return { firstLabel: monthLabel(first.year, first.month), lastLabel: monthLabel(last.year, last.month) };
+}
+
+/**
+ * Contiguous runs of 2+ consecutive months with NO StockMovement row at all
+ * (hasData === false) - a plausible "this was simply out of stock" period,
+ * surfaced for the manager to confirm or dismiss (see
+ * POST /api/reorder-forecast/data-gap-notes) rather than left looking like
+ * an unexplained hole in the data forever. A single missing month is left
+ * out - too easy to be noise (a late import, a quiet month) to be worth a
+ * standing question about.
+ *
+ * rows: [{year, month, hasData}] sorted chronologically, the item's full
+ * calendar grid. Returns [{startYear, startMonth, endYear, endMonth,
+ * monthsCount, startLabel, endLabel}], oldest first.
+ */
+const MIN_DATA_GAP_MONTHS = 2;
+function findDataGaps(rows) {
+  const gaps = [];
+  let runStart = null, prevRow = null;
+  for (const r of rows) {
+    if (!r.hasData) {
+      if (runStart === null) runStart = r;
+    } else if (runStart !== null) {
+      gaps.push([runStart, prevRow]);
+      runStart = null;
+    }
+    prevRow = r;
+  }
+  if (runStart !== null) gaps.push([runStart, prevRow]);
+
+  return gaps
+    .map(([start, end]) => ({
+      startYear: start.year, startMonth: start.month, endYear: end.year, endMonth: end.month,
+      monthsCount: (end.year - start.year) * 12 + (end.month - start.month) + 1,
+      startLabel: monthLabel(start.year, start.month), endLabel: monthLabel(end.year, end.month),
+    }))
+    .filter((g) => g.monthsCount >= MIN_DATA_GAP_MONTHS);
 }
 
 /**
@@ -898,6 +978,8 @@ function buildReorderForecastItems(sheets, settings, today) {
       .reduce((s, d) => s + (Number(d.quantity) || 0), 0);
     const overOrder = computeOverOrderSignal(itemPurchases, rows, itemDestructions);
     const yearlyStats = yearlyDemandStats(rows);
+    const dataGaps = findDataGaps(rows);
+    const activeRange = activeDataRange(rows);
 
     items.push({
       productKey: key,
@@ -914,6 +996,8 @@ function buildReorderForecastItems(sheets, settings, today) {
       forecastMethod: forecast.forecastMethod,
       dataAnomalies: forecast.dataAnomalies,
       yearlyStats,
+      dataGaps,
+      activeRange,
       recentAvgMonthlyDemand: demandStats.recentAvgMonthlyDemand,
       recentStdDevMonthlyDemand: demandStats.recentStdDevMonthlyDemand,
       recentMonthsCount: demandStats.recentMonthsCount,
@@ -968,7 +1052,81 @@ function buildReorderForecastItems(sheets, settings, today) {
     budgetSetButIneffective: totalBudget != null && !financialOptimizationEnabled,
   };
 
-  return { items, financialOptimization };
+  const possibleSameItemGroups = findPossibleSameItemGroups(items);
+  return { items, financialOptimization, possibleSameItemGroups };
+}
+
+/**
+ * Strips a product name down to its base ingredient/line name by removing
+ * every "number + unit" token (500mg, 60 Caps, 1000 IU, ...) - what's left
+ * is what two differently-strengthed or differently-sized listings of the
+ * SAME product line have in common. Deliberately crude (no synonym list,
+ * no brand-specific knowledge) since the point is a candidate list for a
+ * human to review, not an automatic classifier.
+ */
+function stemProductName(name) {
+  return String(name || "")
+    .toLowerCase()
+    .replace(/\b\d+(\.\d+)?\s*(mg|mcg|g|kg|iu|ml|l)\b/g, " ")
+    .replace(/\b\d+(\.\d+)?\s*(caps?|capsules?|tabs?|tablets?|softgels?|caplets?|gummies|pcs?|pack|ct)\b/g, " ")
+    .replace(/[().,\-+]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Surfaces groups of items, within the same brand, whose names reduce to
+ * the same stem (see stemProductName) - almost always a strength or pack-
+ * size change ("Carnitine 500mg" -> "Carnitine 800mg" -> "Carnitine
+ * 1000mg") that was logged as a brand-new item name rather than an update
+ * to the existing one, silently splitting one product's real demand
+ * history across several rows (exactly what produces a year with no data
+ * at all for any single one of them - see yearlyDemandStats' monthsWithData).
+ *
+ * Pure detection, nothing is merged here or anywhere downstream: whether a
+ * rename is really the same formulation (combine the history) or a
+ * genuinely distinct, still-separately-stocked SKU (keep them apart) is a
+ * business call only the manager can make, with the per-item stats below
+ * as evidence either way.
+ */
+function findPossibleSameItemGroups(items) {
+  const byBrand = new Map();
+  for (const it of items) {
+    const brand = (it.brand || "").trim();
+    if (!brand) continue; // nothing to group by without a brand
+    if (!byBrand.has(brand)) byBrand.set(brand, []);
+    byBrand.get(brand).push(it);
+  }
+  const groups = [];
+  for (const [brand, brandItems] of byBrand) {
+    const byStem = new Map();
+    for (const it of brandItems) {
+      const stem = stemProductName(it.productName);
+      if (!stem) continue;
+      if (!byStem.has(stem)) byStem.set(stem, []);
+      byStem.get(stem).push(it);
+    }
+    for (const stemItems of byStem.values()) {
+      if (stemItems.length < 2) continue;
+      groups.push({
+        brand,
+        stem: stemProductName(stemItems[0].productName),
+        items: stemItems
+          .map((it) => ({
+            productName: it.productName,
+            allTimeAvgMonthlyDemand: it.allTimeAvgMonthlyDemand,
+            allTimeMonthsCount: it.allTimeMonthsCount,
+            currentStock: it.currentStock,
+            // So a manager can see for themselves whether one name's
+            // history stops right where another's starts (a real rename)
+            // versus the two overlapping in time (probably not).
+            activeRange: it.activeRange,
+          }))
+          .sort((a, b) => b.allTimeMonthsCount - a.allTimeMonthsCount),
+      });
+    }
+  }
+  return groups.sort((a, b) => b.items.length - a.items.length);
 }
 
 module.exports = {
@@ -996,4 +1154,9 @@ module.exports = {
   yearlyDemandStats,
   demandSummaryStats,
   buildReorderForecastItems,
+  stemProductName,
+  findPossibleSameItemGroups,
+  activeDataRange,
+  findDataGaps,
+  MIN_DATA_GAP_MONTHS,
 };

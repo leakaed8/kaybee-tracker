@@ -2258,13 +2258,13 @@ async function getReorderForecastSettings() {
 
 app.get("/api/reorder-forecast", requireManager, async (req, res) => {
   try {
-    const { StockMovement, Products, Purchases, Destructions, ProductCatalog } = await db.getAllRowsBatch(
-      ["StockMovement", "Products", "Purchases", "Destructions", "ProductCatalog"],
+    const { StockMovement, Products, Purchases, Destructions, ProductCatalog, ReorderDataGapNotes } = await db.getAllRowsBatch(
+      ["StockMovement", "Products", "Purchases", "Destructions", "ProductCatalog", "ReorderDataGapNotes"],
     );
     const reorderSettings = await getReorderForecastSettings();
     const today = new Date(todayBeirutStr());
 
-    const { items, financialOptimization } = forecasting.buildReorderForecastItems(
+    const { items, financialOptimization, possibleSameItemGroups } = forecasting.buildReorderForecastItems(
       {
         stockMovement: StockMovement, products: Products, purchases: Purchases,
         destructions: Destructions, productCatalog: ProductCatalog,
@@ -2273,7 +2273,23 @@ app.get("/api/reorder-forecast", requireManager, async (req, res) => {
       today,
     );
 
-    res.json({ items, settings: reorderSettings, financialOptimization });
+    // Attach any standing manager answer ("yes, out of stock" / "no") to
+    // each detected gap, by exact productName + start/end month match, so
+    // an already-answered gap doesn't keep asking the same question.
+    const gapNoteKey = (productName, startYear, startMonth, endYear, endMonth) =>
+      `${productName}::${startYear}::${startMonth}::${endYear}::${endMonth}`;
+    const gapNotesByKey = new Map();
+    for (const n of ReorderDataGapNotes) {
+      gapNotesByKey.set(gapNoteKey(n.productName, Number(n.startYear), Number(n.startMonth), Number(n.endYear), Number(n.endMonth)), n);
+    }
+    for (const it of items) {
+      it.dataGaps = it.dataGaps.map((g) => {
+        const note = gapNotesByKey.get(gapNoteKey(it.productName, g.startYear, g.startMonth, g.endYear, g.endMonth));
+        return { ...g, status: note?.status || "" };
+      });
+    }
+
+    res.json({ items, possibleSameItemGroups, settings: reorderSettings, financialOptimization });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
@@ -2292,6 +2308,85 @@ app.patch("/api/reorder-forecast/settings", requireManager, async (req, res) => 
     if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
     await db.setSettings(patch);
     res.json({ ok: true, settings: await getReorderForecastSettings() });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Combines a "possible same-item name variants" cluster into one name,
+// everywhere that drives the demand forecast — StockMovement, Purchases
+// (exposure-window measurement) and Destructions (waste history) — so
+// their sales/receiving/waste history is read as one continuous product
+// going forward, same symptom-and-fix as the specialty-name merge above.
+// Deliberately does NOT touch Products (live stock) or ProductCatalog
+// (the master catalog — brand, pricing, images, used across Knowledge/
+// Product Expert/competitor comparison far beyond this one report):
+// those are a separate, higher-stakes decision about which current SKU
+// a manager wants to keep, not something to fold into a demand-history
+// cleanup click. If both names still carry current stock under Products
+// after this, each keeps showing as its own stock row — on purpose.
+app.post("/api/reorder-forecast/merge-item-names", requireManager, async (req, res) => {
+  try {
+    const { fromNames, toName } = req.body;
+    const to = String(toName || "").trim();
+    if (!to) return res.status(400).json({ error: "toName is required." });
+    if (!Array.isArray(fromNames) || fromNames.length === 0) return res.status(400).json({ error: "fromNames must be a non-empty array." });
+    const fromSet = new Set(fromNames.map((v) => String(v || "").trim()).filter(Boolean));
+    if (fromSet.size === 0) return res.status(400).json({ error: "fromNames had nothing usable." });
+
+    const tabs = ["StockMovement", "Purchases", "Destructions"];
+    const updatedCounts = {};
+    for (const tab of tabs) {
+      const rows = await db.getAllRows(tab);
+      const toUpdate = rows.filter((r) => fromSet.has((r.productName || "").trim()) && (r.productName || "").trim() !== to);
+      updatedCounts[tab] = toUpdate.length;
+      if (toUpdate.length > 0) {
+        await db.batchUpdateRows(tab, toUpdate.map((r) => ({ id: r.id, patch: { productName: to } })));
+      }
+    }
+    await writeAuditLog({
+      entityType: "reorder_item_name_merge", entityId: "", field: "productName",
+      oldValue: [...fromSet].join(" / "), newValue: to, changedBy: req.repName || "Manager",
+      reason: `StockMovement:${updatedCounts.StockMovement} Purchases:${updatedCounts.Purchases} Destructions:${updatedCounts.Destructions}`,
+    });
+    res.json({ ok: true, updatedCounts });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// A manager's standing answer to "was this gap really out of stock?" for
+// one specific product + date range (see findDataGaps in forecasting.js).
+// Upserts by the exact productName/start/end key so re-answering the same
+// gap updates it in place rather than piling up duplicate rows.
+app.post("/api/reorder-forecast/data-gap-notes", requireManager, async (req, res) => {
+  try {
+    const { productName, startYear, startMonth, endYear, endMonth, status } = req.body;
+    if (!productName) return res.status(400).json({ error: "productName is required." });
+    if (!["out_of_stock", "dismissed", ""].includes(status)) {
+      return res.status(400).json({ error: "status must be 'out_of_stock', 'dismissed', or '' to clear." });
+    }
+    const sy = Number(startYear), sm = Number(startMonth), ey = Number(endYear), em = Number(endMonth);
+    if (![sy, sm, ey, em].every(Number.isFinite)) return res.status(400).json({ error: "startYear/startMonth/endYear/endMonth must all be numbers." });
+
+    const rows = await db.getAllRows("ReorderDataGapNotes");
+    const existing = rows.find((r) => r.productName === productName
+      && Number(r.startYear) === sy && Number(r.startMonth) === sm
+      && Number(r.endYear) === ey && Number(r.endMonth) === em);
+    const who = req.repName || "Manager";
+    const now = new Date().toISOString();
+    if (existing) {
+      await db.updateRowById("ReorderDataGapNotes", existing.id, { status, confirmedBy: who, confirmedAt: now });
+    } else {
+      await db.appendRow("ReorderDataGapNotes", {
+        id: `rdgn${crypto.randomUUID()}`, productName,
+        startYear: String(sy), startMonth: String(sm), endYear: String(ey), endMonth: String(em),
+        status, confirmedBy: who, confirmedAt: now,
+      });
+    }
+    res.json({ ok: true });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
@@ -5531,6 +5626,55 @@ app.post("/api/sample-prep-stock/restock", requireManager, async (req, res) => {
       const row = rows.find((r) => r.productId === productId);
       if (row) await db.updateRowById("SamplePrepStock", row.id, { lowStockThreshold: String(Math.max(0, Number(lowStockThreshold) || 0)) });
     }
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Direct correction of an already-logged prep-stock line (e.g. a miscount,
+// or a batch that spoiled/expired before being handed out) — an absolute
+// set, unlike restock's additive delta above, since "fix it to be exactly
+// N" is a different intent than "I just made N more."
+app.patch("/api/sample-prep-stock/:id", requireManager, async (req, res) => {
+  try {
+    const { preparedQty, lowStockThreshold } = req.body;
+    const patch = {};
+    if (preparedQty !== undefined) {
+      const qtyNum = Number(preparedQty);
+      if (!Number.isFinite(qtyNum) || qtyNum < 0) return res.status(400).json({ error: "preparedQty must be a non-negative number." });
+      patch.preparedQty = String(qtyNum);
+    }
+    if (lowStockThreshold !== undefined) {
+      const thresholdNum = Number(lowStockThreshold);
+      if (!Number.isFinite(thresholdNum) || thresholdNum < 0) return res.status(400).json({ error: "lowStockThreshold must be a non-negative number." });
+      patch.lowStockThreshold = String(thresholdNum);
+    }
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
+    const rows = await db.getAllRows("SamplePrepStock");
+    const row = rows.find((r) => r.id === req.params.id);
+    if (!row) return res.status(404).json({ error: "Sample prep stock row not found." });
+    patch.updatedBy = req.repName || "Manager";
+    patch.updatedAt = new Date().toISOString();
+    await db.updateRowById("SamplePrepStock", row.id, patch);
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Stops tracking a product as a prepared patient sample entirely — it drops
+// off the Patient-type search in Check-In (back to full-catalog-only via
+// "Flag as interest") until someone logs a fresh prep batch for it again.
+// Deliberately does NOT touch the Samples log (past gave/interest rows for
+// this product stay exactly as they were) — this only removes the running
+// stock count, which is a different, disposable thing.
+app.delete("/api/sample-prep-stock/:id", requireManager, async (req, res) => {
+  try {
+    const ok = await db.deleteRowById("SamplePrepStock", req.params.id);
+    if (!ok) return res.status(404).json({ error: "Sample prep stock row not found." });
     res.json({ ok: true });
   } catch (e) {
     logErr(e);

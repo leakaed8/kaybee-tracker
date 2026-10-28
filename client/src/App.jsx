@@ -1333,6 +1333,32 @@ function reorderRowColor(notes) {
 }
 
 function ReorderDetailRow({ it, fmt, colSpan }) {
+  // "Was this out of stock?" per data gap — answered optimistically here
+  // (no parent reload needed) since the server already has the standing
+  // note; a full page reload will pick it back up from it.dataGaps[].status
+  // the same way, so there's nothing to reconcile.
+  const [gapBusyKey, setGapBusyKey] = useState(null);
+  const [gapOverrides, setGapOverrides] = useState({});
+  const [gapError, setGapError] = useState("");
+  const gapKey = (g) => `${g.startYear}-${g.startMonth}-${g.endYear}-${g.endMonth}`;
+  const answerGap = async (g, status) => {
+    const key = gapKey(g);
+    setGapBusyKey(key);
+    setGapError("");
+    try {
+      await api.setReorderDataGapNote({
+        productName: it.productName,
+        startYear: g.startYear, startMonth: g.startMonth, endYear: g.endYear, endMonth: g.endMonth,
+        status,
+      });
+      setGapOverrides((prev) => ({ ...prev, [key]: status }));
+    } catch (e) {
+      setGapError(e.message);
+    } finally {
+      setGapBusyKey(null);
+    }
+  };
+
   const row = (label, value, note) => (
     <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "3px 0", borderBottom: "1px solid #EFE9DC" }}>
       <span style={{ color: "#8A8272" }}>{label}</span>
@@ -1374,23 +1400,69 @@ function ReorderDetailRow({ it, fmt, colSpan }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {it.yearlyStats.map((y) => (
-                    <tr key={y.year} style={{ borderTop: "1px solid #EFE9DC" }}>
-                      <td style={{ padding: "2px 6px 2px 0" }}>{y.year}</td>
-                      <td style={{ padding: "2px 6px" }}>{y.monthsRecorded}</td>
-                      <td style={{ padding: "2px 6px" }}>{fmt(y.avgMonthlyDemand)}</td>
-                      <td style={{ padding: "2px 6px" }}>{fmt(y.stdDevMonthlyDemand)}</td>
-                      <td style={{ padding: "2px 6px" }}>{fmt(y.maxMonthlyDemand)}</td>
-                    </tr>
-                  ))}
+                  {it.yearlyStats.map((y) => {
+                    const noData = (y.monthsWithData ?? y.monthsRecorded) === 0;
+                    return (
+                      <tr key={y.year} style={{ borderTop: "1px solid #EFE9DC", color: noData ? "#B33A3A" : undefined }}>
+                        <td style={{ padding: "2px 6px 2px 0" }}>{y.year}</td>
+                        <td style={{ padding: "2px 6px" }}>
+                          {y.monthsRecorded}
+                          {noData && " (0 with data)"}
+                        </td>
+                        <td style={{ padding: "2px 6px" }}>{noData ? "no data" : fmt(y.avgMonthlyDemand)}</td>
+                        <td style={{ padding: "2px 6px" }}>{noData ? "—" : fmt(y.stdDevMonthlyDemand)}</td>
+                        <td style={{ padding: "2px 6px" }}>{noData ? "—" : fmt(y.maxMonthlyDemand)}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             ) : <div style={{ color: "#8A8272" }}>No Stock Movement history.</div>}
+            {it.yearlyStats && it.yearlyStats.some((y) => (y.monthsWithData ?? y.monthsRecorded) === 0) && (
+              <div style={{ marginTop: 6, fontSize: 11, color: "#B33A3A" }}>
+                A year shown in red has NO recorded Stock Movement for this exact item name — not a verified zero. Often caused by a mid-history rename (e.g. a strength change like 500mg → 1000mg splitting one product's real history across two different item names).
+              </div>
+            )}
             {it.dataAnomalies && it.dataAnomalies.length > 0 && (
               <div style={{ marginTop: 8, color: "#B33A3A" }}>
                 {it.dataAnomalies.map((a, i) => (
                   <div key={i}>⚠ {a.originalQty.toLocaleString()} in {a.month}/{a.year} was capped as implausible before forecasting — check that month in Stock Movement.</div>
                 ))}
+              </div>
+            )}
+            {it.dataGaps && it.dataGaps.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>Data gaps (2+ months with no Stock Movement)</div>
+                {gapError && <div style={{ color: "#B33A3A", fontSize: 11, marginBottom: 4 }}>{gapError}</div>}
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {it.dataGaps.map((g) => {
+                    const key = gapKey(g);
+                    const busy = gapBusyKey === key;
+                    const status = gapOverrides[key] ?? g.status;
+                    return (
+                      <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 8px" }}>
+                        <span>{g.startLabel} – {g.endLabel} ({g.monthsCount} months)</span>
+                        {status === "out_of_stock" ? (
+                          <span style={{ color: "#4C7A5E", fontWeight: 600 }}>✓ Confirmed out of stock</span>
+                        ) : status === "dismissed" ? (
+                          <span style={{ color: "#8A8272" }}>Not out of stock (noted)</span>
+                        ) : (
+                          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ color: "#8A8272" }}>Was this out of stock?</span>
+                            <button disabled={busy} onClick={() => answerGap(g, "out_of_stock")}
+                              style={{ fontSize: 11, fontWeight: 600, color: "#fff", background: busy ? "#D8D2C4" : "#4C7A5E", border: "none", borderRadius: 6, padding: "4px 8px" }}>
+                              Yes
+                            </button>
+                            <button disabled={busy} onClick={() => answerGap(g, "dismissed")}
+                              style={{ fontSize: 11, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "4px 8px" }}>
+                              No
+                            </button>
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </div>
@@ -1459,6 +1531,22 @@ function ReorderForecastView() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsSaved, setSettingsSaved] = useState(false);
   const [expandedKey, setExpandedKey] = useState(null);
+  // Same-item merge (combines demand history across a renamed product's
+  // old/new names) — per-group tick boxes default to the whole detected
+  // cluster, but a manager can untick one if the heuristic over-grouped.
+  const [mergeChecked, setMergeChecked] = useState({}); // groupKey -> Set(productName)
+  const [mergeCanonical, setMergeCanonical] = useState({}); // groupKey -> string
+  const [mergeBusyKey, setMergeBusyKey] = useState(null);
+  const [mergeError, setMergeError] = useState("");
+  // Full-catalog catch-all merge — the detector above only catches same-
+  // brand, similarly-spelled names; this is "pick any two+ products
+  // yourself" for a rename it couldn't relate (different brand on file, no
+  // shared stem, etc.).
+  const [manualMergeSearch, setManualMergeSearch] = useState("");
+  const [manualMergeSelected, setManualMergeSelected] = useState(new Set());
+  const [manualMergeCanonical, setManualMergeCanonical] = useState("");
+  const [manualMergeBusy, setManualMergeBusy] = useState(false);
+  const [manualMergeError, setManualMergeError] = useState("");
 
   const load = () => {
     setLoading(true);
@@ -1487,6 +1575,61 @@ function ReorderForecastView() {
   const items = (data?.items || []).filter((it) => !q || it.productName.toLowerCase().includes(q));
   const shown = items.slice(0, LIST_DISPLAY_CAP);
   const fmt = (n, digits = 1) => (n == null ? "—" : Number(n).toFixed(digits));
+
+  const groupKeyOf = (g) => `${g.brand}::${g.stem}`;
+  const checkedFor = (g) => mergeChecked[groupKeyOf(g)] || new Set(g.items.map((it) => it.productName));
+  const toggleMergeChecked = (g, productName) => {
+    const key = groupKeyOf(g);
+    setMergeChecked((prev) => {
+      const current = new Set(prev[key] || g.items.map((it) => it.productName));
+      if (current.has(productName)) current.delete(productName); else current.add(productName);
+      return { ...prev, [key]: current };
+    });
+  };
+  const canonicalFor = (g) => mergeCanonical[groupKeyOf(g)] ?? g.items[0].productName; // items[0] = most months on record
+  const doMergeItemNames = async (g) => {
+    const key = groupKeyOf(g);
+    const checked = [...checkedFor(g)];
+    const canonical = canonicalFor(g).trim();
+    if (checked.length < 2 || !canonical) return;
+    setMergeBusyKey(key);
+    setMergeError("");
+    try {
+      await api.mergeReorderItemNames(checked, canonical);
+      await load();
+    } catch (e) {
+      setMergeError(e.message);
+    } finally {
+      setMergeBusyKey(null);
+    }
+  };
+
+  const allProductNames = [...new Map((data?.items || []).map((it) => [it.productName, it])).values()]
+    .sort((a, b) => a.productName.localeCompare(b.productName));
+  const manualQ = manualMergeSearch.toLowerCase().trim();
+  const manualFiltered = manualQ ? allProductNames.filter((it) => it.productName.toLowerCase().includes(manualQ)) : allProductNames;
+  const toggleManualMergeSelected = (productName) => setManualMergeSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(productName)) next.delete(productName); else next.add(productName);
+    return next;
+  });
+  const doManualMerge = async () => {
+    const selected = [...manualMergeSelected];
+    const canonical = manualMergeCanonical.trim();
+    if (selected.length < 2 || !canonical) return;
+    setManualMergeBusy(true);
+    setManualMergeError("");
+    try {
+      await api.mergeReorderItemNames(selected, canonical);
+      setManualMergeSelected(new Set());
+      setManualMergeCanonical("");
+      await load();
+    } catch (e) {
+      setManualMergeError(e.message);
+    } finally {
+      setManualMergeBusy(false);
+    }
+  };
 
   return (
     <div>
@@ -1567,6 +1710,112 @@ function ReorderForecastView() {
             </div>
           )}
         </div>
+      )}
+
+      {data?.possibleSameItemGroups?.length > 0 && (
+        <CollapsibleSection title={`⚠ ${data.possibleSameItemGroups.length} possible same-item name variant${data.possibleSameItemGroups.length === 1 ? "" : "s"} (review before trusting a "no data" year)`}>
+          <p style={{ fontSize: 11.5, color: "#8A8272", marginTop: 0, marginBottom: 10 }}>
+            Same brand, same base name after stripping the strength/pack size — often a straight rename
+            (e.g. a dose change) logged as a brand-new item, which silently splits that product's real demand
+            history across two rows instead of updating it in place. Tick which ones are really the same
+            product, pick the name to keep, and merge — this combines their Stock Movement/Purchases/
+            Destructions history so the forecast reads them as one item going forward. It does NOT touch your
+            live Stock or Product Catalog entries — if those also need combining, that's a separate decision.
+          </p>
+          {mergeError && <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 8 }}>{mergeError}</div>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {data.possibleSameItemGroups.map((g) => {
+              const key = groupKeyOf(g);
+              const checked = checkedFor(g);
+              const busy = mergeBusyKey === key;
+              return (
+                <div key={key} style={{ background: "#FBF3F0", border: "1px solid #E5B8B0", borderRadius: 8, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 700, color: "#B33A3A", marginBottom: 6 }}>{g.brand}</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+                    {g.items.map((it) => (
+                      <label key={it.productName} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, fontSize: 12, cursor: "pointer" }}>
+                        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <input type="checkbox" checked={checked.has(it.productName)} onChange={() => toggleMergeChecked(g, it.productName)} />
+                          {it.productName}
+                        </span>
+                        <span style={{ color: "#8A8272" }}>
+                          {it.activeRange ? `${it.activeRange.firstLabel} – ${it.activeRange.lastLabel}` : "no data"} · {fmt(it.allTimeAvgMonthlyDemand)}/mo avg · {it.currentStock.toLocaleString()} on hand
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 11, color: "#8A8272" }}>Keep the name:</span>
+                    <input
+                      value={canonicalFor(g)}
+                      onChange={(e) => setMergeCanonical((prev) => ({ ...prev, [key]: e.target.value }))}
+                      style={{ ...inputStyle, flex: 1, minWidth: 160, fontSize: 12.5 }}
+                    />
+                    <button
+                      type="button"
+                      disabled={busy || checked.size < 2}
+                      onClick={() => doMergeItemNames(g)}
+                      title={checked.size < 2 ? "Tick at least 2 to merge" : undefined}
+                      style={{
+                        padding: "7px 12px", borderRadius: 7, border: "none", fontSize: 12, fontWeight: 700, color: "#fff", whiteSpace: "nowrap",
+                        background: busy || checked.size < 2 ? "#D8D2C4" : "#B33A3A",
+                      }}
+                    >
+                      {busy ? "Merging…" : `Merge ${checked.size} as one item`}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </CollapsibleSection>
+      )}
+
+      {allProductNames.length > 0 && (
+        <CollapsibleSection title="Merge any items yourself (not just the suggestions above)">
+          <p style={{ fontSize: 11.5, color: "#8A8272", marginTop: 0, marginBottom: 10 }}>
+            The suggestions above only catch same-brand items with a similar name. If a rename isn't caught there
+            (different brand on file, no shared name stem, etc.), pick any two or more products here yourself.
+          </p>
+          {manualMergeError && <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 8 }}>{manualMergeError}</div>}
+          <input
+            value={manualMergeSearch}
+            onChange={(e) => setManualMergeSearch(e.target.value)}
+            placeholder="Search items…"
+            style={{ ...inputStyle, width: "100%", marginBottom: 8 }}
+          />
+          <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 240, overflowY: "auto", marginBottom: 10, border: "1px solid #E5DFD3", borderRadius: 8, padding: 8, background: "#fff" }}>
+            {manualFiltered.slice(0, 200).map((it) => (
+              <label key={it.productName} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "3px 0", cursor: "pointer" }}>
+                <input type="checkbox" checked={manualMergeSelected.has(it.productName)} onChange={() => toggleManualMergeSelected(it.productName)} />
+                <span>{it.productName}</span>
+                <span style={{ color: "#8A8272", fontSize: 11 }}>{it.brand ? `· ${it.brand}` : ""} {it.activeRange ? `· ${it.activeRange.firstLabel}–${it.activeRange.lastLabel}` : "· no data"}</span>
+              </label>
+            ))}
+            {manualFiltered.length === 0 && <div style={{ fontSize: 12, color: "#8A8272" }}>No items match.</div>}
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 11, color: "#8A8272" }}>Name to use:</span>
+            <input
+              value={manualMergeCanonical}
+              onChange={(e) => setManualMergeCanonical(e.target.value)}
+              placeholder="e.g. the newer/current name"
+              style={{ ...inputStyle, flex: 1, minWidth: 160, fontSize: 12.5 }}
+            />
+            <button
+              type="button"
+              disabled={manualMergeBusy || manualMergeSelected.size < 2 || !manualMergeCanonical.trim()}
+              onClick={doManualMerge}
+              title={manualMergeSelected.size < 2 ? "Tick at least 2 to merge" : undefined}
+              style={{
+                padding: "7px 12px", borderRadius: 7, border: "none", fontSize: 12, fontWeight: 700, color: "#fff", whiteSpace: "nowrap",
+                background: manualMergeBusy || manualMergeSelected.size < 2 || !manualMergeCanonical.trim() ? "#D8D2C4" : "#1F2A24",
+              }}
+            >
+              {manualMergeBusy ? "Merging…" : `Merge ${manualMergeSelected.size} selected`}
+            </button>
+          </div>
+        </CollapsibleSection>
       )}
 
       {error && <div style={{ fontSize: 12.5, color: "#B33A3A", margin: "10px 0" }}>{error}</div>}
@@ -16338,6 +16587,12 @@ function SamplesTrackingView({ products, role }) {
   const [restockQty, setRestockQty] = useState("");
   const [restocking, setRestocking] = useState(false);
   const restockInputRef = useRef(null);
+  // Edit/delete on an already-logged stock line — manager-only, for
+  // correcting a miscount or retiring a sample that's no longer prepared,
+  // without having to route it through "log another batch."
+  const [editingStockId, setEditingStockId] = useState(null);
+  const [editQty, setEditQty] = useState("");
+  const [editThreshold, setEditThreshold] = useState("");
   const [showDone, setShowDone] = useState(false);
   // Actual hand-out history — distinct from the Pending/Prepared/Given
   // queue below, which is only ever "need next visit" requests. Before
@@ -16405,6 +16660,39 @@ function SamplesTrackingView({ products, role }) {
       setError(e.message);
     } finally {
       setRestocking(false);
+    }
+  };
+
+  const startEditStock = (s) => {
+    setEditingStockId(s.id);
+    setEditQty(String(s.preparedQty));
+    setEditThreshold(String(s.lowStockThreshold));
+  };
+  const cancelEditStock = () => setEditingStockId(null);
+  const saveEditStock = async (id) => {
+    setBusyKey(id);
+    setError("");
+    try {
+      await api.updateSamplePrepStock(id, { preparedQty: Number(editQty) || 0, lowStockThreshold: Number(editThreshold) || 0 });
+      setEditingStockId(null);
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyKey(null);
+    }
+  };
+  const deleteStock = async (s) => {
+    if (!window.confirm(`Stop tracking "${s.productName}" as a prepared patient sample? Reps won't be able to give it out as Patient type until a new batch is logged.`)) return;
+    setBusyKey(s.id);
+    setError("");
+    try {
+      await api.removeSamplePrepStock(s.id);
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyKey(null);
     }
   };
 
@@ -16557,15 +16845,48 @@ function SamplesTrackingView({ products, role }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {stock.map((s) => {
               const low = s.preparedQty <= s.lowStockThreshold;
+              const busy = busyKey === s.id;
+              const editing = editingStockId === s.id;
+              if (editing) {
+                return (
+                  <div key={s.id} style={{ background: "#fff", border: "1px solid #D9A441", borderRadius: 8, padding: "8px 10px" }}>
+                    <div style={{ fontWeight: 600, marginBottom: 6 }}>{s.productName}</div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      <label style={{ fontSize: 11, color: "#8A8272" }}>On hand</label>
+                      <input type="number" min="0" value={editQty} onChange={(e) => setEditQty(e.target.value)} style={{ ...inputStyle, width: 70, padding: "5px 8px", fontSize: 12 }} />
+                      <label style={{ fontSize: 11, color: "#8A8272" }}>Low-stock alert at</label>
+                      <input type="number" min="0" value={editThreshold} onChange={(e) => setEditThreshold(e.target.value)} style={{ ...inputStyle, width: 70, padding: "5px 8px", fontSize: 12 }} />
+                      <button disabled={busy} onClick={() => saveEditStock(s.id)} style={{ fontSize: 11.5, fontWeight: 600, color: "#fff", background: busy ? "#D8D2C4" : "#4C7A5E", border: "none", borderRadius: 6, padding: "6px 10px" }}>
+                        {busy ? "Saving…" : "Save"}
+                      </button>
+                      <button disabled={busy} onClick={cancelEditStock} style={{ fontSize: 11.5, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                );
+              }
               return (
                 <div key={s.id} style={{
-                  display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5,
+                  display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12.5,
                   background: low ? "#FBF3F0" : "#FAF7F2", border: `1px solid ${low ? "#E5B8B0" : "#E5DFD3"}`, borderRadius: 8, padding: "7px 10px",
                 }}>
                   <span>{s.productName}</span>
-                  <span style={{ fontWeight: 700, color: low ? "#B33A3A" : "#1F2A24" }}>
-                    {s.preparedQty} on hand{low && " — low, prepare more"}
-                  </span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontWeight: 700, color: low ? "#B33A3A" : "#1F2A24" }}>
+                      {s.preparedQty} on hand{low && " — low, prepare more"}
+                    </span>
+                    {isManager && (
+                      <span style={{ display: "flex", gap: 6 }}>
+                        <button disabled={busy} onClick={() => startEditStock(s)} style={{ fontSize: 11, fontWeight: 600, color: "#1F2A24", background: "none", border: "1px solid #D8D2C4", borderRadius: 6, padding: "4px 8px" }}>
+                          Edit
+                        </button>
+                        <button disabled={busy} onClick={() => deleteStock(s)} style={{ fontSize: 11, fontWeight: 600, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "4px 8px" }}>
+                          {busy ? "…" : "Delete"}
+                        </button>
+                      </span>
+                    )}
+                  </div>
                 </div>
               );
             })}

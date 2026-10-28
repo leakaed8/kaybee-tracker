@@ -628,6 +628,14 @@ const SCHEMAS = {
   // "admin/training-studies"); the digest job special-cases those two to
   // call out Knowledge/Product-Expert contributions in their own section.
   ActivityLog: ["id", "repName", "resource", "verb", "detail", "createdAt"],
+  // A manager's standing explanation for a Reorder Forecast "data gap"
+  // (a run of 2+ consecutive months with no StockMovement row at all for
+  // an item — see findDataGaps in forecasting.js) — "yes, out of stock"
+  // or "no, something else" — so the same gap doesn't keep asking every
+  // time the report is reopened. Keyed by productName + the exact
+  // start/end month, since a product can have more than one gap in its
+  // history and each is its own question.
+  ReorderDataGapNotes: ["id", "productName", "startYear", "startMonth", "endYear", "endMonth", "status", "confirmedBy", "confirmedAt"],
 };
 
 const VISIT_EXPORT_HEADERS = ["client", "notes", "coordsLat", "coordsLng", "time"];

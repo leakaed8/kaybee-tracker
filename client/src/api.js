@@ -179,6 +179,8 @@ export const api = {
   unlockDestructionsYear: (year) => request("/destructions/unlock", { method: "POST", body: JSON.stringify({ year }) }),
   getReorderForecast: (params) => request(`/reorder-forecast${qs(params)}`),
   updateReorderForecastSettings: (patch) => request("/reorder-forecast/settings", { method: "PATCH", body: JSON.stringify(patch) }),
+  mergeReorderItemNames: (fromNames, toName) => request("/reorder-forecast/merge-item-names", { method: "POST", body: JSON.stringify({ fromNames, toName }) }),
+  setReorderDataGapNote: (payload) => request("/reorder-forecast/data-gap-notes", { method: "POST", body: JSON.stringify(payload) }),
   getRepTelegramLinkCode: (id) => request(`/reps/${id}/telegram-link-code`, { method: "POST" }),
   getManagerTelegramLinkCode: () => request("/settings/telegram-link-code", { method: "POST" }),
   scheduleFollowUp: (followUp) => request("/followups", { method: "POST", body: JSON.stringify(followUp) }),
@@ -281,6 +283,8 @@ export const api = {
     request(`/sample-fulfillments/${followUpId}/${productId}`, { method: "PATCH", body: JSON.stringify(patch) }),
   getSamplePrepStock: () => request("/sample-prep-stock"),
   restockSamplePrep: (payload) => request("/sample-prep-stock/restock", { method: "POST", body: JSON.stringify(payload) }),
+  updateSamplePrepStock: (id, patch) => request(`/sample-prep-stock/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  removeSamplePrepStock: (id) => request(`/sample-prep-stock/${id}`, { method: "DELETE" }),
 
   // ---------- My Schedule ----------
   // getSchedule reuses GET /followups (same tab holds both check-in-driven
