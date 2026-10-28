@@ -9375,7 +9375,7 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
               <a href={mapsLinkFor(d)} target="_blank" rel="noreferrer" style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#4C7A5E", textDecoration: "none" }}>
                 <MapPin size={11} /> Get directions
               </a>
-              {role === "rep" && (
+              {(role === "rep" || role === "manager") && (
                 <button onClick={() => setCompletingId(completingId === d.id ? null : d.id)} style={{ background: "none", border: "none", color: "#C17817", fontSize: 11, fontWeight: 500 }}>
                   {completingId === d.id ? "Cancel" : "Edit info"}
                 </button>
@@ -9390,7 +9390,7 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
                 {historyProfile ? <DoctorTimeline visits={historyProfile.timeline} /> : <EmptyState text="Loading…" />}
               </div>
             )}
-            {role === "rep" && completingId === d.id && (
+            {(role === "rep" || role === "manager") && completingId === d.id && (
               <CompleteInfoForm
                 fields={DOCTOR_FILLABLE_FIELDS}
                 currentValues={d}

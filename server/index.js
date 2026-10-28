@@ -5068,7 +5068,7 @@ app.post("/api/doctors/merge-specialty", requireManager, async (req, res) => {
 const DOCTOR_FILLABLE_FIELDS = ["name", "phone", "address", "registrationNumber", "area", "hospital", "specialty"];
 app.patch("/api/doctors/:id/complete-info", async (req, res) => {
   try {
-    if (!req.repName) return res.status(403).json({ error: "Reps only." });
+    if (!req.repName && req.role !== "manager") return res.status(403).json({ error: "Reps or managers only." });
     const doctors = await db.getAllRows("Doctors");
     const existing = doctors.find((d) => d.id === req.params.id);
     if (!existing) return res.status(404).json({ error: "Doctor not found" });
@@ -5083,7 +5083,7 @@ app.patch("/api/doctors/:id/complete-info", async (req, res) => {
     await db.updateRowById("Doctors", existing.id, patch);
     if (patch.name && patch.name !== oldName) {
       await renameEntityAcrossHistory(oldName, patch.name, { includeOrders: false });
-      await writeAuditLog({ entityType: "doctor_rename", entityId: existing.id, field: "name", oldValue: oldName, newValue: patch.name, changedBy: req.repName, reason: "Corrected via Edit info" });
+      await writeAuditLog({ entityType: "doctor_rename", entityId: existing.id, field: "name", oldValue: oldName, newValue: patch.name, changedBy: req.repName || "Manager", reason: "Corrected via Edit info" });
     }
     res.json({ ok: true, patch });
   } catch (e) {
