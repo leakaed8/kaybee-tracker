@@ -1413,7 +1413,10 @@ function ReorderDetailRow({ it, fmt, colSpan }) {
 
           <div>
             <div style={{ fontWeight: 600, marginBottom: 6 }}>Cost/sale economics</div>
-            {row("Cost price", it.costPrice != null ? it.costPrice.toFixed(2) : "—", it.costSource ? `(${it.costSource})` : "")}
+            {row("Cost price", it.costPrice != null ? it.costPrice.toFixed(2) : "—",
+              it.costPrice != null
+                ? `(${it.costSource}${!it.financialOptimizationEnabled ? ", not used — optimization off" : ""})`
+                : "")}
             {row("Sale price", it.salePrice != null ? it.salePrice.toFixed(2) : "—")}
             {row("Salvage value if destroyed", it.salvageValue != null ? it.salvageValue.toFixed(2) : "0.00 (not set)")}
             {row("Cu (profit lost if out of stock)", it.cu != null ? it.cu.toFixed(2) : "—", "= sale − cost")}
@@ -1427,7 +1430,12 @@ function ReorderDetailRow({ it, fmt, colSpan }) {
             <div style={{ fontWeight: 600, marginBottom: 6 }}>How Suggested Qty was computed</div>
             {row("Forecasted demand/mo", fmt(it.forecastedMonthlyDemand), `(residual stdev ${fmt(it.forecastResidualStdDev)})`)}
             {row("Exposure window", `${Math.round(it.exposureDays)}d = ${it.exposureMonths.toFixed(2)}mo`, `(${it.exposureSource})`)}
-            {row("Service level Z", it.serviceLevelZ.toFixed(2), it.criticalRatio != null ? `(critical ratio ${(it.criticalRatio * 100).toFixed(1)}%)` : "(floor — no cost/sale price)")}
+            {row("Service level Z", it.serviceLevelZ.toFixed(2),
+              it.criticalRatio != null
+                ? `(cost-based, critical ratio ${(it.criticalRatio * 100).toFixed(1)}%)`
+                : !it.financialOptimizationEnabled
+                  ? "(floor — financial optimization is off, see Settings)"
+                  : "(floor — no cost/sale price for this item)")}
             {row("Safety stock", fmt(it.safetyStock), "= Z × residual stdev × √(exposure months)")}
             {row("Target stock level", fmt(it.targetStockLevel), "= forecast × exposure months + safety stock")}
             {row("Current stock", it.currentStock.toLocaleString())}
@@ -1511,6 +1519,25 @@ function ReorderForecastView() {
                   onChange={(e) => setSettingsForm((s) => ({ ...s, totalBudget: e.target.value }))} style={inputStyle} />
               </Field>
             </div>
+
+            <div style={{ background: "#FDE68A", border: "1px solid #E0C34D", borderRadius: 8, padding: 12, marginBottom: 12 }}>
+              <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
+                <input type="checkbox" checked={!!settingsForm.financialOptimizationEnabled} style={{ marginTop: 3 }}
+                  onChange={(e) => setSettingsForm((s) => ({ ...s, financialOptimizationEnabled: e.target.checked }))} />
+                <span style={{ fontSize: 12.5 }}>
+                  <strong>Enable financial optimization (requires verified acquisition costs)</strong>
+                  <div style={{ fontSize: 11.5, color: "#5B5445", marginTop: 4 }}>
+                    Off by default. When off, Suggested Qty always uses the Min service Z floor above — never a
+                    cost-derived critical ratio — and budget-based Optimized Qty ranking is disabled, even for
+                    items that already have a landed cost on file from Purchases. Only turn this on once you've
+                    confirmed the landed costs entered in Purchases reflect real, verified acquisition + freight +
+                    customs cost — not an estimate or a placeholder. Until then, any cost on file is shown for
+                    reference only and flagged "COST ON FILE, NOT USED" in Notes.
+                  </div>
+                </span>
+              </label>
+            </div>
+
             <button onClick={saveSettings} disabled={savingSettings}
               style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
               {savingSettings ? "Saving…" : "Save settings"}
@@ -1524,6 +1551,23 @@ function ReorderForecastView() {
           </>
         )}
       </CollapsibleSection>
+
+      {data?.financialOptimization && !data.financialOptimization.enabled && (
+        <div style={{ background: "#FEF3C7", border: "1px solid #E0C34D", borderRadius: 8, padding: 12, margin: "14px 0", fontSize: 12.5 }}>
+          <strong>Financial optimization is OFF.</strong> Every item's Suggested Qty uses the manager service-level
+          floor, not a cost-based critical ratio — profit margins, landed costs, and profit-per-dollar budget
+          ranking are not being calculated.
+          {data.financialOptimization.itemsWithCostOnFile > 0 && (
+            <> {data.financialOptimization.itemsWithCostOnFile} item{data.financialOptimization.itemsWithCostOnFile === 1 ? " has" : "s have"} a landed cost on file from Purchases, but {data.financialOptimization.itemsWithCostOnFile === 1 ? "it isn't" : "none of them are"} being used in any calculation — see "COST ON FILE, NOT USED" in Notes.</>
+          )}
+          {data.financialOptimization.budgetSetButIneffective && (
+            <div style={{ marginTop: 6, fontWeight: 600 }}>
+              A total order budget is also configured, but it has no effect while financial optimization is off —
+              every item is receiving its full Suggested Qty unconstrained.
+            </div>
+          )}
+        </div>
+      )}
 
       {error && <div style={{ fontSize: 12.5, color: "#B33A3A", margin: "10px 0" }}>{error}</div>}
 

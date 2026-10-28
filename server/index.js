@@ -2237,7 +2237,13 @@ app.post("/api/destructions/unlock", requireManager, async (req, res) => {
 // call, respond. Ported from the standalone Excel tool
 // (leakaed8/reorder-forecasting-kaybee); see that repo's
 // WORKED_EXAMPLE.md for the hand-worked numbers behind every formula.
-const REORDER_FORECAST_DEFAULTS = { leadTimeDays: 75, reviewPeriodDays: 182, minServiceZ: 1.65 };
+// financialOptimizationEnabled defaults to false, deliberately - until a
+// manager has verified real acquisition/landed costs (not just whatever
+// happens to be sitting in Purchases.landedCost from an import), Suggested
+// Qty must come from the manager-set service-level floor alone, never a
+// cost-derived critical ratio. See server/forecasting.js's
+// computeReorderRecommendation for the full rationale.
+const REORDER_FORECAST_DEFAULTS = { leadTimeDays: 75, reviewPeriodDays: 182, minServiceZ: 1.65, financialOptimizationEnabled: false };
 
 async function getReorderForecastSettings() {
   const settings = await db.getSettings();
@@ -2246,7 +2252,8 @@ async function getReorderForecastSettings() {
   const minServiceZ = settings.reorderMinServiceZ ? Number(settings.reorderMinServiceZ) : REORDER_FORECAST_DEFAULTS.minServiceZ;
   const totalBudget = settings.reorderTotalBudget && settings.reorderTotalBudget !== ""
     ? Number(settings.reorderTotalBudget) : null;
-  return { leadTimeDays, reviewPeriodDays, minServiceZ, totalBudget };
+  const financialOptimizationEnabled = settings.reorderFinancialOptimizationEnabled === "true";
+  return { leadTimeDays, reviewPeriodDays, minServiceZ, totalBudget, financialOptimizationEnabled };
 }
 
 app.get("/api/reorder-forecast", requireManager, async (req, res) => {
@@ -2257,7 +2264,7 @@ app.get("/api/reorder-forecast", requireManager, async (req, res) => {
     const reorderSettings = await getReorderForecastSettings();
     const today = new Date(todayBeirutStr());
 
-    const { items } = forecasting.buildReorderForecastItems(
+    const { items, financialOptimization } = forecasting.buildReorderForecastItems(
       {
         stockMovement: StockMovement, products: Products, purchases: Purchases,
         destructions: Destructions, productCatalog: ProductCatalog,
@@ -2266,7 +2273,7 @@ app.get("/api/reorder-forecast", requireManager, async (req, res) => {
       today,
     );
 
-    res.json({ items, settings: reorderSettings });
+    res.json({ items, settings: reorderSettings, financialOptimization });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
@@ -2276,11 +2283,12 @@ app.get("/api/reorder-forecast", requireManager, async (req, res) => {
 app.patch("/api/reorder-forecast/settings", requireManager, async (req, res) => {
   try {
     const patch = {};
-    const { leadTimeDays, reviewPeriodDays, minServiceZ, totalBudget } = req.body || {};
+    const { leadTimeDays, reviewPeriodDays, minServiceZ, totalBudget, financialOptimizationEnabled } = req.body || {};
     if (leadTimeDays !== undefined) patch.reorderLeadTimeDays = leadTimeDays === "" ? "" : String(Number(leadTimeDays));
     if (reviewPeriodDays !== undefined) patch.reorderReviewPeriodDays = reviewPeriodDays === "" ? "" : String(Number(reviewPeriodDays));
     if (minServiceZ !== undefined) patch.reorderMinServiceZ = minServiceZ === "" ? "" : String(Number(minServiceZ));
     if (totalBudget !== undefined) patch.reorderTotalBudget = totalBudget === "" || totalBudget == null ? "" : String(Number(totalBudget));
+    if (financialOptimizationEnabled !== undefined) patch.reorderFinancialOptimizationEnabled = financialOptimizationEnabled ? "true" : "";
     if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update." });
     await db.setSettings(patch);
     res.json({ ok: true, settings: await getReorderForecastSettings() });

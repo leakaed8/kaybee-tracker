@@ -259,16 +259,17 @@ test("min order qty (case pack) rounds the suggested qty up to a whole case", ()
   assert.equal(row.suggestedReorderQty, 50);
 });
 
-test("critical ratio pushes the service level above the floor but never below it", () => {
+test("critical ratio pushes the service level above the floor but never below it (financial optimization ON)", () => {
   // High margin, cheap waste -> CR-derived Z should beat the floor.
   const highMargin = computeReorderRecommendation(
     {
       forecastedMonthlyDemand: 35.25, forecastResidualStdDev: 17.166464, currentStock: 195,
       costPrice: 2, salePrice: 200, salvageValue: 0, minOrderQty: null,
     },
-    { leadTimeDays: 75, reviewPeriodDays: 182, minServiceZ: 1.65 },
+    { leadTimeDays: 75, reviewPeriodDays: 182, minServiceZ: 1.65, financialOptimizationEnabled: true },
   );
   assert.ok(highMargin.serviceLevelZ > 1.65);
+  assert.equal(highMargin.serviceLevelSource, "cost-based");
 
   // Modest margin -> CR-derived Z is lower than the floor, floor wins.
   const modestMargin = computeReorderRecommendation(
@@ -276,9 +277,28 @@ test("critical ratio pushes the service level above the floor but never below it
       forecastedMonthlyDemand: 35.25, forecastResidualStdDev: 17.166464, currentStock: 195,
       costPrice: 10, salePrice: 25, salvageValue: 0, minOrderQty: null,
     },
-    { leadTimeDays: 75, reviewPeriodDays: 182, minServiceZ: 1.65 },
+    { leadTimeDays: 75, reviewPeriodDays: 182, minServiceZ: 1.65, financialOptimizationEnabled: true },
   );
   assert.ok(Math.abs(modestMargin.serviceLevelZ - 1.65) < 1e-9);
+});
+
+test("critical ratio is IGNORED when financial optimization is off (default) - floor Z always wins", () => {
+  // Same high-margin inputs as above, but financialOptimizationEnabled is
+  // omitted (defaults to off) - this is the core of the fix: a populated
+  // costPrice must never silently change Suggested Qty unless a manager
+  // has explicitly opted in to financial optimization.
+  const result = computeReorderRecommendation(
+    {
+      forecastedMonthlyDemand: 35.25, forecastResidualStdDev: 17.166464, currentStock: 195,
+      costPrice: 2, salePrice: 200, salvageValue: 0, minOrderQty: null,
+    },
+    { leadTimeDays: 75, reviewPeriodDays: 182, minServiceZ: 1.65 },
+  );
+  assert.equal(result.serviceLevelZ, 1.65);
+  assert.equal(result.serviceLevelSource, "floor");
+  assert.equal(result.cu, null);
+  assert.equal(result.co, null);
+  assert.equal(result.criticalRatio, null);
 });
 
 // ---------------------------------------------------------------------
@@ -389,7 +409,7 @@ test("buildReorderForecastItems joins StockMovement/Products/Purchases/Destructi
 
   const { items } = buildReorderForecastItems(
     { stockMovement, products, purchases, destructions, productCatalog },
-    { leadTimeDays: 75, reviewPeriodDays: 182, minServiceZ: 1.65, totalBudget: null },
+    { leadTimeDays: 75, reviewPeriodDays: 182, minServiceZ: 1.65, totalBudget: null, financialOptimizationEnabled: true },
     today,
   );
 
@@ -435,7 +455,7 @@ test("buildReorderForecastItems: a budget caps optimizedOrderQty but never sugge
 
   const { items } = buildReorderForecastItems(
     { stockMovement, products, purchases, destructions: [], productCatalog },
-    { leadTimeDays: 10, reviewPeriodDays: 0, minServiceZ: 1.0, totalBudget: 5 },
+    { leadTimeDays: 10, reviewPeriodDays: 0, minServiceZ: 1.0, totalBudget: 5, financialOptimizationEnabled: true },
     today,
   );
 
@@ -446,6 +466,48 @@ test("buildReorderForecastItems: a budget caps optimizedOrderQty but never sugge
   assert.equal(b.optimizedOrderQty, 0); // nothing left for B
   assert.ok(a.notes.includes("BUDGET-LIMITED") || a.optimizedOrderQty === a.suggestedReorderQty);
   assert.ok(b.notes.includes("BUDGET-LIMITED"));
+});
+
+test("buildReorderForecastItems: a configured budget has NO effect when financial optimization is off", () => {
+  // Same setup as above, but financialOptimizationEnabled is omitted - per
+  // requirement 4, profit-per-dollar budget ranking must not run on
+  // unverified costs. Every item should pass through unconstrained
+  // (Optimized Qty == Suggested Qty for both), and the summary should flag
+  // the budget as configured-but-ineffective so the UI can warn about it.
+  const today = new Date(2026, 0, 15);
+  const stockMovement = [
+    { productName: "A", year: 2025, month: 1, qty: 100 },
+    { productName: "B", year: 2025, month: 1, qty: 100 },
+  ];
+  const products = [
+    { name: "A", qty: "0", expiry: "" },
+    { name: "B", qty: "0", expiry: "" },
+  ];
+  const purchases = [
+    { productName: "A", receiveDate: "2025-06-01", quantity: 10, landedCost: "1" },
+    { productName: "B", receiveDate: "2025-06-01", quantity: 10, landedCost: "10" },
+  ];
+  const productCatalog = [
+    { name: "A", price: "2", packSize: "" },
+    { name: "B", price: "11", packSize: "" },
+  ];
+
+  const { items, financialOptimization } = buildReorderForecastItems(
+    { stockMovement, products, purchases, destructions: [], productCatalog },
+    { leadTimeDays: 10, reviewPeriodDays: 0, minServiceZ: 1.0, totalBudget: 5 },
+    today,
+  );
+
+  const a = items.find((it) => it.productKey === "a");
+  const b = items.find((it) => it.productKey === "b");
+  assert.equal(a.optimizedOrderQty, a.suggestedReorderQty);
+  assert.equal(b.optimizedOrderQty, b.suggestedReorderQty);
+  assert.ok(!a.notes.includes("BUDGET-LIMITED") && !b.notes.includes("BUDGET-LIMITED"));
+  assert.ok(a.notes.includes("COST ON FILE, NOT USED — financial optimization is off; see Settings"));
+  assert.equal(financialOptimization.enabled, false);
+  assert.equal(financialOptimization.budgetSetButIneffective, true);
+  assert.equal(financialOptimization.itemsWithCostOnFile, 2);
+  assert.equal(financialOptimization.itemsUsingCostBasedServiceLevel, 0);
 });
 
 // ---------------------------------------------------------------------
@@ -641,12 +703,12 @@ test("buildReorderForecastItems uses salvage value (ProductCatalog) to reduce Co
   const purchases = [{ productName: "Thermometer", receiveDate: "2025-01-01", quantity: 100, landedCost: "20" }];
   const withoutSalvage = buildReorderForecastItems(
     { stockMovement, products, purchases, destructions: [], productCatalog: [{ name: "Thermometer", price: "35", packSize: "" }] },
-    { leadTimeDays: 30, reviewPeriodDays: 30, minServiceZ: 1.65, totalBudget: null },
+    { leadTimeDays: 30, reviewPeriodDays: 30, minServiceZ: 1.65, totalBudget: null, financialOptimizationEnabled: true },
     today,
   ).items.find((it) => it.productKey === "thermometer");
   const withSalvage = buildReorderForecastItems(
     { stockMovement, products, purchases, destructions: [], productCatalog: [{ name: "Thermometer", price: "35", packSize: "", salvageValue: "15" }] },
-    { leadTimeDays: 30, reviewPeriodDays: 30, minServiceZ: 1.65, totalBudget: null },
+    { leadTimeDays: 30, reviewPeriodDays: 30, minServiceZ: 1.65, totalBudget: null, financialOptimizationEnabled: true },
     today,
   ).items.find((it) => it.productKey === "thermometer");
 

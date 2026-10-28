@@ -453,21 +453,33 @@ function empiricalExposureDays(receiveDates) {
  *
  * item: { forecastedMonthlyDemand, forecastResidualStdDev, currentStock,
  *         costPrice, salePrice, salvageValue, minOrderQty }
- * options: { leadTimeDays, reviewPeriodDays, minServiceZ, exposureDaysOverride }
+ * options: { leadTimeDays, reviewPeriodDays, minServiceZ, exposureDaysOverride,
+ *            financialOptimizationEnabled }
  *   exposureDaysOverride, when given, replaces (leadTimeDays+reviewPeriodDays)
  *   entirely - see empiricalExposureDays below for where this comes from.
+ *   financialOptimizationEnabled is a manager-set policy switch (Settings),
+ *   defaulting to false. Suggested Qty always comes from minServiceZ - a
+ *   deliberate, manager-owned service-level policy - UNLESS this switch is
+ *   explicitly on, in which case a cost-derived critical ratio can push the
+ *   Z score higher (never lower - minServiceZ is always the floor). This
+ *   keeps inventory math decoupled from cost/profit math by default: a
+ *   populated costPrice (e.g. a landed cost entered during Purchases import
+ *   that hasn't actually been verified against a supplier invoice) cannot
+ *   silently change the recommended quantity unless a manager has
+ *   deliberately turned financial optimization on.
  * Returns the full computed row (exposureMonths, cu, co, criticalRatio,
- * serviceLevelZ, safetyStock, targetStockLevel, suggestedReorderQty,
- * daysOfStockRemaining).
+ * serviceLevelZ, serviceLevelSource, safetyStock, targetStockLevel,
+ * suggestedReorderQty, daysOfStockRemaining).
  */
 function computeReorderRecommendation(item, {
-  leadTimeDays, reviewPeriodDays, minServiceZ, exposureDaysOverride,
+  leadTimeDays, reviewPeriodDays, minServiceZ, exposureDaysOverride, financialOptimizationEnabled,
 }) {
   const exposureDays = exposureDaysOverride != null ? exposureDaysOverride : (leadTimeDays + reviewPeriodDays);
   const exposureMonths = exposureDays / DAYS_PER_MONTH;
 
   let cu = null, co = null, criticalRatio = null, serviceLevelZ = minServiceZ;
-  const hasPrices = item.costPrice != null && item.costPrice !== "" && item.salePrice != null && item.salePrice !== "";
+  const hasPrices = !!financialOptimizationEnabled
+    && item.costPrice != null && item.costPrice !== "" && item.salePrice != null && item.salePrice !== "";
   if (hasPrices) {
     cu = item.salePrice - item.costPrice;
     const salvage = item.salvageValue != null && item.salvageValue !== "" ? item.salvageValue : 0;
@@ -477,6 +489,7 @@ function computeReorderRecommendation(item, {
       serviceLevelZ = Math.max(normsinv(criticalRatio), minServiceZ);
     }
   }
+  const serviceLevelSource = criticalRatio != null ? "cost-based" : "floor";
 
   const safetyStock = serviceLevelZ * item.forecastResidualStdDev * Math.sqrt(exposureMonths);
   const targetStockLevel = item.forecastedMonthlyDemand * exposureMonths + safetyStock;
@@ -494,7 +507,7 @@ function computeReorderRecommendation(item, {
   const daysOfStockRemaining = avgDailyDemand > 0 ? item.currentStock / avgDailyDemand : Infinity;
 
   return {
-    exposureMonths, cu, co, criticalRatio, serviceLevelZ,
+    exposureMonths, cu, co, criticalRatio, serviceLevelZ, serviceLevelSource,
     safetyStock, targetStockLevel, suggestedReorderQty, daysOfStockRemaining,
   };
 }
@@ -599,6 +612,9 @@ function buildReorderNotes(it) {
   if (it.forecastedMonthlyDemand === 0 && it.currentStock > 0) notes.push("SLOW MOVER / EXCESS STOCK");
   if (it.historicalDefectQty > 0) notes.push("HISTORY OF SUPPLIER/IMPORT DEFECTS");
   if (it.optimizedOrderQty != null && it.optimizedOrderQty < it.suggestedReorderQty) notes.push("BUDGET-LIMITED");
+  if (!it.financialOptimizationEnabled && it.costPrice != null) {
+    notes.push("COST ON FILE, NOT USED — financial optimization is off; see Settings");
+  }
   if (it.dataAnomalies && it.dataAnomalies.length > 0) {
     notes.push("DATA ANOMALY");
     for (const a of it.dataAnomalies) {
@@ -738,7 +754,7 @@ function demandSummaryStats(rows, windowMonths = 12) {
  */
 function buildReorderForecastItems(sheets, settings, today) {
   const { stockMovement, products, purchases, destructions, productCatalog } = sheets;
-  const { leadTimeDays, reviewPeriodDays, minServiceZ, totalBudget } = settings;
+  const { leadTimeDays, reviewPeriodDays, minServiceZ, totalBudget, financialOptimizationEnabled } = settings;
 
   const monthlyDemand = stockMovement
     .map((r) => ({
@@ -861,7 +877,7 @@ function buildReorderForecastItems(sheets, settings, today) {
         currentStock: stock.currentStock,
         costPrice, salePrice, salvageValue, minOrderQty,
       },
-      { leadTimeDays, reviewPeriodDays, minServiceZ, exposureDaysOverride },
+      { leadTimeDays, reviewPeriodDays, minServiceZ, exposureDaysOverride, financialOptimizationEnabled },
     );
     const expiryRisk = fifoExpiryRisk(stock.batches, forecast.forecastedMonthlyDemand, today);
     // Simple headcount, independent of FIFO/sell-through: how much of what's
@@ -909,6 +925,8 @@ function buildReorderForecastItems(sheets, settings, today) {
       costPrice, costSource: costPrice != null ? "purchases" : null,
       salePrice, salvageValue, minOrderQty,
       cu: reorder.cu, co: reorder.co, criticalRatio: reorder.criticalRatio, serviceLevelZ: reorder.serviceLevelZ,
+      serviceLevelSource: reorder.serviceLevelSource,
+      financialOptimizationEnabled: !!financialOptimizationEnabled,
       safetyStock: reorder.safetyStock, targetStockLevel: reorder.targetStockLevel,
       suggestedReorderQty: reorder.suggestedReorderQty,
       qtyExpiringWithinExposureWindow,
@@ -931,7 +949,26 @@ function buildReorderForecastItems(sheets, settings, today) {
   }
 
   items.sort((a, b) => b.suggestedReorderQty - a.suggestedReorderQty || b.qtyAtRiskOfExpiring - a.qtyAtRiskOfExpiring);
-  return { items };
+
+  // Summary for the UI to render one clear, system-wide banner instead of
+  // repeating the same disclaimer on every row. itemsWithCostOnFile counts
+  // products that have SOME landedCost on record, regardless of whether
+  // financial optimization is even turned on - useful context either way
+  // (e.g. "costs exist but aren't verified/enabled yet" vs "no cost data at
+  // all"). budgetSetButIneffective flags the case a manager would otherwise
+  // discover silently: a total budget is configured, but with financial
+  // optimization off every item is unrankable, so the budget constrains
+  // nothing and every item's Optimized Qty just equals its Suggested Qty.
+  const itemsWithCostOnFile = items.filter((it) => it.costPrice != null).length;
+  const itemsUsingCostBasedServiceLevel = items.filter((it) => it.serviceLevelSource === "cost-based").length;
+  const financialOptimization = {
+    enabled: !!financialOptimizationEnabled,
+    itemsWithCostOnFile,
+    itemsUsingCostBasedServiceLevel,
+    budgetSetButIneffective: totalBudget != null && !financialOptimizationEnabled,
+  };
+
+  return { items, financialOptimization };
 }
 
 module.exports = {
