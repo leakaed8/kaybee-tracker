@@ -719,6 +719,65 @@ function yearlyDemandStats(rows) {
   });
 }
 
+const MONTH_NAMES = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function monthLabel(year, month) { return `${MONTH_NAMES[month]} ${year}`; }
+
+/**
+ * The first and last calendar month this product has ANY real StockMovement
+ * row for (hasData === true) - lets a manager see, at a glance, whether one
+ * name's history stops right where another name's starts (a strong rename
+ * signal) versus the two overlapping in time (more likely two genuinely
+ * different, concurrently-sold items). Deliberately just surfaced as data,
+ * not turned into an automatic "is this a rename" verdict - that judgment
+ * call is exactly what the manager asked to make themselves.
+ *
+ * rows: [{year, month, hasData}], the item's full calendar grid.
+ * Returns {firstLabel, lastLabel} or null if the item has no real data at all.
+ */
+function activeDataRange(rows) {
+  const withData = rows.filter((r) => r.hasData);
+  if (withData.length === 0) return null;
+  const first = withData[0], last = withData[withData.length - 1];
+  return { firstLabel: monthLabel(first.year, first.month), lastLabel: monthLabel(last.year, last.month) };
+}
+
+/**
+ * Contiguous runs of 2+ consecutive months with NO StockMovement row at all
+ * (hasData === false) - a plausible "this was simply out of stock" period,
+ * surfaced for the manager to confirm or dismiss (see
+ * POST /api/reorder-forecast/data-gap-notes) rather than left looking like
+ * an unexplained hole in the data forever. A single missing month is left
+ * out - too easy to be noise (a late import, a quiet month) to be worth a
+ * standing question about.
+ *
+ * rows: [{year, month, hasData}] sorted chronologically, the item's full
+ * calendar grid. Returns [{startYear, startMonth, endYear, endMonth,
+ * monthsCount, startLabel, endLabel}], oldest first.
+ */
+const MIN_DATA_GAP_MONTHS = 2;
+function findDataGaps(rows) {
+  const gaps = [];
+  let runStart = null, prevRow = null;
+  for (const r of rows) {
+    if (!r.hasData) {
+      if (runStart === null) runStart = r;
+    } else if (runStart !== null) {
+      gaps.push([runStart, prevRow]);
+      runStart = null;
+    }
+    prevRow = r;
+  }
+  if (runStart !== null) gaps.push([runStart, prevRow]);
+
+  return gaps
+    .map(([start, end]) => ({
+      startYear: start.year, startMonth: start.month, endYear: end.year, endMonth: end.month,
+      monthsCount: (end.year - start.year) * 12 + (end.month - start.month) + 1,
+      startLabel: monthLabel(start.year, start.month), endLabel: monthLabel(end.year, end.month),
+    }))
+    .filter((g) => g.monthsCount >= MIN_DATA_GAP_MONTHS);
+}
+
 /**
  * The two headline demand averages a manager expects to be able to compare
  * side by side: a "recent" figure (trailing window, raw - not the model's
@@ -903,6 +962,8 @@ function buildReorderForecastItems(sheets, settings, today) {
       .reduce((s, d) => s + (Number(d.quantity) || 0), 0);
     const overOrder = computeOverOrderSignal(itemPurchases, rows, itemDestructions);
     const yearlyStats = yearlyDemandStats(rows);
+    const dataGaps = findDataGaps(rows);
+    const activeRange = activeDataRange(rows);
 
     items.push({
       productKey: key,
@@ -919,6 +980,8 @@ function buildReorderForecastItems(sheets, settings, today) {
       forecastMethod: forecast.forecastMethod,
       dataAnomalies: forecast.dataAnomalies,
       yearlyStats,
+      dataGaps,
+      activeRange,
       recentAvgMonthlyDemand: demandStats.recentAvgMonthlyDemand,
       recentStdDevMonthlyDemand: demandStats.recentStdDevMonthlyDemand,
       recentMonthsCount: demandStats.recentMonthsCount,
@@ -1017,6 +1080,10 @@ function findPossibleSameItemGroups(items) {
             allTimeAvgMonthlyDemand: it.allTimeAvgMonthlyDemand,
             allTimeMonthsCount: it.allTimeMonthsCount,
             currentStock: it.currentStock,
+            // So a manager can see for themselves whether one name's
+            // history stops right where another's starts (a real rename)
+            // versus the two overlapping in time (probably not).
+            activeRange: it.activeRange,
           }))
           .sort((a, b) => b.allTimeMonthsCount - a.allTimeMonthsCount),
       });
@@ -1052,4 +1119,7 @@ module.exports = {
   buildReorderForecastItems,
   stemProductName,
   findPossibleSameItemGroups,
+  activeDataRange,
+  findDataGaps,
+  MIN_DATA_GAP_MONTHS,
 };

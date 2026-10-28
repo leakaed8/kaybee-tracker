@@ -1333,6 +1333,32 @@ function reorderRowColor(notes) {
 }
 
 function ReorderDetailRow({ it, fmt, colSpan }) {
+  // "Was this out of stock?" per data gap — answered optimistically here
+  // (no parent reload needed) since the server already has the standing
+  // note; a full page reload will pick it back up from it.dataGaps[].status
+  // the same way, so there's nothing to reconcile.
+  const [gapBusyKey, setGapBusyKey] = useState(null);
+  const [gapOverrides, setGapOverrides] = useState({});
+  const [gapError, setGapError] = useState("");
+  const gapKey = (g) => `${g.startYear}-${g.startMonth}-${g.endYear}-${g.endMonth}`;
+  const answerGap = async (g, status) => {
+    const key = gapKey(g);
+    setGapBusyKey(key);
+    setGapError("");
+    try {
+      await api.setReorderDataGapNote({
+        productName: it.productName,
+        startYear: g.startYear, startMonth: g.startMonth, endYear: g.endYear, endMonth: g.endMonth,
+        status,
+      });
+      setGapOverrides((prev) => ({ ...prev, [key]: status }));
+    } catch (e) {
+      setGapError(e.message);
+    } finally {
+      setGapBusyKey(null);
+    }
+  };
+
   const row = (label, value, note) => (
     <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "3px 0", borderBottom: "1px solid #EFE9DC" }}>
       <span style={{ color: "#8A8272" }}>{label}</span>
@@ -1404,6 +1430,41 @@ function ReorderDetailRow({ it, fmt, colSpan }) {
                 ))}
               </div>
             )}
+            {it.dataGaps && it.dataGaps.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>Data gaps (2+ months with no Stock Movement)</div>
+                {gapError && <div style={{ color: "#B33A3A", fontSize: 11, marginBottom: 4 }}>{gapError}</div>}
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {it.dataGaps.map((g) => {
+                    const key = gapKey(g);
+                    const busy = gapBusyKey === key;
+                    const status = gapOverrides[key] ?? g.status;
+                    return (
+                      <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 8px" }}>
+                        <span>{g.startLabel} – {g.endLabel} ({g.monthsCount} months)</span>
+                        {status === "out_of_stock" ? (
+                          <span style={{ color: "#4C7A5E", fontWeight: 600 }}>✓ Confirmed out of stock</span>
+                        ) : status === "dismissed" ? (
+                          <span style={{ color: "#8A8272" }}>Not out of stock (noted)</span>
+                        ) : (
+                          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ color: "#8A8272" }}>Was this out of stock?</span>
+                            <button disabled={busy} onClick={() => answerGap(g, "out_of_stock")}
+                              style={{ fontSize: 11, fontWeight: 600, color: "#fff", background: busy ? "#D8D2C4" : "#4C7A5E", border: "none", borderRadius: 6, padding: "4px 8px" }}>
+                              Yes
+                            </button>
+                            <button disabled={busy} onClick={() => answerGap(g, "dismissed")}
+                              style={{ fontSize: 11, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "4px 8px" }}>
+                              No
+                            </button>
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
 
           <div>
@@ -1469,6 +1530,15 @@ function ReorderForecastView() {
   const [mergeCanonical, setMergeCanonical] = useState({}); // groupKey -> string
   const [mergeBusyKey, setMergeBusyKey] = useState(null);
   const [mergeError, setMergeError] = useState("");
+  // Full-catalog catch-all merge — the detector above only catches same-
+  // brand, similarly-spelled names; this is "pick any two+ products
+  // yourself" for a rename it couldn't relate (different brand on file, no
+  // shared stem, etc.).
+  const [manualMergeSearch, setManualMergeSearch] = useState("");
+  const [manualMergeSelected, setManualMergeSelected] = useState(new Set());
+  const [manualMergeCanonical, setManualMergeCanonical] = useState("");
+  const [manualMergeBusy, setManualMergeBusy] = useState(false);
+  const [manualMergeError, setManualMergeError] = useState("");
 
   const load = () => {
     setLoading(true);
@@ -1523,6 +1593,33 @@ function ReorderForecastView() {
       setMergeError(e.message);
     } finally {
       setMergeBusyKey(null);
+    }
+  };
+
+  const allProductNames = [...new Map((data?.items || []).map((it) => [it.productName, it])).values()]
+    .sort((a, b) => a.productName.localeCompare(b.productName));
+  const manualQ = manualMergeSearch.toLowerCase().trim();
+  const manualFiltered = manualQ ? allProductNames.filter((it) => it.productName.toLowerCase().includes(manualQ)) : allProductNames;
+  const toggleManualMergeSelected = (productName) => setManualMergeSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(productName)) next.delete(productName); else next.add(productName);
+    return next;
+  });
+  const doManualMerge = async () => {
+    const selected = [...manualMergeSelected];
+    const canonical = manualMergeCanonical.trim();
+    if (selected.length < 2 || !canonical) return;
+    setManualMergeBusy(true);
+    setManualMergeError("");
+    try {
+      await api.mergeReorderItemNames(selected, canonical);
+      setManualMergeSelected(new Set());
+      setManualMergeCanonical("");
+      await load();
+    } catch (e) {
+      setManualMergeError(e.message);
+    } finally {
+      setManualMergeBusy(false);
     }
   };
 
@@ -1598,7 +1695,7 @@ function ReorderForecastView() {
                           {it.productName}
                         </span>
                         <span style={{ color: "#8A8272" }}>
-                          {it.allTimeMonthsCount}mo on record · {fmt(it.allTimeAvgMonthlyDemand)}/mo avg · {it.currentStock.toLocaleString()} on hand
+                          {it.activeRange ? `${it.activeRange.firstLabel} – ${it.activeRange.lastLabel}` : "no data"} · {fmt(it.allTimeAvgMonthlyDemand)}/mo avg · {it.currentStock.toLocaleString()} on hand
                         </span>
                       </label>
                     ))}
@@ -1626,6 +1723,53 @@ function ReorderForecastView() {
                 </div>
               );
             })}
+          </div>
+        </CollapsibleSection>
+      )}
+
+      {allProductNames.length > 0 && (
+        <CollapsibleSection title="Merge any items yourself (not just the suggestions above)">
+          <p style={{ fontSize: 11.5, color: "#8A8272", marginTop: 0, marginBottom: 10 }}>
+            The suggestions above only catch same-brand items with a similar name. If a rename isn't caught there
+            (different brand on file, no shared name stem, etc.), pick any two or more products here yourself.
+          </p>
+          {manualMergeError && <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 8 }}>{manualMergeError}</div>}
+          <input
+            value={manualMergeSearch}
+            onChange={(e) => setManualMergeSearch(e.target.value)}
+            placeholder="Search items…"
+            style={{ ...inputStyle, width: "100%", marginBottom: 8 }}
+          />
+          <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 240, overflowY: "auto", marginBottom: 10, border: "1px solid #E5DFD3", borderRadius: 8, padding: 8, background: "#fff" }}>
+            {manualFiltered.slice(0, 200).map((it) => (
+              <label key={it.productName} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "3px 0", cursor: "pointer" }}>
+                <input type="checkbox" checked={manualMergeSelected.has(it.productName)} onChange={() => toggleManualMergeSelected(it.productName)} />
+                <span>{it.productName}</span>
+                <span style={{ color: "#8A8272", fontSize: 11 }}>{it.brand ? `· ${it.brand}` : ""} {it.activeRange ? `· ${it.activeRange.firstLabel}–${it.activeRange.lastLabel}` : "· no data"}</span>
+              </label>
+            ))}
+            {manualFiltered.length === 0 && <div style={{ fontSize: 12, color: "#8A8272" }}>No items match.</div>}
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 11, color: "#8A8272" }}>Name to use:</span>
+            <input
+              value={manualMergeCanonical}
+              onChange={(e) => setManualMergeCanonical(e.target.value)}
+              placeholder="e.g. the newer/current name"
+              style={{ ...inputStyle, flex: 1, minWidth: 160, fontSize: 12.5 }}
+            />
+            <button
+              type="button"
+              disabled={manualMergeBusy || manualMergeSelected.size < 2 || !manualMergeCanonical.trim()}
+              onClick={doManualMerge}
+              title={manualMergeSelected.size < 2 ? "Tick at least 2 to merge" : undefined}
+              style={{
+                padding: "7px 12px", borderRadius: 7, border: "none", fontSize: 12, fontWeight: 700, color: "#fff", whiteSpace: "nowrap",
+                background: manualMergeBusy || manualMergeSelected.size < 2 || !manualMergeCanonical.trim() ? "#D8D2C4" : "#1F2A24",
+              }}
+            >
+              {manualMergeBusy ? "Merging…" : `Merge ${manualMergeSelected.size} selected`}
+            </button>
           </div>
         </CollapsibleSection>
       )}

@@ -2251,8 +2251,8 @@ async function getReorderForecastSettings() {
 
 app.get("/api/reorder-forecast", requireManager, async (req, res) => {
   try {
-    const { StockMovement, Products, Purchases, Destructions, ProductCatalog } = await db.getAllRowsBatch(
-      ["StockMovement", "Products", "Purchases", "Destructions", "ProductCatalog"],
+    const { StockMovement, Products, Purchases, Destructions, ProductCatalog, ReorderDataGapNotes } = await db.getAllRowsBatch(
+      ["StockMovement", "Products", "Purchases", "Destructions", "ProductCatalog", "ReorderDataGapNotes"],
     );
     const reorderSettings = await getReorderForecastSettings();
     const today = new Date(todayBeirutStr());
@@ -2265,6 +2265,22 @@ app.get("/api/reorder-forecast", requireManager, async (req, res) => {
       reorderSettings,
       today,
     );
+
+    // Attach any standing manager answer ("yes, out of stock" / "no") to
+    // each detected gap, by exact productName + start/end month match, so
+    // an already-answered gap doesn't keep asking the same question.
+    const gapNoteKey = (productName, startYear, startMonth, endYear, endMonth) =>
+      `${productName}::${startYear}::${startMonth}::${endYear}::${endMonth}`;
+    const gapNotesByKey = new Map();
+    for (const n of ReorderDataGapNotes) {
+      gapNotesByKey.set(gapNoteKey(n.productName, Number(n.startYear), Number(n.startMonth), Number(n.endYear), Number(n.endMonth)), n);
+    }
+    for (const it of items) {
+      it.dataGaps = it.dataGaps.map((g) => {
+        const note = gapNotesByKey.get(gapNoteKey(it.productName, g.startYear, g.startMonth, g.endYear, g.endMonth));
+        return { ...g, status: note?.status || "" };
+      });
+    }
 
     res.json({ items, possibleSameItemGroups, settings: reorderSettings });
   } catch (e) {
@@ -2327,6 +2343,42 @@ app.post("/api/reorder-forecast/merge-item-names", requireManager, async (req, r
       reason: `StockMovement:${updatedCounts.StockMovement} Purchases:${updatedCounts.Purchases} Destructions:${updatedCounts.Destructions}`,
     });
     res.json({ ok: true, updatedCounts });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// A manager's standing answer to "was this gap really out of stock?" for
+// one specific product + date range (see findDataGaps in forecasting.js).
+// Upserts by the exact productName/start/end key so re-answering the same
+// gap updates it in place rather than piling up duplicate rows.
+app.post("/api/reorder-forecast/data-gap-notes", requireManager, async (req, res) => {
+  try {
+    const { productName, startYear, startMonth, endYear, endMonth, status } = req.body;
+    if (!productName) return res.status(400).json({ error: "productName is required." });
+    if (!["out_of_stock", "dismissed", ""].includes(status)) {
+      return res.status(400).json({ error: "status must be 'out_of_stock', 'dismissed', or '' to clear." });
+    }
+    const sy = Number(startYear), sm = Number(startMonth), ey = Number(endYear), em = Number(endMonth);
+    if (![sy, sm, ey, em].every(Number.isFinite)) return res.status(400).json({ error: "startYear/startMonth/endYear/endMonth must all be numbers." });
+
+    const rows = await db.getAllRows("ReorderDataGapNotes");
+    const existing = rows.find((r) => r.productName === productName
+      && Number(r.startYear) === sy && Number(r.startMonth) === sm
+      && Number(r.endYear) === ey && Number(r.endMonth) === em);
+    const who = req.repName || "Manager";
+    const now = new Date().toISOString();
+    if (existing) {
+      await db.updateRowById("ReorderDataGapNotes", existing.id, { status, confirmedBy: who, confirmedAt: now });
+    } else {
+      await db.appendRow("ReorderDataGapNotes", {
+        id: `rdgn${crypto.randomUUID()}`, productName,
+        startYear: String(sy), startMonth: String(sm), endYear: String(ey), endMonth: String(em),
+        status, confirmedBy: who, confirmedAt: now,
+      });
+    }
+    res.json({ ok: true });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
