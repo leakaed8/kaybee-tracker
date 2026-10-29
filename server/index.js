@@ -5265,42 +5265,6 @@ async function dedupeSamplePrepStockRows() {
   return anyMerged ? db.getAllRows("SamplePrepStock") : rows;
 }
 
-// TEMPORARY DIAGNOSTIC — manager-only, read-only, safe to delete once this
-// is resolved. The "0 left" bug has now survived two matching-logic fixes
-// that both check out in testing (byte-identical names, and real
-// punctuation/spacing variants observed elsewhere in this catalog), which
-// means the live mismatch is some other difference this session can't see
-// without live data access. This dumps every Products/SamplePrepStock row
-// whose name contains `q`, decomposed into unicode code points, so an
-// invisible character (a non-breaking space, a BOM, a directional mark —
-// none of which show up on screen, in a screenshot, or by eye) can be
-// spotted directly instead of guessed at again. Visit e.g.
-// /api/debug/name-check?q=alflexil while logged in as manager.
-app.get("/api/debug/name-check", requireManager, async (req, res) => {
-  try {
-    const q = String(req.query.q || "").trim().toLowerCase();
-    if (!q) return res.status(400).json({ error: "q query param is required, e.g. ?q=alflexil" });
-    const describe = (name) => ({
-      text: name,
-      length: String(name || "").length,
-      normalized: normalizeSamplePrepName(name),
-      codePoints: [...String(name || "")].map((ch) => `U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`).join(" "),
-    });
-    const [products, stock] = await Promise.all([
-      db.getAllRows("Products"),
-      db.getAllRows("SamplePrepStock"),
-    ]);
-    res.json({
-      q,
-      products: products.filter((p) => (p.name || "").toLowerCase().includes(q)).map((p) => ({ id: p.id, ...describe(p.name) })),
-      samplePrepStock: stock.filter((s) => (s.productName || "").toLowerCase().includes(q)).map((s) => ({ id: s.id, preparedQty: s.preparedQty, ...describe(s.productName) })),
-    });
-  } catch (e) {
-    logErr(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
 async function adjustSamplePrepStock(productId, productName, deltaQty, who) {
   const rows = await dedupeSamplePrepStockRows();
   const existing = rows.find((r) => normalizeSamplePrepName(r.productName) === normalizeSamplePrepName(productName));
@@ -5318,7 +5282,20 @@ async function adjustSamplePrepStock(productId, productName, deltaQty, who) {
   }
 }
 
-app.get("/api/sample-prep-stock", requireTabAccess("samples"), async (req, res) => {
+// Not gated by requireTabAccess("samples") — that setting controls who can
+// see the standalone Samples MANAGEMENT tab (fulfillment queue, restock
+// logging, edit/delete), which is reasonably restricted. But this read is
+// also what CheckInView calls for ANYONE doing a doctor/nutritionist
+// check-in, to gate "Gave it today" against real prepared-stock quantities
+// — a need that has nothing to do with whether this account can see that
+// management tab. DEFAULT_TAB_VISIBILITY.samples has supervisor: false, so
+// a supervisor conducting their own doctor visits (supervisors get the
+// full rep Check-In experience) was silently getting a 403 on every load,
+// swallowed by the client's .catch(() => setSamplePrepStock([])), which
+// made every product show "0 left" regardless of real stock — not a name-
+// matching bug at all, a permissions gap. Just product names/quantities/
+// thresholds, no more sensitive than what Stock/Samples already show.
+app.get("/api/sample-prep-stock", async (req, res) => {
   try {
     const rows = await dedupeSamplePrepStockRows();
     const stock = rows
