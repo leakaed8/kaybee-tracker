@@ -2468,15 +2468,16 @@ app.post("/api/knowledge-contributions", async (req, res) => {
     if (!specialty || !String(specialty).trim()) return res.status(400).json({ error: "specialty is required" });
     if (!topic || !String(topic).trim()) return res.status(400).json({ error: "topic (existing or new category) is required" });
     if (!productId || !productName || !String(productName).trim()) return res.status(400).json({ error: "A product must be selected" });
-    // Matched by normalized name, not productId — the Product Catalog has
-    // duplicate rows for the same product under different ids (see
-    // adjustSamplePrepStock's comment for the full story), and the same
-    // product picked via a different duplicate row must still count as
-    // already listed under this category.
+    // specialty/topic are category names a human picks from a short list —
+    // simple trim+lowercase is enough. productName comes from the Product
+    // Catalog, which has duplicate rows for the same product that also
+    // differ in punctuation/spacing (see normalizeSamplePrepName's comment
+    // for the full story), so the same product picked via a different
+    // duplicate row must still count as already listed under this category.
     const norm = (s) => String(s || "").trim().toLowerCase();
     const existing = await db.getAllRows("KnowledgeContributions");
     const isDuplicate = existing.some((c) =>
-      norm(c.specialty) === norm(specialty) && norm(c.topic) === norm(topic) && norm(c.productName) === norm(productName)
+      norm(c.specialty) === norm(specialty) && norm(c.topic) === norm(topic) && normalizeSamplePrepName(c.productName) === normalizeSamplePrepName(productName)
     );
     if (isDuplicate) return res.status(409).json({ error: `${String(productName).trim()} is already listed under this category.` });
     const row = {
@@ -5214,15 +5215,19 @@ app.patch("/api/sample-fulfillments/:followUpId/:productId", requireTabAccess("s
 // what actually happened.
 // Keyed by normalized product NAME, not productId. The Product Catalog has
 // duplicate rows for the same product under different ids (repeated
-// imports, a trailing period, etc. — see the same-item-name-variant
-// detector in forecasting.js for the Reorder Forecast side of this same
-// data problem). Matching stock by whichever specific id happened to be
-// restocked meant a rep picking a different duplicate row for the exact
-// same product at check-in always saw "0 left" even with real stock on
-// hand. Matching by name instead makes the prep-stock pool follow the
-// product regardless of which duplicate catalog id anyone happens to pick.
+// imports), and those duplicates often also differ in punctuation/spacing
+// that a plain trim+lowercase doesn't catch — e.g. "...60 Caps.(alfa)" vs
+// "...60 Caps (alfa)" (a period instead of a space before the parenthesis).
+// Matching stock by whichever specific id/spelling happened to be restocked
+// meant a rep picking a different duplicate row for the exact same product
+// at check-in could still see "0 left" even with real stock on hand, even
+// after moving this match from productId to a loosely-normalized name.
+// Stripping everything but letters and digits collapses every such variant
+// (periods, double spaces, non-breaking spaces, capitalization, trailing
+// punctuation) down to the same key, so the prep-stock pool follows the
+// product regardless of which duplicate catalog id or spelling anyone picks.
 function normalizeSamplePrepName(name) {
-  return String(name || "").trim().toLowerCase();
+  return String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 // Self-heals a data artifact left over from when Sample Prep Stock was

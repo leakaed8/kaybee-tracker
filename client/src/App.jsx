@@ -36,6 +36,17 @@ import {
 const POLL_INTERVAL_MS = 30000; // Sheets API's per-user read quota is fixed and shared across every session — keep this conservative
 const LIST_DISPLAY_CAP = 200; // cap rendered rows so huge imported lists (30k+) don't freeze the browser — use search to narrow
 
+// The Product Catalog has duplicate rows for the same product under
+// different ids (repeated imports), and those duplicates often also differ
+// in punctuation/spacing that a plain trim+lowercase doesn't catch — e.g.
+// "...60 Caps.(alfa)" vs "...60 Caps (alfa)" (a period instead of a space
+// before the parenthesis). Matches server/index.js's normalizeSamplePrepName:
+// stripping everything but letters and digits collapses every such variant
+// down to the same key, so a product is recognized as "the same one"
+// everywhere it's matched by name, regardless of which duplicate catalog
+// row or spelling anyone happens to pick.
+const normalizeProductNameKey = (name) => String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+
 // Visits saved when GPS capture fails (indoors, no signal, permission
 // denied) — queued here instead of lost, then flushed automatically once a
 // GPS fix becomes available. Lives in localStorage rather than React state
@@ -2503,9 +2514,9 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   // Matched by normalized NAME, not productId — the Product Catalog has
   // duplicate rows for the same product under different ids, and prep
   // stock has to follow the product regardless of which duplicate catalog
-  // row the rep happens to search up (see adjustSamplePrepStock on the
-  // server for the full story).
-  const preparedQtyFor = (name) => Number(samplePrepStock.find((s) => (s.productName || "").trim().toLowerCase() === (name || "").trim().toLowerCase())?.preparedQty) || 0;
+  // row (or spelling variant) the rep happens to search up (see
+  // normalizeProductNameKey's comment for the full story).
+  const preparedQtyFor = (name) => Number(samplePrepStock.find((s) => normalizeProductNameKey(s.productName) === normalizeProductNameKey(name))?.preparedQty) || 0;
   // Stock already spoken for by "Gave it today" items tagged earlier in
   // THIS same visit (not yet submitted, so not yet reflected in
   // samplePrepStock itself) — subtracted here so the rep can't tag more of
@@ -10051,14 +10062,15 @@ function KnowledgeView({ productCatalog, role }) {
   const pendingTopic = categoryMode === "new" ? newTopic.trim() : selectedTopic;
   // Same product already listed under the same specialty + category — a
   // duplicate catches the exact screenshot that prompted this (the same
-  // Fish Oil contributed twice under Asthma Support). Matched by normalized
-  // name rather than productId, since the Product Catalog itself has
-  // duplicate rows for the same product under different ids.
+  // Fish Oil contributed twice under Asthma Support). specialty/topic are
+  // trim+lowercase matched (a short, human-picked list); productName uses
+  // normalizeProductNameKey since the Product Catalog itself has duplicate
+  // rows for the same product that also differ in punctuation/spacing.
   const isDuplicateContribution = Boolean(
     matchedProduct && pendingTopic && addingTo && contributions.some((c) =>
       normKnowledge(c.specialty) === normKnowledge(addingTo) &&
       normKnowledge(c.topic) === normKnowledge(pendingTopic) &&
-      normKnowledge(c.productName) === normKnowledge(matchedProduct.name)
+      normalizeProductNameKey(c.productName) === normalizeProductNameKey(matchedProduct.name)
     )
   );
 
@@ -15616,18 +15628,18 @@ function SamplesTrackingView({ products, role }) {
   // never auto-actionable: they're grouped here as a read-only demand
   // signal for the manager to review and decide on their own schedule,
   // not a per-request to-do that piles up expecting an answer.
-  // Matched by normalized name, not productId — the Product Catalog has
-  // duplicate rows for the same product under different ids, and a
-  // fulfillment request tagged against a different duplicate than the one
-  // that was restocked must still count as "already has a prep line."
-  const normName = (n) => String(n || "").trim().toLowerCase();
-  const stockProductNames = new Set(stock.map((s) => normName(s.productName)));
-  const interestPending = pending.filter((f) => !stockProductNames.has(normName(f.name)));
-  const actionablePending = pending.filter((f) => stockProductNames.has(normName(f.name)));
+  // Matched by normalizeProductNameKey, not productId — the Product
+  // Catalog has duplicate rows for the same product under different ids
+  // that also differ in punctuation/spacing, and a fulfillment request
+  // tagged against a different duplicate than the one that was restocked
+  // must still count as "already has a prep line."
+  const stockProductNames = new Set(stock.map((s) => normalizeProductNameKey(s.productName)));
+  const interestPending = pending.filter((f) => !stockProductNames.has(normalizeProductNameKey(f.name)));
+  const actionablePending = pending.filter((f) => stockProductNames.has(normalizeProductNameKey(f.name)));
   const interestGroups = [];
   const interestByProduct = new Map();
   interestPending.forEach((f) => {
-    const key = normName(f.name);
+    const key = normalizeProductNameKey(f.name);
     if (!interestByProduct.has(key)) {
       const g = { productId: f.productId, name: f.name, qty: 0, doctors: [] };
       interestByProduct.set(key, g);
