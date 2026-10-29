@@ -9434,18 +9434,25 @@ async function loadImageBytes(productId, which, mime) {
 // ---- Shared pure layout math (unit-testable independent of jsPDF/canvas) ----
 // Legibility of a Supplement Facts label depends on two independent things,
 // and a placement only counts as legible when BOTH clear their floor:
-//   1. Physical size — a label rendered narrower than ~70mm is too small for
+//   1. Physical size — a label rendered narrower than this is too small for
 //      a human to read the fine print, no matter how sharp the source is.
 //      Shrinking an image into a smaller box always makes its *pixel*
 //      density look better, so this check is what actually drives falling
-//      back to a bigger box (side -> full-width -> own page).
+//      back to the bigger full-width box.
 //   2. Source sharpness — "effective PPI" (native pixel width divided by the
-//      rendered width in inches). Below ~150, the source image itself is too
-//      low-resolution to look sharp at any practical size; enlarging it
-//      further never makes it clearer, so this is what flags an image as
-//      needing replacement rather than a bigger box.
-const MIN_LEGIBLE_WIDTH_MM = 70;
-const MIN_LEGIBLE_PPI = 150;
+//      rendered width in inches). Below the floor, the source image itself
+//      is too low-resolution to look sharp at any practical size; enlarging
+//      it further never makes it clearer.
+// Raised from an earlier 70mm/150ppi: most "Supplement Facts" uploads here
+// are a photo of the WHOLE bottle (cap, shoulder, curved glass), not a
+// cropped flat label scan, so only a fraction of the image's own width is
+// actually the label text — a plain image-width check at 70mm reads as
+// "fits" while the real text inside it renders too small to read. These
+// higher floors push more of those bottle-photo cases into the bigger
+// full-width layout instead of accepting a side-by-side fit that measures
+// out as "wide enough" without actually being readable.
+const MIN_LEGIBLE_WIDTH_MM = 95;
+const MIN_LEGIBLE_PPI = 180;
 
 function effectivePpi(imgWidthPx, renderedWidthMm) {
   if (!imgWidthPx || !renderedWidthMm) return 0;

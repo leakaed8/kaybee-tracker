@@ -2452,9 +2452,31 @@ app.get("/api/compensation/summary", async (req, res) => {
 // repKnowledge.js). Shared reference content, not personal visit data, so
 // every authenticated caller (manager or rep) can both read and add — no
 // isTeamWide scoping here, unlike Visits/Orders/Samples.
+// One-time corrective renames of the static SPECIALTY_TALKING_POINTS
+// category label a contribution was saved under — each contribution stores
+// the specialty name verbatim at the time it was added, so renaming a
+// category in repKnowledge.js (e.g. "Internal medicine" -> "Endocrinology")
+// would otherwise silently orphan any already-saved contribution still
+// carrying the old label: it would stop matching any current category and
+// just disappear from the list instead of showing up under the new name.
+// Keyed by normalized old name; add an entry here whenever a category gets
+// renamed. Self-heals on every read, same pattern as
+// dedupeSamplePrepStockRows — a no-op once nothing matches the old name.
+const KNOWLEDGE_SPECIALTY_RENAMES = { "internal medicine": "Endocrinology" };
+async function renameKnowledgeContributionSpecialties(rows) {
+  const stale = rows.filter((c) => KNOWLEDGE_SPECIALTY_RENAMES[String(c.specialty || "").trim().toLowerCase()]);
+  if (stale.length === 0) return rows;
+  for (const c of stale) {
+    const newSpecialty = KNOWLEDGE_SPECIALTY_RENAMES[String(c.specialty || "").trim().toLowerCase()];
+    await db.updateRowById("KnowledgeContributions", c.id, { specialty: newSpecialty });
+    c.specialty = newSpecialty;
+  }
+  return rows;
+}
+
 app.get("/api/knowledge-contributions", async (req, res) => {
   try {
-    const rows = await db.getAllRows("KnowledgeContributions");
+    const rows = await renameKnowledgeContributionSpecialties(await db.getAllRows("KnowledgeContributions"));
     res.json({ contributions: rows.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)) });
   } catch (e) {
     logErr(e);

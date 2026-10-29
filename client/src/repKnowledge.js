@@ -205,7 +205,7 @@ export const SPECIALTY_TALKING_POINTS = [
     ],
   },
   {
-    specialty: "Internal medicine",
+    specialty: "Endocrinology",
     topics: [
       { topic: "Diabetes", text: "Chromium Picolinate 200mcg, Ginseng, Psyllium, Acetyl-L-carnitine, Berberine." },
     ],
