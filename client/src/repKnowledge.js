@@ -213,7 +213,6 @@ export const SPECIALTY_TALKING_POINTS = [
   {
     specialty: "Nephrology/Urology",
     topics: [
-      { topic: "Daily Multi Vitamins", text: "Iron Free 100 Tabs (mason)." },
       { topic: "Dialysis Support", text: "Patients on long-term dialysis often require Vitamin B2 (Riboflavin) and Vitamin B6 (Pyridoxine) loss during hemodialysis." },
       { topic: "Precautions", text: "Medical reps should note that large doses of Vitamin C should be avoided in patients with renal disorders." },
       { topic: "Urology", text: "Highly Concentrated Cranberry with Probiotic, Saw Palmetto for UTI and prostate enlargement. MACA — common supplement for male reproductive health and vitality." },
