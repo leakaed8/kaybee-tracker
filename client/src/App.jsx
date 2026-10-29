@@ -9642,21 +9642,6 @@ function buildBrochurePageHtml({ product, logoDataUrl, overviewRows, ingredients
     ${buildBrochureFooterHtml(logoDataUrl, pageIndex, pageCount)}
   </div>`;
 }
-function buildBrochureFactsOnlyPageHtml({ product, logoDataUrl, factsDataUrl, lowRes, pageIndex, pageCount }) {
-  return `<div style="width:794px;height:1123px;box-sizing:border-box;padding:45px;background:${BROCHURE_COLORS.ivory};display:flex;flex-direction:column;">
-    ${buildBrochureHeaderHtml(logoDataUrl, "")}
-    <div style="font-family:'Playfair Display',serif;font-weight:700;font-size:26px;color:${BROCHURE_COLORS.ink};margin-top:18px;flex:0 0 auto;">Supplement Facts — ${escapeHtml(product.name)}</div>
-    <div style="height:2px;width:72px;background:${BROCHURE_COLORS.sage};margin:14px 0 20px;border-radius:2px;flex:0 0 auto;"></div>
-    ${lowRes ? `<div style="flex:0 0 auto;background:#FCEDDD;border:1px solid #E0B273;border-radius:8px;padding:10px 14px;font-family:Inter,sans-serif;font-size:11px;color:#8A5A14;margin-bottom:16px;">Low-resolution source image — replace with a higher-resolution scan for print use.</div>` : ""}
-    <div style="flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;">
-      <div style="background:#fff;border:1px solid ${BROCHURE_COLORS.border};border-radius:10px;box-shadow:0 10px 24px rgba(23,63,51,0.08);padding:18px;display:flex;align-items:center;justify-content:center;max-width:100%;max-height:100%;box-sizing:border-box;">
-        <img src="${factsDataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;display:block;"/>
-      </div>
-    </div>
-    ${buildBrochureFooterHtml(logoDataUrl, pageIndex, pageCount)}
-  </div>`;
-}
-
 // Mounts a page's HTML off-screen (so it still gets real layout/paint, just
 // not visible) and waits for every image to finish decoding and the
 // brochure fonts to be ready — but does NOT rasterize it. Used on its own
@@ -9686,34 +9671,27 @@ async function renderBrochurePageToCanvas(innerHtml, { scale = 2 } = {}) {
 }
 
 // Decides, via real (but cheap — DOM measurement, no rasterization) layout,
-// whether a product's Supplement Facts image fits legibly side-by-side or
-// full-width on its own main page, or needs its own dedicated page. Split
-// out from actually rendering the page so the caller can learn the
-// decision for EVERY product up front: that's what lets
-// downloadSpecialtyBrochurePdf compute an accurate total page count before
-// committing anything to the PDF, and insert a product's own facts page
-// immediately after that same product's main page — instead of discovering
-// the need for an extra page mid-render and clustering every one of them
-// at the very end of the document, disconnected from whichever product
-// they actually belong to (the bug this replaced).
+// whether a product's Supplement Facts image fits best side-by-side with
+// its bottle photo or needs the wider full-width layout. The facts image
+// ALWAYS stays on the product's one page — there is no "give it its own
+// page" fallback (there used to be, for images too narrow to read at a
+// readable size; that traded legibility for togetherness, which is the
+// wrong trade for a rep handing a doctor a brochure where every product's
+// facts belong right there with its bottle, not on a page by themselves).
+// "full-width" is the last resort for an image that doesn't fit legibly
+// side-by-side — it gets the biggest box this layout has to offer, and
+// whatever legibility results from that is what ships.
 async function decideBrochureHeroLayout(baseArgs, factsData) {
-  if (!factsData) return { heroMode: "bottle-only", needsOwnFactsPage: false, lowRes: false };
-  for (const heroMode of ["side", "full-width"]) {
-    const { container, pageEl } = await mountBrochurePageForMeasurement(buildBrochurePageHtml({ ...baseArgs, heroMode, pageIndex: 1, pageCount: 1 }));
-    const rect = pageEl.querySelector(".kbdoc-facts-img").getBoundingClientRect();
-    document.body.removeChild(container);
-    if (isLegibleFit(factsData.img.width, { w: mmFromPx(rect.width) })) {
-      return { heroMode, needsOwnFactsPage: false, lowRes: false };
-    }
-    if (heroMode === "full-width") {
-      return { heroMode: "bottle-only", needsOwnFactsPage: true, lowRes: effectivePpi(factsData.img.width, mmFromPx(rect.width)) < MIN_LEGIBLE_PPI };
-    }
-  }
+  if (!factsData) return { heroMode: "bottle-only" };
+  const { container, pageEl } = await mountBrochurePageForMeasurement(buildBrochurePageHtml({ ...baseArgs, heroMode: "side", pageIndex: 1, pageCount: 1 }));
+  const rect = pageEl.querySelector(".kbdoc-facts-img").getBoundingClientRect();
+  document.body.removeChild(container);
+  return { heroMode: isLegibleFit(factsData.img.width, { w: mmFromPx(rect.width) }) ? "side" : "full-width" };
 }
 
-// Renders exactly one product's MAIN page using an already-decided
-// heroMode (from decideBrochureHeroLayout) — no more trial-and-error here,
-// since the decision was already made in the planning pass.
+// Renders exactly one product's page using an already-decided heroMode
+// (from decideBrochureHeroLayout) — no more trial-and-error here, since the
+// decision was already made before this is called.
 async function renderDoctorBrochurePage(doc, product, { contributions, pageIndex, pageCount, prefetched, logoDataUrl, heroMode }) {
   const ingredients = parseProductIngredientsJson(product.ingredients);
   const overviewRows = buildProductOverviewRows(product, ingredients);
@@ -9782,71 +9760,43 @@ async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName
     }
   }
 
-  // Memoized per product id so the SAME image data fetched during the
-  // planning pass below is reused in the render pass, not fetched twice —
-  // each product's bottle/facts bytes are small (already downscaled) and
-  // there are at most a couple dozen products in a specialty, so holding
-  // all of them for the duration of one export is cheap.
-  const dataCache = new Map();
-  const getProductData = (product) => {
-    if (!dataCache.has(product.id)) dataCache.set(product.id, fetchProductBrochureData(product));
-    return dataCache.get(product.id);
-  };
-
-  // Planning pass: decide EVERY product's hero layout (side / full-width /
-  // its own dedicated facts page) via cheap DOM measurement before
-  // committing a single page to the PDF. This is what makes the render
-  // pass below able to know the correct total page count from its very
-  // first page, and to insert a product's own facts page immediately after
-  // that same product's main page — rather than discovering the need for
-  // an extra page mid-render and clustering every one of them at the end
-  // of the whole document, disconnected from whichever product they
-  // actually belong to (the bug this replaced).
-  const plans = [];
-  {
-    let nextFetch = products.length ? getProductData(products[0]) : null;
-    for (let i = 0; i < products.length; i++) {
-      const prefetched = await nextFetch;
-      if (i + 1 < products.length) nextFetch = getProductData(products[i + 1]);
-      const ingredients = parseProductIngredientsJson(products[i].ingredients);
-      const overviewRows = buildProductOverviewRows(products[i], ingredients);
-      const subcats = specialtySubcategoriesFor(products[i].name, contributions || []);
-      const baseArgs = {
-        product: products[i], overviewRows, ingredients, subcats,
-        bottleDataUrl: prefetched.bottleData?.dataUrl || "", factsDataUrl: prefetched.factsData?.dataUrl || "",
-      };
-      plans.push({ product: products[i], decision: await decideBrochureHeroLayout(baseArgs, prefetched.factsData) });
-    }
-  }
-
-  const totalPages = 1 + plans.reduce((sum, p) => sum + 1 + (p.decision.needsOwnFactsPage ? 1 : 0), 0);
-
+  // Every product is exactly one page now (facts images never get a page
+  // of their own — see decideBrochureHeroLayout), so the total is known
+  // upfront without a separate planning pass.
   const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+  const pageCount = products.length + 1;
+
+  // Kick off the first product's fetch right away (it keeps downloading in
+  // the background while we await the tiny, same-origin, usually-cached
+  // logo asset needed for the cover page below).
+  let nextFetch = products.length ? fetchProductBrochureData(products[0]) : null;
   const logoDataUrl = await ensureBrochureLogoDataUrl();
 
-  const cover = await renderBrochurePageToCanvas(buildBrochureCoverPageHtml({ specialty, productCount: products.length, pageIndex: 1, pageCount: totalPages, logoDataUrl }));
+  const cover = await renderBrochurePageToCanvas(buildBrochureCoverPageHtml({ specialty, productCount: products.length, pageIndex: 1, pageCount, logoDataUrl }));
   doc.addImage(cover.canvas.toDataURL("image/jpeg", 0.95), "JPEG", 0, 0, 210, 297);
   document.body.removeChild(cover.container);
 
+  // Pipelined, one-ahead fetch: while product i is being rendered (CPU-bound
+  // html2canvas work), product i+1's images are already downloading in the
+  // background, instead of fetching every product's data up front before
+  // any rendering (and any progress feedback) starts. This keeps peak
+  // network concurrency and memory bounded to ~2 products at a time and
+  // makes "Exporting 1/N…" appear right away even for a large specialty.
   let pageIndex = 1;
   for (let i = 0; i < products.length; i++) {
     pageIndex++;
-    const prefetched = await getProductData(products[i]);
+    const prefetched = await nextFetch;
+    if (i + 1 < products.length) nextFetch = fetchProductBrochureData(products[i + 1]);
+    const ingredients = parseProductIngredientsJson(products[i].ingredients);
+    const overviewRows = buildProductOverviewRows(products[i], ingredients);
+    const subcats = specialtySubcategoriesFor(products[i].name, contributions || []);
+    const baseArgs = {
+      product: products[i], overviewRows, ingredients, subcats,
+      bottleDataUrl: prefetched.bottleData?.dataUrl || "", factsDataUrl: prefetched.factsData?.dataUrl || "",
+    };
+    const { heroMode } = await decideBrochureHeroLayout(baseArgs, prefetched.factsData);
     doc.addPage();
-    await renderDoctorBrochurePage(doc, products[i], {
-      contributions: contributions || [], pageIndex, pageCount: totalPages, prefetched, logoDataUrl,
-      heroMode: plans[i].decision.heroMode,
-    });
-    if (plans[i].decision.needsOwnFactsPage) {
-      doc.addPage();
-      pageIndex++;
-      const { canvas, container } = await renderBrochurePageToCanvas(buildBrochureFactsOnlyPageHtml({
-        product: products[i], logoDataUrl, factsDataUrl: prefetched.factsData.dataUrl,
-        lowRes: plans[i].decision.lowRes, pageIndex, pageCount: totalPages,
-      }));
-      doc.addImage(canvas.toDataURL("image/jpeg", 0.95), "JPEG", 0, 0, 210, 297);
-      document.body.removeChild(container);
-    }
+    await renderDoctorBrochurePage(doc, products[i], { contributions: contributions || [], pageIndex, pageCount, prefetched, logoDataUrl, heroMode });
     if (onProgress) onProgress(i + 1, products.length);
   }
   doc.save(`${specialty.replace(/[^a-zA-Z0-9]+/g, "-")}-brochure-${Date.now()}.pdf`);
