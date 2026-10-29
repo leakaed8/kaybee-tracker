@@ -5265,6 +5265,42 @@ async function dedupeSamplePrepStockRows() {
   return anyMerged ? db.getAllRows("SamplePrepStock") : rows;
 }
 
+// TEMPORARY DIAGNOSTIC — manager-only, read-only, safe to delete once this
+// is resolved. The "0 left" bug has now survived two matching-logic fixes
+// that both check out in testing (byte-identical names, and real
+// punctuation/spacing variants observed elsewhere in this catalog), which
+// means the live mismatch is some other difference this session can't see
+// without live data access. This dumps every Products/SamplePrepStock row
+// whose name contains `q`, decomposed into unicode code points, so an
+// invisible character (a non-breaking space, a BOM, a directional mark —
+// none of which show up on screen, in a screenshot, or by eye) can be
+// spotted directly instead of guessed at again. Visit e.g.
+// /api/debug/name-check?q=alflexil while logged in as manager.
+app.get("/api/debug/name-check", requireManager, async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim().toLowerCase();
+    if (!q) return res.status(400).json({ error: "q query param is required, e.g. ?q=alflexil" });
+    const describe = (name) => ({
+      text: name,
+      length: String(name || "").length,
+      normalized: normalizeSamplePrepName(name),
+      codePoints: [...String(name || "")].map((ch) => `U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`).join(" "),
+    });
+    const [products, stock] = await Promise.all([
+      db.getAllRows("Products"),
+      db.getAllRows("SamplePrepStock"),
+    ]);
+    res.json({
+      q,
+      products: products.filter((p) => (p.name || "").toLowerCase().includes(q)).map((p) => ({ id: p.id, ...describe(p.name) })),
+      samplePrepStock: stock.filter((s) => (s.productName || "").toLowerCase().includes(q)).map((s) => ({ id: s.id, preparedQty: s.preparedQty, ...describe(s.productName) })),
+    });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 async function adjustSamplePrepStock(productId, productName, deltaQty, who) {
   const rows = await dedupeSamplePrepStockRows();
   const existing = rows.find((r) => normalizeSamplePrepName(r.productName) === normalizeSamplePrepName(productName));
