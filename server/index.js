@@ -2528,6 +2528,47 @@ app.delete("/api/knowledge-contributions/:id", requireManager, async (req, res) 
   }
 });
 
+// A subspecialty/category created on its own, with no product attached yet
+// — see the KnowledgeSubspecialties schema comment for why this is a
+// separate table from KnowledgeContributions rather than a contribution
+// with an empty product. The client merges these in by topic name
+// alongside the static SPECIALTY_TALKING_POINTS topics and any contributed-
+// product topics, so creating one here and later tagging a product onto
+// the same topic name (via the ordinary "existing category" flow) joins
+// them into one card — no separate "convert to a real topic" step needed.
+app.get("/api/knowledge-subspecialties", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("KnowledgeSubspecialties");
+    res.json({ subspecialties: rows.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)) });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/knowledge-subspecialties", async (req, res) => {
+  try {
+    const { specialty, topic, text } = req.body;
+    if (!specialty || !String(specialty).trim()) return res.status(400).json({ error: "specialty is required" });
+    if (!topic || !String(topic).trim()) return res.status(400).json({ error: "A subspecialty name is required" });
+    const norm = (s) => String(s || "").trim().toLowerCase();
+    const existing = await db.getAllRows("KnowledgeSubspecialties");
+    const isDuplicate = existing.some((s) => norm(s.specialty) === norm(specialty) && norm(s.topic) === norm(topic));
+    if (isDuplicate) return res.status(409).json({ error: `"${String(topic).trim()}" already exists under this specialty.` });
+    const row = {
+      id: `ksub${crypto.randomUUID()}`,
+      specialty: String(specialty).trim(), topic: String(topic).trim(), text: String(text || "").trim(),
+      addedBy: req.repName || "Manager",
+      createdAt: new Date().toISOString(),
+    };
+    await db.appendRow("KnowledgeSubspecialties", row);
+    res.json(row);
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/visits", async (req, res) => {
   const startedAt = Date.now();
   try {

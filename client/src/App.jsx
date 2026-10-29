@@ -10156,6 +10156,44 @@ function KnowledgeView({ productCatalog, role }) {
   };
   useEffect(loadContributions, []);
 
+  // Subspecialties created on their own, with no product yet — a separate
+  // small form next to "Add product" (not the same button) since "set up
+  // the category structure first" and "tag a product onto one" are two
+  // different moments a manager reaches for, and bundling them forced the
+  // first through the second.
+  const [subspecialties, setSubspecialties] = useState([]);
+  const [addingSubspecialtyTo, setAddingSubspecialtyTo] = useState(null); // specialty name, or null
+  const [newSubspecialtyName, setNewSubspecialtyName] = useState("");
+  const [newSubspecialtyText, setNewSubspecialtyText] = useState("");
+  const [savingSubspecialty, setSavingSubspecialty] = useState(false);
+  const [subspecialtyError, setSubspecialtyError] = useState("");
+
+  const loadSubspecialties = () => {
+    api.getKnowledgeSubspecialties().then((data) => setSubspecialties(data.subspecialties || [])).catch(() => {});
+  };
+  useEffect(loadSubspecialties, []);
+
+  const openAddSubspecialtyForm = (specialty) => {
+    if (addingSubspecialtyTo === specialty) { setAddingSubspecialtyTo(null); return; }
+    setAddingSubspecialtyTo(specialty);
+    setNewSubspecialtyName(""); setNewSubspecialtyText(""); setSubspecialtyError("");
+  };
+  const submitSubspecialty = async (specialty) => {
+    const name = newSubspecialtyName.trim();
+    if (!name) return;
+    setSavingSubspecialty(true);
+    setSubspecialtyError("");
+    try {
+      await api.addKnowledgeSubspecialty({ specialty, topic: name, text: newSubspecialtyText.trim() });
+      setAddingSubspecialtyTo(null); setNewSubspecialtyName(""); setNewSubspecialtyText("");
+      loadSubspecialties();
+    } catch (e) {
+      setSubspecialtyError(e.message || "Couldn't add that subspecialty.");
+    } finally {
+      setSavingSubspecialty(false);
+    }
+  };
+
   const [deletingId, setDeletingId] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const deleteContribution = async (id) => {
@@ -10224,20 +10262,33 @@ function KnowledgeView({ productCatalog, role }) {
 
   const specialtyWithContributions = SPECIALTY_TALKING_POINTS.map((s) => {
     const specialtyContribs = contributions.filter((c) => c.specialty === s.specialty);
+    const specialtySubspecialties = subspecialties.filter((sub) => sub.specialty === s.specialty);
     const existingTopicNames = new Set(s.topics.map((t) => t.topic.toLowerCase()));
     const topicsWithProducts = s.topics.map((t) => ({
       ...t,
       contributedProducts: specialtyContribs.filter((c) => c.topic.toLowerCase() === t.topic.toLowerCase()),
     }));
-    // New-category contributions — topic name doesn't match any existing
-    // static topic for this specialty — become their own topic card,
-    // grouped by that topic name, at the end of the list.
-    const newTopicNames = [...new Set(
-      specialtyContribs.filter((c) => !existingTopicNames.has(c.topic.toLowerCase())).map((c) => c.topic)
-    )];
-    const newTopicsFromContributions = newTopicNames.map((topicName) => ({
-      topic: topicName, text: "",
-      contributedProducts: specialtyContribs.filter((c) => c.topic === topicName),
+    // A topic that isn't one of the static ones above becomes its own card
+    // at the end of the list — it can come into existence either by a
+    // manager creating it directly (a subspecialty, with its own optional
+    // description) or as a side effect of a rep tagging a product onto a
+    // brand-new category name; either way, the SAME topic name from both
+    // sources merges into one card rather than showing twice. A
+    // subspecialty's own description wins when both exist for the same name.
+    const extraTopicsByKey = new Map(); // lowercase name -> { topic, text }
+    specialtySubspecialties.forEach((sub) => {
+      const key = sub.topic.toLowerCase();
+      if (existingTopicNames.has(key)) return;
+      extraTopicsByKey.set(key, { topic: sub.topic, text: sub.text || "" });
+    });
+    specialtyContribs.forEach((c) => {
+      const key = c.topic.toLowerCase();
+      if (existingTopicNames.has(key) || extraTopicsByKey.has(key)) return;
+      extraTopicsByKey.set(key, { topic: c.topic, text: "" });
+    });
+    const newTopicsFromContributions = [...extraTopicsByKey.values()].map(({ topic, text }) => ({
+      topic, text,
+      contributedProducts: specialtyContribs.filter((c) => c.topic.toLowerCase() === topic.toLowerCase()),
     }));
     return { ...s, topics: [...topicsWithProducts, ...newTopicsFromContributions] };
   });
@@ -10376,6 +10427,21 @@ function KnowledgeView({ productCatalog, role }) {
                   )}
                   <button
                     onClick={() => {
+                      openAddSubspecialtyForm(s.specialty);
+                      setExpandedSpecialties((prev) => new Set(prev).add(s.specialty));
+                    }}
+                    title={`Add a subspecialty under ${s.specialty}`}
+                    aria-label={`Add a subspecialty under ${s.specialty}`}
+                    style={{
+                      fontSize: 11, fontWeight: 600, padding: "4px 8px", borderRadius: 6, flexShrink: 0, whiteSpace: "nowrap",
+                      border: "1px solid #4C7A5E", background: addingSubspecialtyTo === s.specialty ? "#4C7A5E" : "#fff",
+                      color: addingSubspecialtyTo === s.specialty ? "#fff" : "#4C7A5E", cursor: "pointer",
+                    }}
+                  >
+                    + Subspecialty
+                  </button>
+                  <button
+                    onClick={() => {
                       openAddForm(s.specialty, s.topics);
                       setExpandedSpecialties((prev) => new Set(prev).add(s.specialty));
                     }}
@@ -10393,6 +10459,39 @@ function KnowledgeView({ productCatalog, role }) {
               </div>
               {expandedSpecialties.has(s.specialty) && (
               <>
+              {addingSubspecialtyTo === s.specialty && (
+                <div style={{ background: "#FAF7F2", border: "1px dashed #4C7A5E", borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                  <input
+                    value={newSubspecialtyName}
+                    onChange={(e) => { setNewSubspecialtyName(e.target.value); setSubspecialtyError(""); }}
+                    placeholder="Subspecialty name (e.g. Pediatric Asthma)"
+                    style={{ ...inputStyle, marginBottom: 8, background: "#fff" }}
+                  />
+                  <textarea
+                    value={newSubspecialtyText}
+                    onChange={(e) => { setNewSubspecialtyText(e.target.value); setSubspecialtyError(""); }}
+                    placeholder="Short description (optional) — products can be tagged in later"
+                    rows={2}
+                    style={{ ...inputStyle, marginBottom: 8, background: "#fff", resize: "vertical", fontFamily: "inherit" }}
+                  />
+                  {subspecialtyError && <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 8 }}>{subspecialtyError}</div>}
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={() => setAddingSubspecialtyTo(null)} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 11.5, cursor: "pointer" }}>
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => submitSubspecialty(s.specialty)}
+                      disabled={savingSubspecialty || !newSubspecialtyName.trim()}
+                      style={{
+                        padding: "6px 12px", borderRadius: 6, border: "none", fontSize: 11.5, fontWeight: 600, cursor: "pointer",
+                        background: !newSubspecialtyName.trim() ? "#D8D2C4" : "#4C7A5E", color: "#fff",
+                      }}
+                    >
+                      {savingSubspecialty ? "Saving…" : "Add"}
+                    </button>
+                  </div>
+                </div>
+              )}
               {addingTo === s.specialty && (
                 <div style={{ background: "#FAF7F2", border: "1px dashed #4C7A5E", borderRadius: 8, padding: 10, marginBottom: 8 }}>
                   <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>

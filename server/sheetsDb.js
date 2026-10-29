@@ -278,6 +278,13 @@ const SCHEMAS = {
   // Append-only — reps add to this shared reference, they don't edit/delete
   // each other's entries.
   KnowledgeContributions: ["id", "specialty", "topic", "productId", "productName", "addedBy", "createdAt"],
+  // A subspecialty/category created on its own, with no product yet — a
+  // manager setting up the reference structure ahead of time, rather than
+  // a topic only ever coming into existence as a side effect of someone
+  // tagging a product onto it. Once created it's just another topic name
+  // under its specialty: a product later contributed to the SAME topic
+  // name joins it, same as any other category.
+  KnowledgeSubspecialties: ["id", "specialty", "topic", "text", "addedBy", "createdAt"],
   // The last analysis's flagged-client results (effective % >= 35 only —
   // same filter the client already applies before this gets saved), so
   // reopening Discount Audit shows where things stood without re-uploading
