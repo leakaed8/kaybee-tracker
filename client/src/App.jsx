@@ -9799,7 +9799,56 @@ async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName
     await renderDoctorBrochurePage(doc, products[i], { contributions: contributions || [], pageIndex, pageCount, prefetched, logoDataUrl, heroMode });
     if (onProgress) onProgress(i + 1, products.length);
   }
-  doc.save(`${specialty.replace(/[^a-zA-Z0-9]+/g, "-")}-brochure-${Date.now()}.pdf`);
+  // Returns the blob instead of calling doc.save() itself — on an iOS
+  // home-screen PWA, a blob download routinely isn't honored as a download
+  // at all; it just navigates to the blob: URL and displays the PDF inline
+  // in the WebView, browser chrome and all, showing this app's own address
+  // right there on screen before a manager ever gets to share it with a
+  // doctor. The caller decides how to hand this off (see shareOrDownloadPdfBlob).
+  return { blob: doc.output("blob"), filename: `${specialty.replace(/[^a-zA-Z0-9]+/g, "-")}-brochure-${Date.now()}.pdf` };
+}
+
+// True only where the OS can be handed a FILE directly (Web Share API,
+// Level 2) — this is what lets "Export (PDF)" skip the browser entirely and
+// go straight to the native share sheet (WhatsApp, Mail, Save to Files,
+// AirDrop…), with no in-app page, no address bar, and no link ever shown.
+// Desktop browsers (and older mobile ones) typically don't support this, so
+// they keep the plain, single-click auto-download behavior instead.
+function canShareFiles() {
+  try {
+    return Boolean(navigator.canShare && navigator.canShare({ files: [new File([new Blob(["x"])], "test.pdf", { type: "application/pdf" })] }));
+  } catch {
+    return false;
+  }
+}
+
+// Must be called directly from a fresh click handler, with nothing awaited
+// before it — Web Share API requires a live user gesture, and the PDF
+// itself was generated moments earlier (several seconds of image
+// fetching/rendering), so that gesture is long since spent by the time
+// generation finishes. The caller is responsible for making this call the
+// very first thing a NEW click does.
+async function shareOrDownloadPdfBlob(blob, filename) {
+  const file = new File([blob], filename, { type: "application/pdf" });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file] });
+      return;
+    } catch (e) {
+      if (e?.name === "AbortError") return; // the manager closed the share sheet — not a failure, nothing more to do
+      // Any other failure (e.g. share sheet unavailable for this file after
+      // all) falls through to a plain download below instead of leaving the
+      // manager with nothing.
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function loadImageFromDataUrl(dataUrl) {
@@ -9977,6 +10026,14 @@ function KnowledgeView({ productCatalog, role }) {
   // card's button flash "Exporting…" too.
   const [exportingKey, setExportingKey] = useState(null);
   const [exportProgress, setExportProgress] = useState(null); // { done, total } | null — for the currently exportingKey only
+  // Set once a specialty's PDF has finished generating, on platforms where
+  // sharing a FILE directly is possible (see canShareFiles) — the button
+  // then reads "Share PDF" and the actual share-sheet call happens on the
+  // NEXT click, since that's a fresh user gesture and this one (spent on
+  // several seconds of PDF generation) no longer is. Elsewhere (desktop),
+  // this never gets set — generation finishes straight into a download, as
+  // it always has.
+  const [readyToShare, setReadyToShare] = useState(null); // { key, blob, filename } | null
   // Every specialty card starts collapsed (name + Export/+ buttons only) —
   // a long scrolling wall of every topic and product under every specialty
   // was the actual complaint, not any one specialty's content. Expanding one
@@ -10171,17 +10228,34 @@ function KnowledgeView({ productCatalog, role }) {
                   <button
                     onClick={async () => {
                       const key = `subcat:${s.specialty}`;
+                      // A fresh click landing while this specialty's PDF is
+                      // already sitting ready: hand it off immediately, with
+                      // nothing awaited first, so the share sheet still gets
+                      // a live user gesture to work with.
+                      if (readyToShare?.key === key) {
+                        const { blob, filename } = readyToShare;
+                        setReadyToShare(null);
+                        shareOrDownloadPdfBlob(blob, filename);
+                        return;
+                      }
                       setExportingKey(key);
                       setExportProgress(null);
                       try {
-                        await downloadSpecialtyBrochurePdf(s.specialty, s.topics, catalogByNormName, contributions, (done, total) => setExportProgress({ done, total }));
+                        const result = await downloadSpecialtyBrochurePdf(s.specialty, s.topics, catalogByNormName, contributions, (done, total) => setExportProgress({ done, total }));
+                        if (canShareFiles()) {
+                          setReadyToShare({ key, ...result });
+                        } else {
+                          await shareOrDownloadPdfBlob(result.blob, result.filename);
+                        }
                       } finally {
                         setExportingKey(null);
                         setExportProgress(null);
                       }
                     }}
                     disabled={exportingKey !== null}
-                    title={`Export a premium physician-facing brochure covering every ${s.specialty} product in one PDF`}
+                    title={readyToShare?.key === `subcat:${s.specialty}`
+                      ? "Tap to send this PDF straight to Messages/Mail/Save to Files — no app link, no preview page"
+                      : `Export a premium physician-facing brochure covering every ${s.specialty} product in one PDF`}
                     style={{
                       fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 6, flexShrink: 0,
                       border: "1px solid #4C7A5E", background: "#4C7A5E", color: "#fff",
@@ -10190,6 +10264,8 @@ function KnowledgeView({ productCatalog, role }) {
                   >
                     {exportingKey === `subcat:${s.specialty}`
                       ? (exportProgress ? `Exporting ${exportProgress.done}/${exportProgress.total}…` : "Exporting…")
+                      : readyToShare?.key === `subcat:${s.specialty}`
+                      ? "Share PDF"
                       : "Export (PDF)"}
                   </button>
                   <button
