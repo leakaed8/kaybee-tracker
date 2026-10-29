@@ -2468,6 +2468,17 @@ app.post("/api/knowledge-contributions", async (req, res) => {
     if (!specialty || !String(specialty).trim()) return res.status(400).json({ error: "specialty is required" });
     if (!topic || !String(topic).trim()) return res.status(400).json({ error: "topic (existing or new category) is required" });
     if (!productId || !productName || !String(productName).trim()) return res.status(400).json({ error: "A product must be selected" });
+    // Matched by normalized name, not productId — the Product Catalog has
+    // duplicate rows for the same product under different ids (see
+    // adjustSamplePrepStock's comment for the full story), and the same
+    // product picked via a different duplicate row must still count as
+    // already listed under this category.
+    const norm = (s) => String(s || "").trim().toLowerCase();
+    const existing = await db.getAllRows("KnowledgeContributions");
+    const isDuplicate = existing.some((c) =>
+      norm(c.specialty) === norm(specialty) && norm(c.topic) === norm(topic) && norm(c.productName) === norm(productName)
+    );
+    if (isDuplicate) return res.status(409).json({ error: `${String(productName).trim()} is already listed under this category.` });
     const row = {
       id: `kc${crypto.randomUUID()}`,
       specialty: String(specialty).trim(), topic: String(topic).trim(),

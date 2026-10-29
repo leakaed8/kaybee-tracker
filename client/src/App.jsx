@@ -10006,6 +10006,7 @@ function KnowledgeView({ productCatalog, role }) {
   const [newTopic, setNewTopic] = useState("");
   const [productQuery, setProductQuery] = useState("");
   const [savingContribution, setSavingContribution] = useState(false);
+  const [contributionError, setContributionError] = useState("");
 
   const loadContributions = () => {
     api.getKnowledgeContributions().then((data) => setContributions(data.contributions || [])).catch(() => {});
@@ -10032,7 +10033,7 @@ function KnowledgeView({ productCatalog, role }) {
     setAddingTo(specialty);
     setCategoryMode(existingTopics.length > 0 ? "existing" : "new");
     setSelectedTopic(existingTopics[0]?.topic || "");
-    setNewTopic(""); setProductQuery("");
+    setNewTopic(""); setProductQuery(""); setContributionError("");
   };
 
   // Picked from the Product Catalog itself (not Stock/products) — contributions
@@ -10046,17 +10047,32 @@ function KnowledgeView({ productCatalog, role }) {
     ? (productCatalog || []).filter((p) => p.name.toLowerCase().includes(productQuery.toLowerCase().trim()))
     : (productCatalog || [])
   ).slice(0, 50);
+  const normKnowledge = (s) => String(s || "").trim().toLowerCase();
+  const pendingTopic = categoryMode === "new" ? newTopic.trim() : selectedTopic;
+  // Same product already listed under the same specialty + category — a
+  // duplicate catches the exact screenshot that prompted this (the same
+  // Fish Oil contributed twice under Asthma Support). Matched by normalized
+  // name rather than productId, since the Product Catalog itself has
+  // duplicate rows for the same product under different ids.
+  const isDuplicateContribution = Boolean(
+    matchedProduct && pendingTopic && addingTo && contributions.some((c) =>
+      normKnowledge(c.specialty) === normKnowledge(addingTo) &&
+      normKnowledge(c.topic) === normKnowledge(pendingTopic) &&
+      normKnowledge(c.productName) === normKnowledge(matchedProduct.name)
+    )
+  );
 
   const submitContribution = async (specialty) => {
     const topic = categoryMode === "new" ? newTopic.trim() : selectedTopic;
-    if (!topic || !matchedProduct) return;
+    if (!topic || !matchedProduct || isDuplicateContribution) return;
     setSavingContribution(true);
+    setContributionError("");
     try {
       await api.addKnowledgeContribution({ specialty, topic, productId: matchedProduct.id, productName: matchedProduct.name });
       setAddingTo(null); setNewTopic(""); setProductQuery("");
       loadContributions();
-    } catch {
-      // Keep the form open so the rep can retry.
+    } catch (e) {
+      setContributionError(e.message || "Couldn't add that product.");
     } finally {
       setSavingContribution(false);
     }
@@ -10221,20 +10237,20 @@ function KnowledgeView({ productCatalog, role }) {
                     </button>
                   </div>
                   {categoryMode === "existing" ? (
-                    <select value={selectedTopic} onChange={(e) => setSelectedTopic(e.target.value)} style={{ ...inputStyle, marginBottom: 8, background: "#fff" }}>
+                    <select value={selectedTopic} onChange={(e) => { setSelectedTopic(e.target.value); setContributionError(""); }} style={{ ...inputStyle, marginBottom: 8, background: "#fff" }}>
                       {s.topics.map((t) => <option key={t.topic} value={t.topic}>{t.topic}</option>)}
                     </select>
                   ) : (
                     <input
                       value={newTopic}
-                      onChange={(e) => setNewTopic(e.target.value)}
+                      onChange={(e) => { setNewTopic(e.target.value); setContributionError(""); }}
                       placeholder="New category name (e.g. Joint Health)"
                       style={{ ...inputStyle, marginBottom: 8, background: "#fff" }}
                     />
                   )}
                   <input
                     value={productQuery}
-                    onChange={(e) => setProductQuery(e.target.value)}
+                    onChange={(e) => { setProductQuery(e.target.value); setContributionError(""); }}
                     placeholder="Search our products…"
                     list="knowledge-product-options"
                     style={{ ...inputStyle, marginBottom: 8, background: "#fff" }}
@@ -10242,16 +10258,24 @@ function KnowledgeView({ productCatalog, role }) {
                   <datalist id="knowledge-product-options">
                     {productOptions.map((p) => <option key={p.id} value={p.name} />)}
                   </datalist>
+                  {isDuplicateContribution && (
+                    <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 8 }}>
+                      {matchedProduct.name} is already listed under {pendingTopic || "this category"}.
+                    </div>
+                  )}
+                  {contributionError && !isDuplicateContribution && (
+                    <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 8 }}>{contributionError}</div>
+                  )}
                   <div style={{ display: "flex", gap: 8 }}>
                     <button onClick={() => setAddingTo(null)} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 11.5, cursor: "pointer" }}>
                       Cancel
                     </button>
                     <button
                       onClick={() => submitContribution(s.specialty)}
-                      disabled={savingContribution || !matchedProduct || (categoryMode === "new" && !newTopic.trim()) || (categoryMode === "existing" && !selectedTopic)}
+                      disabled={savingContribution || !matchedProduct || (categoryMode === "new" && !newTopic.trim()) || (categoryMode === "existing" && !selectedTopic) || isDuplicateContribution}
                       style={{
                         padding: "6px 12px", borderRadius: 6, border: "none", fontSize: 11.5, fontWeight: 600, cursor: "pointer",
-                        background: (!matchedProduct || (categoryMode === "new" && !newTopic.trim()) || (categoryMode === "existing" && !selectedTopic)) ? "#D8D2C4" : "#4C7A5E",
+                        background: (!matchedProduct || (categoryMode === "new" && !newTopic.trim()) || (categoryMode === "existing" && !selectedTopic) || isDuplicateContribution) ? "#D8D2C4" : "#4C7A5E",
                         color: "#fff",
                       }}
                     >
