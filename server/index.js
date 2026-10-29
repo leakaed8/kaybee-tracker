@@ -5201,9 +5201,21 @@ app.patch("/api/sample-fulfillments/:followUpId/:productId", requireTabAccess("s
 // (two reps giving out the last unit at the same time, a miscount, etc.),
 // clamping to 0 here keeps the number honest without losing the record of
 // what actually happened.
+// Keyed by normalized product NAME, not productId. The Product Catalog has
+// duplicate rows for the same product under different ids (repeated
+// imports, a trailing period, etc. — see the same-item-name-variant
+// detector in forecasting.js for the Reorder Forecast side of this same
+// data problem). Matching stock by whichever specific id happened to be
+// restocked meant a rep picking a different duplicate row for the exact
+// same product at check-in always saw "0 left" even with real stock on
+// hand. Matching by name instead makes the prep-stock pool follow the
+// product regardless of which duplicate catalog id anyone happens to pick.
+function normalizeSamplePrepName(name) {
+  return String(name || "").trim().toLowerCase();
+}
 async function adjustSamplePrepStock(productId, productName, deltaQty, who) {
   const rows = await db.getAllRows("SamplePrepStock");
-  const existing = rows.find((r) => r.productId === productId);
+  const existing = rows.find((r) => normalizeSamplePrepName(r.productName) === normalizeSamplePrepName(productName));
   const now = new Date().toISOString();
   if (existing) {
     await db.updateRowById("SamplePrepStock", existing.id, {
@@ -5247,7 +5259,7 @@ app.post("/api/sample-prep-stock/restock", requireManager, async (req, res) => {
     await adjustSamplePrepStock(productId, productName, qtyNum, req.repName || "Manager");
     if (lowStockThreshold !== undefined) {
       const rows = await db.getAllRows("SamplePrepStock");
-      const row = rows.find((r) => r.productId === productId);
+      const row = rows.find((r) => normalizeSamplePrepName(r.productName) === normalizeSamplePrepName(productName));
       if (row) await db.updateRowById("SamplePrepStock", row.id, { lowStockThreshold: String(Math.max(0, Number(lowStockThreshold) || 0)) });
     }
     res.json({ ok: true });

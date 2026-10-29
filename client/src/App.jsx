@@ -2493,14 +2493,19 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   // (that's how a brand-new sample type gets requested in the first
   // place). What's actually restricted is "Gave it today": you can only
   // physically hand over what's already prepared, so that button is gated
-  // by this product's real SamplePrepStock count, looked up by id, not by
+  // by this product's real SamplePrepStock count, looked up by name, not by
   // what's searchable.
   const matchedSamplesItem = products.find((p) => p.name.toLowerCase().trim() === samplesQuery.toLowerCase().trim());
   const samplesItemOptions = (samplesQuery.trim()
     ? products.filter((p) => p.name.toLowerCase().includes(samplesQuery.toLowerCase().trim()))
     : products
   ).slice(0, 50);
-  const preparedQtyFor = (productId) => Number(samplePrepStock.find((s) => s.productId === productId)?.preparedQty) || 0;
+  // Matched by normalized NAME, not productId — the Product Catalog has
+  // duplicate rows for the same product under different ids, and prep
+  // stock has to follow the product regardless of which duplicate catalog
+  // row the rep happens to search up (see adjustSamplePrepStock on the
+  // server for the full story).
+  const preparedQtyFor = (name) => Number(samplePrepStock.find((s) => (s.productName || "").trim().toLowerCase() === (name || "").trim().toLowerCase())?.preparedQty) || 0;
   // Stock already spoken for by "Gave it today" items tagged earlier in
   // THIS same visit (not yet submitted, so not yet reflected in
   // samplePrepStock itself) — subtracted here so the rep can't tag more of
@@ -2509,7 +2514,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
     ? mentionedItems.filter((it) => it.productId === matchedSamplesItem.id && it.sampleStatus === "gave" && it.sampleType === "patient").reduce((sum, it) => sum + (Number(it.qty) || 1), 0)
     : 0;
   const remainingForMatched = matchedSamplesItem && sampleTypeChoice === "patient"
-    ? Math.max(0, preparedQtyFor(matchedSamplesItem.id) - alreadyTaggedGaveQty)
+    ? Math.max(0, preparedQtyFor(matchedSamplesItem.name) - alreadyTaggedGaveQty)
     : null;
   const sampleQtyNum = Math.max(1, Number(sampleQty) || 1);
   const giveExceedsStock = sampleTypeChoice === "patient" && remainingForMatched !== null && sampleQtyNum > remainingForMatched;
@@ -3364,7 +3369,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                       onChange={setSamplesQuery}
                       options={samplesItemOptions}
                       getLabel={(p) => p.name}
-                      renderOption={sampleTypeChoice === "patient" ? (p) => `${p.name} — ${preparedQtyFor(p.id)} left` : undefined}
+                      renderOption={sampleTypeChoice === "patient" ? (p) => `${p.name} — ${preparedQtyFor(p.name)} left` : undefined}
                       placeholder="Search a product…"
                       style={{ ...inputStyle, width: "100%", background: "#fff" }}
                     />
@@ -15587,18 +15592,24 @@ function SamplesTrackingView({ products, role }) {
   // never auto-actionable: they're grouped here as a read-only demand
   // signal for the manager to review and decide on their own schedule,
   // not a per-request to-do that piles up expecting an answer.
-  const stockProductIds = new Set(stock.map((s) => s.productId));
-  const interestPending = pending.filter((f) => !stockProductIds.has(f.productId));
-  const actionablePending = pending.filter((f) => stockProductIds.has(f.productId));
+  // Matched by normalized name, not productId — the Product Catalog has
+  // duplicate rows for the same product under different ids, and a
+  // fulfillment request tagged against a different duplicate than the one
+  // that was restocked must still count as "already has a prep line."
+  const normName = (n) => String(n || "").trim().toLowerCase();
+  const stockProductNames = new Set(stock.map((s) => normName(s.productName)));
+  const interestPending = pending.filter((f) => !stockProductNames.has(normName(f.name)));
+  const actionablePending = pending.filter((f) => stockProductNames.has(normName(f.name)));
   const interestGroups = [];
   const interestByProduct = new Map();
   interestPending.forEach((f) => {
-    if (!interestByProduct.has(f.productId)) {
+    const key = normName(f.name);
+    if (!interestByProduct.has(key)) {
       const g = { productId: f.productId, name: f.name, qty: 0, doctors: [] };
-      interestByProduct.set(f.productId, g);
+      interestByProduct.set(key, g);
       interestGroups.push(g);
     }
-    const g = interestByProduct.get(f.productId);
+    const g = interestByProduct.get(key);
     g.qty += Number(f.qty) || 1;
     g.doctors.push({ entityName: f.entityName, repName: f.repName });
   });
