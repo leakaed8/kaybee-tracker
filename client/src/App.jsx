@@ -8616,6 +8616,38 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
     return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([s]) => ({ specialty: s }));
   }, [doctors]);
 
+  // Two doctor records with the EXACT same name are indistinguishable to
+  // Check-In and the Samples log — both key purely off the name string, not
+  // a record id (see /api/doctors/visit-stats), so they always show
+  // identical visit/sample activity no matter which one a rep actually
+  // meant. There's no field anywhere that records which specific duplicate
+  // got visited, so the only real fix for a true duplicate is picking one
+  // to keep and removing the rest — nothing about their shared history is
+  // lost by doing that, since it was never attached to a specific id in the
+  // first place.
+  const duplicateDoctorGroups = useMemo(() => {
+    const groups = new Map();
+    for (const d of doctors) {
+      const key = (d.name || "").trim().toLowerCase();
+      if (!key) continue;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(d);
+    }
+    return [...groups.values()].filter((g) => g.length >= 2);
+  }, [doctors]);
+  const [resolvingDuplicateKey, setResolvingDuplicateKey] = useState(null);
+  const keepDoctor = async (group, keeperId) => {
+    const others = group.filter((d) => d.id !== keeperId);
+    const keeper = group.find((d) => d.id === keeperId);
+    if (!window.confirm(`Keep this "${keeper.name}" record and remove the other ${others.length} duplicate${others.length === 1 ? "" : "s"}? Their visit/sample history stays put either way — it's tracked by name, not by which record.`)) return;
+    setResolvingDuplicateKey(keeper.name.toLowerCase().trim());
+    try {
+      for (const d of others) await onRemove(d.id);
+    } finally {
+      setResolvingDuplicateKey(null);
+    }
+  };
+
   // Doctor-visit redesign: the History toggle now shows the full structured
   // Timeline (DoctorTimeline) via the same /api/doctors/:name/profile
   // endpoint the Check-In Pre-Call brief uses, instead of a hand-rolled
@@ -8763,6 +8795,46 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
           style={{ ...inputStyle, paddingLeft: 34 }}
         />
       </div>
+
+      {duplicateDoctorGroups.length > 0 && (
+        <CollapsibleSection title={`⚠ ${duplicateDoctorGroups.length} doctor name${duplicateDoctorGroups.length === 1 ? "" : "s"} entered more than once`}>
+          <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 10 }}>
+            These share the exact same name, so Check-In and the Samples log can't tell them apart — both always show the same visit/sample activity. Pick the one to keep; its history isn't affected either way.
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {duplicateDoctorGroups.map((group) => {
+              const key = group[0].name.toLowerCase().trim();
+              const busy = resolvingDuplicateKey === key;
+              return (
+                <div key={key} style={{ background: "#fff", border: "1px solid #E5B8B0", borderRadius: 8, padding: 10 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>{group[0].name}</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {group.map((d) => (
+                      <div key={d.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 8px" }}>
+                        <div className="kb-font-mono" style={{ fontSize: 11, color: "#5B5445" }}>
+                          {d.hospital || "no hospital set"} · {d.area || "no area"} {d.phone ? `· ${d.phone}` : ""}
+                          {d.address && <div style={{ marginTop: 2 }}>{d.address}</div>}
+                          {d.specialty && <div style={{ marginTop: 2 }}>{d.specialty}</div>}
+                        </div>
+                        <button
+                          disabled={busy}
+                          onClick={() => keepDoctor(group, d.id)}
+                          style={{
+                            fontSize: 11, fontWeight: 600, padding: "5px 10px", borderRadius: 6, flexShrink: 0, whiteSpace: "nowrap",
+                            border: "1px solid #4C7A5E", background: busy ? "#D8D2C4" : "#4C7A5E", color: "#fff", cursor: busy ? "default" : "pointer",
+                          }}
+                        >
+                          {busy ? "Removing others…" : "Keep this one"}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </CollapsibleSection>
+      )}
 
       {filteredRows.length > LIST_DISPLAY_CAP && (
         <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 10 }}>
@@ -9822,6 +9894,21 @@ function canShareFiles() {
   }
 }
 
+// Plain browser download — same mechanism jsPDF's own .save() uses
+// internally, just driven ourselves so it can be reused both as the
+// Share-API fallback below and as its own explicit "Save" action (saving
+// straight to the device without opening the share-sheet picker at all).
+function downloadPdfBlobDirectly(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 // Must be called directly from a fresh click handler, with nothing awaited
 // before it — Web Share API requires a live user gesture, and the PDF
 // itself was generated moments earlier (several seconds of image
@@ -9841,14 +9928,7 @@ async function shareOrDownloadPdfBlob(blob, filename) {
       // manager with nothing.
     }
   }
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  downloadPdfBlobDirectly(blob, filename);
 }
 
 function loadImageFromDataUrl(dataUrl) {
@@ -10225,49 +10305,68 @@ function KnowledgeView({ productCatalog, role }) {
                   <span style={{ fontWeight: 600, fontSize: 14, textAlign: "left" }}>{s.specialty}</span>
                 </button>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <button
-                    onClick={async () => {
-                      const key = `subcat:${s.specialty}`;
-                      // A fresh click landing while this specialty's PDF is
-                      // already sitting ready: hand it off immediately, with
-                      // nothing awaited first, so the share sheet still gets
-                      // a live user gesture to work with.
-                      if (readyToShare?.key === key) {
-                        const { blob, filename } = readyToShare;
-                        setReadyToShare(null);
-                        shareOrDownloadPdfBlob(blob, filename);
-                        return;
-                      }
-                      setExportingKey(key);
-                      setExportProgress(null);
-                      try {
-                        const result = await downloadSpecialtyBrochurePdf(s.specialty, s.topics, catalogByNormName, contributions, (done, total) => setExportProgress({ done, total }));
-                        if (canShareFiles()) {
-                          setReadyToShare({ key, ...result });
-                        } else {
-                          await shareOrDownloadPdfBlob(result.blob, result.filename);
-                        }
-                      } finally {
-                        setExportingKey(null);
+                  {readyToShare?.key === `subcat:${s.specialty}` ? (
+                    <>
+                      <button
+                        onClick={() => {
+                          const { blob, filename } = readyToShare;
+                          setReadyToShare(null);
+                          shareOrDownloadPdfBlob(blob, filename);
+                        }}
+                        title="Send this PDF straight to Messages/Mail/AirDrop — no app link, no preview page"
+                        style={{
+                          fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 6, flexShrink: 0,
+                          border: "1px solid #4C7A5E", background: "#4C7A5E", color: "#fff", cursor: "pointer",
+                        }}
+                      >
+                        Share PDF
+                      </button>
+                      <button
+                        onClick={() => {
+                          const { blob, filename } = readyToShare;
+                          setReadyToShare(null);
+                          downloadPdfBlobDirectly(blob, filename);
+                        }}
+                        title="Save this PDF straight to your device, no share sheet"
+                        style={{
+                          fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 6, flexShrink: 0,
+                          border: "1px solid #4C7A5E", background: "#fff", color: "#4C7A5E", cursor: "pointer",
+                        }}
+                      >
+                        Save
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={async () => {
+                        const key = `subcat:${s.specialty}`;
+                        setExportingKey(key);
                         setExportProgress(null);
-                      }
-                    }}
-                    disabled={exportingKey !== null}
-                    title={readyToShare?.key === `subcat:${s.specialty}`
-                      ? "Tap to send this PDF straight to Messages/Mail/Save to Files — no app link, no preview page"
-                      : `Export a premium physician-facing brochure covering every ${s.specialty} product in one PDF`}
-                    style={{
-                      fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 6, flexShrink: 0,
-                      border: "1px solid #4C7A5E", background: "#4C7A5E", color: "#fff",
-                      cursor: exportingKey !== null ? "default" : "pointer", opacity: exportingKey !== null ? 0.6 : 1,
-                    }}
-                  >
-                    {exportingKey === `subcat:${s.specialty}`
-                      ? (exportProgress ? `Exporting ${exportProgress.done}/${exportProgress.total}…` : "Exporting…")
-                      : readyToShare?.key === `subcat:${s.specialty}`
-                      ? "Share PDF"
-                      : "Export (PDF)"}
-                  </button>
+                        try {
+                          const result = await downloadSpecialtyBrochurePdf(s.specialty, s.topics, catalogByNormName, contributions, (done, total) => setExportProgress({ done, total }));
+                          if (canShareFiles()) {
+                            setReadyToShare({ key, ...result });
+                          } else {
+                            await shareOrDownloadPdfBlob(result.blob, result.filename);
+                          }
+                        } finally {
+                          setExportingKey(null);
+                          setExportProgress(null);
+                        }
+                      }}
+                      disabled={exportingKey !== null}
+                      title={`Export a premium physician-facing brochure covering every ${s.specialty} product in one PDF`}
+                      style={{
+                        fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 6, flexShrink: 0,
+                        border: "1px solid #4C7A5E", background: "#4C7A5E", color: "#fff",
+                        cursor: exportingKey !== null ? "default" : "pointer", opacity: exportingKey !== null ? 0.6 : 1,
+                      }}
+                    >
+                      {exportingKey === `subcat:${s.specialty}`
+                        ? (exportProgress ? `Exporting ${exportProgress.done}/${exportProgress.total}…` : "Exporting…")
+                        : "Export (PDF)"}
+                    </button>
+                  )}
                   <button
                     onClick={() => {
                       openAddForm(s.specialty, s.topics);
