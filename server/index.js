@@ -5224,8 +5224,44 @@ app.patch("/api/sample-fulfillments/:followUpId/:productId", requireTabAccess("s
 function normalizeSamplePrepName(name) {
   return String(name || "").trim().toLowerCase();
 }
-async function adjustSamplePrepStock(productId, productName, deltaQty, who) {
+
+// Self-heals a data artifact left over from when Sample Prep Stock was
+// matched by productId (before that lookup moved to normalized product
+// name, above): a duplicate Product Catalog row for the same product could
+// each get their own SamplePrepStock row, splitting one real prepared-stock
+// pool into several entries that each looked emptier than reality (e.g. a
+// manager's real 36-on-hand batch showing as three separate rows, two of
+// them stuck at 0). Merges any rows sharing a normalized product name into
+// the oldest one — summing what was actually prepared across all of them,
+// keeping the highest low-stock threshold set on any of them — and deletes
+// the rest. Called on every read/write so it runs transparently; once
+// merged, each name maps to exactly one row and this is a no-op.
+async function dedupeSamplePrepStockRows() {
   const rows = await db.getAllRows("SamplePrepStock");
+  const groups = new Map();
+  for (const r of rows) {
+    const key = normalizeSamplePrepName(r.productName);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  let anyMerged = false;
+  for (const group of groups.values()) {
+    if (group.length <= 1) continue;
+    anyMerged = true;
+    group.sort((a, b) => new Date(a.updatedAt || 0) - new Date(b.updatedAt || 0));
+    const [keeper, ...extras] = group;
+    const mergedQty = group.reduce((sum, r) => sum + (Number(r.preparedQty) || 0), 0);
+    const mergedThreshold = Math.max(...group.map((r) => Number(r.lowStockThreshold) || 0));
+    await db.updateRowById("SamplePrepStock", keeper.id, {
+      preparedQty: String(mergedQty), lowStockThreshold: String(mergedThreshold),
+    });
+    for (const extra of extras) await db.deleteRowById("SamplePrepStock", extra.id);
+  }
+  return anyMerged ? db.getAllRows("SamplePrepStock") : rows;
+}
+
+async function adjustSamplePrepStock(productId, productName, deltaQty, who) {
+  const rows = await dedupeSamplePrepStockRows();
   const existing = rows.find((r) => normalizeSamplePrepName(r.productName) === normalizeSamplePrepName(productName));
   const now = new Date().toISOString();
   if (existing) {
@@ -5243,7 +5279,7 @@ async function adjustSamplePrepStock(productId, productName, deltaQty, who) {
 
 app.get("/api/sample-prep-stock", requireTabAccess("samples"), async (req, res) => {
   try {
-    const rows = await db.getAllRows("SamplePrepStock");
+    const rows = await dedupeSamplePrepStockRows();
     const stock = rows
       .map((r) => ({
         id: r.id, productId: r.productId, productName: r.productName,
