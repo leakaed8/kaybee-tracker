@@ -9431,38 +9431,6 @@ async function loadImageBytes(productId, which, mime) {
   return { dataUrl, img, format: jsPdfFormatForMime(mime) };
 }
 
-// ---- Shared pure layout math (unit-testable independent of jsPDF/canvas) ----
-// Legibility of a Supplement Facts label depends on two independent things,
-// and a placement only counts as legible when BOTH clear their floor:
-//   1. Physical size — a label rendered narrower than this is too small for
-//      a human to read the fine print, no matter how sharp the source is.
-//      Shrinking an image into a smaller box always makes its *pixel*
-//      density look better, so this check is what actually drives falling
-//      back to the bigger full-width box.
-//   2. Source sharpness — "effective PPI" (native pixel width divided by the
-//      rendered width in inches). Below the floor, the source image itself
-//      is too low-resolution to look sharp at any practical size; enlarging
-//      it further never makes it clearer.
-// Raised from an earlier 70mm/150ppi: most "Supplement Facts" uploads here
-// are a photo of the WHOLE bottle (cap, shoulder, curved glass), not a
-// cropped flat label scan, so only a fraction of the image's own width is
-// actually the label text — a plain image-width check at 70mm reads as
-// "fits" while the real text inside it renders too small to read. These
-// higher floors push more of those bottle-photo cases into the bigger
-// full-width layout instead of accepting a side-by-side fit that measures
-// out as "wide enough" without actually being readable.
-const MIN_LEGIBLE_WIDTH_MM = 95;
-const MIN_LEGIBLE_PPI = 180;
-
-function effectivePpi(imgWidthPx, renderedWidthMm) {
-  if (!imgWidthPx || !renderedWidthMm) return 0;
-  return imgWidthPx / (renderedWidthMm / 25.4);
-}
-
-function isLegibleFit(imgWidthPx, fit) {
-  return fit.w >= MIN_LEGIBLE_WIDTH_MM && effectivePpi(imgWidthPx, fit.w) >= MIN_LEGIBLE_PPI;
-}
-
 function parseProductIngredientsJson(raw) {
   try {
     const list = JSON.parse(raw || "[]");
@@ -9549,8 +9517,6 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function mmFromPx(px) { return (px / 96) * 25.4; }
-
 // Simple, generic line-icon glyphs (not a copy of any specific icon
 // library's artwork) used throughout the brochure's header/card badges.
 function kbIcon(name, color, size) {
@@ -9610,42 +9576,31 @@ function buildBrochureHeadlineHtml(product, overviewRows) {
 // page space is instead absorbed by a spacer placed AFTER the info cards
 // (in buildBrochurePageHtml), so the cards sit right under the images and
 // the footer still stays pinned to the bottom of the page.
-const BROCHURE_HERO_HEIGHT_PX = { side: 420, fullWidth: 540, bottleOnly: 460 };
+// "side" raised from 420 to 560 (the facts panel's own column, below, was
+// also widened) — a manager handing this brochure to a doctor wants both
+// images clearly readable side by side, not swapped into a taller stacked
+// layout on the images that are hardest to read. Making the one shared
+// layout bigger directly, instead of switching layouts case by case, is
+// what actually fixes "too small to read" here.
+const BROCHURE_HERO_HEIGHT_PX = { side: 560, bottleOnly: 460 };
 
 function buildBrochureHeroSideHtml({ bottleDataUrl, factsDataUrl }) {
   // Top-aligned, not vertically centered: with a tall bottle photo next to a
   // much shorter landscape facts panel, centering both within the same
   // shared-height row left the facts panel visibly floating with a large,
   // unbalanced gap above and below it.
+  // Facts gets the bigger share of the row (65% vs. the bottle photo's
+  // 35%) — the bottle is a simple product shot that reads fine small, the
+  // facts panel is dense printed text that needs the extra width to stay
+  // legible.
   return `<div style="flex:0 0 auto;height:${BROCHURE_HERO_HEIGHT_PX.side}px;display:flex;align-items:flex-start;gap:28px;margin:20px 0 24px;">
-    <div style="flex:0 0 45%;height:100%;display:flex;align-items:flex-start;justify-content:center;min-width:0;">
+    <div style="flex:0 0 35%;height:100%;display:flex;align-items:flex-start;justify-content:center;min-width:0;">
       ${bottleDataUrl ? `<img class="kbdoc-bottle-img" src="${bottleDataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;filter:drop-shadow(0 14px 18px rgba(23,63,51,0.18));"/>` : ""}
     </div>
     <div style="flex:1 1 auto;height:100%;display:flex;align-items:flex-start;justify-content:center;min-width:0;">
       ${factsDataUrl ? `<div style="background:#fff;border:1px solid ${BROCHURE_COLORS.border};border-radius:10px;box-shadow:0 10px 24px rgba(23,63,51,0.08);padding:14px;display:flex;align-items:center;justify-content:center;max-width:100%;height:100%;box-sizing:border-box;">
         <img class="kbdoc-facts-img" src="${factsDataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;display:block;"/>
       </div>` : ""}
-    </div>
-  </div>`;
-}
-function buildBrochureHeroFullWidthHtml({ bottleDataUrl, factsDataUrl }) {
-  // flex-basis 0 (not "auto") on these two rows: with a basis of "auto", the
-  // browser sizes each row from its own CONTENT first and only afterwards
-  // applies flex-grow, which made the facts image's own percentage
-  // max-height resolve against an indefinite ("auto") parent height and
-  // silently fall back to "no constraint" — letting the image ignore its
-  // vertical budget entirely and overflow past its row and into the info
-  // cards below. A 0 basis makes each row's height purely a function of
-  // flex-grow (computed immediately, independent of content), giving the
-  // image a definite height to constrain itself against from the start.
-  return `<div style="flex:0 0 auto;height:${BROCHURE_HERO_HEIGHT_PX.fullWidth}px;display:flex;flex-direction:column;gap:16px;margin:20px 0 24px;">
-    <div style="flex:1 1 0;min-height:0;display:flex;align-items:center;justify-content:center;">
-      ${bottleDataUrl ? `<img class="kbdoc-bottle-img" src="${bottleDataUrl}" style="max-width:40%;max-height:100%;object-fit:contain;filter:drop-shadow(0 14px 18px rgba(23,63,51,0.18));"/>` : ""}
-    </div>
-    <div style="flex:1 1 0;min-height:0;display:flex;align-items:center;justify-content:center;">
-      <div style="background:#fff;border:1px solid ${BROCHURE_COLORS.border};border-radius:10px;box-shadow:0 10px 24px rgba(23,63,51,0.08);padding:14px;display:flex;align-items:center;justify-content:center;max-width:100%;height:100%;box-sizing:border-box;">
-        <img class="kbdoc-facts-img" src="${factsDataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;display:block;"/>
-      </div>
     </div>
   </div>`;
 }
@@ -9702,9 +9657,7 @@ function buildBrochureFooterHtml(logoDataUrl, pageIndex, pageCount) {
 
 function buildBrochurePageHtml({ product, logoDataUrl, overviewRows, ingredients, subcats, bottleDataUrl, factsDataUrl, heroMode, pageIndex, pageCount }) {
   const primarySpecialty = subcats[0]?.specialty || "";
-  const heroHtml = heroMode === "full-width"
-    ? buildBrochureHeroFullWidthHtml({ bottleDataUrl, factsDataUrl })
-    : heroMode === "bottle-only"
+  const heroHtml = heroMode === "bottle-only"
     ? buildBrochureHeroBottleOnlyHtml({ bottleDataUrl })
     : buildBrochureHeroSideHtml({ bottleDataUrl, factsDataUrl });
   const infoRow = buildBrochureInfoRowHtml([
@@ -9749,23 +9702,18 @@ async function renderBrochurePageToCanvas(innerHtml, { scale = 2 } = {}) {
   return { canvas, container, pageEl };
 }
 
-// Decides, via real (but cheap — DOM measurement, no rasterization) layout,
-// whether a product's Supplement Facts image fits best side-by-side with
-// its bottle photo or needs the wider full-width layout. The facts image
-// ALWAYS stays on the product's one page — there is no "give it its own
-// page" fallback (there used to be, for images too narrow to read at a
-// readable size; that traded legibility for togetherness, which is the
-// wrong trade for a rep handing a doctor a brochure where every product's
-// facts belong right there with its bottle, not on a page by themselves).
-// "full-width" is the last resort for an image that doesn't fit legibly
-// side-by-side — it gets the biggest box this layout has to offer, and
-// whatever legibility results from that is what ships.
-async function decideBrochureHeroLayout(baseArgs, factsData) {
-  if (!factsData) return { heroMode: "bottle-only" };
-  const { container, pageEl } = await mountBrochurePageForMeasurement(buildBrochurePageHtml({ ...baseArgs, heroMode: "side", pageIndex: 1, pageCount: 1 }));
-  const rect = pageEl.querySelector(".kbdoc-facts-img").getBoundingClientRect();
-  document.body.removeChild(container);
-  return { heroMode: isLegibleFit(factsData.img.width, { w: mmFromPx(rect.width) }) ? "side" : "full-width" };
+// Bottle and facts images always sit side by side on the product's one
+// page — the only other layout is "bottle-only", for a product with no
+// facts image uploaded at all. An earlier version of this tried to detect
+// when a facts image wouldn't be legible side-by-side and switch it to a
+// taller stacked layout (or, before that, its own separate page); both
+// traded the thing a rep actually wants — both images together, clearly
+// readable — for a fallback nobody asked for. Fixed by making the one
+// shared layout itself bigger (see BROCHURE_HERO_HEIGHT_PX.side and the
+// facts column's wider share in buildBrochureHeroSideHtml) instead of
+// switching away from it.
+function decideBrochureHeroLayout(factsData) {
+  return { heroMode: factsData ? "side" : "bottle-only" };
 }
 
 // Renders exactly one product's page using an already-decided heroMode
@@ -9866,14 +9814,7 @@ async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName
     pageIndex++;
     const prefetched = await nextFetch;
     if (i + 1 < products.length) nextFetch = fetchProductBrochureData(products[i + 1]);
-    const ingredients = parseProductIngredientsJson(products[i].ingredients);
-    const overviewRows = buildProductOverviewRows(products[i], ingredients);
-    const subcats = specialtySubcategoriesFor(products[i].name, contributions || []);
-    const baseArgs = {
-      product: products[i], overviewRows, ingredients, subcats,
-      bottleDataUrl: prefetched.bottleData?.dataUrl || "", factsDataUrl: prefetched.factsData?.dataUrl || "",
-    };
-    const { heroMode } = await decideBrochureHeroLayout(baseArgs, prefetched.factsData);
+    const { heroMode } = decideBrochureHeroLayout(prefetched.factsData);
     doc.addPage();
     await renderDoctorBrochurePage(doc, products[i], { contributions: contributions || [], pageIndex, pageCount, prefetched, logoDataUrl, heroMode });
     if (onProgress) onProgress(i + 1, products.length);
@@ -9951,12 +9892,10 @@ function loadImageFromDataUrl(dataUrl) {
 // decode and rasterize the source at its FULL native resolution no matter
 // how small the brochure's CSS box or page `scale` is, so an oversized
 // source is pure wasted decode time. Re-encoding down to a sane cap before
-// rendering fixes that without touching the brochure's layout/legibility
-// logic at all, since isLegibleFit/effectivePpi only ever look at
-// `img.width` (never the original file's byte size). Bottle photos get a
-// tight cap (they're only ever shown a few hundred CSS px wide); Supplement
-// Facts photos get a much more generous one so the legibility cascade still
-// has real pixel density to fall back on for fine print.
+// rendering fixes that without touching the brochure's layout at all.
+// Bottle photos get a tight cap (they're only ever shown a few hundred CSS
+// px wide); Supplement Facts photos get a much more generous one so there's
+// real pixel density left to work with at the wider box they render into.
 const BOTTLE_IMAGE_MAX_DIM = 900;
 const FACTS_IMAGE_MAX_DIM = 1600;
 
