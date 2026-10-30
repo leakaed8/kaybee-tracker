@@ -1104,10 +1104,20 @@ const REACTION_EMOJI = (key) => REACTION_OPTIONS.find((o) => o.key === key)?.emo
 
 function ExpiryView({ role, sorted, slowThreshold, repPhone, onRemove }) {
   const [activeZone, setActiveZone] = useState("red");
+  const [search, setSearch] = useState("");
 
   const visibleFor = (key) => (key === "green" ? sorted.filter(isPushSales) : sorted.filter((p) => p.zone.key === key));
   const counts = { red: visibleFor("red").length, yellow: visibleFor("yellow").length, green: visibleFor("green").length };
-  const shown = visibleFor(activeZone);
+
+  // Search looks across EVERY product, not just the active zone's filtered
+  // list — a healthy, fast-moving item far from expiry never shows up in
+  // any of the three zone tabs at all, but a manager searching for it by
+  // name still wants to see its expiry/turnover/stock details. While a
+  // search is active it fully replaces the zone tab's list; clearing it
+  // goes back to normal zone browsing.
+  const q = search.trim().toLowerCase();
+  const searchResults = q ? sorted.filter((p) => p.name.toLowerCase().includes(q)) : null;
+  const shown = searchResults !== null ? searchResults : visibleFor(activeZone);
 
   return (
     <div>
@@ -1116,15 +1126,25 @@ function ExpiryView({ role, sorted, slowThreshold, repPhone, onRemove }) {
           {role === "rep" ? "What needs clearing this month" : "Shelf-life overview"}
         </h2>
         <p style={{ fontSize: 13, color: "#8A8272", margin: "4px 0 0" }}>
-          Tap a zone to see its items · slow-mover threshold {slowThreshold}% turnover/90d
+          Tap a zone to see its items, or search any product by name · slow-mover threshold {slowThreshold}% turnover/90d
         </p>
       </div>
 
-      <div style={{ display: "flex", gap: 10, marginBottom: 18, flexWrap: "wrap" }}>
+      <div style={{ position: "relative", marginBottom: 14 }}>
+        <Search size={15} style={{ position: "absolute", left: 12, top: 10, color: "#8A8272" }} />
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search for a product to check its expiry, stock, and turnover…"
+          style={{ ...inputStyle, paddingLeft: 34 }}
+        />
+      </div>
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 18, flexWrap: "wrap", opacity: searchResults !== null ? 0.5 : 1 }}>
         {EXPIRY_ZONES.map((z) => {
-          const active = activeZone === z.key;
+          const active = searchResults === null && activeZone === z.key;
           return (
-            <button key={z.key} onClick={() => setActiveZone(z.key)} style={{
+            <button key={z.key} onClick={() => { setSearch(""); setActiveZone(z.key); }} style={{
               flex: 1, minWidth: 150, textAlign: "left", padding: "12px 14px", borderRadius: 10,
               border: active ? `1px solid ${z.color}` : "1px solid #1F2A24",
               background: active ? z.color : "#fff", color: active ? "#FAF7F2" : "#1F2A24",
@@ -1144,7 +1164,9 @@ function ExpiryView({ role, sorted, slowThreshold, repPhone, onRemove }) {
         {shown.map((p) => (
           <ProductRow key={p.id} product={p} repPhone={repPhone} onRemove={() => onRemove(p.id)} />
         ))}
-        {shown.length === 0 && <EmptyState text="No products in this zone." />}
+        {shown.length === 0 && (
+          <EmptyState text={searchResults !== null ? "No products match your search." : "No products in this zone."} />
+        )}
       </div>
     </div>
   );
