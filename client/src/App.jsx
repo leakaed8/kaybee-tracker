@@ -1116,7 +1116,10 @@ function ExpiryView({ role, sorted, slowThreshold, repPhone, onRemove }) {
   // search is active it fully replaces the zone tab's list; clearing it
   // goes back to normal zone browsing.
   const q = search.trim().toLowerCase();
-  const searchResults = q ? sorted.filter((p) => p.name.toLowerCase().includes(q)) : null;
+  const qKey = normalizeProductNameKey(search);
+  const searchResults = q
+    ? sorted.filter((p) => p.name.toLowerCase().includes(q) || normalizeProductNameKey(p.name).includes(qKey))
+    : null;
   const shown = searchResults !== null ? searchResults : visibleFor(activeZone);
 
   return (
@@ -1268,9 +1271,10 @@ function StockView({ products }) {
   const categories = Array.from(new Set(products.map((p) => p.category).filter(Boolean))).sort();
 
   const q = search.toLowerCase().trim();
+  const qKey = normalizeProductNameKey(search);
   const filtered = products
     .filter((p) => category === "all" || p.category === category)
-    .filter((p) => !q || p.name.toLowerCase().includes(q))
+    .filter((p) => !q || p.name.toLowerCase().includes(q) || normalizeProductNameKey(p.name).includes(qKey))
     .sort((a, b) => a.name.localeCompare(b.name));
   const shown = filtered.slice(0, LIST_DISPLAY_CAP);
 
