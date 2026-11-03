@@ -227,6 +227,7 @@ export default function App() {
     qualityCallRequiredFields: ["reaction", "commitment", "callOutcome"],
     tierVisitFrequency: { A: { perMonth: 2 }, B: { perMonth: 1 }, C: { perMonth: 0.4 } },
     tabVisibility: DEFAULT_TAB_VISIBILITY,
+    stockMovementActiveYear: new Date().getFullYear(),
   });
   const [loaded, setLoaded] = useState(false);
   const [syncStatus, setSyncStatus] = useState("");
@@ -457,6 +458,15 @@ export default function App() {
       }
     }, 700);
   }, []);
+
+  // Locking a Stock Movement year is a deliberate, one-way action — unlike
+  // every other setting above, it's never debounced/optimistic: the server
+  // call must actually succeed before the UI moves on, since it closes off
+  // editing a whole year of history.
+  const lockStockMovementYear = async (newYear) => {
+    await api.updateSettings({ stockMovementActiveYear: newYear });
+    setSettings((prev) => ({ ...prev, stockMovementActiveYear: newYear }));
+  };
 
   const todayStr = new Date().toISOString().slice(0, 10);
   const removeProduct = (id) => withSync(() => api.removeProduct(id), { touchesReference: true });
@@ -882,6 +892,9 @@ export default function App() {
                 repNames={repNames}
                 tabVisibility={settings.tabVisibility}
                 setTabVisibility={(v) => updateSettingsField({ tabVisibility: v })}
+                products={products}
+                stockMovementActiveYear={settings.stockMovementActiveYear}
+                onLockStockMovementYear={lockStockMovementYear}
               />
             )}
           </>
@@ -16878,7 +16891,7 @@ function CollapsibleSection({ title, defaultOpen = false, children }) {
 }
 
 // ---------- Settings ----------
-function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts, onUploadCatalogProductImages, onSetCatalogProductImageApproval, onFindMissingCatalogImages, onGetFindImagesStatus, onRefreshAfterFindImages, competitors, onAddCompetitor, onUpdateCompetitor, onRemoveCompetitor, onAddCompetitorProduct, onUpdateCompetitorProduct, onRemoveCompetitorProduct, onImportCompetitorProducts, repNames = [], tabVisibility, setTabVisibility }) {
+function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts, onUploadCatalogProductImages, onSetCatalogProductImageApproval, onFindMissingCatalogImages, onGetFindImagesStatus, onRefreshAfterFindImages, competitors, onAddCompetitor, onUpdateCompetitor, onRemoveCompetitor, onAddCompetitorProduct, onUpdateCompetitorProduct, onRemoveCompetitorProduct, onImportCompetitorProducts, repNames = [], tabVisibility, setTabVisibility, products = [], stockMovementActiveYear, onLockStockMovementYear }) {
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Settings</h2>
@@ -16972,6 +16985,10 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
         </p>
       </CollapsibleSection>
 
+      <CollapsibleSection title="Stock Movement">
+        <StockMovementSection products={products} activeYear={stockMovementActiveYear} onLockYear={onLockStockMovementYear} />
+      </CollapsibleSection>
+
       <CollapsibleSection title="Rep WhatsApp number">
         <Field label="Rep WhatsApp number (for expiry nudges, include country code)">
           <input value={repPhone} onChange={(e) => setRepPhone(e.target.value)} placeholder="+961 xx xxx xxx" style={inputStyle} />
@@ -17010,6 +17027,166 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
           <Plus size={14} /> Add variation
         </button>
       </CollapsibleSection>
+    </div>
+  );
+}
+
+const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// Manager-only editor for the StockMovement sheet that feeds
+// avgMonthlyMovementFor server-side (turnover%, slow-mover, at-risk — see
+// its comment in server/index.js). Only `activeYear` (settings.
+// stockMovementActiveYear) is ever editable — the server rejects a save for
+// any other year — so a manager fills this in month by month through the
+// year, then "locks" it (bumping the active year forward) once December is
+// in, moving on to the next year with the same editing flow. Locking is
+// one-way by design: there's no "unlock" here.
+function StockMovementSection({ products, activeYear, onLockYear }) {
+  const [yearRows, setYearRows] = useState([]);
+  const [loadingYear, setLoadingYear] = useState(true);
+  const [productQuery, setProductQuery] = useState("");
+  const [monthQtys, setMonthQtys] = useState(Array(12).fill(""));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [showSaved, setShowSaved] = useState(false);
+  const [locking, setLocking] = useState(false);
+
+  const loadYear = useCallback(() => {
+    setLoadingYear(true);
+    api.getStockMovement(activeYear)
+      .then((data) => setYearRows(data.rows || []))
+      .catch(() => setYearRows([]))
+      .finally(() => setLoadingYear(false));
+  }, [activeYear]);
+  useEffect(() => { loadYear(); }, [loadYear]);
+
+  const matchedProduct = products.find((p) => p.name.toLowerCase().trim() === productQuery.toLowerCase().trim());
+  const productOptions = (productQuery.trim()
+    ? products.filter((p) => p.name.toLowerCase().includes(productQuery.toLowerCase().trim()))
+    : products
+  ).slice(0, 50);
+
+  // Dedup by normalized name — Products is one row per batch, so the same
+  // item can otherwise appear many times in the picker (see
+  // normalizeProductNameKey's own comment elsewhere in this file for why).
+  const uniqueProductOptions = (() => {
+    const seen = new Set();
+    const out = [];
+    for (const p of productOptions) {
+      const key = normalizeProductNameKey(p.name);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(p);
+    }
+    return out;
+  })();
+
+  const selectProduct = (name) => {
+    setProductQuery(name);
+    setError("");
+    const rowsForProduct = yearRows.filter((r) => normalizeProductNameKey(r.productName) === normalizeProductNameKey(name));
+    setMonthQtys(Array.from({ length: 12 }, (_, i) => {
+      const row = rowsForProduct.find((r) => r.month === i + 1);
+      return row ? String(row.qty) : "";
+    }));
+  };
+
+  const save = async () => {
+    if (!matchedProduct) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api.saveStockMovement({
+        productName: matchedProduct.name,
+        year: activeYear,
+        entries: monthQtys.map((qty, i) => ({ month: i + 1, qty: Number(qty) || 0 })),
+      });
+      setShowSaved(true);
+      setTimeout(() => setShowSaved(false), 2500);
+      loadYear();
+    } catch (e) {
+      setError(e?.message || "Couldn't save.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const lockYear = async () => {
+    if (!window.confirm(`Lock ${activeYear} for good and start editing ${activeYear + 1}? You won't be able to change ${activeYear}'s Stock Movement again after this.`)) return;
+    setLocking(true);
+    try {
+      await onLockYear(activeYear + 1);
+    } catch (e) {
+      setError(e?.message || "Couldn't lock the year.");
+    } finally {
+      setLocking(false);
+    }
+  };
+
+  const productsWithDataCount = new Set(yearRows.map((r) => normalizeProductNameKey(r.productName))).size;
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>
+          Editing {activeYear}
+          <span style={{ fontWeight: 400, color: "#8A8272", marginLeft: 8 }}>
+            {loadingYear ? "loading…" : `${productsWithDataCount} product${productsWithDataCount === 1 ? "" : "s"} with data so far`}
+          </span>
+        </div>
+        <button
+          onClick={lockYear}
+          disabled={locking}
+          style={{ fontSize: 12, fontWeight: 500, color: "#5B5445", background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px", cursor: "pointer" }}
+        >
+          {locking ? "Locking…" : `Lock ${activeYear} and start ${activeYear + 1} →`}
+        </button>
+      </div>
+      <p style={{ fontSize: 11.5, color: "#8A8272", margin: "0 0 12px" }}>
+        Only {activeYear} can be edited here — once locked, a year's figures are permanent. Pick a product, enter its units sold per month, and save. Leave a month blank for "not reported yet" (it won't drag the average down).
+      </p>
+
+      <div style={{ marginBottom: 10 }}>
+        <input
+          value={productQuery}
+          onChange={(e) => selectProduct(e.target.value)}
+          placeholder="Search product…"
+          list="stock-movement-product-options"
+          style={inputStyle}
+        />
+        <datalist id="stock-movement-product-options">
+          {uniqueProductOptions.map((p) => <option key={p.id} value={p.name} />)}
+        </datalist>
+      </div>
+
+      {matchedProduct && (
+        <div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(70px, 1fr))", gap: 8, marginBottom: 10 }}>
+            {MONTH_LABELS.map((label, i) => (
+              <div key={label}>
+                <label style={{ display: "block", fontSize: 10.5, color: "#8A8272", marginBottom: 2 }}>{label}</label>
+                <input
+                  type="number" min="0"
+                  value={monthQtys[i]}
+                  onChange={(e) => setMonthQtys((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))}
+                  style={{ ...inputStyle, width: "100%", padding: "6px 8px", textAlign: "center" }}
+                />
+              </div>
+            ))}
+          </div>
+          {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <button
+              onClick={save}
+              disabled={saving}
+              style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+            >
+              {saving ? "Saving…" : `Save ${matchedProduct.name}`}
+            </button>
+            {showSaved && !saving && <span style={{ fontSize: 12, color: "#4C7A5E" }}>Saved</span>}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

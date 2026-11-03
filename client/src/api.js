@@ -166,6 +166,8 @@ export const api = {
   savePushSubscription: (subscription) => request("/push/subscribe", { method: "POST", body: JSON.stringify({ subscription }) }),
   logOutreach: (entry) => request("/outreach-log", { method: "POST", body: JSON.stringify(entry) }),
   updateSettings: (patch) => request("/settings", { method: "PATCH", body: JSON.stringify(patch) }),
+  getStockMovement: (year) => request(`/stock-movement${year ? `?year=${year}` : ""}`),
+  saveStockMovement: (payload) => request("/stock-movement", { method: "POST", body: JSON.stringify(payload) }),
   getTelegramStatus: () => request("/telegram/status"),
   sendTelegramDigestNow: () => request("/telegram/send-digest-now", { method: "POST" }),
   getMyTelegramLinkCode: () => request("/reps/me/telegram-link-code", { method: "POST" }),

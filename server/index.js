@@ -342,6 +342,13 @@ function parseSettings(raw) {
     tierVisitFrequency: raw.tierVisitFrequency
       ? JSON.parse(raw.tierVisitFrequency) : DEFAULT_SETTINGS.tierVisitFrequency,
     tabVisibility: raw.tabVisibility ? mergeTabVisibility(JSON.parse(raw.tabVisibility)) : DEFAULT_SETTINGS.tabVisibility,
+    // The only year a manager can currently add/edit Stock Movement rows
+    // for (see POST /api/stock-movement below) — every earlier year is
+    // implicitly locked forever once this has moved past it. Not in
+    // DEFAULT_SETTINGS (a static object computed once at module load) since
+    // its correct fallback is "whichever year it actually is right now,"
+    // not whatever year the server happened to boot in.
+    stockMovementActiveYear: raw.stockMovementActiveYear !== undefined ? Number(raw.stockMovementActiveYear) : beirutDateParts(new Date()).year,
   };
 }
 
@@ -6530,6 +6537,78 @@ app.patch("/api/settings", requireManager, async (req, res) => {
     await db.setSettings(patch);
     const raw = await db.getSettings();
     res.json(parseSettings(raw));
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Stock Movement (manager-editable monthly sales history) ----------
+// Feeds avgMonthlyMovementFor (see above) — turnover%, slow-mover, and
+// at-risk all read from this once a product has any rows here, in
+// preference to the cruder 90-day sold90 estimate. Only the current
+// settings.stockMovementActiveYear is ever writable; every earlier year is
+// permanently locked the moment the manager advances it (see
+// "Lock <year>" in Settings — just a PATCH /api/settings
+// stockMovementActiveYear bump, no separate endpoint needed) — enforced
+// here, not just hidden in the UI, so a locked year's history can't be
+// quietly rewritten after the fact.
+app.get("/api/stock-movement", requireManager, async (req, res) => {
+  try {
+    const rows = await db.getAllRows("StockMovement");
+    const year = req.query.year ? Number(req.query.year) : null;
+    const filtered = year ? rows.filter((r) => Number(r.year) === year) : rows;
+    res.json({
+      rows: filtered.map((r) => ({ id: r.id, productName: r.productName, year: Number(r.year), month: Number(r.month), qty: Number(r.qty) || 0 })),
+    });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Upserts a batch of month/qty entries for one product in one call — a
+// manager typically fills in several months at once for a product, and
+// this must never leave the sheet half-updated if the request covers, say,
+// Jan through Jun. A qty of 0 (or blank) DELETES that month's row instead
+// of writing a 0 — a month with no real sales figure yet should count as
+// "not reported" for avgMonthlyMovementFor's averaging, not as a reported
+// zero that would drag the average down.
+app.post("/api/stock-movement", requireManager, async (req, res) => {
+  try {
+    const { productName, year, entries } = req.body;
+    const name = String(productName || "").trim();
+    const yearNum = Number(year);
+    if (!name || !Number.isInteger(yearNum) || !Array.isArray(entries) || entries.length === 0) {
+      return res.status(400).json({ error: "productName, year, and at least one month entry are required." });
+    }
+    const settings = parseSettings(await db.getSettings());
+    if (yearNum !== settings.stockMovementActiveYear) {
+      return res.status(403).json({ error: `${yearNum} is locked — only ${settings.stockMovementActiveYear} can be edited.` });
+    }
+
+    const existing = await db.getAllRows("StockMovement");
+    const toAppend = [];
+    for (const entry of entries) {
+      const month = Number(entry.month);
+      if (!Number.isInteger(month) || month < 1 || month > 12) continue;
+      const qty = Number(entry.qty) || 0;
+      const match = existing.find((r) =>
+        String(r.productName || "").trim().toLowerCase() === name.toLowerCase() &&
+        Number(r.year) === yearNum && Number(r.month) === month);
+      if (qty <= 0) {
+        if (match) await db.deleteRowById("StockMovement", match.id);
+        continue;
+      }
+      if (match) {
+        await db.updateRowById("StockMovement", match.id, { qty });
+      } else {
+        toAppend.push({ id: `sm${crypto.randomUUID()}`, productName: name, year: yearNum, month, qty });
+      }
+    }
+    if (toAppend.length) await db.appendRows("StockMovement", toAppend);
+
+    res.json({ ok: true });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
