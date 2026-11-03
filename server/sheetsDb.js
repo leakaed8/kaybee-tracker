@@ -355,6 +355,12 @@ const SCHEMAS = {
   FollowUps: [
     "id", "entityName", "entityType", "repName", "dueDate", "status", "visitId", "createdAt", "needsSample", "sampleItems", "sampleReminded", "stopReason", "smartiObjective",
     "type", "dueTime", "purpose", "notes", "reminderEnabled", "reminderOffset", "reminderSentAt", "cancelledAt", "completedAt", "rescheduledFromId",
+    // Set to "snooze" or "new" while a Telegram "Custom" reply is pending for
+    // this row (see fucustom handling below), so the next plain-text message
+    // from that rep's chat is understood as "how many days from now" rather
+    // than ignored or misread as something else. Cleared the moment that
+    // reply is parsed, whether it succeeds or needs retrying.
+    "awaitingCustomReply",
   ],
   PharmacySales: ["id", "productName", "pharmacyName", "expiry", "qty"],
   Competitors: ["id", "name", "supplierName", "supplierContact", "offerDetails", "notes", "createdAt"],

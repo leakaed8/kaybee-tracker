@@ -1167,6 +1167,8 @@ app.post("/api/telegram/webhook", async (req, res) => {
         return;
       }
       await telegram.sendMessage(chatId, "That link code wasn't recognized — generate a new one and try again.");
+    } else if (update.message?.text) {
+      await handleFollowUpTextReply(update.message);
     } else if (update.callback_query) {
       const data = update.callback_query.data || "";
       if (data.startsWith("fu")) {
@@ -14631,13 +14633,19 @@ function followUpButtons(followUpId) {
       { text: "✅ Sign in (visited)", callback_data: `fusignin:${followUpId}` },
       { text: "⏰ Snooze 2 days", callback_data: `fusnooze:${followUpId}` },
     ],
-    [{ text: "🚫 Not interested — stop", callback_data: `fustop:${followUpId}` }],
+    [
+      { text: "📅 Custom…", callback_data: `fucustom:${followUpId}` },
+      { text: "🚫 Not interested — stop", callback_data: `fustop:${followUpId}` },
+    ],
   ];
 }
 
 // The re-ask sent right after "Sign in" — same idea as the original
 // scheduling step in the app (a short list of presets), just compact since
-// it's a Telegram message rather than a full form.
+// it's a Telegram message rather than a full form. "Custom…" covers
+// anything the fixed presets don't (e.g. "in 2 weeks") by asking the rep to
+// reply with a day count — see fucustom in handleFollowUpCallback and
+// handleFollowUpTextReply.
 function rescheduleButtons(followUpId) {
   return [
     [
@@ -14645,7 +14653,10 @@ function rescheduleButtons(followUpId) {
       { text: "In 1 week", callback_data: `fu1w:${followUpId}` },
       { text: "In 1 month", callback_data: `fu1m:${followUpId}` },
     ],
-    [{ text: "No follow-up needed", callback_data: `fudone:${followUpId}` }],
+    [
+      { text: "📅 Custom…", callback_data: `fucustom:${followUpId}` },
+      { text: "No follow-up needed", callback_data: `fudone:${followUpId}` },
+    ],
   ];
 }
 
@@ -14767,6 +14778,21 @@ async function handleFollowUpCallback(callbackQuery) {
     return;
   }
 
+  if (action === "fucustom") {
+    // Reached from either keyboard: followUpButtons (this `followUp` is
+    // still "reminded" — a snooze of the same row, like fusnooze) or
+    // rescheduleButtons right after Sign In (this `followUp` is already
+    // "done" — schedule a brand-new next follow-up, like the fu2d/fu1w/fu1m
+    // branch below). Its own status at click time is enough to tell which,
+    // with no separate callback_data needed.
+    await db.updateRowById("FollowUps", followUp.id, { awaitingCustomReply: followUp.status === "done" ? "new" : "snooze" });
+    await telegram.answerCallbackQuery(id, "Reply with a number of days.");
+    if (message?.chat?.id) {
+      await telegram.sendMessage(message.chat.id, `How many days from today? Reply with just the number (1–365) — e.g. 14 for two weeks.`);
+    }
+    return;
+  }
+
   if (action === "fusnooze") {
     // Shared with the in-app "Reschedule" action (server/index.js, My
     // Schedule routes) — marks this row "rescheduled", never "done", so a
@@ -14822,6 +14848,58 @@ async function handleFollowUpCallback(callbackQuery) {
   });
   await telegram.answerCallbackQuery(id, `Follow-up scheduled ${preset.label}.`);
   if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `Follow-up with ${followUp.entityName} scheduled ${preset.label}.`);
+}
+
+// Handles a plain-text reply typed after "📅 Custom…" (see fucustom above).
+// Only ever looks at messages from a chat already linked to a rep — nothing
+// else in this app reads free-text Telegram messages, so this can't
+// misinterpret some unrelated reply as a day count. If more than one of a
+// rep's follow-ups is somehow awaiting a reply at once (shouldn't normally
+// happen — a rep only has one open "Custom…" prompt at a time), the most
+// recently created one is treated as the one being answered and every
+// awaiting row is cleared, so a stale prompt from days ago can never be
+// accidentally triggered by an unrelated later message.
+async function handleFollowUpTextReply(message) {
+  const chatId = String(message.chat?.id || "");
+  const text = String(message.text || "").trim();
+  if (!chatId || !text) return;
+  const reps = await db.getAllRows("Reps");
+  const rep = reps.find((r) => r.telegramChatId === chatId);
+  if (!rep) return;
+  const followUps = await db.getAllRows("FollowUps");
+  const pending = followUps.filter((f) => f.repName === rep.name && f.awaitingCustomReply);
+  if (pending.length === 0) return;
+  const target = [...pending].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
+
+  const days = Number(text);
+  if (!Number.isInteger(days) || days < 1 || days > 365) {
+    await telegram.sendMessage(chatId, `That's not a valid number of days — reply with just a whole number between 1 and 365 (e.g. 14 for two weeks), for your follow-up with ${target.entityName}.`);
+    return;
+  }
+
+  await Promise.all(pending.map((f) => db.updateRowById("FollowUps", f.id, { awaitingCustomReply: "" })));
+
+  const label = `in ${days} day${days === 1 ? "" : "s"}`;
+  if (target.awaitingCustomReply === "new") {
+    await db.appendRow("FollowUps", {
+      id: `fu${crypto.randomUUID()}`,
+      entityName: target.entityName,
+      entityType: target.entityType,
+      repName: target.repName,
+      dueDate: addDaysToTodayStr(days),
+      status: "pending",
+      visitId: target.visitId,
+      createdAt: new Date().toISOString(),
+      type: target.type || "FOLLOW_UP",
+      purpose: target.purpose || "Follow-up",
+      reminderEnabled: "true",
+      reminderOffset: "1d",
+    });
+    await telegram.sendMessage(chatId, `Follow-up with ${target.entityName} scheduled ${label}.`);
+  } else {
+    await rescheduleFollowUp(target, addDaysToTodayStr(days), "");
+    await telegram.sendMessage(chatId, `Follow-up with ${target.entityName} snoozed — you'll hear again ${label}.`);
+  }
 }
 
 const FOLLOWUP_CHECK_INTERVAL_MS = 60 * 60 * 1000;

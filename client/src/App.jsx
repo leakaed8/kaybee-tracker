@@ -2380,6 +2380,13 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   const [editingOrderId, setEditingOrderId] = useState(null);
   const [addingSampleForVisitId, setAddingSampleForVisitId] = useState(null);
   const [samplesByVisitId, setSamplesByVisitId] = useState({});
+  // A visit logged with no details at all — e.g. the minimal row Telegram's
+  // "✅ Sign in (visited)" follow-up button creates straight from a reminder
+  // (see createVisitFromFollowUp, server-side) — previously had no way to
+  // ever add the notes/products-discussed/samples a real Check-In collects.
+  // This lets a rep go back into any of today's own visits and fill that in
+  // after the fact, same fields as the live wizard.
+  const [editingDetailsForVisitId, setEditingDetailsForVisitId] = useState(null);
 
   const loadSamplesForVisit = (visitId) => {
     api.getSamples({ visitId }).then((data) => {
@@ -2464,10 +2471,14 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   // Loaded once the Samples box can actually appear (not on every
   // pharmacy check-in, which never shows it) — this is what restricts the
   // Patient-type dropdown below to only products the manager has prepared.
+  // Also loaded when a past visit's "Edit visit details" form opens (see
+  // Today's Visits below) — that form has its own Patient-type dropdown and
+  // otherwise would always see an empty/stale stock list, since opening it
+  // doesn't touch isDoctorStyleEntity/visitStarted at all.
   useEffect(() => {
-    if (!isDoctorStyleEntity || !visitStarted) return;
+    if (!((isDoctorStyleEntity && visitStarted) || editingDetailsForVisitId)) return;
     api.getSamplePrepStock().then((data) => setSamplePrepStock(data.stock || [])).catch(() => setSamplePrepStock([]));
-  }, [isDoctorStyleEntity, visitStarted]);
+  }, [isDoctorStyleEntity, visitStarted, editingDetailsForVisitId]);
 
   // Doctor-visit redesign: the richer Pre-Call brief replaces the plain
   // "last 3 visits" list above for doctors AND nutritionists/dietitians
@@ -4065,6 +4076,10 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
           const isExpanded = expandedTodayVisitId === v.id;
           const isPharmacyVisit = clients.some((c) => c.name.toLowerCase().trim() === v.client.toLowerCase().trim());
           const isNutritionistVisit = nutritionists.some((n) => n.name.toLowerCase().trim() === v.client.toLowerCase().trim());
+          // By elimination, same as everywhere else in this app that infers
+          // entity type from a bare name match — not pharmacy, not
+          // nutritionist, so it's a doctor.
+          const isDoctorVisit = !isPharmacyVisit && !isNutritionistVisit;
           const existingOrder = todayOrders.find((o) => o.visitId === v.id);
           const samples = samplesByVisitId[v.id];
           return (
@@ -4096,6 +4111,28 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
 
               {isExpanded && (
                 <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #E5DFD3", display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: "#8A8272", marginBottom: 4 }}>VISIT DETAILS</div>
+                    {editingDetailsForVisitId === v.id ? (
+                      <EditVisitDetailsForm
+                        visit={v}
+                        products={products}
+                        samplePrepStock={samplePrepStock}
+                        isDoctorStyleVisit={isDoctorVisit}
+                        onUpdateVisit={onUpdateVisit}
+                        onDone={() => { loadTodayVisits(); setEditingDetailsForVisitId(null); }}
+                        onCancel={() => setEditingDetailsForVisitId(null)}
+                      />
+                    ) : (
+                      <button
+                        onClick={() => setEditingDetailsForVisitId(v.id)}
+                        style={{ fontSize: 12, fontWeight: 500, color: "#C17817", background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 6, padding: "6px 10px", cursor: "pointer" }}
+                      >
+                        ✎ {v.notes || (v.mentionedItems && v.mentionedItems.length > 0) ? "Edit visit details" : "Add visit details"}
+                      </button>
+                    )}
+                  </div>
+
                   <div>
                     <div style={{ fontSize: 11, fontWeight: 600, color: "#8A8272", marginBottom: 4 }}>ORDER</div>
                     {existingOrder && editingOrderId === existingOrder.id ? (
@@ -4449,6 +4486,246 @@ function PharmacySampleStep({ clientName, visitId, products, onDone }) {
       <div style={{ display: "flex", gap: 8 }}>
         <button disabled={saving} onClick={finish} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
           {saving ? "Saving…" : items.length > 0 ? "Save samples & continue" : "Continue"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Lets a rep fill in the notes/products-discussed/samples a real Check-In
+// collects, for a visit that was logged with none of that — most commonly
+// the bare-bones row Telegram's "✅ Sign in (visited)" follow-up button
+// creates straight from a reminder (see createVisitFromFollowUp,
+// server-side), which only ever has a client name and a timestamp, with no
+// way before now to go back and say what actually happened. Mirrors the
+// live Check-In wizard's own item/sample pickers: same mentionedItems
+// shape, same Personal/Patient sample-type split with prepared-stock
+// awareness for doctor-style entities, so PATCH /api/visits/:id (already
+// built for exactly this — it folds a newly-tagged sample into Samples and
+// draws down SamplePrepStock the same way POST /api/visits does) needs no
+// changes to support this.
+function EditVisitDetailsForm({ visit, products, samplePrepStock, isDoctorStyleVisit, onUpdateVisit, onDone, onCancel }) {
+  const [notes, setNotes] = useState(visit.notes || "");
+  const [items, setItems] = useState(() => (visit.mentionedItems || []).map((it) => ({ ...it })));
+  const [itemQuery, setItemQuery] = useState("");
+  const [samplesQuery, setSamplesQuery] = useState("");
+  const [sampleTypeChoice, setSampleTypeChoice] = useState("personal");
+  const [sampleQty, setSampleQty] = useState("3");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const matchedItem = products.find((p) => p.name.toLowerCase().trim() === itemQuery.toLowerCase().trim());
+  const itemOptions = (itemQuery.trim()
+    ? products.filter((p) => p.name.toLowerCase().includes(itemQuery.toLowerCase().trim()))
+    : products
+  ).slice(0, 50);
+  const addDiscussedItem = () => {
+    if (!matchedItem || items.some((it) => it.productId === matchedItem.id)) return;
+    setItems((prev) => [...prev, { productId: matchedItem.id, name: matchedItem.name, sampleStatus: null }]);
+    setItemQuery("");
+  };
+  const removeItem = (productId) => setItems((prev) => prev.filter((it) => it.productId !== productId));
+
+  const preparedQtyFor = (name) => Number(samplePrepStock.find((s) => normalizeProductNameKey(s.productName) === normalizeProductNameKey(name))?.preparedQty) || 0;
+  const samplesItemOptions = (() => {
+    const matches = samplesQuery.trim()
+      ? products.filter((p) => p.name.toLowerCase().includes(samplesQuery.toLowerCase().trim()))
+      : products;
+    const seen = new Set();
+    const deduped = [];
+    for (const p of matches) {
+      const key = normalizeProductNameKey(p.name);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(p);
+    }
+    return deduped.slice(0, 50);
+  })();
+  const matchedSamplesItem = products.find((p) => p.name.toLowerCase().trim() === samplesQuery.toLowerCase().trim());
+  const alreadyTaggedGaveQty = matchedSamplesItem && sampleTypeChoice === "patient"
+    ? items.filter((it) => it.productId === matchedSamplesItem.id && it.sampleStatus === "gave" && it.sampleType === "patient").reduce((sum, it) => sum + (Number(it.qty) || 1), 0)
+    : 0;
+  const remainingForMatched = matchedSamplesItem && sampleTypeChoice === "patient"
+    ? Math.max(0, preparedQtyFor(matchedSamplesItem.name) - alreadyTaggedGaveQty)
+    : null;
+  const sampleQtyNum = Math.max(1, Number(sampleQty) || 1);
+  const giveExceedsStock = sampleTypeChoice === "patient" && remainingForMatched !== null && sampleQtyNum > remainingForMatched;
+  const addSamplesItem = (status) => {
+    if (!matchedSamplesItem) return;
+    if (status === "gave" && giveExceedsStock) return;
+    setItems((prev) => {
+      if (prev.some((it) => it.productId === matchedSamplesItem.id)) {
+        return prev.map((it) => (it.productId === matchedSamplesItem.id ? { ...it, sampleStatus: status, sampleType: sampleTypeChoice, qty: sampleQtyNum } : it));
+      }
+      return [...prev, { productId: matchedSamplesItem.id, name: matchedSamplesItem.name, sampleStatus: status, sampleType: sampleTypeChoice, qty: sampleQtyNum }];
+    });
+    setSamplesQuery("");
+    setSampleQty("3");
+  };
+
+  const discussedOnly = items.filter((it) => !it.sampleStatus);
+  const taggedSampleItems = items.filter((it) => it.sampleStatus === "gave" || it.sampleStatus === "next_visit");
+
+  const save = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      await onUpdateVisit(visit.id, { notes, mentionedItems: items });
+      onDone();
+    } catch (e) {
+      setError(e?.message || "Couldn't save.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
+      <div style={{ marginBottom: 10 }}>
+        <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#8A8272", marginBottom: 4 }}>What happened at the visit</label>
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Describe the visit — what was discussed, how it went…"
+          rows={3}
+          style={{ ...inputStyle, width: "100%", resize: "vertical" }}
+        />
+      </div>
+
+      <div style={{ marginBottom: 10 }}>
+        <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#8A8272", marginBottom: 4 }}>Products discussed</label>
+        <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+          <input
+            value={itemQuery}
+            onChange={(e) => setItemQuery(e.target.value)}
+            placeholder="Search product…"
+            list="edit-visit-item-options"
+            style={{ ...inputStyle, flex: 1 }}
+          />
+          <datalist id="edit-visit-item-options">
+            {itemOptions.map((p) => <option key={p.id} value={p.name} />)}
+          </datalist>
+          <button
+            type="button"
+            onClick={addDiscussedItem}
+            disabled={!matchedItem}
+            style={{ padding: "8px 14px", borderRadius: 8, border: "none", whiteSpace: "nowrap", background: matchedItem ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
+          >
+            Add
+          </button>
+        </div>
+        {discussedOnly.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {discussedOnly.map((it) => (
+              <div key={it.productId} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "6px 8px 6px 10px" }}>
+                <span style={{ fontWeight: 500 }}>{it.name}</span>
+                <button type="button" onClick={() => removeItem(it.productId)} style={{ border: "none", background: "none", cursor: "pointer", display: "flex", padding: 2, marginLeft: "auto", color: "#8A8272" }} aria-label={`Remove ${it.name}`}>
+                  <X size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {isDoctorStyleVisit && (
+        <div style={{ marginBottom: 10 }}>
+          <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "#8A8272", marginBottom: 4 }}>Samples</label>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <button
+              type="button"
+              onClick={() => { setSampleTypeChoice("personal"); setSamplesQuery(""); setSampleQty("3"); }}
+              style={{
+                flex: 1, padding: "6px 10px", borderRadius: 6, fontSize: 11.5, fontWeight: 500,
+                border: sampleTypeChoice === "personal" ? "1px solid #7A5B2E" : "1px solid #E9C88A",
+                background: sampleTypeChoice === "personal" ? "#7A5B2E" : "#fff",
+                color: sampleTypeChoice === "personal" ? "#fff" : "#7A5B2E",
+              }}
+            >
+              Personal use (original bottle)
+            </button>
+            <button
+              type="button"
+              onClick={() => { setSampleTypeChoice("patient"); setSamplesQuery(""); setSampleQty("3"); }}
+              style={{
+                flex: 1, padding: "6px 10px", borderRadius: 6, fontSize: 11.5, fontWeight: 500,
+                border: sampleTypeChoice === "patient" ? "1px solid #7A5B2E" : "1px solid #E9C88A",
+                background: sampleTypeChoice === "patient" ? "#7A5B2E" : "#fff",
+                color: sampleTypeChoice === "patient" ? "#fff" : "#7A5B2E",
+              }}
+            >
+              Patient samples (prepared)
+            </button>
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+            <div style={{ flex: 1 }}>
+              <SearchableSelect
+                value={samplesQuery}
+                onChange={setSamplesQuery}
+                options={samplesItemOptions}
+                getLabel={(p) => p.name}
+                renderOption={sampleTypeChoice === "patient" ? (p) => `${p.name} — ${preparedQtyFor(p.name)} left` : undefined}
+                placeholder="Search a product…"
+                style={{ ...inputStyle, width: "100%", background: "#fff" }}
+              />
+            </div>
+            <input
+              type="number" min="1" value={sampleQty} onChange={(e) => setSampleQty(e.target.value)}
+              title="Quantity"
+              style={{ ...inputStyle, width: 64, background: "#fff", textAlign: "center" }}
+            />
+          </div>
+          {sampleTypeChoice === "patient" && matchedSamplesItem && (
+            <div style={{ fontSize: 11, color: giveExceedsStock ? "#B33A3A" : "#7A5B2E", marginBottom: 8 }}>
+              {remainingForMatched === 0
+                ? `Not prepared yet for ${matchedSamplesItem.name} — "Gave it today" is disabled.`
+                : <>{remainingForMatched} prepared and left for {matchedSamplesItem.name}{giveExceedsStock ? " — reduce the quantity." : ""}</>}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <button
+              type="button"
+              onClick={() => addSamplesItem("gave")}
+              disabled={!matchedSamplesItem || giveExceedsStock}
+              style={{
+                flex: 1, padding: "8px 10px", borderRadius: 8, border: "none", fontSize: 12, fontWeight: 500,
+                background: matchedSamplesItem && !giveExceedsStock ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2",
+              }}
+            >
+              Gave it today
+            </button>
+            <button
+              type="button"
+              onClick={() => addSamplesItem("next_visit")}
+              disabled={!matchedSamplesItem}
+              style={{ flex: 1, padding: "8px 10px", borderRadius: 8, border: "1px solid #E5DFD3", fontSize: 12, fontWeight: 500, background: "#fff", color: "#5B5445" }}
+            >
+              Flag interest / next visit
+            </button>
+          </div>
+          {taggedSampleItems.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {taggedSampleItems.map((it) => (
+                <div key={it.productId} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: "6px 8px 6px 10px" }}>
+                  <span style={{ fontWeight: 500 }}>{it.name} × {it.qty}{it.sampleStatus === "gave" ? " (given)" : " (interest)"}</span>
+                  <button type="button" onClick={() => removeItem(it.productId)} style={{ border: "none", background: "none", cursor: "pointer", display: "flex", padding: 2, marginLeft: "auto", color: "#8A8272" }} aria-label={`Remove ${it.name}`}>
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="button" disabled={saving} onClick={save} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}>
+          {saving ? "Saving…" : "Save"}
+        </button>
+        <button type="button" onClick={onCancel} disabled={saving} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>
+          Cancel
         </button>
       </div>
     </div>
