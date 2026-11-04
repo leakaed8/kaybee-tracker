@@ -5221,8 +5221,8 @@ app.get("/api/sample-fulfillments", requireTabAccess("samples"), async (req, res
 app.patch("/api/sample-fulfillments/:followUpId/:productId", requireTabAccess("samples"), async (req, res) => {
   try {
     const { managerStatus, qty, sampleType } = req.body;
-    if (managerStatus !== undefined && !["prepared", "given_to_rep", ""].includes(managerStatus)) {
-      return res.status(400).json({ error: "managerStatus must be 'prepared', 'given_to_rep', or '' to revert." });
+    if (managerStatus !== undefined && !["prepared", "given_to_rep", "expired", ""].includes(managerStatus)) {
+      return res.status(400).json({ error: "managerStatus must be 'prepared', 'given_to_rep', 'expired', or '' to revert." });
     }
     if (sampleType !== undefined && !["personal", "patient"].includes(sampleType)) {
       return res.status(400).json({ error: "sampleType must be 'personal' or 'patient'." });
@@ -5255,6 +5255,7 @@ app.patch("/api/sample-fulfillments/:followUpId/:productId", requireTabAccess("s
     item.sampleType = nextType;
     if (nextStatus === "prepared" && prevStatus !== "prepared") { item.preparedAt = now; item.preparedBy = who; }
     if (nextStatus === "given_to_rep" && prevStatus !== "given_to_rep") { item.givenAt = now; item.givenBy = who; }
+    if (nextStatus === "expired" && prevStatus !== "expired") { item.expiredAt = now; item.expiredBy = who; }
 
     // Handing prepared PATIENT samples off to a rep is what actually draws
     // down the prepared pool — personal-use items never touch it. Compares
@@ -5272,6 +5273,47 @@ app.patch("/api/sample-fulfillments/:followUpId/:productId", requireTabAccess("s
 
     await db.updateRowById("FollowUps", f.id, { sampleItems: JSON.stringify(items) });
     res.json({ ok: true, item });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Bulk cleanup for stale pending requests: a sample item's own dueDate
+// comes from its PARENT follow-up (see GET /api/sample-fulfillments above),
+// which can keep drifting long past that date — rescheduled, snoozed,
+// signed in via Telegram without ever touching this item — while the
+// sample item itself just sits at managerStatus "" forever, since nothing
+// else ever revisits it. Over months this silently piles up into a long
+// "pending" queue of requests nobody is ever going to act on. This finds
+// every PENDING item (managerStatus "") whose follow-up's dueDate has
+// already passed and marks it "expired" — same mechanism as marking one
+// prepared/given by hand, just batched, and never touches
+// SamplePrepStock (only a "given_to_rep" + patient transition does that,
+// see above) so this can never affect real stock counts.
+app.post("/api/sample-fulfillments/clear-expired", requireManager, async (req, res) => {
+  try {
+    const followUps = await db.getAllRows("FollowUps");
+    const relevant = followUps.filter((f) => f.needsSample === "true" && f.status !== "stopped" && daysUntilFromToday(f.dueDate) < 0);
+    const who = req.repName || "Manager";
+    const now = new Date().toISOString();
+    let clearedCount = 0;
+    for (const f of relevant) {
+      let items = [];
+      try { items = JSON.parse(f.sampleItems || "[]"); } catch { items = []; }
+      let changed = false;
+      for (const it of items) {
+        if (!it.managerStatus) {
+          it.managerStatus = "expired";
+          it.expiredAt = now;
+          it.expiredBy = who;
+          changed = true;
+          clearedCount++;
+        }
+      }
+      if (changed) await db.updateRowById("FollowUps", f.id, { sampleItems: JSON.stringify(items) });
+    }
+    res.json({ ok: true, clearedCount });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });

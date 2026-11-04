@@ -16039,6 +16039,7 @@ function SamplesTrackingView({ products, role }) {
   // this, an immediate "Gave it today" at check-in had no visible trace
   // anywhere in this tab at all, only in raw data exports.
   const [recentGiven, setRecentGiven] = useState(null);
+  const [clearingExpired, setClearingExpired] = useState(false);
 
   const load = useCallback(() => {
     Promise.all([api.getSampleFulfillments(), api.getSamplePrepStock(), api.getSamples({ all: true })])
@@ -16079,6 +16080,27 @@ function SamplesTrackingView({ products, role }) {
       setError(e.message);
     } finally {
       setBusyKey(null);
+    }
+  };
+
+  // Bulk-dismisses every pending request whose own follow-up's due date has
+  // already passed — these silently accumulate (a follow-up keeps getting
+  // rescheduled/snoozed/signed-in via Telegram while the sample item itself
+  // never gets revisited) into a long tail nobody's ever going to act on.
+  // Marks them "expired" server-side (see POST /api/sample-fulfillments/
+  // clear-expired) — never touches SamplePrepStock, since only a
+  // given_to_rep + patient transition does that.
+  const clearExpired = async () => {
+    if (!window.confirm("Clear every expired pending sample request? This can't be undone from here.")) return;
+    setClearingExpired(true);
+    setError("");
+    try {
+      await api.clearExpiredSampleFulfillments();
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setClearingExpired(false);
     }
   };
 
@@ -16143,6 +16165,7 @@ function SamplesTrackingView({ products, role }) {
   const pending = fulfillments.filter((f) => !f.managerStatus);
   const prepared = fulfillments.filter((f) => f.managerStatus === "prepared");
   const given = fulfillments.filter((f) => f.managerStatus === "given_to_rep");
+  const expiredPendingCount = pending.filter((f) => daysUntil(f.dueDate) < 0).length;
 
   // SamplePrepStock only ever tracks PATIENT samples — a patient-type
   // request for a product with NO prep line yet is where the real cost
@@ -16377,6 +16400,21 @@ function SamplesTrackingView({ products, role }) {
           </div>
         )}
       </div>
+
+      {isManager && expiredPendingCount > 0 && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", background: "#FBF3F0", border: "1px solid #E5B8B0", borderRadius: 10, padding: 12, marginBottom: 18 }}>
+          <span style={{ fontSize: 12.5, color: "#B33A3A" }}>
+            {expiredPendingCount} pending sample request{expiredPendingCount === 1 ? "" : "s"} {expiredPendingCount === 1 ? "is" : "are"} past {expiredPendingCount === 1 ? "its" : "their"} follow-up's due date — likely stale.
+          </span>
+          <button
+            onClick={clearExpired}
+            disabled={clearingExpired}
+            style={{ fontSize: 12, fontWeight: 600, color: "#fff", background: clearingExpired ? "#D8D2C4" : "#B33A3A", border: "none", borderRadius: 6, padding: "7px 12px", whiteSpace: "nowrap" }}
+          >
+            {clearingExpired ? "Clearing…" : `Clear ${expiredPendingCount} expired`}
+          </button>
+        </div>
+      )}
 
       <div style={{ background: "#F5F0FA", border: "1.5px solid #D7C3EA", borderRadius: 10, padding: 14, marginBottom: 18 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>

@@ -273,6 +273,7 @@ export const api = {
   getSampleFulfillments: () => request("/sample-fulfillments"),
   updateSampleFulfillment: (followUpId, productId, patch) =>
     request(`/sample-fulfillments/${followUpId}/${productId}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  clearExpiredSampleFulfillments: () => request("/sample-fulfillments/clear-expired", { method: "POST" }),
   getSamplePrepStock: () => request("/sample-prep-stock"),
   restockSamplePrep: (payload) => request("/sample-prep-stock/restock", { method: "POST", body: JSON.stringify(payload) }),
   updateSamplePrepStock: (id, patch) => request(`/sample-prep-stock/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
