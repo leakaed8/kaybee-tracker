@@ -16144,22 +16144,29 @@ function SamplesTrackingView({ products, role }) {
   const prepared = fulfillments.filter((f) => f.managerStatus === "prepared");
   const given = fulfillments.filter((f) => f.managerStatus === "given_to_rep");
 
-  // A flagged-interest item for a product that already has a prep line
-  // (patient has been on it before) is cheap to act on — restocking an
-  // existing label/bottle setup — so it stays in the old actionable queue.
-  // A product with no prep line yet is where the real cost sits (new
-  // label design, printing, decanting many bottles), so those items are
-  // never auto-actionable: they're grouped here as a read-only demand
-  // signal for the manager to review and decide on their own schedule,
-  // not a per-request to-do that piles up expecting an answer.
+  // SamplePrepStock only ever tracks PATIENT samples — a patient-type
+  // request for a product with NO prep line yet is where the real cost
+  // sits (new label design, printing, decanting many bottles), so those
+  // are never auto-actionable: grouped here as a read-only demand signal
+  // for the manager to review and decide on their own schedule, not a
+  // per-request to-do. Once a product IS prepared, any rep can give it
+  // straight from the Check-In dropdown — which draws the same
+  // SamplePrepStock count down on its own — so a patient-type request for
+  // an already-prepared product needs no manager action at all and is
+  // deliberately excluded from both queues below, not just demoted into
+  // this one. Personal-use requests are never matched against
+  // SamplePrepStock at all (it isn't what that stock tracks) — they always
+  // land in the actionable queue below regardless of whether some patient
+  // batch happens to share the same product name.
   // Matched by normalizeProductNameKey, not productId — the Product
   // Catalog has duplicate rows for the same product under different ids
   // that also differ in punctuation/spacing, and a fulfillment request
   // tagged against a different duplicate than the one that was restocked
   // must still count as "already has a prep line."
   const stockProductNames = new Set(stock.map((s) => normalizeProductNameKey(s.productName)));
-  const interestPending = pending.filter((f) => !stockProductNames.has(normalizeProductNameKey(f.name)));
-  const actionablePending = pending.filter((f) => stockProductNames.has(normalizeProductNameKey(f.name)));
+  const isPatientRequest = (f) => f.sampleType === "patient";
+  const interestPending = pending.filter((f) => isPatientRequest(f) && !stockProductNames.has(normalizeProductNameKey(f.name)));
+  const actionablePending = pending.filter((f) => !isPatientRequest(f));
   const interestGroups = [];
   const interestByProduct = new Map();
   interestPending.forEach((f) => {
@@ -16412,9 +16419,9 @@ function SamplesTrackingView({ products, role }) {
       </div>
 
       <div style={{ marginBottom: 18 }}>
-        <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>Pending — ready to prep ({actionablePending.length})</div>
+        <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>Pending — personal-use samples ({actionablePending.length})</div>
         <div style={{ fontSize: 11, color: "#8A8272", marginBottom: 8 }}>
-          Already has a prep line going — a quick restock, not a new label/bottle setup.
+          Original-bottle requests — these never draw from Patient Sample Stock, so they always need your own action here, regardless of what's already prepared for patients.
         </div>
         {actionablePending.length === 0 ? <EmptyState text="No pending sample requests." /> : actionablePending.map(fulfillmentRow)}
       </div>
