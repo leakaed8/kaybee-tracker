@@ -16034,6 +16034,7 @@ function SamplesTrackingView({ products, role }) {
   const [editQty, setEditQty] = useState("");
   const [editThreshold, setEditThreshold] = useState("");
   const [showDone, setShowDone] = useState(false);
+  const [showRejected, setShowRejected] = useState(false);
   // Actual hand-out history — distinct from the Pending/Prepared/Given
   // queue below, which is only ever "need next visit" requests. Before
   // this, an immediate "Gave it today" at check-in had no visible trace
@@ -16165,6 +16166,7 @@ function SamplesTrackingView({ products, role }) {
   const pending = fulfillments.filter((f) => !f.managerStatus);
   const prepared = fulfillments.filter((f) => f.managerStatus === "prepared");
   const given = fulfillments.filter((f) => f.managerStatus === "given_to_rep");
+  const rejected = fulfillments.filter((f) => f.managerStatus === "rejected");
   const expiredPendingCount = pending.filter((f) => daysUntil(f.dueDate) < 0).length;
 
   // SamplePrepStock only ever tracks PATIENT samples — a patient-type
@@ -16240,10 +16242,25 @@ function SamplesTrackingView({ products, role }) {
         {isManager && (
           <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
             {!f.managerStatus && (
-              <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "prepared")}
-                style={{ fontSize: 11.5, fontWeight: 600, color: "#fff", background: busy ? "#D8D2C4" : "#C17817", border: "none", borderRadius: 6, padding: "6px 10px" }}>
-                {busy ? "Saving…" : "Mark Prepared"}
-              </button>
+              <>
+                <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "prepared")}
+                  style={{ fontSize: 11.5, fontWeight: 600, color: "#fff", background: busy ? "#D8D2C4" : "#C17817", border: "none", borderRadius: 6, padding: "6px 10px" }}>
+                  {busy ? "Saving…" : "Mark Prepared"}
+                </button>
+                {/* For an old request it turns out was already handed over
+                    off the books — skips straight to "given_to_rep" (same
+                    end state the normal Prepared -> Given flow reaches),
+                    which still draws down SamplePrepStock for a patient-type
+                    item exactly as it would have at the time. */}
+                <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "given_to_rep")}
+                  style={{ fontSize: 11.5, fontWeight: 600, color: "#fff", background: busy ? "#D8D2C4" : "#4C7A5E", border: "none", borderRadius: 6, padding: "6px 10px" }}>
+                  {busy ? "Saving…" : "Already gave it"}
+                </button>
+                <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "rejected")}
+                  style={{ fontSize: 11.5, fontWeight: 600, color: "#B33A3A", background: "none", border: "1px solid #E5B8B0", borderRadius: 6, padding: "6px 10px" }}>
+                  Reject
+                </button>
+              </>
             )}
             {f.managerStatus === "prepared" && (
               <>
@@ -16259,6 +16276,12 @@ function SamplesTrackingView({ products, role }) {
             )}
             {f.managerStatus === "given_to_rep" && (
               <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "prepared")}
+                style={{ fontSize: 11.5, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>
+                Undo
+              </button>
+            )}
+            {f.managerStatus === "rejected" && (
+              <button disabled={busy} onClick={() => setStatus(f.followUpId, f.productId, "")}
                 style={{ fontSize: 11.5, color: "#8A8272", background: "none", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 10px" }}>
                 Undo
               </button>
@@ -16474,6 +16497,13 @@ function SamplesTrackingView({ products, role }) {
           {showDone ? "▾" : "▸"} Given to rep ({given.length})
         </button>
         {showDone && (given.length === 0 ? <EmptyState text="None yet." /> : given.map(fulfillmentRow))}
+      </div>
+
+      <div style={{ marginTop: 10 }}>
+        <button onClick={() => setShowRejected((v) => !v)} style={{ fontSize: 12.5, fontWeight: 600, color: "#8A8272", background: "none", border: "none", padding: 0, cursor: "pointer", marginBottom: 8 }}>
+          {showRejected ? "▾" : "▸"} Rejected ({rejected.length})
+        </button>
+        {showRejected && (rejected.length === 0 ? <EmptyState text="None yet." /> : rejected.map(fulfillmentRow))}
       </div>
     </div>
   );

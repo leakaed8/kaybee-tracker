@@ -5197,6 +5197,7 @@ app.get("/api/sample-fulfillments", requireTabAccess("samples"), async (req, res
           managerStatus: it.managerStatus || "",
           preparedAt: it.preparedAt || "", preparedBy: it.preparedBy || "",
           givenAt: it.givenAt || "", givenBy: it.givenBy || "",
+          expiredAt: it.expiredAt || "", rejectedAt: it.rejectedAt || "", rejectedBy: it.rejectedBy || "",
           repName: f.repName, entityName: f.entityName, dueDate: f.dueDate, followUpStatus: f.status,
         });
       }
@@ -5221,8 +5222,8 @@ app.get("/api/sample-fulfillments", requireTabAccess("samples"), async (req, res
 app.patch("/api/sample-fulfillments/:followUpId/:productId", requireTabAccess("samples"), async (req, res) => {
   try {
     const { managerStatus, qty, sampleType } = req.body;
-    if (managerStatus !== undefined && !["prepared", "given_to_rep", "expired", ""].includes(managerStatus)) {
-      return res.status(400).json({ error: "managerStatus must be 'prepared', 'given_to_rep', 'expired', or '' to revert." });
+    if (managerStatus !== undefined && !["prepared", "given_to_rep", "expired", "rejected", ""].includes(managerStatus)) {
+      return res.status(400).json({ error: "managerStatus must be 'prepared', 'given_to_rep', 'expired', 'rejected', or '' to revert." });
     }
     if (sampleType !== undefined && !["personal", "patient"].includes(sampleType)) {
       return res.status(400).json({ error: "sampleType must be 'personal' or 'patient'." });
@@ -5256,6 +5257,7 @@ app.patch("/api/sample-fulfillments/:followUpId/:productId", requireTabAccess("s
     if (nextStatus === "prepared" && prevStatus !== "prepared") { item.preparedAt = now; item.preparedBy = who; }
     if (nextStatus === "given_to_rep" && prevStatus !== "given_to_rep") { item.givenAt = now; item.givenBy = who; }
     if (nextStatus === "expired" && prevStatus !== "expired") { item.expiredAt = now; item.expiredBy = who; }
+    if (nextStatus === "rejected" && prevStatus !== "rejected") { item.rejectedAt = now; item.rejectedBy = who; }
 
     // Handing prepared PATIENT samples off to a rep is what actually draws
     // down the prepared pool — personal-use items never touch it. Compares
