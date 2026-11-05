@@ -3918,6 +3918,25 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
       {step === "orderSetup" && lastVisit && (() => {
         const offersActiveToday = (offers || []).filter((o) => o.active && (!o.expiresAt || o.expiresAt >= new Date().toISOString().slice(0, 10)));
         const eligibleForOffers = (Number(orderDiscountRate) || 0) < PROMOTIONAL_INELIGIBLE_DISCOUNT_PCT;
+        // Of the offers that would even show at this discount, only keep
+        // the ones that don't blow past the EXISTING 35% total-effective-
+        // discount cap once combined with it — same formula that cap
+        // itself enforces (uniform $1/unit, so this is the worst-case
+        // estimate; real per-order pricing can land a touch lower). Keeps
+        // the dropdown from ever offering a combination the server would
+        // reject outright at submission.
+        //
+        // One explicit, acknowledged exception: at exactly 29%, "10+1" is
+        // kept available even though its own estimate (35.45%) is a hair
+        // over the cap — a deliberate call, not an oversight.
+        const offersWithinCap = offersActiveToday.filter((o) => {
+          const required = o.buyQty + o.getQty;
+          if (required <= 0) return false;
+          const estimatedPct = computeEffectiveDiscountPct(required, o.buyQty * (1 - (Number(orderDiscountRate) || 0) / 100));
+          const withinCap = estimatedPct <= MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT + 1e-9;
+          const isTenPlusOneAt29 = Number(orderDiscountRate) === 29 && o.buyQty === 10 && o.getQty === 1;
+          return withinCap || isTenPlusOneAt29;
+        });
         return (
           <>
             {canGoBack && <BackStepButton onClick={goBack} />}
@@ -3929,18 +3948,24 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                 <input
                   type="number" min="0" max="100" step="0.5"
                   value={orderDiscountRate}
-                  onChange={(e) => setOrderDiscountRate(e.target.value)}
+                  onChange={(e) => { setOrderDiscountRate(e.target.value); setOrderOfferId(""); }}
                   placeholder="0"
                   style={inputStyle}
                 />
               </Field>
               {eligibleForOffers ? (
-                <Field label="Offer (optional)">
-                  <select value={orderOfferId} onChange={(e) => setOrderOfferId(e.target.value)} style={inputStyle}>
-                    <option value="">No offer (regular)</option>
-                    {offersActiveToday.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
-                  </select>
-                </Field>
+                offersWithinCap.length > 0 ? (
+                  <Field label="Offer (optional)">
+                    <select value={orderOfferId} onChange={(e) => setOrderOfferId(e.target.value)} style={inputStyle}>
+                      <option value="">No offer (regular)</option>
+                      {offersWithinCap.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+                    </select>
+                  </Field>
+                ) : (
+                  <div style={{ fontSize: 12.5, color: "#8A8272", marginTop: 2 }}>
+                    No offer stays under the {MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT}% total-discount cap at this rate.
+                  </div>
+                )
               ) : (
                 <div style={{ fontSize: 12.5, color: "#8A8272", marginTop: 2 }}>
                   No promotional offers at {PROMOTIONAL_INELIGIBLE_DISCOUNT_PCT}% or higher.
