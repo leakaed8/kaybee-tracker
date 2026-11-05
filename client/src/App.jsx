@@ -24,7 +24,7 @@ import {
   daysUntil, fmtDate, turnoverPct, zoneFor, isSlowMover, isAtRisk, effectiveSold90, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
   computeLeadScore, todayBeirutStr, beirutDateStrOfInstant, fmtDateOfInstant, fmtTime, fmtDateTime, addDaysToDateStr, weekdayOfDateStr,
   computeFullRetailValue, hasPromotionalItems, computeEffectiveDiscountPct, MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT,
-  offerRequiresApproval, offerFreeRatio, MAX_PROMOTIONAL_ELIGIBLE_DISCOUNT_PCT,
+  offerRequiresApproval, offerFreeRatio, PROMOTIONAL_INELIGIBLE_DISCOUNT_PCT,
 } from "./helpers.js";
 import {
   DRUG_NUTRIENT_DATA, CONDITION_TALKING_POINTS, SPECIALTY_TALKING_POINTS,
@@ -2259,6 +2259,13 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   const [locating, setLocating] = useState(false);
   const [locError, setLocError] = useState("");
   const [lastVisit, setLastVisit] = useState(null);
+  // The whole-invoice discount % and offer family, chosen up front on the
+  // new "Set the discount" step (between "Did they place an order?" and
+  // the item-adding page) — handed to OrderBuilder as its starting values
+  // so the rep never has to type a discount or touch a per-item dropdown
+  // if they already agreed on one with the pharmacist.
+  const [orderDiscountRate, setOrderDiscountRate] = useState("");
+  const [orderOfferId, setOrderOfferId] = useState("");
   // The visit-logging flow is one step at a time instead of one long
   // scrolling page: checkin -> orderPrompt -> order (only if "yes") ->
   // followup -> done. Punch in/out and the reference lists below (today's
@@ -2774,11 +2781,24 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   // saveVisitAndFollowUp below, doctor-only). Every pre-existing call site
   // passes nothing, so `targetVisit` falls back to `lastVisit` exactly as
   // before — pharmacy's `followup` step is unaffected.
+  // Pharmacy/supplement-store visit notes now live on THIS (last) step
+  // instead of "Log the visit" — the visit itself was already created back
+  // in submit()/submitEdit() with notes="", so finishing here needs to
+  // patch them in. Doctors/nutritionists already save their own
+  // "Additional notes" earlier (still on checkin, untouched) — never
+  // touched here. Best-effort: a failure here shouldn't block the rep from
+  // finishing the follow-up step over a non-critical notes save.
+  const persistPendingNotes = async (targetVisit) => {
+    if (isDoctorStyleEntity || !notes.trim()) return;
+    try { await onUpdateVisit(targetVisit.id, { notes }); } catch (e) { /* non-critical, swallowed */ }
+  };
+
   const scheduleFollowUp = async (presetKey, visitOverride) => {
     const targetVisit = visitOverride || lastVisit;
     setFollowUpSaving(true);
     setFollowUpError("");
     try {
+      await persistPendingNotes(targetVisit);
       await api.scheduleFollowUp({
         entityName: targetVisit.client,
         entityType,
@@ -2805,6 +2825,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
     setFollowUpSaving(true);
     setFollowUpError("");
     try {
+      await persistPendingNotes(targetVisit);
       await api.scheduleFollowUp({
         entityName: targetVisit.client,
         entityType,
@@ -2829,6 +2850,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
     setFollowUpSaving(true);
     setFollowUpError("");
     try {
+      await persistPendingNotes(targetVisit);
       await api.stopFollowUp({
         entityName: targetVisit.client,
         entityType,
@@ -2993,24 +3015,32 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   // clinical flow as doctors, but — since they CAN place orders — postcall's
   // Save continues into the same orderPrompt -> order/sample -> followup
   // steps pharmacies use, instead of finishing on the spot.
+  // "orderSetup" (new) sits between "Did they place an order?" and the
+  // item-adding page — the discount and offer FAMILY for the whole
+  // invoice are picked there once, up front, instead of the rep typing a
+  // discount number and choosing a per-item offer on the items page
+  // itself (see the orderSetup step's render and OrderBuilder's
+  // initialDiscountRate/initialOfferId props).
   const STEP_KEYS = isNutritionistEntity
-    ? ["checkin", "postcall", "orderPrompt", "order", "sample", "followup"]
+    ? ["checkin", "postcall", "orderPrompt", "orderSetup", "order", "sample", "followup"]
     : !isDoctorEntity
-    ? ["checkin", "orderPrompt", "order", "sample", "followup"]
+    ? ["checkin", "orderPrompt", "orderSetup", "order", "sample", "followup"]
     : ["checkin", "postcall"];
   const STEP_INFO = isNutritionistEntity ? {
     checkin: { n: 1, title: "Log the visit" },
     postcall: { n: 2, title: "Close the visit" },
     orderPrompt: { n: 3, title: "Did they place an order?" },
-    order: { n: 4, title: "Order details" },
-    sample: { n: 5, title: "Did you give a sample?" },
-    followup: { n: 6, title: "Schedule a follow-up" },
+    orderSetup: { n: 4, title: "Set the discount" },
+    order: { n: 5, title: "Order details" },
+    sample: { n: 6, title: "Did you give a sample?" },
+    followup: { n: 7, title: "Schedule a follow-up" },
   } : !isDoctorEntity ? {
     checkin: { n: 1, title: "Log the visit" },
     orderPrompt: { n: 2, title: "Did they place an order?" },
-    order: { n: 3, title: "Order details" },
-    sample: { n: 4, title: "Did you give a sample?" },
-    followup: { n: 5, title: "Schedule a follow-up" },
+    orderSetup: { n: 3, title: "Set the discount" },
+    order: { n: 4, title: "Order details" },
+    sample: { n: 5, title: "Did you give a sample?" },
+    followup: { n: 6, title: "Schedule a follow-up" },
   } : {
     checkin: { n: 1, title: "Log the visit" },
     postcall: { n: 2, title: "Close the visit" },
@@ -3254,65 +3284,33 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                 condensed postcall screen right after this one (reusing the
                 same keyLearning state) already asks for exactly this, so
                 asking again here would just be the same question twice. */}
-            {!isRemoteContact && (!isDoctorStyleEntity || visitStarted) && !isReturnVisit && (
-              <Field label={isDoctorStyleEntity ? "Additional notes (optional)" : "Visit notes"}>
+            {/* Pharmacy/supplement-store visit notes moved to the LAST step
+                (Schedule a follow-up) — the rep usually knows what's worth
+                noting only after seeing how the visit (and any order) went,
+                not before. Doctor/nutritionist's own "Additional notes"
+                stays here, unchanged — their flow is a different shape
+                (pre-call/during-call/postcall), already asking this at the
+                right moment for them. */}
+            {!isRemoteContact && isDoctorStyleEntity && visitStarted && !isReturnVisit && (
+              <Field label="Additional notes (optional)">
                 <textarea
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
-                  placeholder={isDoctorStyleEntity ? "Anything else worth remembering…" : "What was discussed, orders taken, objections…"}
-                  rows={isDoctorStyleEntity ? 2 : 3}
+                  placeholder="Anything else worth remembering…"
+                  rows={2}
                   style={{ ...inputStyle, marginBottom: 8, resize: "vertical" }}
                 />
-                {!isDoctorStyleEntity && (
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
-                    {NOTE_TEMPLATES.map((t) => (
-                      <button
-                        type="button"
-                        key={t}
-                        onClick={() => appendTemplate(t)}
-                        style={{ fontSize: 11, padding: "4px 9px", borderRadius: 12, border: "1px solid #E5DFD3", background: "#FAF7F2", color: "#5B5445" }}
-                      >
-                        + {t}
-                      </button>
-                    ))}
-                  </div>
-                )}
               </Field>
             )}
 
-            {/* Objection resolution — pharmacy-only (doctors/nutritionists
-                already have the structured Concern field for this). Picking
-                a tag here overrides the server's notes-text auto-classifier;
-                leaving it blank falls back to that classifier as before. */}
-            {!isRemoteContact && !isDoctorStyleEntity && !isReturnVisit && (
-              <Field label="Objection (if any)">
-                <select value={objectionTag} onChange={(e) => setObjectionTag(e.target.value)} style={inputStyle}>
-                  <option value="">No objection</option>
-                  {OBJECTION_TAG_OPTIONS.map((tag) => <option key={tag} value={tag}>{tag}</option>)}
-                </select>
-                {objectionTag && (
-                  <div style={{ marginTop: 8 }}>
-                    <Field label="Resolution">
-                      <select value={objectionResolution} onChange={(e) => setObjectionResolution(e.target.value)} style={inputStyle}>
-                        <option value="">Not yet determined</option>
-                        {OBJECTION_RESOLUTION_OPTIONS.map((r) => <option key={r} value={r}>{r}</option>)}
-                      </select>
-                    </Field>
-                    <Field label="Notes (what did you say/do?)">
-                      <textarea
-                        value={objectionNotes}
-                        onChange={(e) => setObjectionNotes(e.target.value)}
-                        placeholder="How you handled it…"
-                        rows={2}
-                        style={{ ...inputStyle, resize: "vertical" }}
-                      />
-                    </Field>
-                  </div>
-                )}
-              </Field>
-            )}
+            {/* Objection tracking and the competitor-sighting checkbox below
+                are pharmacy-only features that have been dropped from the
+                simplified visit-logging flow — no longer collected.
+                Doctor/nutritionist's own structured Concern field (further
+                down) and their own competitor-mention tracking are
+                untouched. */}
 
-            {!isRemoteContact && (!isDoctorStyleEntity || visitStarted) && (
+            {!isRemoteContact && isDoctorStyleEntity && visitStarted && (
               <div style={{ background: "#FBF0F0", border: "1.5px solid #E8B4B8", borderRadius: 10, padding: 12, marginBottom: 14 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: sawCompetitor ? 8 : 0 }}>
                   <TrendingDown size={15} style={{ color: "#B33A3A", flexShrink: 0 }} />
@@ -3320,7 +3318,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                 </div>
                 <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#5B5445", marginBottom: sawCompetitor ? 8 : 0 }}>
                   <input type="checkbox" checked={sawCompetitor} onChange={(e) => setSawCompetitor(e.target.checked)} />
-                  {isDoctorStyleEntity ? "Did a competitor come up in the conversation?" : "Any competitor brands on the shelf here?"}
+                  Did a competitor come up in the conversation?
                 </label>
                 {sawCompetitor && (
                   <>
@@ -3898,7 +3896,15 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
           <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
             <span style={{ fontSize: 13.5 }}>Did <strong>{lastVisit.client}</strong> place an order?</span>
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => goToStep("order")} style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}>
+              <button
+                onClick={() => {
+                  const matched = (isNutritionistEntity ? nutritionists : clients).find((c) => c.name.toLowerCase().trim() === lastVisit.client.toLowerCase().trim());
+                  setOrderDiscountRate(matched?.discountRate || "");
+                  setOrderOfferId("");
+                  goToStep("orderSetup");
+                }}
+                style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
+              >
                 Yes, add order
               </button>
               <button onClick={() => goToStep(lastVisit.pending ? "done" : !isDoctorEntity ? "sample" : "followup")} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5 }}>
@@ -3909,6 +3915,48 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
         </>
       )}
 
+      {step === "orderSetup" && lastVisit && (() => {
+        const offersActiveToday = (offers || []).filter((o) => o.active && (!o.expiresAt || o.expiresAt >= new Date().toISOString().slice(0, 10)));
+        const eligibleForOffers = (Number(orderDiscountRate) || 0) < PROMOTIONAL_INELIGIBLE_DISCOUNT_PCT;
+        return (
+          <>
+            {canGoBack && <BackStepButton onClick={goBack} />}
+            <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+              <div style={{ fontSize: 13.5, marginBottom: 14 }}>
+                Set the discount for <strong>{lastVisit.client}</strong>'s invoice.
+              </div>
+              <Field label="Discount %">
+                <input
+                  type="number" min="0" max="100" step="0.5"
+                  value={orderDiscountRate}
+                  onChange={(e) => setOrderDiscountRate(e.target.value)}
+                  placeholder="0"
+                  style={inputStyle}
+                />
+              </Field>
+              {eligibleForOffers ? (
+                <Field label="Offer (optional)">
+                  <select value={orderOfferId} onChange={(e) => setOrderOfferId(e.target.value)} style={inputStyle}>
+                    <option value="">No offer (regular)</option>
+                    {offersActiveToday.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+                  </select>
+                </Field>
+              ) : (
+                <div style={{ fontSize: 12.5, color: "#8A8272", marginTop: 2 }}>
+                  No promotional offers at {PROMOTIONAL_INELIGIBLE_DISCOUNT_PCT}% or higher.
+                </div>
+              )}
+              <button
+                onClick={() => goToStep("order")}
+                style={{ marginTop: 14, padding: "9px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+              >
+                Continue to items
+              </button>
+            </div>
+          </>
+        );
+      })()}
+
       {step === "order" && lastVisit && (
         <>
           {canGoBack && <BackStepButton onClick={goBack} />}
@@ -3918,6 +3966,8 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
             products={products}
             offers={offers}
             clients={isNutritionistEntity ? nutritionists : clients}
+            initialDiscountRate={orderDiscountRate}
+            initialOfferId={orderOfferId}
             onCreateOrder={onCreateOrder}
             onQueueOrderOffline={onQueueOrderOffline}
             pendingVisitLocalKey={lastVisit.pending ? lastVisit.localKey : null}
@@ -3945,6 +3995,35 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
           <div style={{ fontSize: 13.5, marginBottom: 10 }}>
             Schedule a follow-up for <strong>{lastVisit.client}</strong>?
           </div>
+
+          {/* Pharmacy/supplement-store visit notes — moved here from "Log
+              the visit" (step 1), since what's worth noting is usually
+              clearer after seeing how the whole visit (and any order)
+              went. Saved onto the already-created visit when any
+              follow-up action below is taken (see persistPendingNotes). */}
+          {!isDoctorStyleEntity && (
+            <Field label="Visit notes (optional)">
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="What was discussed, orders taken…"
+                rows={3}
+                style={{ ...inputStyle, marginBottom: 8, resize: "vertical" }}
+              />
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+                {NOTE_TEMPLATES.map((t) => (
+                  <button
+                    type="button"
+                    key={t}
+                    onClick={() => appendTemplate(t)}
+                    style={{ fontSize: 11, padding: "4px 9px", borderRadius: 12, border: "1px solid #E5DFD3", background: "#FAF7F2", color: "#5B5445" }}
+                  >
+                    + {t}
+                  </button>
+                ))}
+              </div>
+            </Field>
+          )}
 
           {isDoctorStyleEntity && (
             <Field label={isReturnVisit ? "What do you plan for next time? (included in your Telegram reminder for this follow-up)" : "Next SMARTI Objective (included in your Telegram reminder for this follow-up)"}>
@@ -4852,7 +4931,7 @@ function reconstituteRawItems(groupItems) {
   return [...merged.values()];
 }
 
-function OrderBuilder({ clientName, visitId, products, offers, clients, onCreateOrder, onUpdateOrder, onQueueOrderOffline, pendingVisitLocalKey, onAttachPendingOrder, editOrder, onDone }) {
+function OrderBuilder({ clientName, visitId, products, offers, clients, onCreateOrder, onUpdateOrder, onQueueOrderOffline, pendingVisitLocalKey, onAttachPendingOrder, editOrder, onDone, initialDiscountRate, initialOfferId }) {
   const [productQuery, setProductQuery] = useState("");
   const [qty, setQty] = useState("");
   // Editing an existing order pre-fills its items — matched back to a
@@ -4874,7 +4953,12 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   // This is the one place a rep assigns a product to an offer; correcting a
   // mistake is remove-and-re-add, matching how every other item edit in
   // this form already works (there's no in-place qty edit either).
-  const [pendingOfferId, setPendingOfferId] = useState("");
+  // Pre-selected from the Check-In flow's new "Set the discount" step when
+  // coming from there (initialOfferId) — so the rep never has to touch
+  // this dropdown at all if they already agreed on an offer with the
+  // pharmacist beforehand; still just a starting value; they can switch it
+  // for any individual item exactly as before.
+  const [pendingOfferId, setPendingOfferId] = useState(initialOfferId || "");
   // The offer INSTANCE the shared add-item row currently targets — distinct
   // from pendingOfferId (which promotion TYPE is selected). null means "the
   // next add starts a brand-new instance." Only three things ever change
@@ -4929,7 +5013,11 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   // existing order instead pre-fills that order's own discount, not the
   // pharmacy's current default.
   const matchedClient = (clients || []).find((c) => c.name.toLowerCase().trim() === clientName.toLowerCase().trim());
-  const [discountRate, setDiscountRate] = useState(editOrder ? editOrder.discountRate || "" : matchedClient?.discountRate || "");
+  // initialDiscountRate (from the Check-In flow's new "Set the discount"
+  // step) takes priority over the pharmacy's own default — it's the rep's
+  // explicit choice for this invoice, which that step itself already
+  // pre-filled from the same default as a starting point.
+  const [discountRate, setDiscountRate] = useState(editOrder ? editOrder.discountRate || "" : (initialDiscountRate !== undefined && initialDiscountRate !== null && initialDiscountRate !== "" ? initialDiscountRate : matchedClient?.discountRate || ""));
 
   const matchedProduct = products.find((p) => batchLabel(p) === productQuery.trim());
 
@@ -5321,7 +5409,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   };
 
   const handleCreateOrderClick = () => {
-    const eligibleForPromoSuggestions = !(Number(matchedClient?.discountRate) > MAX_PROMOTIONAL_ELIGIBLE_DISCOUNT_PCT);
+    const eligibleForPromoSuggestions = (Number(matchedClient?.discountRate) || 0) < PROMOTIONAL_INELIGIBLE_DISCOUNT_PCT;
     if (eligibleForPromoSuggestions) {
       const found = findCloseToQualifyingGroup();
       if (found && !declinedSuggestionKeys.current.has(suggestionKey(found))) {
