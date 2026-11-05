@@ -24,6 +24,7 @@ import {
   daysUntil, fmtDate, turnoverPct, zoneFor, isSlowMover, isAtRisk, effectiveSold90, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
   computeLeadScore, todayBeirutStr, beirutDateStrOfInstant, fmtDateOfInstant, fmtTime, fmtDateTime, addDaysToDateStr, weekdayOfDateStr,
   computeFullRetailValue, hasPromotionalItems, computeEffectiveDiscountPct, MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT,
+  offerRequiresApproval,
 } from "./helpers.js";
 import {
   DRUG_NUTRIENT_DATA, CONDITION_TALKING_POINTS, SPECIALTY_TALKING_POINTS,
@@ -5320,7 +5321,11 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
           throw e;
         }
       }
-      downloadOrderPdf(saved || { ...payload, date: editOrder ? editOrder.date : new Date().toISOString(), total: finalTotal, netTotal: finalTotal * (1 - finalDiscountRate / 100) }, stockWarnings);
+      if (saved?.status === "pending_offer_approval") {
+        alert(`Saved — this order's offer is more generous than the standard ceiling, so it's awaiting Head of Sales sign-off before it's confirmed. You'll be notified once it's decided.`);
+      } else {
+        downloadOrderPdf(saved || { ...payload, date: editOrder ? editOrder.date : new Date().toISOString(), total: finalTotal, netTotal: finalTotal * (1 - finalDiscountRate / 100) }, stockWarnings);
+      }
       onDone();
     } catch (e) {
       setError(e.message || "Couldn't save the order.");
@@ -5376,6 +5381,11 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ fontSize: 10, fontWeight: 700, color: "#7A3B3B", background: "#F0EBE0", borderRadius: 5, padding: "2px 7px" }}>OFFER {idx + 1}</span>
                 <span style={{ fontSize: 13, fontWeight: 600 }}>{g.offer.label}</span>
+                {offerRequiresApproval(g.offer) && (
+                  <span title="More generous than the standard ceiling — needs Head of Sales sign-off" style={{ fontSize: 10, fontWeight: 700, color: "#8A5A00", background: "#FBEBC9", borderRadius: 5, padding: "2px 7px" }}>
+                    NEEDS SIGN-OFF
+                  </span>
+                )}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span className="kb-font-mono" style={{ fontSize: 12, fontWeight: 600, color: statusColor }}>
@@ -5710,11 +5720,15 @@ function PromoRecommendationPopup({ offerLabel, productName, missing, benefitVal
 // with everything in it — a pill toggle switches between them, both live
 // under the same "Orders" nav slot.
 function OrdersTabView({ role, isSupervisor, repNames, products, offers, clients, nutritionists = [], onDelete, onApproveDelete, onDenyDelete, onUpdateOrder }) {
-  const [subTab, setSubTab] = useState("history"); // history | pending
+  const [subTab, setSubTab] = useState("history"); // history | pending | offerApproval
+  // Head of Sales (isSupervisor) is the one who actually acts on these —
+  // a manager can still see the tab for visibility, same access shape as
+  // Order History's own canManage/isSupervisor split.
+  const canSeeOfferApproval = role === "manager" || isSupervisor;
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
         <button
           onClick={() => setSubTab("history")}
           style={{
@@ -5735,14 +5749,28 @@ function OrdersTabView({ role, isSupervisor, repNames, products, offers, clients
         >
           Pending POS
         </button>
+        {canSeeOfferApproval && (
+          <button
+            onClick={() => setSubTab("offerApproval")}
+            style={{
+              padding: "6px 14px", borderRadius: 16, fontSize: 12.5, fontWeight: 500,
+              border: subTab === "offerApproval" ? "1px solid #8A5A00" : "1px solid #E5DFD3",
+              background: subTab === "offerApproval" ? "#8A5A00" : "#fff", color: subTab === "offerApproval" ? "#fff" : "#5B5445",
+            }}
+          >
+            Pending Offer Approval
+          </button>
+        )}
       </div>
       {subTab === "history" ? (
         <OrderHistoryView
           role={role} isSupervisor={isSupervisor} repNames={repNames} products={products} offers={offers} clients={clients} nutritionists={nutritionists}
           onDelete={onDelete} onApproveDelete={onApproveDelete} onDenyDelete={onDenyDelete} onUpdateOrder={onUpdateOrder}
         />
-      ) : (
+      ) : subTab === "pending" ? (
         <PendingPOSView isSupervisor={isSupervisor} />
+      ) : (
+        <PendingOfferApprovalView />
       )}
     </div>
   );
@@ -5983,6 +6011,105 @@ function PendingPOSView({ isSupervisor }) {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, fontSize: 12.5 }}>
           <span style={{ color: "#8A8272" }}>
             Showing {(page - 1) * PENDING_POS_PAGE_SIZE + 1}–{Math.min(page * PENDING_POS_PAGE_SIZE, result.total)} of {result.total.toLocaleString()}
+          </span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button disabled={page <= 1} onClick={() => setPage((p) => p - 1)} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5, opacity: page <= 1 ? 0.5 : 1 }}>Prev</button>
+            <span style={{ color: "#8A8272" }}>Page {page} of {totalPages}</span>
+            <button disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5, opacity: page >= totalPages ? 0.5 : 1 }}>Next</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Pending Offer Approval View (the Head of Sales' sign-off worklist) ----------
+// Same shape as PendingPOSView (own paginated GET /api/orders call, now
+// filtered to status=pending_offer_approval) — the in-app mirror of the
+// Telegram Accept/Reject buttons, for whoever's actually at a desk instead
+// of checking Telegram. Both surfaces call the same server-side resolution
+// path (see resolveOfferApproval, server/index.js), so acting here and
+// acting via Telegram are equivalent and mutually idempotent.
+const PENDING_OFFER_APPROVAL_PAGE_SIZE = 20;
+function PendingOfferApprovalView() {
+  const [page, setPage] = useState(1);
+  const [result, setResult] = useState({ orders: [], total: 0 });
+  const [loading, setLoading] = useState(true);
+  const [decidingId, setDecidingId] = useState(null);
+  const [error, setError] = useState("");
+
+  const load = () => {
+    setLoading(true);
+    api.getOrders({ status: "pending_offer_approval", page, limit: PENDING_OFFER_APPROVAL_PAGE_SIZE })
+      .then((data) => setResult(data))
+      .catch(() => setResult({ orders: [], total: 0 }))
+      .finally(() => setLoading(false));
+  };
+  useEffect(() => { load(); }, [page]);
+
+  const decide = async (id, decision) => {
+    setDecidingId(id);
+    setError("");
+    try {
+      await (decision === "approve" ? api.approveOffer(id) : api.rejectOffer(id));
+      load();
+    } catch (e) {
+      setError(e.message || "Couldn't record that decision.");
+    } finally {
+      setDecidingId(null);
+    }
+  };
+
+  const totalPages = Math.max(1, Math.ceil(result.total / PENDING_OFFER_APPROVAL_PAGE_SIZE));
+
+  return (
+    <div>
+      <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 14px" }}>
+        Orders using an offer more generous than the standard ceiling — each one is on hold until you accept or reject it. History of past purchases is shown for context, never as an automatic unlock.
+      </p>
+      {error && <div style={{ fontSize: 12.5, color: "#B33A3A", marginBottom: 10 }}>{error}</div>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {result.orders.map((o) => (
+          <div key={o.id} style={{ background: "#FFFBEF", border: "1px solid #E8D9A8", borderRadius: 10, padding: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 13.5 }}>{o.clientName}{o.repName ? ` · ${o.repName}` : ""}</div>
+                <div className="kb-font-mono" style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>
+                  {new Date(o.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Beirut" })} · {o.items.length} item{o.items.length === 1 ? "" : "s"} · collected {Number(o.netTotal ?? o.total).toFixed(2)}
+                  {o.discountRate > 0 ? ` (list ${o.total.toFixed(2)}, ${o.discountRate}% off)` : ""}
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button
+                  disabled={decidingId === o.id}
+                  onClick={() => decide(o.id, "approve")}
+                  style={{ fontSize: 12, fontWeight: 500, background: "#4C7A5E", color: "#fff", border: "none", borderRadius: 6, padding: "7px 12px" }}
+                >
+                  Accept offer
+                </button>
+                <button
+                  disabled={decidingId === o.id}
+                  onClick={() => decide(o.id, "reject")}
+                  style={{ fontSize: 12, fontWeight: 500, color: "#B33A3A", background: "#fff", border: "1px solid #E5B8B0", borderRadius: 6, padding: "7px 12px" }}
+                >
+                  Reject
+                </button>
+              </div>
+            </div>
+            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 2 }}>
+              {o.items.map((it, i) => (
+                <div key={i} style={{ fontSize: 12, color: "#5B5445" }}>• {it.name} × {it.qty}{it.isFree ? " (free)" : ""}</div>
+              ))}
+            </div>
+          </div>
+        ))}
+        {!loading && result.orders.length === 0 && <EmptyState text="Nothing awaiting sign-off." />}
+      </div>
+
+      {result.total > PENDING_OFFER_APPROVAL_PAGE_SIZE && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, fontSize: 12.5 }}>
+          <span style={{ color: "#8A8272" }}>
+            Showing {(page - 1) * PENDING_OFFER_APPROVAL_PAGE_SIZE + 1}–{Math.min(page * PENDING_OFFER_APPROVAL_PAGE_SIZE, result.total)} of {result.total.toLocaleString()}
           </span>
           <div style={{ display: "flex", gap: 8 }}>
             <button disabled={page <= 1} onClick={() => setPage((p) => p - 1)} style={{ padding: "6px 12px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", fontSize: 12.5, opacity: page <= 1 ? 0.5 : 1 }}>Prev</button>

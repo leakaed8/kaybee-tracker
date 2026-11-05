@@ -176,6 +176,26 @@ export const computeEffectiveDiscountPct = (fullRetailValue, finalInvoiceAmount)
 
 export const MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT = 35;
 
+// Offer-generosity ceiling — mirrors server/offerEligibility.js exactly
+// (same ratio, same "7+1" constant) so OrderBuilder can badge an
+// above-ceiling offer group as it's built, without a round trip. Display
+// ONLY: the server is the sole enforcement authority on whether an order
+// needs Head of Sales sign-off (see notifyOfferApprovalNeeded, POST/PATCH
+// /api/orders) and is never trusted to have been bypassed by skipping
+// this client-side check.
+export const MAX_AUTO_APPROVED_FREE_RATIO = 1 / 8;
+const OFFER_RATIO_EPSILON = 1e-9;
+
+export const offerFreeRatio = (offer) => {
+  const buyQty = Number(offer?.buyQty) || 0;
+  const getQty = Number(offer?.getQty) || 0;
+  const totalQty = buyQty + getQty;
+  return totalQty > 0 ? getQty / totalQty : 0;
+};
+
+export const offerRequiresApproval = (offer) =>
+  offerFreeRatio(offer) > MAX_AUTO_APPROVED_FREE_RATIO + OFFER_RATIO_EPSILON;
+
 const MONTH_ABBR = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
 
 // Handles the three shapes a spreadsheet cell can hand back: a JS Date (xlsx

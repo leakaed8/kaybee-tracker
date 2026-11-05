@@ -13,6 +13,7 @@ const { DAHIYEH_REFERENCE_PHARMACIES } = require("./dahiyehReference");
 const { MOUNT_LEBANON_REFERENCE_NAMES } = require("./mountLebanonReferenceNames");
 const { buildMedicalPromotionSummary, MIN_DOCTORS_FOR_DISCLOSURE } = require("./medicalPromotion");
 const { computeFullRetailValue, hasPromotionalItems, computeEffectiveDiscountPct, evaluatePromotionalCap, MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT } = require("./effectiveDiscount");
+const { offerRequiresApproval, orderNeedsOfferApproval } = require("./offerEligibility");
 
 const app = express();
 // Render sits in front of this app behind a proxy/load balancer — without
@@ -583,6 +584,8 @@ function parseOrder(o) {
     posEntered: o.posEntered === "true",
     posEnteredAt: o.posEnteredAt || "",
     posEnteredBy: o.posEnteredBy || "",
+    offerApprovalDecidedBy: o.offerApprovalDecidedBy || "",
+    offerApprovalDecidedAt: o.offerApprovalDecidedAt || "",
     fullRetailValue,
     // Rounded to 2 decimals for display — the 35% cap itself is always
     // enforced at order-save time against the full-precision value, never
@@ -713,6 +716,97 @@ function notifySupervisorOrderTelegram(order, cleanItems, total, discountRate, n
     const msg = `${headline} <b>${escapeHtml(order.clientName)}</b>\nRep: ${escapeHtml(order.repName || "")}\n${itemLines}\n\nList total: ${total.toFixed(2)}\nDiscount: ${discountRate}%\nCollected: <b>${netTotal.toFixed(2)}</b>`;
     telegram.sendMessage(supervisor.telegramChatId, msg, posEntryButtons(order.id)).catch((e) => console.error("order telegram notify failed", e));
   }).catch((e) => console.error("order telegram notify failed", e));
+}
+
+function offerApprovalButtons(orderId) {
+  return {
+    inline_keyboard: [[
+      { text: "✅ Accept offer", callback_data: `offerappr:${orderId}` },
+      { text: "🚫 Reject", callback_data: `offerrej:${orderId}` },
+    ]],
+  };
+}
+
+// An order using an offer more generous than the "7+1" ceiling (see
+// offerEligibility.js) is saved as "pending_offer_approval", never
+// rejected outright — the Head of Sales gets an actionable Telegram
+// message (the only real workflow he uses, same as
+// notifySupervisorOrderTelegram above); the manager gets a separate,
+// purely informational heads-up (push + Telegram) at the same moment,
+// since this is about keeping them aware, not asking them to act —
+// that's the Head of Sales's job here. Purchase history is surfaced so
+// whoever decides has real context, never as an automatic threshold.
+async function notifyOfferApprovalNeeded(order, cleanItems, total, discountRate, netTotal, offerById) {
+  try {
+    const [reps, settings, allOrders] = await Promise.all([db.getAllRows("Reps"), db.getSettings(), db.getAllRows("Orders")]);
+    const pastOrders = allOrders.filter((o) =>
+      o.id !== order.id && o.status === "confirmed" &&
+      String(o.clientName || "").toLowerCase().trim() === String(order.clientName || "").toLowerCase().trim());
+    const pastOrderCount = pastOrders.length;
+    const pastTotalCollected = pastOrders.reduce((sum, o) => sum + (Number(o.netTotal) || 0), 0);
+    const historyLine = pastOrderCount > 0
+      ? `History: ${pastOrderCount} past order${pastOrderCount === 1 ? "" : "s"}, ${pastTotalCollected.toFixed(2)} total collected.`
+      : "History: no past orders — a new customer.";
+    const flaggedOfferLabels = [...new Set(
+      cleanItems.filter((it) => it.offerId && offerById.has(it.offerId) && offerRequiresApproval(offerById.get(it.offerId)))
+        .map((it) => offerById.get(it.offerId).label)
+    )].join(", ") || "A promotional offer";
+    const itemLines = cleanItems.map((it) => `• ${escapeHtml(it.name)} × ${it.qty}${it.isFree ? " (free)" : ""}`).join("\n");
+    const msg = `🔔 <b>${escapeHtml(flaggedOfferLabels)}</b> on an order for <b>${escapeHtml(order.clientName)}</b> is more generous than the standard ceiling — needs your sign-off.\nRep: ${escapeHtml(order.repName || "")}\n${itemLines}\n\nList total: ${total.toFixed(2)}\nAdditional discount: ${discountRate}%\nCollected: <b>${netTotal.toFixed(2)}</b>\n${historyLine}`;
+
+    const supervisor = reps.find((r) => r.isSupervisor === "true" && r.telegramChatId);
+    if (supervisor) {
+      await telegram.sendMessage(supervisor.telegramChatId, msg, offerApprovalButtons(order.id)).catch((e) => console.error("offer approval telegram (supervisor) failed", e));
+    }
+    if (settings.managerTelegramChatId) {
+      await telegram.sendMessage(settings.managerTelegramChatId, `ℹ️ FYI, awaiting Head of Sales sign-off:\n${msg}`).catch((e) => console.error("offer approval telegram (manager) failed", e));
+    }
+    notifyManagers({ title: "High-discount offer needs sign-off", body: `${order.clientName} — ${flaggedOfferLabels}, awaiting Head of Sales approval`, url: "/" }).catch(() => {});
+  } catch (e) {
+    console.error("notifyOfferApprovalNeeded failed", e);
+  }
+}
+
+// Shared resolution path for the Head of Sales's decision, whether made
+// in-app (approve-offer/reject-offer endpoints) or via the Telegram
+// Accept/Reject buttons — same status transition and side effects either
+// way. Idempotent: a second decision on an already-resolved order is a
+// no-op, same pattern as the existing deletion-request flow.
+async function resolveOfferApproval(orderId, decision, decidedBy) {
+  const orders = await db.getAllRows("Orders");
+  const order = orders.find((o) => o.id === orderId);
+  if (!order) return { ok: false, notFound: true };
+  if (order.status !== "pending_offer_approval") return { ok: false, alreadyHandled: true, order };
+
+  const patch = {
+    status: decision === "approve" ? "confirmed" : "offer_rejected",
+    offerApprovalDecidedBy: decidedBy || "",
+    offerApprovalDecidedAt: new Date().toISOString(),
+  };
+  await db.updateRowById("Orders", orderId, patch);
+  const updated = { ...order, ...patch };
+
+  const cleanItems = JSON.parse(order.items || "[]");
+  const total = Number(order.total) || 0;
+  const discountRate = order.discountRate !== "" && order.discountRate !== undefined ? Number(order.discountRate) : 0;
+  const netTotal = order.netTotal !== "" && order.netTotal !== undefined ? Number(order.netTotal) : total;
+
+  if (decision === "approve") {
+    notifyManagers({ title: "Offer approved", body: `${order.clientName} — order confirmed by Head of Sales`, url: "/" }).catch(() => {});
+    notifySupervisorOrderTelegram(updated, cleanItems, total, discountRate, netTotal, "✅ Offer approved — new order:");
+  } else {
+    notifyManagers({ title: "Offer rejected", body: `${order.clientName} — offer rejected by Head of Sales`, url: "/" }).catch(() => {});
+  }
+  if (order.repName) {
+    notifyRep(order.repName, {
+      title: decision === "approve" ? "Offer approved" : "Offer rejected",
+      body: decision === "approve"
+        ? `Your order for ${order.clientName} was approved and is now confirmed.`
+        : `Your order for ${order.clientName} was rejected — the offer needs revising.`,
+      url: "/",
+    }).catch(() => {});
+  }
+  return { ok: true, order: updated };
 }
 
 function parseOffer(o) {
@@ -1203,6 +1297,8 @@ app.post("/api/telegram/webhook", async (req, res) => {
         await handleOrderDeleteCallback(update.callback_query);
       } else if (data.startsWith("posenter") || data.startsWith("posnotyet")) {
         await handlePosEntryCallback(update.callback_query);
+      } else if (data.startsWith("offerappr") || data.startsWith("offerrej")) {
+        await handleOfferApprovalCallback(update.callback_query);
       } else if (data.startsWith("keeprep") || data.startsWith("changerep")) {
         await handleReassignmentCallback(update.callback_query);
       } else {
@@ -1517,7 +1613,7 @@ app.get("/api/visits", async (req, res) => {
 // page and get page 1 of their requested limit, same result as before.
 app.get("/api/orders", async (req, res) => {
   try {
-    const { repName, client, product, from, to, page, limit, all, posStatus } = req.query;
+    const { repName, client, product, from, to, page, limit, all, posStatus, status } = req.query;
     const isTeamWide = req.role === "manager" || req.isSupervisor;
     const rows = await db.getAllRows("Orders");
     let orders = rows.map(parseOrder).sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -1540,6 +1636,7 @@ app.get("/api/orders", async (req, res) => {
     // still shows up here indefinitely.
     if (posStatus === "pending") orders = orders.filter((o) => !o.posEntered);
     if (posStatus === "entered") orders = orders.filter((o) => o.posEntered);
+    if (status) orders = orders.filter((o) => o.status === status);
 
     const total = orders.length;
     // Same "give me the true complete set" escape hatch as /api/visits, for
@@ -3540,6 +3637,14 @@ app.post("/api/orders", async (req, res) => {
       });
     }
 
+    // An offer more generous than the "7+1" ceiling (see
+    // offerEligibility.js) always needs the Head of Sales's sign-off,
+    // regardless of this customer's history — the order is still saved
+    // (never lost, never rejected outright), just held pending instead of
+    // going straight to "confirmed".
+    const offerById = new Map((await db.getAllRows("Offers")).map(parseOffer).map((o) => [o.id, o]));
+    const needsOfferApproval = orderNeedsOfferApproval(cleanItems, offerById);
+
     const order = {
       id: `ord${crypto.randomUUID()}`,
       clientName,
@@ -3548,13 +3653,17 @@ app.post("/api/orders", async (req, res) => {
       date: new Date().toISOString(),
       items: JSON.stringify(cleanItems),
       total,
-      status: "confirmed",
+      status: needsOfferApproval ? "pending_offer_approval" : "confirmed",
       discountRate: appliedDiscountRate,
       netTotal,
     };
     await db.appendRow("Orders", order);
-    notifyManagers({ title: "New order placed", body: `${clientName} — ${netTotal.toFixed(2)} collected (list ${total.toFixed(2)})`, url: "/" });
-    notifySupervisorOrderTelegram(order, cleanItems, total, appliedDiscountRate, netTotal, "🧾 New order —");
+    if (needsOfferApproval) {
+      notifyOfferApprovalNeeded(order, cleanItems, total, appliedDiscountRate, netTotal, offerById);
+    } else {
+      notifyManagers({ title: "New order placed", body: `${clientName} — ${netTotal.toFixed(2)} collected (list ${total.toFixed(2)})`, url: "/" });
+      notifySupervisorOrderTelegram(order, cleanItems, total, appliedDiscountRate, netTotal, "🧾 New order —");
+    }
     res.json(parseOrder(order));
   } catch (e) {
     logErr(e);
@@ -3609,10 +3718,25 @@ app.patch("/api/orders/:id", async (req, res) => {
       });
     }
 
-    const patch = { items: JSON.stringify(cleanItems), total, discountRate: appliedDiscountRate, netTotal };
+    const offerById = new Map((await db.getAllRows("Offers")).map(parseOffer).map((o) => [o.id, o]));
+    const needsOfferApproval = orderNeedsOfferApproval(cleanItems, offerById);
+    const patch = {
+      items: JSON.stringify(cleanItems), total, discountRate: appliedDiscountRate, netTotal,
+      // An edit that introduces an above-ceiling offer re-triggers
+      // approval even if the order was already confirmed; an edit that
+      // REMOVES the last above-ceiling offer line is left as whatever its
+      // status already was rather than auto-reverting to "confirmed" —
+      // that's still the Head of Sales's call, same as any other pending
+      // approval they haven't acted on yet.
+      status: needsOfferApproval ? "pending_offer_approval" : order.status,
+    };
     await db.updateRowById("Orders", order.id, patch);
     const updated = { ...order, ...patch };
-    notifySupervisorOrderTelegram(updated, cleanItems, total, appliedDiscountRate, netTotal, "✏️ Order updated —");
+    if (needsOfferApproval) {
+      notifyOfferApprovalNeeded(updated, cleanItems, total, appliedDiscountRate, netTotal, offerById);
+    } else {
+      notifySupervisorOrderTelegram(updated, cleanItems, total, appliedDiscountRate, netTotal, "✏️ Order updated —");
+    }
     res.json(parseOrder(updated));
   } catch (e) {
     logErr(e);
@@ -3641,6 +3765,37 @@ app.post("/api/orders/:id/request-delete", async (req, res) => {
         telegram.sendMessage(settings.managerTelegramChatId, msg, buttons).catch((e) => console.error("order-delete telegram (manager) failed", e));
       }
     }
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Head of Sales in-app decision on a "pending_offer_approval" order —
+// same resolution path as the Telegram Accept/Reject buttons (see
+// resolveOfferApproval). Gated the same way Training/Locations/
+// Performance team-wide views are: manager OR the isSupervisor rep flag,
+// since "Head of Sales" is that flag, not a separate role.
+app.post("/api/orders/:id/approve-offer", requireAuth, async (req, res) => {
+  if (!(req.role === "manager" || req.isSupervisor)) return res.status(403).json({ error: "Head of Sales or managers only." });
+  try {
+    const result = await resolveOfferApproval(req.params.id, "approve", req.role === "manager" ? "Manager" : req.repName);
+    if (result.notFound) return res.status(404).json({ error: "Order not found" });
+    if (!result.ok) return res.status(409).json({ error: "Already handled." });
+    res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/orders/:id/reject-offer", requireAuth, async (req, res) => {
+  if (!(req.role === "manager" || req.isSupervisor)) return res.status(403).json({ error: "Head of Sales or managers only." });
+  try {
+    const result = await resolveOfferApproval(req.params.id, "reject", req.role === "manager" ? "Manager" : req.repName);
+    if (result.notFound) return res.status(404).json({ error: "Order not found" });
+    if (!result.ok) return res.status(409).json({ error: "Already handled." });
     res.json({ ok: true });
   } catch (e) {
     logErr(e);
@@ -14637,6 +14792,23 @@ async function handleOrderDeleteCallback(callbackQuery) {
     await db.updateRowById("Orders", order.id, { status: "confirmed" });
     await telegram.answerCallbackQuery(id, "Kept.");
     if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `Kept the order for ${order.clientName}.`);
+  }
+}
+
+async function handleOfferApprovalCallback(callbackQuery) {
+  const { id, data, message } = callbackQuery;
+  const [action, orderId] = (data || "").split(":");
+  const requester = await resolveTelegramRequester(message?.chat?.id);
+  const result = await resolveOfferApproval(orderId, action === "offerappr" ? "approve" : "reject", requester?.repName || "Telegram");
+  if (result.notFound) { await telegram.answerCallbackQuery(id, "This order is no longer available."); return; }
+  if (!result.ok) { await telegram.answerCallbackQuery(id, "Already handled."); return; }
+
+  if (action === "offerappr") {
+    await telegram.answerCallbackQuery(id, "Offer approved.");
+    if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `✅ Approved the offer for ${result.order.clientName}. Order confirmed.`);
+  } else if (action === "offerrej") {
+    await telegram.answerCallbackQuery(id, "Offer rejected.");
+    if (message?.chat?.id) await telegram.sendMessage(message.chat.id, `🚫 Rejected the offer for ${result.order.clientName}.`);
   }
 }
 

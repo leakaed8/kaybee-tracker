@@ -293,7 +293,14 @@ const SCHEMAS = {
   // the ~1,000+ raw invoice-line rows, just one row per flagged client.
   DiscountAuditResults: ["id", "clientName", "effectivePct", "units", "collected", "listValue", "invoiceCount", "lastAnalyzedAt"],
   OutreachLog: ["id", "name", "date", "templateIndex"],
-  Orders: ["id", "clientName", "visitId", "repName", "date", "items", "total", "status", "discountRate", "netTotal", "posEntered", "posEnteredAt", "posEnteredBy"],
+  Orders: [
+    "id", "clientName", "visitId", "repName", "date", "items", "total", "status", "discountRate", "netTotal", "posEntered", "posEnteredAt", "posEnteredBy",
+    // Offer-generosity approval audit (status itself carries
+    // "pending_offer_approval"/"offer_rejected" alongside the existing
+    // "confirmed"/"deletion_requested" values) — who actually decided and
+    // when, same shape as posEnteredBy/posEnteredAt above.
+    "offerApprovalDecidedBy", "offerApprovalDecidedAt",
+  ],
   Reps: ["id", "name", "passcode", "email", "exportSheetId", "telegramChatId", "telegramLinkCode", "isSupervisor", "supplementStoresOnly", "medRepOnly"],
   Offers: ["id", "label", "buyQty", "getQty", "expiresAt", "active"],
   PushSubscriptions: ["id", "role", "repName", "endpoint", "p256dh", "auth"],
