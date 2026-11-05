@@ -5263,26 +5263,46 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   const regularSuggestionKey = (found) =>
     `regular:${found.regularUnitTotal}:${found.options.map((o) => o.offer.id).join(",")}`;
 
-  // Carves `required` units off the front of the regular pool (in the
-  // order the rep added them) into a new offer instance — a line that
-  // straddles the boundary splits into a moved part and a kept part, same
-  // shape addItem/applyOfferToItems already expect. Pure, so the same
-  // split can both simulate a popup option's preview and, on accept,
-  // actually rewrite the cart with the identical result.
+  // Carves `required` units out of the regular pool into a new offer
+  // instance, CHEAPEST units first — any leftover (whatever the chosen
+  // offer doesn't need) comes off the MOST EXPENSIVE line(s) instead, so
+  // a pricier product is the one left to sell at full, undiscounted
+  // price rather than being pulled into the promotional pool for no
+  // reason (and, since the group's own average price decides which line
+  // becomes free, keeping the priciest item out of the pool when it
+  // doesn't have to be there also protects against it ever being the one
+  // picked free). A line that straddles the boundary splits into a moved
+  // part and a kept part, same shape addItem/applyOfferToItems already
+  // expect. Pure, so the same split can both simulate a popup option's
+  // preview and, on accept, actually rewrite the cart with the identical
+  // result. Assignment is price-driven, but stageItems stays in the
+  // cart's own original order — only WHICH units move changes, not the
+  // order they're rendered/rewritten in.
   const splitRegularPool = (required) => {
     let remaining = required;
+    const assignmentByKey = new Map(); // key -> {type, movedQty?, keptQty?}
+    const byPriceAsc = [...regularItems].sort((a, b) => a.unitPrice - b.unitPrice);
+    for (const it of byPriceAsc) {
+      if (remaining <= 0) { assignmentByKey.set(it.key, { type: "kept" }); continue; }
+      if (it.qty <= remaining) {
+        assignmentByKey.set(it.key, { type: "moved" });
+        remaining -= it.qty;
+      } else {
+        assignmentByKey.set(it.key, { type: "split", movedQty: remaining, keptQty: it.qty - remaining });
+        remaining = 0;
+      }
+    }
     const poolItems = [];
     const stageItems = []; // {type:"kept"|"moved"|"split", original, movedQty, keptQty}
     for (const it of regularItems) {
-      if (remaining <= 0) { stageItems.push({ type: "kept", original: it }); continue; }
-      if (it.qty <= remaining) {
+      const a = assignmentByKey.get(it.key);
+      if (a.type === "kept") { stageItems.push({ type: "kept", original: it }); continue; }
+      if (a.type === "moved") {
         poolItems.push(it);
         stageItems.push({ type: "moved", original: it });
-        remaining -= it.qty;
       } else {
-        poolItems.push({ ...it, qty: remaining });
-        stageItems.push({ type: "split", original: it, movedQty: remaining, keptQty: it.qty - remaining });
-        remaining = 0;
+        poolItems.push({ ...it, qty: a.movedQty });
+        stageItems.push({ type: "split", original: it, movedQty: a.movedQty, keptQty: a.keptQty });
       }
     }
     return { poolItems, stageItems };
