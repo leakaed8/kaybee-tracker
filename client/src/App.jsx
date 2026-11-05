@@ -4893,10 +4893,18 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   // explicit confirmation the recommendation needs; DECLINE submits the
   // order exactly as the rep built it.
   const [pendingSuggestion, setPendingSuggestion] = useState(null);
+  // Smart Promotional Offer Assistant, second (primary) mode — the common
+  // real-world flow: the rep adds everything the pharmacist needs first,
+  // with no offer picked at all, then decides the offer from the total.
+  // Checked BEFORE pendingSuggestion above, since this covers the far more
+  // common case; up to two candidates (best auto-approved fit + best
+  // above-ceiling fit, if any) so the rep sees both paths at once.
+  const [pendingRegularSuggestion, setPendingRegularSuggestion] = useState(null);
   // One declined recommendation (keyed by groupId + its qty/offer at the
   // moment of declining) is never shown again UNLESS the order actually
   // changes — adding/removing items for that group changes the key, so a
-  // genuinely new situation still gets a fresh recommendation.
+  // genuinely new situation still gets a fresh recommendation. Shared
+  // between both suggestion modes above (their key formats never collide).
   const declinedSuggestionKeys = useRef(new Set());
   const nextKeyRef = useRef(editOrder ? editOrder.items.length : 0);
   const nextGroupKeyRef = useRef((() => {
@@ -5218,15 +5226,117 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     return { ...result, targetProductId, targetProductName, missing };
   };
 
+  // --- Smart Promotional Offer Assistant, primary mode -------------------
+  // The common real flow: the rep adds everything the pharmacist wants
+  // with no offer picked at all, then decides the offer from the total —
+  // not "complete the offer you already started" (above), but "here's
+  // what your regular cart could become." Offers aren't product-scoped
+  // (confirmed in the existing, untouched engine), so this looks at the
+  // TOTAL quantity across every regular item, not any one product.
+  //
+  // "Fits" means the offer's required total is already covered by what's
+  // in the cart right now (never "needs more" — that's the OTHER mode's
+  // job). Among offers that fit, the LARGEST required total wins in each
+  // bucket (maximizes free units without wasting what's already there).
+  // Two buckets, shown side by side: the best one that auto-confirms (at
+  // or below the "7+1" ceiling) and the best one that would need Head of
+  // Sales sign-off — both are always allowed (policy explicitly allows
+  // suggesting any offer to any client), the second is just flagged.
+  const findRegularItemsSuggestion = () => {
+    if (regularUnitTotal <= 0) return null;
+    const fitting = activeOffers.filter((o) => {
+      const required = o.buyQty + o.getQty;
+      return required > 0 && required <= regularUnitTotal;
+    });
+    if (fitting.length === 0) return null;
+    const largestOf = (list) => list.length
+      ? list.reduce((best, o) => ((o.buyQty + o.getQty) > (best.buyQty + best.getQty) ? o : best))
+      : null;
+    const bestAuto = largestOf(fitting.filter((o) => !offerRequiresApproval(o)));
+    const bestAboveCeiling = largestOf(fitting.filter((o) => offerRequiresApproval(o)));
+    const options = [];
+    if (bestAuto) options.push({ offer: bestAuto, required: bestAuto.buyQty + bestAuto.getQty, needsApproval: false });
+    if (bestAboveCeiling) options.push({ offer: bestAboveCeiling, required: bestAboveCeiling.buyQty + bestAboveCeiling.getQty, needsApproval: true });
+    if (options.length === 0) return null;
+    return { regularUnitTotal, options };
+  };
+  const regularSuggestionKey = (found) =>
+    `regular:${found.regularUnitTotal}:${found.options.map((o) => o.offer.id).join(",")}`;
+
+  // Carves `required` units off the front of the regular pool (in the
+  // order the rep added them) into a new offer instance — a line that
+  // straddles the boundary splits into a moved part and a kept part, same
+  // shape addItem/applyOfferToItems already expect. Pure, so the same
+  // split can both simulate a popup option's preview and, on accept,
+  // actually rewrite the cart with the identical result.
+  const splitRegularPool = (required) => {
+    let remaining = required;
+    const poolItems = [];
+    const stageItems = []; // {type:"kept"|"moved"|"split", original, movedQty, keptQty}
+    for (const it of regularItems) {
+      if (remaining <= 0) { stageItems.push({ type: "kept", original: it }); continue; }
+      if (it.qty <= remaining) {
+        poolItems.push(it);
+        stageItems.push({ type: "moved", original: it });
+        remaining -= it.qty;
+      } else {
+        poolItems.push({ ...it, qty: remaining });
+        stageItems.push({ type: "split", original: it, movedQty: remaining, keptQty: it.qty - remaining });
+        remaining = 0;
+      }
+    }
+    return { poolItems, stageItems };
+  };
+
+  // Preview-only — routed through the existing, unmodified
+  // applyOfferToItems so the popup's free-unit math can never drift from
+  // what actually happens if the rep accepts.
+  const simulateRegularOption = (option) => {
+    const { poolItems } = splitRegularPool(option.required);
+    const result = applyOfferToItems(poolItems, [option.offer]);
+    return { ...result, leftover: regularUnitTotal - option.required };
+  };
+
   const handleCreateOrderClick = () => {
     const eligibleForPromoSuggestions = !(Number(matchedClient?.discountRate) > MAX_PROMOTIONAL_ELIGIBLE_DISCOUNT_PCT);
     if (eligibleForPromoSuggestions) {
+      const regularFound = findRegularItemsSuggestion();
+      if (regularFound && !declinedSuggestionKeys.current.has(regularSuggestionKey(regularFound))) {
+        setPendingRegularSuggestion(regularFound);
+        return;
+      }
       const found = findCloseToQualifyingGroup();
       if (found && !declinedSuggestionKeys.current.has(suggestionKey(found))) {
         setPendingSuggestion(found);
         return;
       }
     }
+    doCreateOrder();
+  };
+
+  const acceptRegularSuggestion = (option) => {
+    const { stageItems } = splitRegularPool(option.required);
+    const newGroupId = `g${nextGroupKeyRef.current++}`;
+    const taggedItems = items.filter((it) => it.offerId);
+    const rewrittenRegular = stageItems.flatMap((s) => {
+      if (s.type === "kept") return [s.original];
+      if (s.type === "moved") return [{ ...s.original, offerId: option.offer.id, groupId: newGroupId }];
+      return [
+        { ...s.original, qty: s.movedQty, offerId: option.offer.id, groupId: newGroupId },
+        { ...s.original, qty: s.keptQty, key: nextKeyRef.current++ },
+      ];
+    });
+    setItems([...taggedItems, ...rewrittenRegular]);
+    setActiveGroupId(newGroupId);
+    setPendingRegularSuggestion(null);
+    // Same policy as acceptSuggestion below — never auto-submits, the rep
+    // reviews the now-updated cart and clicks "Create order" again.
+  };
+
+  const declineRegularSuggestion = () => {
+    if (!pendingRegularSuggestion) return;
+    declinedSuggestionKeys.current.add(regularSuggestionKey(pendingRegularSuggestion));
+    setPendingRegularSuggestion(null);
     doCreateOrder();
   };
 
@@ -5665,6 +5775,22 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
           />
         );
       })()}
+
+      {pendingRegularSuggestion && (() => {
+        const enrichedOptions = pendingRegularSuggestion.options.map((option) => {
+          const sim = simulateRegularOption(option);
+          const benefitValue = (sim.freeItems || []).reduce((sum, it) => sum + it.qty * (it.originalPrice || 0), 0);
+          return { option, freeQty: sim.freeQty || 0, benefitValue, leftover: sim.leftover };
+        });
+        return (
+          <RegularItemsOfferSuggestionPopup
+            regularUnitTotal={pendingRegularSuggestion.regularUnitTotal}
+            options={enrichedOptions}
+            onAccept={(option) => acceptRegularSuggestion(option)}
+            onDecline={declineRegularSuggestion}
+          />
+        );
+      })()}
     </div>
   );
 }
@@ -5711,6 +5837,59 @@ function PromoRecommendationPopup({ offerLabel, productName, missing, benefitVal
             DECLINE
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// Primary-mode popup for the Smart Promotional Offer Assistant — the rep
+// has built a cart of regular (no-offer) items and is shown up to two
+// offers that already fit the total as-is: the best one that auto-
+// confirms, and (if one exists) the best one that would need Head of
+// Sales sign-off, clearly flagged. Picking one carves that many units
+// into a new offer instance; "Keep as regular" leaves the cart untouched,
+// same no-backdrop-dismiss / two-explicit-outcomes pattern as the other
+// popup above.
+function RegularItemsOfferSuggestionPopup({ regularUnitTotal, options, onAccept, onDecline }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(31,42,36,0.55)", zIndex: 300, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div style={{ background: "#FAF7F2", borderRadius: "16px 16px 0 0", width: "100%", maxWidth: 480, padding: 20, boxShadow: "0 -4px 24px rgba(0,0,0,0.2)" }}>
+        <h3 className="kb-font-display" style={{ fontSize: 16, fontWeight: 600, margin: "0 0 4px", display: "flex", alignItems: "center", gap: 6 }}>
+          <Megaphone size={17} /> You have {regularUnitTotal} unit{regularUnitTotal === 1 ? "" : "s"} — want an offer?
+        </h3>
+        <p style={{ fontSize: 12.5, color: "#5B5445", margin: "0 0 14px" }}>
+          Pick one to apply it to this order, or keep everything as regular items.
+        </p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+          {options.map(({ option, freeQty, benefitValue, leftover }) => (
+            <div key={option.offer.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14, fontSize: 13 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <span style={{ fontWeight: 600 }}>{option.offer.label}</span>
+                {option.needsApproval && (
+                  <span title="More generous than the standard ceiling — needs Head of Sales sign-off" style={{ fontSize: 10, fontWeight: 700, color: "#8A5A00", background: "#FBEBC9", borderRadius: 5, padding: "2px 7px" }}>
+                    NEEDS SIGN-OFF
+                  </span>
+                )}
+              </div>
+              <div style={{ color: "#5B5445", marginBottom: 2 }}>
+                Uses {option.required} of your {regularUnitTotal} units — <span style={{ color: "#4C7A5E", fontWeight: 600 }}>{freeQty} free</span>, leaving {leftover} as regular.
+              </div>
+              <div style={{ color: "#8A8272", marginBottom: 10 }}>+{benefitValue.toFixed(2)} value</div>
+              <button
+                onClick={() => onAccept(option)}
+                style={{ width: "100%", padding: "9px 14px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13, fontWeight: 600 }}
+              >
+                USE {option.offer.label.toUpperCase()}
+              </button>
+            </div>
+          ))}
+        </div>
+        <button
+          onClick={onDecline}
+          style={{ width: "100%", padding: "11px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", fontSize: 13.5, fontWeight: 600 }}
+        >
+          KEEP AS REGULAR
+        </button>
       </div>
     </div>
   );
