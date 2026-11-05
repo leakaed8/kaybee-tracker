@@ -24,7 +24,7 @@ import {
   daysUntil, fmtDate, turnoverPct, zoneFor, isSlowMover, isAtRisk, effectiveSold90, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
   computeLeadScore, todayBeirutStr, beirutDateStrOfInstant, fmtDateOfInstant, fmtTime, fmtDateTime, addDaysToDateStr, weekdayOfDateStr,
   computeFullRetailValue, hasPromotionalItems, computeEffectiveDiscountPct, MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT,
-  offerRequiresApproval,
+  offerRequiresApproval, MAX_PROMOTIONAL_ELIGIBLE_DISCOUNT_PCT,
 } from "./helpers.js";
 import {
   DRUG_NUTRIENT_DATA, CONDITION_TALKING_POINTS, SPECIALTY_TALKING_POINTS,
@@ -503,7 +503,7 @@ export default function App() {
   const removeClient = (id) => withSync(() => api.removeClient(id), { touchesReference: true });
   const bulkImportClients = (payload) => withSync(() => api.importClientsBulk(payload), { touchesReference: true });
   const assignClientRep = (id, assignedRep) => withSync(() => api.assignClientRep(id, assignedRep), { touchesReference: true });
-  const updateClientDiscount = (id, discountRate) => withSync(() => api.updateClientDiscount(id, discountRate), { touchesReference: true });
+  const changeClientDiscount = (id, payload) => withSync(() => api.changeClientDiscount(id, payload), { touchesReference: true });
   const updateClientSubTerritory = (id, subTerritory) => withSync(() => api.updateClientSubTerritory(id, subTerritory), { touchesReference: true });
   const applyDahiyehSubTerritorySuggestions = (assignments) => withSync(() => api.applyDahiyehSubTerritorySuggestions(assignments), { touchesReference: true });
   const applyZahraaTerritoryFix = (ids) => withSync(() => api.applyZahraaTerritoryFix(ids), { touchesReference: true });
@@ -744,13 +744,14 @@ export default function App() {
                 clients={clients}
                 kind="pharmacy"
                 role={role}
+                isSupervisor={isSupervisor}
                 repName={repName}
                 repNames={repNames}
                 onAdd={addClient}
                 onRemove={removeClient}
                 onBulkImport={bulkImportClients}
                 onAssignRep={assignClientRep}
-                onUpdateDiscount={updateClientDiscount}
+                onChangeDiscount={changeClientDiscount}
                 onUpdateSubTerritory={updateClientSubTerritory}
                 onApplyDahiyehSuggestions={applyDahiyehSubTerritorySuggestions}
                 onApplyZahraaTerritoryFix={applyZahraaTerritoryFix}
@@ -764,13 +765,14 @@ export default function App() {
                 clients={clients}
                 kind="supplement_store"
                 role={role}
+                isSupervisor={isSupervisor}
                 repName={repName}
                 repNames={repNames}
                 onAdd={addClient}
                 onRemove={removeClient}
                 onBulkImport={bulkImportClients}
                 onAssignRep={assignClientRep}
-                onUpdateDiscount={updateClientDiscount}
+                onChangeDiscount={changeClientDiscount}
                 onUpdateSubTerritory={updateClientSubTerritory}
                 onCompleteInfo={completeClientInfo}
               />
@@ -5217,7 +5219,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   };
 
   const handleCreateOrderClick = () => {
-    const eligibleForPromoSuggestions = !(Number(matchedClient?.discountRate) > 22.5);
+    const eligibleForPromoSuggestions = !(Number(matchedClient?.discountRate) > MAX_PROMOTIONAL_ELIGIBLE_DISCOUNT_PCT);
     if (eligibleForPromoSuggestions) {
       const found = findCloseToQualifyingGroup();
       if (found && !declinedSuggestionKeys.current.has(suggestionKey(found))) {
@@ -8629,15 +8631,29 @@ function DahiyehMatchTool({ onApply }) {
 // tiers, lead scoring, discount rate, GPS, bulk import, order/visit
 // history — works identically for supplement stores with no separate
 // component to maintain.
-function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onUpdateDiscount, onUpdateSubTerritory, onApplyDahiyehSuggestions, onApplyZahraaTerritoryFix, onBulkRemove, onDuplicateSafeImport, onCompleteInfo }) {
+function ClientsView({ clients: allClients, kind = "pharmacy", role, isSupervisor, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onChangeDiscount, onUpdateSubTerritory, onApplyDahiyehSuggestions, onApplyZahraaTerritoryFix, onBulkRemove, onDuplicateSafeImport, onCompleteInfo }) {
   const clients = useMemo(() => allClients.filter((c) => (c.type || "pharmacy") === kind), [allClients, kind]);
   const isSupplementStore = kind === "supplement_store";
   const entityWord = isSupplementStore ? "supplement store" : "pharmacy";
   const entityWordPlural = isSupplementStore ? "supplement stores" : "pharmacies";
   const entityWordCap = isSupplementStore ? "Supplement store" : "Pharmacy";
+  // Who may make a PERMANENT registered-discount change (Part 3) — same
+  // gate as the offer-approval endpoints: manager or Head of Sales.
+  const canEditDiscount = role === "manager" || isSupervisor;
   const [completingId, setCompletingId] = useState(null);
   const [historyId, setHistoryId] = useState(null);
   const [historyProfile, setHistoryProfile] = useState(null);
+  // Permanent registered-discount editing (Part 3) — separate from the
+  // visit-timeline historyId/historyProfile above, which is a different
+  // kind of "history" entirely.
+  const [discountEditId, setDiscountEditId] = useState(null);
+  const [discountEditRate, setDiscountEditRate] = useState("");
+  const [discountEditReason, setDiscountEditReason] = useState("");
+  const [discountEditComments, setDiscountEditComments] = useState("");
+  const [discountEditError, setDiscountEditError] = useState("");
+  const [discountEditSaving, setDiscountEditSaving] = useState(false);
+  const [discountHistoryId, setDiscountHistoryId] = useState(null);
+  const [discountHistory, setDiscountHistory] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [name, setName] = useState("");
@@ -8682,6 +8698,46 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
     if (!c) return;
     api.getClientProfile(c.name).then(setHistoryProfile).catch(() => setHistoryProfile(null));
   }, [historyId, clients]);
+
+  useEffect(() => {
+    if (!discountHistoryId) { setDiscountHistory(null); return; }
+    api.getClientDiscountHistory(discountHistoryId).then((d) => setDiscountHistory(d.history)).catch(() => setDiscountHistory([]));
+  }, [discountHistoryId]);
+
+  const openDiscountEdit = (c) => {
+    setDiscountEditId(c.id);
+    setDiscountEditRate(c.discountRate || "");
+    setDiscountEditReason("");
+    setDiscountEditComments("");
+    setDiscountEditError("");
+  };
+
+  const saveDiscountChange = async (c) => {
+    const rate = Number(discountEditRate);
+    if (discountEditRate === "" || Number.isNaN(rate) || rate < 0 || rate > 100) {
+      setDiscountEditError("Enter a discount between 0 and 100.");
+      return;
+    }
+    if (!discountEditReason.trim()) {
+      setDiscountEditError("A reason is required.");
+      return;
+    }
+    const fromLabel = c.discountRate ? `${c.discountRate}%` : "no registered discount";
+    if (!window.confirm(`Permanently change ${c.name}'s registered discount from ${fromLabel} to ${rate}%?\n\nThis applies to every future order — past orders are unaffected.`)) {
+      return;
+    }
+    setDiscountEditSaving(true);
+    setDiscountEditError("");
+    try {
+      await onChangeDiscount(c.id, { newDiscountRate: rate, reason: discountEditReason.trim(), comments: discountEditComments.trim() });
+      setDiscountEditId(null);
+      if (discountHistoryId === c.id) setDiscountHistoryId(null); // force a refetch if reopened
+    } catch (e) {
+      setDiscountEditError(e.message || "Couldn't save that change.");
+    } finally {
+      setDiscountEditSaving(false);
+    }
+  };
 
   // Same navigator.geolocation pattern used for Punch In / Check-In — a GPS
   // fix taken while standing at the pharmacy is more accurate than
@@ -8929,19 +8985,16 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
                       {subTerritoriesByArea[c.area].map((s) => <option key={s} value={s}>{s}</option>)}
                     </select>
                   )}
-                  {role === "manager" ? (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 8, fontSize: 11, color: "#5B5445" }}>
-                      Discount
-                      <input
-                        type="number" min="0" max="100" step="0.5"
-                        defaultValue={c.discountRate || ""}
-                        onBlur={(e) => {
-                          const v = e.target.value;
-                          if (v !== String(c.discountRate || "")) onUpdateDiscount(c.id, v);
-                        }}
-                        placeholder="0"
-                        style={{ width: 50, padding: "2px 4px", fontSize: 11, borderRadius: 5, border: "1px solid #E5DFD3" }}
-                      />%
+                  {canEditDiscount ? (
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, marginLeft: 8, fontSize: 11, color: "#5B5445" }}>
+                      {c.discountRate ? `Discount: ${c.discountRate}%` : "No discount set"}
+                      <button
+                        type="button"
+                        onClick={() => (discountEditId === c.id ? setDiscountEditId(null) : openDiscountEdit(c))}
+                        style={{ fontSize: 10.5, fontWeight: 600, color: "#4C7A5E", background: "none", border: "none", cursor: "pointer", padding: 0 }}
+                      >
+                        {discountEditId === c.id ? "Cancel" : "Change"}
+                      </button>
                     </span>
                   ) : c.discountRate ? (
                     <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 7px", borderRadius: 5, marginLeft: 6, background: "#F0EBE0", color: "#5B5445" }}>
@@ -8964,6 +9017,11 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
               <button onClick={() => setHistoryId(historyId === c.id ? null : c.id)} style={{ background: "none", border: "none", color: "#5B5445", fontSize: 11, fontWeight: 500 }}>
                 {historyId === c.id ? "Hide history" : "History"}
               </button>
+              {canEditDiscount && (
+                <button onClick={() => setDiscountHistoryId(discountHistoryId === c.id ? null : c.id)} style={{ background: "none", border: "none", color: "#5B5445", fontSize: 11, fontWeight: 500 }}>
+                  {discountHistoryId === c.id ? "Hide discount history" : "Discount history"}
+                </button>
+              )}
               {role === "rep" && (
                 <button onClick={() => setCompletingId(completingId === c.id ? null : c.id)} style={{ background: "none", border: "none", color: "#C17817", fontSize: 11, fontWeight: 500 }}>
                   {completingId === c.id ? "Cancel" : "Edit info"}
@@ -8974,6 +9032,75 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, repName, re
             {historyId === c.id && (
               <div style={{ marginTop: 8 }}>
                 {historyProfile ? <DoctorTimeline visits={historyProfile.timeline} /> : <EmptyState text="Loading…" />}
+              </div>
+            )}
+            {canEditDiscount && discountEditId === c.id && (
+              <div style={{ marginTop: 8, padding: 10, borderRadius: 8, background: "#FFFBEF", border: "1px solid #E8D9A8", display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: "#5B5445" }}>
+                  Permanently change {c.name}'s registered discount — applies to every future order, not this invoice only.
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <input
+                    type="number" min="0" max="100" step="0.5"
+                    value={discountEditRate}
+                    onChange={(e) => setDiscountEditRate(e.target.value)}
+                    placeholder="New %"
+                    style={{ width: 70, padding: "5px 7px", fontSize: 12, borderRadius: 6, border: "1px solid #E5DFD3" }}
+                  />
+                  <input
+                    value={discountEditReason}
+                    onChange={(e) => setDiscountEditReason(e.target.value)}
+                    placeholder="Reason (required)"
+                    style={{ flex: "1 1 160px", padding: "5px 7px", fontSize: 12, borderRadius: 6, border: "1px solid #E5DFD3" }}
+                  />
+                  <input
+                    value={discountEditComments}
+                    onChange={(e) => setDiscountEditComments(e.target.value)}
+                    placeholder="Comments (optional)"
+                    style={{ flex: "1 1 160px", padding: "5px 7px", fontSize: 12, borderRadius: 6, border: "1px solid #E5DFD3" }}
+                  />
+                </div>
+                {discountEditError && <div style={{ fontSize: 11.5, color: "#B33A3A" }}>{discountEditError}</div>}
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button
+                    disabled={discountEditSaving}
+                    onClick={() => saveDiscountChange(c)}
+                    style={{ fontSize: 12, fontWeight: 500, background: "#1F2A24", color: "#FAF7F2", border: "none", borderRadius: 6, padding: "6px 12px" }}
+                  >
+                    {discountEditSaving ? "Saving…" : "Save permanent change"}
+                  </button>
+                  <button onClick={() => setDiscountEditId(null)} style={{ fontSize: 12, background: "#fff", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 12px" }}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+            {canEditDiscount && discountHistoryId === c.id && (
+              <div style={{ marginTop: 8 }}>
+                {discountHistory === null ? (
+                  <EmptyState text="Loading…" />
+                ) : discountHistory.length === 0 ? (
+                  <EmptyState text="No discount changes recorded for this client yet." />
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {discountHistory.map((h) => (
+                      <div key={h.id} style={{ fontSize: 11.5, padding: 8, borderRadius: 6, background: "#F7F5EF", border: "1px solid #E5DFD3" }}>
+                        <div>
+                          <strong>{h.previousDiscount === null ? "none" : `${h.previousDiscount}%`} → {h.newDiscount}%</strong>
+                          {h.previousEligible !== h.newEligible && (
+                            <span style={{ marginLeft: 6, color: h.newEligible ? "#4C7A5E" : "#B33A3A", fontWeight: 600 }}>
+                              (promo eligibility turned {h.newEligible ? "ON" : "OFF"})
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ color: "#8A8272", marginTop: 2 }}>
+                          {h.changedBy || "Unknown"} · {new Date(h.changedAt).toLocaleString("en-GB", { timeZone: "Asia/Beirut" })}
+                        </div>
+                        <div style={{ marginTop: 2 }}>Reason: {h.reason}{h.comments ? ` — ${h.comments}` : ""}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
             {role === "rep" && completingId === c.id && (

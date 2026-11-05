@@ -548,6 +548,10 @@ const SCHEMAS = {
   AuditLog: [
     "id", "entityType", "entityId", "field", "oldValue", "newValue",
     "changedBy", "changedAt", "reason",
+    // Optional free-text note alongside "reason" — first used by the
+    // permanent customer discount change flow, generic enough for any
+    // future audited change that wants a longer note than "reason" fits.
+    "comments",
   ],
   // Manager coaching notes per rep — always appended, never overwritten, so
   // "Coaching Priority" has a real history rather than one mutable note.

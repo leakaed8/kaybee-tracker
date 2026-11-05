@@ -196,6 +196,13 @@ export const offerFreeRatio = (offer) => {
 export const offerRequiresApproval = (offer) =>
   offerFreeRatio(offer) > MAX_AUTO_APPROVED_FREE_RATIO + OFFER_RATIO_EPSILON;
 
+// Promotional-eligibility threshold — mirrors server/discountEligibility.js
+// exactly (same 22.5% constant). A client whose registered discount is
+// above this never sees Smart Promotional Offer Assistant suggestions;
+// this check IS the enforcement (the popup is advisory client-side UX,
+// never a server-side submission gate), unlike the two constants above.
+export const MAX_PROMOTIONAL_ELIGIBLE_DISCOUNT_PCT = 22.5;
+
 const MONTH_ABBR = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
 
 // Handles the three shapes a spreadsheet cell can hand back: a JS Date (xlsx

@@ -14,6 +14,7 @@ const { MOUNT_LEBANON_REFERENCE_NAMES } = require("./mountLebanonReferenceNames"
 const { buildMedicalPromotionSummary, MIN_DOCTORS_FOR_DISCLOSURE } = require("./medicalPromotion");
 const { computeFullRetailValue, hasPromotionalItems, computeEffectiveDiscountPct, evaluatePromotionalCap, MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT } = require("./effectiveDiscount");
 const { offerRequiresApproval, orderNeedsOfferApproval } = require("./offerEligibility");
+const { isPromotionallyEligible } = require("./discountEligibility");
 
 const app = express();
 // Render sits in front of this app behind a proxy/load balancer — without
@@ -490,7 +491,7 @@ function effectiveInteractionType(visit) {
 // redesign) — reused by every "record who changed what" requirement in the
 // spec (rep targets, interaction-type corrections, customer reassignment,
 // follow-up edits, manager notes). Never updates or deletes a prior row.
-async function writeAuditLog({ entityType, entityId, field, oldValue, newValue, changedBy, reason }) {
+async function writeAuditLog({ entityType, entityId, field, oldValue, newValue, changedBy, reason, comments }) {
   await db.appendRow("AuditLog", {
     id: `al${crypto.randomUUID()}`,
     entityType, entityId, field,
@@ -499,6 +500,7 @@ async function writeAuditLog({ entityType, entityId, field, oldValue, newValue, 
     changedBy: changedBy || "",
     changedAt: new Date().toISOString(),
     reason: reason || "",
+    comments: comments || "",
   });
 }
 
@@ -3658,6 +3660,18 @@ app.post("/api/orders", async (req, res) => {
       netTotal,
     };
     await db.appendRow("Orders", order);
+    // A client with no registered discount yet gets one established from
+    // their very first confirmed invoice (Part 3 — Permanent Customer
+    // Discount Management, req 7) — purely automatic, with none of the
+    // confirmation/audit-trail/manager-notification ceremony a deliberate
+    // PERMANENT CHANGE gets below (see POST /:id/discount-change): nothing
+    // is being changed here, just set for the first time so the rep never
+    // has to re-enter the same discount on every future order. Once this
+    // fires, discountRate is no longer "", so it never fires again for
+    // this client — naturally a one-time "first invoice" event.
+    if (matchedClient && (matchedClient.discountRate === "" || matchedClient.discountRate === undefined)) {
+      db.updateRowById("Clients", matchedClient.id, { discountRate: appliedDiscountRate }).catch((e) => console.error("auto-establish discount failed", e));
+    }
     if (needsOfferApproval) {
       notifyOfferApprovalNeeded(order, cleanItems, total, appliedDiscountRate, netTotal, offerById);
     } else {
@@ -4770,11 +4784,16 @@ app.post("/api/clients", async (req, res) => {
   }
 });
 
+// discountRate is deliberately NOT patchable here — a client's permanent
+// registered discount only ever changes through POST
+// /:id/discount-change below, which requires a reason, writes an audit
+// entry, and notifies the manager (Part 3 — Permanent Customer Discount
+// Management). This generic route stays for the other fields it always
+// covered.
 app.patch("/api/clients/:id", requireManager, async (req, res) => {
   try {
     const patch = {};
     if (req.body.assignedRep !== undefined) patch.assignedRep = req.body.assignedRep;
-    if (req.body.discountRate !== undefined) patch.discountRate = req.body.discountRate;
     if (req.body.nameAr !== undefined) patch.nameAr = req.body.nameAr;
     if (req.body.subTerritory !== undefined) patch.subTerritory = req.body.subTerritory;
     let previous = null;
@@ -4791,6 +4810,96 @@ app.patch("/api/clients/:id", requireManager, async (req, res) => {
       });
     }
     res.json({ ok: true });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Permanent registered-discount change (Part 3 — Permanent Customer
+// Discount Management) — distinct from the per-order "override for an
+// exception" discount in OrderBuilder, which only ever affects that one
+// invoice (existing behavior, untouched). This updates the client's
+// commercial terms for every FUTURE order; past orders keep whatever
+// discountRate they already stored at the time, untouched. Gated the same
+// as the offer-approval endpoints: manager or Head of Sales (isSupervisor)
+// — an authorized, audited, notified change, never a mandatory approval
+// workflow (per spec, explicitly not required).
+app.post("/api/clients/:id/discount-change", requireAuth, async (req, res) => {
+  if (!(req.role === "manager" || req.isSupervisor)) return res.status(403).json({ error: "Head of Sales or managers only." });
+  try {
+    const { newDiscountRate, reason, comments } = req.body;
+    const rate = Number(newDiscountRate);
+    if (newDiscountRate === undefined || newDiscountRate === null || newDiscountRate === "" || Number.isNaN(rate)) {
+      return res.status(400).json({ error: "A new discount rate is required." });
+    }
+    if (rate < 0 || rate > 100) return res.status(400).json({ error: "Discount rate must be between 0 and 100." });
+    if (!reason || !String(reason).trim()) return res.status(400).json({ error: "A reason is required for a permanent discount change." });
+
+    const clients = await db.getAllRows("Clients");
+    const client = clients.find((c) => c.id === req.params.id);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+
+    const hadDiscount = client.discountRate !== "" && client.discountRate !== undefined;
+    const previousDiscount = hadDiscount ? Number(client.discountRate) : null;
+    const ok = await db.updateRowById("Clients", client.id, { discountRate: rate });
+    if (!ok) return res.status(404).json({ error: "Client not found" });
+
+    const changedByLabel = req.role === "manager" ? "Manager" : req.repName;
+    await writeAuditLog({
+      entityType: "client_discount", entityId: client.id, field: "discountRate",
+      oldValue: hadDiscount ? previousDiscount : "", newValue: rate, changedBy: changedByLabel, reason, comments,
+    });
+
+    const previousEligible = hadDiscount ? isPromotionallyEligible(previousDiscount) : null;
+    const newEligible = isPromotionallyEligible(rate);
+    const fromLabel = hadDiscount ? `${previousDiscount}%` : "none";
+    const eligibilityNote = previousEligible === newEligible ? "" :
+      `\nPromotional eligibility turned ${newEligible ? "ON" : "OFF"}.`;
+
+    notifyManagers({ title: "Registered discount changed", body: `${client.name}: ${fromLabel} → ${rate}% — ${reason}`, url: "/" }).catch(() => {});
+    db.getSettings().then((settings) => {
+      if (!settings.managerTelegramChatId) return;
+      const msg = `💰 <b>${escapeHtml(client.name)}</b>'s registered discount changed: ${fromLabel} → <b>${rate}%</b>\nBy: ${escapeHtml(changedByLabel)}\nReason: ${escapeHtml(reason)}${comments ? `\nComments: ${escapeHtml(comments)}` : ""}${eligibilityNote}`;
+      telegram.sendMessage(settings.managerTelegramChatId, msg).catch((e) => console.error("discount change telegram failed", e));
+    }).catch(() => {});
+
+    res.json({ ok: true, previousDiscount, newDiscount: rate, previousEligible, newEligible });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Full change history for one client's registered discount — management
+// review surface for the audit trail req 9 requires. previousEligible/
+// newEligible are derived live from the stored before/after discount
+// values rather than stored as their own columns: promotional eligibility
+// is a pure, deterministic function of the discount percentage, so
+// deriving it is exactly equivalent to recording it, without adding
+// discount-specific columns to the generic, shared AuditLog schema.
+app.get("/api/clients/:id/discount-history", requireAuth, async (req, res) => {
+  if (!(req.role === "manager" || req.isSupervisor)) return res.status(403).json({ error: "Head of Sales or managers only." });
+  try {
+    const rows = await db.getAllRows("AuditLog");
+    const history = rows
+      .filter((r) => r.entityType === "client_discount" && r.entityId === req.params.id && r.field === "discountRate")
+      .map((r) => {
+        const hadPrevious = r.oldValue !== "" && r.oldValue !== undefined;
+        return {
+          id: r.id,
+          previousDiscount: hadPrevious ? Number(r.oldValue) : null,
+          newDiscount: Number(r.newValue),
+          previousEligible: hadPrevious ? isPromotionallyEligible(r.oldValue) : null,
+          newEligible: isPromotionallyEligible(r.newValue),
+          changedBy: r.changedBy || "",
+          changedAt: r.changedAt,
+          reason: r.reason || "",
+          comments: r.comments || "",
+        };
+      })
+      .sort((a, b) => new Date(b.changedAt) - new Date(a.changedAt));
+    res.json({ history });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
