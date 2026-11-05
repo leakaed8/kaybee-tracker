@@ -12,6 +12,7 @@ const { importedInventory, defaultTemplates } = require("./seedData");
 const { DAHIYEH_REFERENCE_PHARMACIES } = require("./dahiyehReference");
 const { MOUNT_LEBANON_REFERENCE_NAMES } = require("./mountLebanonReferenceNames");
 const { buildMedicalPromotionSummary, MIN_DOCTORS_FOR_DISCLOSURE } = require("./medicalPromotion");
+const { computeFullRetailValue, hasPromotionalItems, computeEffectiveDiscountPct, evaluatePromotionalCap, MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT } = require("./effectiveDiscount");
 
 const app = express();
 // Render sits in front of this app behind a proxy/load balancer — without
@@ -558,22 +559,36 @@ function ytdMovementFor(name, movementIndex) {
 
 function parseOrder(o) {
   const total = Number(o.total) || 0;
+  const items = JSON.parse(o.items || "[]");
+  // Orders placed before this field existed have no netTotal stored —
+  // treat their collected amount as the list total rather than 0.
+  const netTotal = o.netTotal !== "" && o.netTotal !== undefined ? Number(o.netTotal) : total;
+  // fullRetailValue/effectiveDiscountPct are NEVER stored — always derived
+  // live from this order's own items + netTotal (see effectiveDiscount.js),
+  // so every order (including every historical one, which this never
+  // rewrites) reports a correct effective discount with no stored/derived
+  // value to ever drift out of sync.
+  const fullRetailValue = computeFullRetailValue(items);
   return {
     id: o.id,
     clientName: o.clientName,
     visitId: o.visitId || "",
     repName: o.repName || "",
     date: o.date,
-    items: JSON.parse(o.items || "[]"),
+    items,
     total,
     status: o.status || "confirmed",
     discountRate: o.discountRate !== "" && o.discountRate !== undefined ? Number(o.discountRate) : 0,
-    // Orders placed before this field existed have no netTotal stored —
-    // treat their collected amount as the list total rather than 0.
-    netTotal: o.netTotal !== "" && o.netTotal !== undefined ? Number(o.netTotal) : total,
+    netTotal,
     posEntered: o.posEntered === "true",
     posEnteredAt: o.posEnteredAt || "",
     posEnteredBy: o.posEnteredBy || "",
+    fullRetailValue,
+    // Rounded to 2 decimals for display — the 35% cap itself is always
+    // enforced at order-save time against the full-precision value, never
+    // this rounded one (see evaluatePromotionalCap).
+    effectiveDiscountPct: Math.round(computeEffectiveDiscountPct(fullRetailValue, netTotal) * 100) / 100,
+    hasPromotionalItems: hasPromotionalItems(items),
   };
 }
 
@@ -3510,6 +3525,21 @@ app.post("/api/orders", async (req, res) => {
     }
     const netTotal = total * (1 - appliedDiscountRate / 100);
 
+    // The 35% total-effective-discount cap only ever applies to an invoice
+    // that actually carries a promotional offer — never to an ordinary
+    // invoice, however high its registered discount. Checked against the
+    // FULL-PRECISION percentage (never the rounded display value) so a
+    // true 35.01% can never slip through just because it rounds to
+    // "35.00%". See effectiveDiscount.js for the full rationale.
+    const capCheck = evaluatePromotionalCap(cleanItems, netTotal);
+    if (capCheck.exceeded) {
+      return res.status(400).json({
+        error: `This order's total effective discount is ${capCheck.effectiveDiscountPct.toFixed(2)}% — a promotional invoice can't exceed ${MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT}%. Edit the additional discount, change the promotional offer, or save this order for later.`,
+        effectiveDiscountPct: Math.round(capCheck.effectiveDiscountPct * 100) / 100,
+        maxEffectiveDiscountPct: MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT,
+      });
+    }
+
     const order = {
       id: `ord${crypto.randomUUID()}`,
       clientName,
@@ -3566,6 +3596,18 @@ app.patch("/api/orders/:id", async (req, res) => {
       ? Number(order.discountRate) || 0
       : Number(discountRate) || 0;
     const netTotal = total * (1 - appliedDiscountRate / 100);
+
+    // Same 35% promotional cap as order creation — an edit that pushes a
+    // promotional order's effective discount over the line must be
+    // rejected just as firmly as creating one that way in the first place.
+    const capCheck = evaluatePromotionalCap(cleanItems, netTotal);
+    if (capCheck.exceeded) {
+      return res.status(400).json({
+        error: `This order's total effective discount is ${capCheck.effectiveDiscountPct.toFixed(2)}% — a promotional invoice can't exceed ${MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT}%. Edit the additional discount, change the promotional offer, or save this order for later.`,
+        effectiveDiscountPct: Math.round(capCheck.effectiveDiscountPct * 100) / 100,
+        maxEffectiveDiscountPct: MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT,
+      });
+    }
 
     const patch = { items: JSON.stringify(cleanItems), total, discountRate: appliedDiscountRate, netTotal };
     await db.updateRowById("Orders", order.id, patch);

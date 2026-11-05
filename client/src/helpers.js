@@ -152,6 +152,30 @@ export const computeLeadScore = ({ tier, days, cadence, revenue = 0, engagement 
   return Math.max(0, Math.min(100, tierPoints + urgencyPoints + revenuePoints + engagementPoints));
 };
 
+// Total Effective Discount — mirrors server/effectiveDiscount.js exactly
+// (same math, same 35% constant) so OrderBuilder can show live feedback as
+// a rep builds an order, without waiting for a round trip. This is display
+// ONLY: the server is the sole enforcement authority on the 35% cap (see
+// POST/PATCH /api/orders) and is never trusted to have been bypassed by
+// skipping this client-side check. Never feeds back into — and is kept
+// entirely separate from — applyOfferToItems/the existing pricing engine;
+// it only MEASURES an already-priced set of items against full retail
+// value. See effectiveDiscount.js server-side for the full definitions and
+// the worked example this reproduces (33.57%).
+export const computeFullRetailValue = (items) =>
+  (items || []).reduce((sum, it) => {
+    const qty = Number(it.qty) || 0;
+    const listPrice = it.isFree ? (Number(it.originalPrice) || 0) : (Number(it.unitPrice) || 0);
+    return sum + qty * listPrice;
+  }, 0);
+
+export const hasPromotionalItems = (items) => (items || []).some((it) => !!it.offerId || !!it.viaOfferId);
+
+export const computeEffectiveDiscountPct = (fullRetailValue, finalInvoiceAmount) =>
+  fullRetailValue > 0 ? ((fullRetailValue - finalInvoiceAmount) / fullRetailValue) * 100 : 0;
+
+export const MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT = 35;
+
 const MONTH_ABBR = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
 
 // Handles the three shapes a spreadsheet cell can hand back: a JS Date (xlsx

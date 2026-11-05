@@ -23,6 +23,7 @@ import { ScheduleView } from "./ScheduleView.jsx";
 import {
   daysUntil, fmtDate, turnoverPct, zoneFor, isSlowMover, isAtRisk, effectiveSold90, lifecyclePct, TIER_CADENCE, haversineKm, daysSince, parseExcelCellDate,
   computeLeadScore, todayBeirutStr, beirutDateStrOfInstant, fmtDateOfInstant, fmtTime, fmtDateTime, addDaysToDateStr, weekdayOfDateStr,
+  computeFullRetailValue, hasPromotionalItems, computeEffectiveDiscountPct, MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT,
 } from "./helpers.js";
 import {
   DRUG_NUTRIENT_DATA, CONDITION_TALKING_POINTS, SPECIALTY_TALKING_POINTS,
@@ -5120,6 +5121,16 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   const total = allDisplayItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
   const netTotal = total * (1 - (Number(discountRate) || 0) / 100);
 
+  // Live display only — the server is the sole authority on the 35% cap
+  // (see doCreateOrder's error handling below and POST/PATCH /api/orders
+  // server-side); this just lets a rep see the real number, and a warning,
+  // before they ever try to submit. Never changes pricing, never blocks
+  // adding/removing items — only the final submit can be rejected.
+  const orderFullRetailValue = computeFullRetailValue(allDisplayItems);
+  const orderIsPromotional = hasPromotionalItems(allDisplayItems);
+  const orderEffectiveDiscountPct = computeEffectiveDiscountPct(orderFullRetailValue, netTotal);
+  const orderExceedsPromotionalCap = orderIsPromotional && orderEffectiveDiscountPct > MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT;
+
   // Same product, a different batch (different expiry, its own row in the
   // Products sheet) with stock left — surfaced whenever a line runs short,
   // so a rep isn't only told "1 left" for the batch they happened to pick
@@ -5455,6 +5466,26 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
           <div style={{ textAlign: "right", fontSize: 15, fontWeight: 600, marginTop: 6 }}>
             Net total (collected): {netTotal.toFixed(2)}
           </div>
+          {/* Only shown when a promotional offer is actually on the order —
+              for a plain order this would just restate the Discount %
+              field above it. The 35% cap only ever applies here too (see
+              effectiveDiscount.js server-side) — a high-discount ordinary
+              order is never flagged. */}
+          {orderIsPromotional && (
+            <div style={{ textAlign: "right", marginTop: 4 }}>
+              <span style={{
+                fontSize: 12.5, fontWeight: 600,
+                color: orderExceedsPromotionalCap ? "#B33A3A" : "#5B5445",
+              }}>
+                Total effective discount: {orderEffectiveDiscountPct.toFixed(2)}%
+              </span>
+              {orderExceedsPromotionalCap && (
+                <div style={{ fontSize: 11.5, color: "#B33A3A", marginTop: 2 }}>
+                  ⚠ Exceeds the {MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT}% maximum for a promotional invoice. Lower the additional discount, change the offer, or save this order for later — the server will reject it as-is.
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
