@@ -5292,14 +5292,21 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   const totalFreeUnits = offerGroups.reduce((sum, g) => sum + (g.valid ? g.freeQty : 0), 0);
 
   // "If you have 13 and 7+1 requires 8, the next offer that fits 13 is
-  // 12+2 (needs 14)" — the smallest-threshold active offer, other than the
+  // 14+2 (needs 14)" — the smallest-threshold active offer, other than the
   // one already assigned, whose requirement is still >= what's been added.
   // Only offered when the group is OVER its requirement; being under just
-  // needs more units added, not a different offer.
+  // needs more units added, not a different offer. Restricted to the SAME
+  // ratio family as the offer already assigned (same equivalence the
+  // approval ceiling and findGroupAdjustment's "over" case already use) —
+  // this used to scan every active offer regardless of family, which could
+  // suggest switching e.g. a 7+1 group to a same-sized 6+1-family offer
+  // (a MORE generous ratio the rep/pharmacist never asked for), not a
+  // bigger instance of the SAME deal.
   const nextOfferSuggestion = (group) => {
     if (group.totalQty <= group.required) return null;
+    const ratio = offerFreeRatio(group.offer);
     return activeOffers
-      .filter((o) => o.id !== group.offerId && o.buyQty + o.getQty >= group.totalQty)
+      .filter((o) => o.id !== group.offerId && o.buyQty + o.getQty >= group.totalQty && Math.abs(offerFreeRatio(o) - ratio) < 1e-9)
       .sort((a, b) => (a.buyQty + a.getQty) - (b.buyQty + b.getQty))[0] || null;
   };
 
