@@ -162,6 +162,7 @@ const TAB_VISIBILITY_TABS = [
   { key: "recall", label: "Product Expert", icon: Brain },
   { key: "training", label: "Training", icon: GraduationCap },
   { key: "samples", label: "Samples", icon: Gift },
+  { key: "medicalPromotion", label: "Medical Promotion Activity", icon: Megaphone },
 ];
 const DEFAULT_TAB_VISIBILITY = {
   performance: { manager: true, salesRep: false, medRep: false, supervisor: false },
@@ -178,6 +179,9 @@ const DEFAULT_TAB_VISIBILITY = {
   // Manager-configurable (not hardcoded) like every other tab here, so the
   // manager can open it up further later without needing a code change.
   samples: { manager: true, salesRep: false, medRep: true, supervisor: false },
+  // Read-only aggregate report (see MedicalPromotionView) — open to the
+  // whole sales team by default, same as Visit Cadence.
+  medicalPromotion: { manager: true, salesRep: true, medRep: true, supervisor: true },
 };
 function isTabVisibleFor(tabVisibility, tabKey, role, isSupervisor, isSalesRep, isMedRep) {
   const v = (tabVisibility && tabVisibility[tabKey]) || DEFAULT_TAB_VISIBILITY[tabKey];
@@ -667,6 +671,7 @@ export default function App() {
         {canSeeTab("recall") && <TabBtn active={tab === "recall"} onClick={() => setTab("recall")} icon={<Brain size={15} />} label="Product Expert" />}
         {canSeeTab("training") && <TabBtn active={tab === "training"} onClick={() => setTab("training")} icon={<GraduationCap size={15} />} label="Training" />}
         {canSeeTab("samples") && <TabBtn active={tab === "samples"} onClick={() => setTab("samples")} icon={<Gift size={15} />} label="Samples" />}
+        {canSeeTab("medicalPromotion") && <TabBtn active={tab === "medicalPromotion"} onClick={() => setTab("medicalPromotion")} icon={<Megaphone size={15} />} label="Medical Promotion Activity" />}
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
       </nav>
 
@@ -797,6 +802,7 @@ export default function App() {
               <TrainingTabView role={role} repName={repName} isSupervisor={isSupervisor} repNames={repNames} />
             )}
             {tab === "samples" && canSeeTab("samples") && <SamplesTrackingView products={products} role={role} />}
+            {tab === "medicalPromotion" && canSeeTab("medicalPromotion") && <MedicalPromotionView />}
             {tab === "recall" && canSeeTab("recall") && (
               <RecallView role={role} repName={repName} repNames={repNames} products={products} catalogProducts={productCatalog} />
             )}
@@ -16505,6 +16511,274 @@ function SamplesTrackingView({ products, role }) {
         </button>
         {showRejected && (rejected.length === 0 ? <EmptyState text="None yet." /> : rejected.map(fulfillmentRow))}
       </div>
+    </div>
+  );
+}
+
+// ---------- Medical Promotion Activity (read-only aggregate dashboard) ----
+// Shows the sales team which Alfa/Mason products are being discussed with
+// doctors, and where — purely a read of GET /api/medical-promotion-summary,
+// which itself only ever reads Visits/Doctors/ProductCatalog (see that
+// route's own comment, server/index.js). Nothing here writes anything, and
+// nothing here touches Check-In's own flow/fields/permissions at all.
+//
+// The response is already privacy-safe by construction (no doctor names,
+// rep names, notes, addresses, or individual timestamps, and any product+
+// location combination backed by too few distinct doctors is omitted
+// server-side) — this component just renders exactly what it's handed, in
+// three views over the SAME fetched rows (no extra requests to switch
+// views): the flat table the spec calls "Product Promotion Summary," a
+// per-location breakdown, and a per-product breakdown.
+function MedicalPromotionView() {
+  const [rows, setRows] = useState(null);
+  const [suppressedGroups, setSuppressedGroups] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [datePreset, setDatePreset] = useState("30");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
+  const [brand, setBrand] = useState("");
+  const [productQueryInput, setProductQueryInput] = useState("");
+  const [locationQueryInput, setLocationQueryInput] = useState("");
+  const [productQuery, setProductQuery] = useState("");
+  const [locationQuery, setLocationQuery] = useState("");
+  const [viewMode, setViewMode] = useState("all");
+  const [selectedLocation, setSelectedLocation] = useState("");
+  const [selectedProduct, setSelectedProduct] = useState("");
+
+  // Debounced so typing a search term doesn't fire a request per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setProductQuery(productQueryInput.trim()), 400);
+    return () => clearTimeout(t);
+  }, [productQueryInput]);
+  useEffect(() => {
+    const t = setTimeout(() => setLocationQuery(locationQueryInput.trim()), 400);
+    return () => clearTimeout(t);
+  }, [locationQueryInput]);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    setError("");
+    const params = {};
+    // Leaving from/to out entirely for the default 30-day view lets the
+    // server apply its own Beirut-anchored default — only compute dates
+    // here once the rep actually picks something else.
+    if (datePreset === "custom") {
+      if (customFrom) params.from = customFrom;
+      if (customTo) params.to = customTo;
+    } else if (datePreset !== "30") {
+      const days = Number(datePreset);
+      const toDate = new Date();
+      const fromDate = new Date(toDate.getTime() - days * 86400000);
+      params.to = toDate.toISOString().slice(0, 10);
+      params.from = fromDate.toISOString().slice(0, 10);
+    }
+    if (brand) params.brand = brand;
+    if (productQuery) params.product = productQuery;
+    if (locationQuery) params.location = locationQuery;
+    api.getMedicalPromotionSummary(params)
+      .then((data) => {
+        setRows(data.rows || []);
+        setSuppressedGroups(data.suppressedGroups || 0);
+      })
+      .catch((e) => setError(e?.message || "Couldn't load promotion activity."))
+      .finally(() => setLoading(false));
+  }, [datePreset, customFrom, customTo, brand, productQuery, locationQuery]);
+  useEffect(() => { load(); }, [load]);
+
+  const shownRows = rows || [];
+  const locationOptions = Array.from(new Set(shownRows.map((r) => r.location))).sort();
+  const productOptions = Array.from(new Set(shownRows.map((r) => r.product))).sort();
+
+  // Keep the picked location/product valid as the underlying data changes
+  // (e.g. a filter narrows it out of the list) — defaults to the first
+  // option so the By Location/By Product views are never left blank when
+  // there's data to show.
+  useEffect(() => {
+    if (!locationOptions.includes(selectedLocation)) setSelectedLocation(locationOptions[0] || "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shownRows.length, locationOptions.join("|")]);
+  useEffect(() => {
+    if (!productOptions.includes(selectedProduct)) setSelectedProduct(productOptions[0] || "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shownRows.length, productOptions.join("|")]);
+
+  const dateRangeLabel = datePreset === "custom"
+    ? (customFrom && customTo ? `${customFrom} – ${customTo}` : "custom range")
+    : `Last ${datePreset} days`;
+
+  const presetBtn = (value, label) => (
+    <button
+      onClick={() => setDatePreset(value)}
+      style={{
+        padding: "6px 12px", borderRadius: 8, fontSize: 12.5, fontWeight: 500, whiteSpace: "nowrap",
+        border: datePreset === value ? "1px solid #1F2A24" : "1px solid #E5DFD3",
+        background: datePreset === value ? "#1F2A24" : "#fff",
+        color: datePreset === value ? "#FAF7F2" : "#5B5445",
+      }}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px", display: "flex", alignItems: "center", gap: 8 }}>
+        <Megaphone size={19} /> Medical Promotion Activity
+      </h2>
+      <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 16px" }}>
+        Which products are being discussed with doctors, and where — aggregated from Check-In automatically. No doctor names, rep names, or visit details are ever shown here.
+      </p>
+
+      <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14, marginBottom: 16 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+          {presetBtn("7", "Last 7 days")}
+          {presetBtn("30", "Last 30 days")}
+          {presetBtn("90", "Last 90 days")}
+          {presetBtn("custom", "Custom")}
+        </div>
+        {datePreset === "custom" && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+            <input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} style={{ ...inputStyle, width: "auto" }} />
+            <span style={{ alignSelf: "center", color: "#8A8272" }}>to</span>
+            <input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)} style={{ ...inputStyle, width: "auto" }} />
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <select value={brand} onChange={(e) => setBrand(e.target.value)} style={{ ...inputStyle, flex: 1, minWidth: 160 }}>
+            <option value="">All brands</option>
+            <option value="Alfa">Alfa Vitamins</option>
+            <option value="Mason">Mason Natural</option>
+          </select>
+          <input
+            value={productQueryInput}
+            onChange={(e) => setProductQueryInput(e.target.value)}
+            placeholder="Search product…"
+            style={{ ...inputStyle, flex: 1, minWidth: 160 }}
+          />
+          <input
+            value={locationQueryInput}
+            onChange={(e) => setLocationQueryInput(e.target.value)}
+            placeholder="Search location/territory…"
+            style={{ ...inputStyle, flex: 1, minWidth: 160 }}
+          />
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        {[
+          { key: "all", label: "All" },
+          { key: "byLocation", label: "By Location" },
+          { key: "byProduct", label: "By Product" },
+        ].map((m) => (
+          <button
+            key={m.key}
+            onClick={() => setViewMode(m.key)}
+            style={{
+              padding: "7px 14px", borderRadius: 8, fontSize: 12.5, fontWeight: 600,
+              border: viewMode === m.key ? "1px solid #1F2A24" : "1px solid #E5DFD3",
+              background: viewMode === m.key ? "#1F2A24" : "#fff",
+              color: viewMode === m.key ? "#FAF7F2" : "#5B5445",
+            }}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 12 }}>{error}</div>}
+
+      {loading ? (
+        <div style={{ fontSize: 12.5, color: "#8A8272" }}>Loading…</div>
+      ) : shownRows.length === 0 ? (
+        <EmptyState text="No promotion activity found for this filter." />
+      ) : viewMode === "byLocation" ? (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
+          <select value={selectedLocation} onChange={(e) => setSelectedLocation(e.target.value)} style={{ ...inputStyle, marginBottom: 12 }}>
+            {locationOptions.map((loc) => <option key={loc} value={loc}>{loc}</option>)}
+          </select>
+          <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>{selectedLocation} — {dateRangeLabel}</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+            {shownRows
+              .filter((r) => r.location === selectedLocation)
+              .sort((a, b) => b.doctorsReached - a.doctorsReached)
+              .map((r) => (
+                <div key={r.product} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px" }}>
+                  <div>
+                    <span style={{ fontWeight: 600, fontSize: 13.5 }}>{r.product}</span>
+                    <span style={{ fontSize: 11, color: "#8A8272", marginLeft: 8 }}>{r.brand}</span>
+                  </div>
+                  <span style={{ fontSize: 12.5, color: "#5B5445" }}>{r.doctorsReached} doctor{r.doctorsReached === 1 ? "" : "s"} reached · {r.discussions} discussion{r.discussions === 1 ? "" : "s"}</span>
+                </div>
+              ))}
+          </div>
+        </div>
+      ) : viewMode === "byProduct" ? (
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14 }}>
+          <select value={selectedProduct} onChange={(e) => setSelectedProduct(e.target.value)} style={{ ...inputStyle, marginBottom: 12 }}>
+            {productOptions.map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+          <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 10 }}>{selectedProduct}</div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ textAlign: "left", color: "#8A8272", fontSize: 11.5 }}>
+                  <th style={{ padding: "6px 8px" }}>Location</th>
+                  <th style={{ padding: "6px 8px" }}>Doctors Reached</th>
+                  <th style={{ padding: "6px 8px" }}>Discussions</th>
+                  <th style={{ padding: "6px 8px" }}>Last Activity</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shownRows
+                  .filter((r) => r.product === selectedProduct)
+                  .sort((a, b) => b.doctorsReached - a.doctorsReached)
+                  .map((r) => (
+                    <tr key={r.location} style={{ borderTop: "1px solid #E5DFD3" }}>
+                      <td style={{ padding: "6px 8px", fontWeight: 500 }}>{r.location}</td>
+                      <td style={{ padding: "6px 8px" }}>{r.doctorsReached}</td>
+                      <td style={{ padding: "6px 8px" }}>{r.discussions}</td>
+                      <td style={{ padding: "6px 8px", color: "#8A8272" }}>{fmtDate(r.lastActivity)}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ textAlign: "left", color: "#8A8272", fontSize: 11.5 }}>
+                <th style={{ padding: "6px 8px" }}>Product</th>
+                <th style={{ padding: "6px 8px" }}>Brand</th>
+                <th style={{ padding: "6px 8px" }}>Location</th>
+                <th style={{ padding: "6px 8px" }}>Doctors Reached</th>
+                <th style={{ padding: "6px 8px" }}>Discussions</th>
+                <th style={{ padding: "6px 8px" }}>Last Activity</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shownRows.map((r) => (
+                <tr key={`${r.product}::${r.location}`} style={{ borderTop: "1px solid #E5DFD3" }}>
+                  <td style={{ padding: "6px 8px", fontWeight: 500 }}>{r.product}</td>
+                  <td style={{ padding: "6px 8px", color: "#8A8272" }}>{r.brand}</td>
+                  <td style={{ padding: "6px 8px" }}>{r.location}</td>
+                  <td style={{ padding: "6px 8px" }}>{r.doctorsReached}</td>
+                  <td style={{ padding: "6px 8px" }}>{r.discussions}</td>
+                  <td style={{ padding: "6px 8px", color: "#8A8272" }}>{fmtDate(r.lastActivity)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {suppressedGroups > 0 && (
+        <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 14, fontStyle: "italic" }}>
+          {suppressedGroups} product/location combination{suppressedGroups === 1 ? "" : "s"} with too few doctors to report anonymously {suppressedGroups === 1 ? "is" : "are"} hidden from this view.
+        </div>
+      )}
     </div>
   );
 }

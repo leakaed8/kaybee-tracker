@@ -79,6 +79,7 @@ export const api = {
   getVisits: (params) => request(`/visits${qs(params)}`),
   getOrders: (params) => request(`/orders${qs(params)}`),
   getSamples: (params) => request(`/samples${qs(params)}`),
+  getMedicalPromotionSummary: (params) => request(`/medical-promotion-summary${qs(params)}`),
   getPunchLog: (params) => request(`/punch-log${qs(params)}`),
   getOutreachLogToday: () => request("/outreach-log/today"),
   getCompetitorSightings: (params) => request(`/competitor-sightings${qs(params)}`),

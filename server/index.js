@@ -11,6 +11,7 @@ const { beirutDateStr, beirutWeekday, beirutHour, todayBeirutStr, beirutDatePart
 const { importedInventory, defaultTemplates } = require("./seedData");
 const { DAHIYEH_REFERENCE_PHARMACIES } = require("./dahiyehReference");
 const { MOUNT_LEBANON_REFERENCE_NAMES } = require("./mountLebanonReferenceNames");
+const { buildMedicalPromotionSummary, MIN_DOCTORS_FOR_DISCLOSURE } = require("./medicalPromotion");
 
 const app = express();
 // Render sits in front of this app behind a proxy/load balancer — without
@@ -259,6 +260,9 @@ const DEFAULT_TAB_VISIBILITY = {
   recall: { manager: true, salesRep: false, medRep: false, supervisor: false },
   training: { manager: true, salesRep: false, medRep: false, supervisor: false },
   samples: { manager: true, salesRep: false, medRep: true, supervisor: false },
+  // Read-only aggregate report (see GET /api/medical-promotion-summary) —
+  // open to the whole sales team by default, same as cadence.
+  medicalPromotion: { manager: true, salesRep: true, medRep: true, supervisor: true },
 };
 function isTabVisibleFor(tabVisibility, tabKey, role, isSupervisor, isSalesRep, isMedRep) {
   const v = (tabVisibility && tabVisibility[tabKey]) || DEFAULT_TAB_VISIBILITY[tabKey];
@@ -6546,6 +6550,39 @@ app.get("/api/visit-cadence", async (req, res) => {
     });
 
     res.json({ cadence });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Medical Promotion Activity (read-only aggregate dashboard) ----
+// Answers "which Alfa/Mason products are being promoted to doctors, and
+// where" purely from data the Check-In flow already writes (Visits.
+// itemsMentioned + Doctors.area) — no new fields, no new write path, and
+// the existing check-in flow is completely untouched by this. This is a
+// READ-ONLY reporting layer: it never mutates Visits/Doctors/FollowUps/
+// anything else. All the actual aggregation (including every privacy
+// guarantee — no doctor/rep names, no notes/addresses, no individual
+// timestamps, and small-group suppression) lives in medicalPromotion.js,
+// split out specifically so it can be unit-tested directly with plain
+// Node against synthetic data (see medicalPromotion.test.js) — this route
+// is just "fetch the raw rows, hand them to that function."
+app.get("/api/medical-promotion-summary", requireTabAccess("medicalPromotion"), async (req, res) => {
+  try {
+    const [visitRows, doctors, clients, nutritionists, productCatalog] = await Promise.all([
+      db.getAllRows("Visits"), db.getAllRows("Doctors"), db.getAllRows("Clients"),
+      db.getAllRows("Nutritionists"), db.getAllRows("ProductCatalog"),
+    ]);
+    const result = buildMedicalPromotionSummary({
+      visitRows, doctors, clients, nutritionists, productCatalog,
+      from: req.query.from ? String(req.query.from) : "",
+      to: req.query.to ? String(req.query.to) : "",
+      brandFilter: req.query.brand ? String(req.query.brand) : "",
+      productFilter: req.query.product ? String(req.query.product) : "",
+      locationFilter: req.query.location ? String(req.query.location) : "",
+    });
+    res.json({ ...result, minDoctorsForDisclosure: MIN_DOCTORS_FOR_DISCLOSURE });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });
