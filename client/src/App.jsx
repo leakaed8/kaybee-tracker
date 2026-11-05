@@ -3937,6 +3937,25 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
           const isTenPlusOneAt29 = Number(orderDiscountRate) === 29 && o.buyQty === 10 && o.getQty === 1;
           return withinCap || isTenPlusOneAt29;
         });
+        // Same family equivalence the approval ceiling and the
+        // over-threshold "switch offer" suggestion already use (a 24+4
+        // offer is exactly as generous as 6+1 — same ratio, judged the
+        // same way) — every member of a family produces the IDENTICAL
+        // estimatedPct above for a given discount, so this never
+        // half-includes a family, only ever collapses duplicates. There's
+        // no per-order total yet at this step to size a bigger instance
+        // against, so the smallest ("base") member of each family is the
+        // only sensible one to offer here; the rep's cart can always grow
+        // into a bigger same-family offer later via the existing
+        // over-threshold flow on the items page.
+        const offersByFamily = [];
+        for (const o of offersWithinCap) {
+          const ratio = offerFreeRatio(o);
+          const idx = offersByFamily.findIndex((existing) => Math.abs(offerFreeRatio(existing) - ratio) < 1e-9);
+          if (idx === -1) offersByFamily.push(o);
+          else if (o.buyQty + o.getQty < offersByFamily[idx].buyQty + offersByFamily[idx].getQty) offersByFamily[idx] = o;
+        }
+        offersByFamily.sort((a, b) => (a.buyQty + a.getQty) - (b.buyQty + b.getQty));
         return (
           <>
             {canGoBack && <BackStepButton onClick={goBack} />}
@@ -3954,11 +3973,11 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                 />
               </Field>
               {eligibleForOffers ? (
-                offersWithinCap.length > 0 ? (
+                offersByFamily.length > 0 ? (
                   <Field label="Offer (optional)">
                     <select value={orderOfferId} onChange={(e) => setOrderOfferId(e.target.value)} style={inputStyle}>
                       <option value="">No offer (regular)</option>
-                      {offersWithinCap.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+                      {offersByFamily.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
                     </select>
                   </Field>
                 ) : (
