@@ -4883,6 +4883,18 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   const [activeGroupId, setActiveGroupId] = useState(null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  // Smart Promotional Offer Assistant — a recommendation to complete an
+  // under-threshold offer group the rep already started, shown as a
+  // popup right before submit (not live, so it never interrupts typing).
+  // null when nothing is pending. Never auto-adds anything — ACCEPT is the
+  // explicit confirmation the recommendation needs; DECLINE submits the
+  // order exactly as the rep built it.
+  const [pendingSuggestion, setPendingSuggestion] = useState(null);
+  // One declined recommendation (keyed by groupId + its qty/offer at the
+  // moment of declining) is never shown again UNLESS the order actually
+  // changes — adding/removing items for that group changes the key, so a
+  // genuinely new situation still gets a fresh recommendation.
+  const declinedSuggestionKeys = useRef(new Set());
   const nextKeyRef = useRef(editOrder ? editOrder.items.length : 0);
   const nextGroupKeyRef = useRef((() => {
     if (!editOrder) return 0;
@@ -5158,6 +5170,82 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     return activeOffers
       .filter((o) => o.id !== group.offerId && o.buyQty + o.getQty >= group.totalQty)
       .sort((a, b) => (a.buyQty + a.getQty) - (b.buyQty + b.getQty))[0] || null;
+  };
+
+  // --- Smart Promotional Offer Assistant ---------------------------------
+  // Finds the one UNDER-threshold group (if any) that's genuinely close to
+  // completing the promotion the rep already picked for it — the
+  // complement to nextOfferSuggestion above, which only ever handles the
+  // OVER-threshold case. Deliberately narrow in scope (confirmed with the
+  // user): suggests completing the SAME offer the rep already assigned,
+  // never a scan across every other active offer for a theoretically
+  // better one — that's a materially bigger feature than what shipped
+  // here. "Close" means missing no more than ~30% of the group's own
+  // requirement — a tunable heuristic, not a rule from the offer engine
+  // itself, which stays completely untouched.
+  const CLOSE_TO_QUALIFYING_MAX_MISSING_RATIO = 0.3;
+  const findCloseToQualifyingGroup = () => {
+    for (const g of offerGroups) {
+      if (g.valid || g.totalQty >= g.required) continue;
+      const missing = g.required - g.totalQty;
+      if (missing > Math.ceil(g.required * CLOSE_TO_QUALIFYING_MAX_MISSING_RATIO)) continue;
+      return { group: g, missing };
+    }
+    return null;
+  };
+  // A stable key for "this exact recommendation" — changes the moment the
+  // group's quantity or assigned offer changes, so a declined suggestion
+  // is only ever suppressed for the order state it was actually declined
+  // for (per the spec: never repeat it "unless the relevant order details
+  // change").
+  const suggestionKey = (found) => `${found.group.groupId}:${found.group.totalQty}:${found.group.offerId}`;
+
+  // Simulates completing the group by adding `missing` more units of the
+  // LAST product added to it (the one the rep was just working on) — never
+  // a different product, and always routed back through the existing,
+  // unmodified applyOfferToItems so the simulated free-unit math can never
+  // drift from what actually happens if accepted.
+  const simulateCompletedGroup = (found) => {
+    const { group, missing } = found;
+    const targetProductId = group.rawItems[group.rawItems.length - 1].productId;
+    const simulatedRawItems = group.rawItems.map((it) =>
+      it.productId === targetProductId ? { ...it, qty: it.qty + missing } : it);
+    const result = applyOfferToItems(simulatedRawItems, [group.offer]);
+    const targetProductName = group.rawItems.find((it) => it.productId === targetProductId)?.name || "";
+    return { ...result, targetProductId, targetProductName, missing };
+  };
+
+  const handleCreateOrderClick = () => {
+    const eligibleForPromoSuggestions = !(Number(matchedClient?.discountRate) > 22.5);
+    if (eligibleForPromoSuggestions) {
+      const found = findCloseToQualifyingGroup();
+      if (found && !declinedSuggestionKeys.current.has(suggestionKey(found))) {
+        setPendingSuggestion(found);
+        return;
+      }
+    }
+    doCreateOrder();
+  };
+
+  const acceptSuggestion = () => {
+    if (!pendingSuggestion) return;
+    const { group, missing } = pendingSuggestion;
+    const targetProductId = group.rawItems[group.rawItems.length - 1].productId;
+    // Same shape of update addItem itself makes when merging into an
+    // existing line — this is exactly what the rep would get from typing
+    // the missing quantity and clicking "Add item" themselves.
+    setItems((prev) => prev.map((it) =>
+      (it.groupId === group.groupId && it.productId === targetProductId) ? { ...it, qty: it.qty + missing } : it));
+    setPendingSuggestion(null);
+    // Deliberately does NOT auto-submit — the rep reviews the updated
+    // cart/effective-discount and clicks "Create order" again themselves.
+  };
+
+  const declineSuggestion = () => {
+    if (!pendingSuggestion) return;
+    declinedSuggestionKeys.current.add(suggestionKey(pendingSuggestion));
+    setPendingSuggestion(null);
+    doCreateOrder();
   };
 
   const doCreateOrder = async () => {
@@ -5523,13 +5611,94 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
 
       <div style={{ display: "flex", gap: 8 }}>
         <button
-          disabled={saving || allDisplayItems.length === 0 || !allGroupsValid}
-          onClick={doCreateOrder}
+          // Clickable even with an incomplete offer group now (previously
+          // disabled outright in that state) — a group that's just a unit
+          // or two short of qualifying is exactly what the Smart
+          // Promotional Offer Assistant's popup exists to catch and offer
+          // to fix in one tap. doCreateOrder's own existing validation is
+          // completely unchanged and still has the final word: if no
+          // suggestion applies (or the rep declines one that doesn't fix
+          // it), the same "Fix the quantity for…" error fires exactly as
+          // it always did — this only ever adds a helpful detour in front
+          // of that, never removes the gate itself.
+          disabled={saving || allDisplayItems.length === 0}
+          onClick={handleCreateOrderClick}
           style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: !saving && allDisplayItems.length > 0 && allGroupsValid ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
         >
           {saving ? (editOrder ? "Saving…" : "Creating…") : editOrder ? "Save changes & download PDF" : "Create order & download PDF"}
         </button>
         <button onClick={onDone} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>Cancel</button>
+      </div>
+
+      {pendingSuggestion && (() => {
+        const sim = simulateCompletedGroup(pendingSuggestion);
+        const simulatedGroupItems = sim.displayItems.map((it) => ({ ...it, offerId: pendingSuggestion.group.offerId, groupId: pendingSuggestion.group.groupId }));
+        const otherItems = allDisplayItems.filter((it) => it.groupId !== pendingSuggestion.group.groupId);
+        const simulatedAllItems = [...otherItems, ...simulatedGroupItems];
+        const simTotal = simulatedAllItems.reduce((sum, it) => sum + it.qty * it.unitPrice, 0);
+        const simNetTotal = simTotal * (1 - (Number(discountRate) || 0) / 100);
+        const simFullRetail = computeFullRetailValue(simulatedAllItems);
+        const simEffectivePct = computeEffectiveDiscountPct(simFullRetail, simNetTotal);
+        const benefitValue = (sim.freeItems || []).reduce((sum, it) => sum + it.qty * (it.originalPrice || 0), 0);
+        return (
+          <PromoRecommendationPopup
+            offerLabel={pendingSuggestion.group.offer.label}
+            productName={sim.targetProductName}
+            missing={pendingSuggestion.missing}
+            benefitValue={benefitValue}
+            effectiveDiscountPct={simEffectivePct}
+            finalInvoiceAmount={simNetTotal}
+            onAccept={acceptSuggestion}
+            onDecline={declineSuggestion}
+          />
+        );
+      })()}
+    </div>
+  );
+}
+
+// Mobile-friendly bottom-sheet popup for the Smart Promotional Offer
+// Assistant — exactly the two buttons the spec calls for, nothing else
+// clickable (no backdrop-dismiss) so a tap can only ever be a real,
+// explicit ACCEPT or DECLINE.
+function PromoRecommendationPopup({ offerLabel, productName, missing, benefitValue, effectiveDiscountPct, finalInvoiceAmount, onAccept, onDecline }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(31,42,36,0.55)", zIndex: 300, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div style={{ background: "#FAF7F2", borderRadius: "16px 16px 0 0", width: "100%", maxWidth: 480, padding: 20, boxShadow: "0 -4px 24px rgba(0,0,0,0.2)" }}>
+        <h3 className="kb-font-display" style={{ fontSize: 16, fontWeight: 600, margin: "0 0 4px", display: "flex", alignItems: "center", gap: 6 }}>
+          <Megaphone size={17} /> You're close to a better deal
+        </h3>
+        <p style={{ fontSize: 12.5, color: "#5B5445", margin: "0 0 14px" }}>
+          Add {missing} more unit{missing === 1 ? "" : "s"} of <strong>{productName}</strong> to qualify for <strong>{offerLabel}</strong>.
+        </p>
+        <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14, marginBottom: 16, fontSize: 13 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+            <span style={{ color: "#8A8272" }}>Promotional benefit</span>
+            <span style={{ fontWeight: 600, color: "#4C7A5E" }}>+{benefitValue.toFixed(2)} value</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+            <span style={{ color: "#8A8272" }}>Total effective invoice discount</span>
+            <span style={{ fontWeight: 600 }}>{effectiveDiscountPct.toFixed(2)}%</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <span style={{ color: "#8A8272" }}>Final invoice amount</span>
+            <span style={{ fontWeight: 600 }}>{finalInvoiceAmount.toFixed(2)}</span>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            onClick={onAccept}
+            style={{ flex: 1, padding: "11px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13.5, fontWeight: 600 }}
+          >
+            ACCEPT OFFER
+          </button>
+          <button
+            onClick={onDecline}
+            style={{ flex: 1, padding: "11px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", fontSize: 13.5, fontWeight: 600 }}
+          >
+            DECLINE
+          </button>
+        </div>
       </div>
     </div>
   );
