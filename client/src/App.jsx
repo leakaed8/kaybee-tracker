@@ -5420,25 +5420,27 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   // handles "a little under, and close." This catches the other two ways
   // a started group can be off: too FEW units for even the smallest
   // family member (and NOT close — that's the other function's job), or
-  // too MANY. "Family" means same free ratio as the group's own offer —
-  // the exact equivalence the approval ceiling already treats as
-  // identical (6+1 ≈ 12+2 ≈ 18+3 ≈ 24+4) — so switching within a family
-  // never changes whether sign-off is needed, only how many free units
-  // the rep gets. Only ever matches ACTIVE, CATALOG offers, never
-  // synthesizes one that isn't registered.
+  // too MANY.
+  //
+  // OVER: rather than hunting for one bigger catalog sibling, this repeats
+  // the SAME offer the rep already picked as many times as the total
+  // supports (floor(totalQty/required) complete instances) — exactly as
+  // if the rep had picked it that many times themselves. The existing,
+  // unmodified "same offer picked 2+ times" pooling mechanic (see
+  // promotionFamilies above) already combines repeat instances into one
+  // pool for free-item selection, so this produces the identical
+  // financial result as a same-ratio bigger offer would, with no need to
+  // search the catalog for one. Whatever's left over after filling
+  // complete instances cheapest-first is always the PRICIEST remaining
+  // units — protects the priciest item the same way the regular-cart
+  // carve (see splitItemPool) already does.
   const findGroupAdjustment = () => {
     for (const g of offerGroups) {
       if (g.valid) continue;
       if (g.totalQty > g.required) {
-        const ratio = offerFreeRatio(g.offer);
-        const familyFitting = activeOffers.filter((o) => {
-          const required = o.buyQty + o.getQty;
-          return required > 0 && required <= g.totalQty && Math.abs(offerFreeRatio(o) - ratio) < 1e-9;
-        });
-        const bestOffer = familyFitting.reduce((best, o) =>
-          (!best || (o.buyQty + o.getQty) > (best.buyQty + best.getQty)) ? o : best, null);
-        if (!bestOffer) continue; // the family's own offer may since have gone inactive
-        return { direction: "over", group: g, bestOffer, required: bestOffer.buyQty + bestOffer.getQty, leftover: g.totalQty - (bestOffer.buyQty + bestOffer.getQty) };
+        const instanceCount = Math.floor(g.totalQty / g.required);
+        const tailRemainder = g.totalQty % g.required;
+        return { direction: "over", group: g, instanceCount, tailRemainder };
       }
       const missing = g.required - g.totalQty;
       const closeEnough = missing <= Math.ceil(g.required * CLOSE_TO_QUALIFYING_MAX_MISSING_RATIO);
@@ -5448,15 +5450,20 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     return null;
   };
   const adjustmentKey = (adj) => adj.direction === "over"
-    ? `over:${adj.group.groupId}:${adj.group.totalQty}:${adj.bestOffer.id}`
+    ? `over:${adj.group.groupId}:${adj.group.totalQty}:${adj.group.offerId}`
     : `under:${adj.group.groupId}:${adj.group.totalQty}:${adj.group.offerId}`;
 
-  // Preview-only for the "over" case — routed through the existing,
+  // Preview-only for the "over" case — pools the cheapest
+  // instanceCount×required units against a synthetic N×-scaled offer,
+  // the EXACT same technique promotionFamilies above already uses for
+  // repeat instances of one offer, routed through the existing,
   // unmodified applyOfferToItems so the popup's free-unit math can never
   // drift from what actually happens if the rep accepts.
   const simulateGroupOverAdjustment = (adj) => {
-    const { poolItems } = splitItemPool(adj.group.rawItems, adj.required);
-    return applyOfferToItems(poolItems, [adj.bestOffer]);
+    const { group, instanceCount } = adj;
+    const { poolItems } = splitItemPool(group.rawItems, instanceCount * group.required);
+    const syntheticOffer = { ...group.offer, buyQty: group.offer.buyQty * instanceCount, getQty: group.offer.getQty * instanceCount };
+    return applyOfferToItems(poolItems, [syntheticOffer]);
   };
 
   const handleCreateOrderClick = () => {
@@ -5476,22 +5483,59 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     doCreateOrder();
   };
 
-  // "over" ACCEPT — carve `required` units (cheapest first) into the
-  // chosen family offer, release the rest back to regular. Never
-  // auto-submits, same policy as every other mutating accept below.
+  // "over" ACCEPT — carves instanceCount×required units (cheapest first)
+  // into instanceCount separate new instances of the SAME offer (each
+  // exactly `required` units, so each is independently valid and the
+  // existing pooling mechanic combines them), chunked in cheapest-first
+  // order — a single raw line can straddle an instance boundary and end
+  // up split across two, which only affects how the cards are grouped on
+  // screen, never the free-item math (pooled across all instances of one
+  // offerId regardless). Whatever's left is the priciest remainder; if
+  // any is left, asks whether to top it up into one more instance (the
+  // rep then adds the missing units themselves — never auto-filled, since
+  // only they know which product to add) or leave it as plain regular.
+  // Never auto-submits, same policy as every other mutating accept here.
   const acceptGroupOverAdjustment = (adj) => {
-    const { group, bestOffer } = adj;
-    const { stageItems } = splitItemPool(group.rawItems, adj.required);
+    const { group, instanceCount, tailRemainder } = adj;
+    const { stageItems } = splitItemPool(group.rawItems, instanceCount * group.required);
     const otherItems = items.filter((it) => it.groupId !== group.groupId);
-    const rewritten = stageItems.flatMap((s) => {
-      if (s.type === "moved") return [{ ...s.original, offerId: bestOffer.id, groupId: group.groupId }];
-      if (s.type === "kept") return [{ ...s.original, offerId: "", groupId: "" }];
-      return [
-        { ...s.original, qty: s.movedQty, offerId: bestOffer.id, groupId: group.groupId },
-        { ...s.original, qty: s.keptQty, offerId: "", groupId: "", key: nextKeyRef.current++ },
-      ];
-    });
-    setItems([...otherItems, ...rewritten]);
+
+    const movedRaw = [];
+    for (const s of stageItems) {
+      if (s.type === "moved") movedRaw.push({ ...s.original });
+      else if (s.type === "split") movedRaw.push({ ...s.original, qty: s.movedQty });
+    }
+    const newGroupItems = [];
+    let remainingInInstance = group.required;
+    let currentGroupId = null;
+    for (const raw of movedRaw) {
+      let qtyLeft = raw.qty;
+      while (qtyLeft > 0) {
+        if (currentGroupId === null) currentGroupId = `g${nextGroupKeyRef.current++}`;
+        const take = Math.min(qtyLeft, remainingInInstance);
+        newGroupItems.push({ ...raw, qty: take, offerId: group.offerId, groupId: currentGroupId, key: nextKeyRef.current++ });
+        qtyLeft -= take;
+        remainingInInstance -= take;
+        if (remainingInInstance === 0) { currentGroupId = null; remainingInInstance = group.required; }
+      }
+    }
+
+    const leftoverRaw = stageItems
+      .filter((s) => s.type !== "moved")
+      .map((s) => (s.type === "kept" ? { ...s.original } : { ...s.original, qty: s.keptQty, key: nextKeyRef.current++ }));
+
+    let leftoverItems;
+    if (tailRemainder > 0 && window.confirm(
+      `${tailRemainder} unit${tailRemainder === 1 ? "" : "s"} left over after making ${instanceCount} complete ${group.offer.label} offer${instanceCount === 1 ? "" : "s"}.\n\nAdd ${group.required - tailRemainder} more to complete one more offer?`
+    )) {
+      const topUpGroupId = `g${nextGroupKeyRef.current++}`;
+      leftoverItems = leftoverRaw.map((it) => ({ ...it, offerId: group.offerId, groupId: topUpGroupId }));
+      setActiveGroupId(topUpGroupId);
+    } else {
+      leftoverItems = leftoverRaw.map((it) => ({ ...it, offerId: "", groupId: "" }));
+    }
+
+    setItems([...otherItems, ...newGroupItems, ...leftoverItems]);
     setPendingAdjustment(null);
   };
 
@@ -5963,11 +6007,11 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
           const benefitValue = (sim.freeItems || []).reduce((sum, it) => sum + it.qty * (it.originalPrice || 0), 0);
           return (
             <GroupOverAdjustmentPopup
-              currentOfferLabel={pendingAdjustment.group.offer.label}
+              offerLabel={pendingAdjustment.group.offer.label}
               totalQty={pendingAdjustment.group.totalQty}
-              bestOfferLabel={pendingAdjustment.bestOffer.label}
-              required={pendingAdjustment.required}
-              leftover={pendingAdjustment.leftover}
+              instanceCount={pendingAdjustment.instanceCount}
+              keepUnits={pendingAdjustment.instanceCount * pendingAdjustment.group.required}
+              tailRemainder={pendingAdjustment.tailRemainder}
               freeQty={sim.freeQty || 0}
               benefitValue={benefitValue}
               onAccept={() => acceptGroupOverAdjustment(pendingAdjustment)}
@@ -6038,22 +6082,25 @@ function PromoRecommendationPopup({ offerLabel, productName, missing, benefitVal
 }
 
 // Smart Promotional Offer Assistant, second mode, OVER-threshold popup —
-// the rep committed to a family (picked from the dropdown) and added more
-// than it needs. Offers the largest active, catalog offer in that SAME
-// family that fits, carving it out and releasing the rest back to
-// regular; DECLINE changes nothing and retries the submit, which the
-// existing, unmodified group-validity check still blocks exactly as
-// before — same no-backdrop-dismiss / two-explicit-outcomes pattern as
-// the other popups here.
-function GroupOverAdjustmentPopup({ currentOfferLabel, totalQty, bestOfferLabel, required, leftover, freeQty, benefitValue, onAccept, onDecline }) {
+// the rep committed to an offer (picked from the dropdown) and added more
+// than it needs. Offers to split the pool into multiple complete
+// instances of that SAME offer (cheapest units first, so any leftover is
+// always whatever's priciest) rather than hunting for a different,
+// bigger catalog sibling; DECLINE changes nothing and retries the submit,
+// which the existing, unmodified group-validity check still blocks
+// exactly as before — same no-backdrop-dismiss / two-explicit-outcomes
+// pattern as the other popups here. The "add N more to complete one more
+// offer?" follow-up (when there's a leftover) is a plain native confirm,
+// handled in acceptGroupOverAdjustment itself.
+function GroupOverAdjustmentPopup({ offerLabel, totalQty, instanceCount, keepUnits, tailRemainder, freeQty, benefitValue, onAccept, onDecline }) {
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(31,42,36,0.55)", zIndex: 300, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
       <div style={{ background: "#FAF7F2", borderRadius: "16px 16px 0 0", width: "100%", maxWidth: 480, padding: 20, boxShadow: "0 -4px 24px rgba(0,0,0,0.2)" }}>
         <h3 className="kb-font-display" style={{ fontSize: 16, fontWeight: 600, margin: "0 0 4px", display: "flex", alignItems: "center", gap: 6 }}>
-          <Megaphone size={17} /> You have {totalQty} units on {currentOfferLabel}
+          <Megaphone size={17} /> You have {totalQty} units on {offerLabel}
         </h3>
         <p style={{ fontSize: 12.5, color: "#5B5445", margin: "0 0 14px" }}>
-          Use <strong>{bestOfferLabel}</strong> for {required} of them — <span style={{ color: "#4C7A5E", fontWeight: 600 }}>{freeQty} free</span>, leaving {leftover} as regular — or keep it as {currentOfferLabel} and fix the quantity yourself.
+          Split into <strong>{instanceCount} complete {offerLabel} offer{instanceCount === 1 ? "" : "s"}</strong> ({keepUnits} units — <span style={{ color: "#4C7A5E", fontWeight: 600 }}>{freeQty} free</span>), leaving {tailRemainder} as regular — or keep it as one offer and fix the quantity yourself.
         </p>
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14, marginBottom: 16, fontSize: 13 }}>
           <div style={{ display: "flex", justifyContent: "space-between" }}>
@@ -6066,7 +6113,7 @@ function GroupOverAdjustmentPopup({ currentOfferLabel, totalQty, bestOfferLabel,
             onClick={onAccept}
             style={{ flex: 1, padding: "11px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13.5, fontWeight: 600 }}
           >
-            USE {bestOfferLabel.toUpperCase()}
+            USE {instanceCount} OFFERS
           </button>
           <button
             onClick={onDecline}
