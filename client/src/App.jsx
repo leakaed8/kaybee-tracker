@@ -3909,6 +3909,15 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
       {step === "orderPrompt" && lastVisit && (
         <>
           {canGoBack && <BackStepButton onClick={goBack} />}
+          {/* Same discoverability hint as the Today's Visits quick-add row
+              below — a saved draft otherwise only shows up once the rep is
+              already on the item-adding screen, which is exactly what was
+              confusing about it going missing after a later check-in. */}
+          {loadOrderDrafts()[lastVisit.client.toLowerCase().trim()] && (
+            <div style={{ fontSize: 12, color: "#8A8272", marginBottom: 8 }}>
+              📝 You have a saved order draft for {lastVisit.client} — choosing "Yes, add order" below will resume it.
+            </div>
+          )}
           <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
             <span style={{ fontSize: 13.5 }}>Did <strong>{lastVisit.client}</strong> place an order?</span>
             <div style={{ display: "flex", gap: 8 }}>
@@ -4339,12 +4348,23 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                         onDone={() => { loadRecentOrders(); loadTodayOrders(); setAddingOrderForVisitId(null); }}
                       />
                     ) : (
-                      <button
-                        onClick={() => setAddingOrderForVisitId(v.id)}
-                        style={{ fontSize: 12, fontWeight: 500, color: "#C17817", background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 6, padding: "6px 10px", cursor: "pointer" }}
-                      >
-                        + Add order
-                      </button>
+                      <>
+                        <button
+                          onClick={() => setAddingOrderForVisitId(v.id)}
+                          style={{ fontSize: 12, fontWeight: 500, color: "#C17817", background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 6, padding: "6px 10px", cursor: "pointer" }}
+                        >
+                          + Add order
+                        </button>
+                        {/* Surfaces a "Save for later" draft BEFORE the rep
+                            opens the order screen — otherwise the only way
+                            to discover one exists is to click in and find
+                            out, which is exactly what was confusing. */}
+                        {loadOrderDrafts()[v.client.toLowerCase().trim()] && (
+                          <div style={{ fontSize: 11, color: "#8A8272", marginTop: 4 }}>
+                            📝 Saved draft order waiting — tap "+ Add order" to resume it
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
 
@@ -4993,11 +5013,17 @@ function reconstituteRawItems(groupItems) {
 
 function OrderBuilder({ clientName, visitId, products, offers, clients, onCreateOrder, onUpdateOrder, onQueueOrderOffline, pendingVisitLocalKey, onAttachPendingOrder, editOrder, onDone, initialDiscountRate, initialOfferId }) {
   // Identifies "this order being built", for the local "Save for later"
-  // draft below — one per visit, falling back to the client name in the
-  // rare case neither a real visit id nor an offline local key is
-  // available yet. Edits of an already-real order never read/write a
-  // draft at all (that order already exists — there's nothing to pause).
-  const draftKey = pendingVisitLocalKey || visitId || clientName;
+  // draft below — keyed by PHARMACY, not by visit. A rep who saves a
+  // draft, then leaves and checks in again to the same pharmacy later
+  // (a brand-new visit with its own new id) still expects that draft
+  // waiting for them — that's the whole point of "for later". Keying by
+  // visitId/pendingVisitLocalKey instead would silently orphan the draft
+  // the moment the visit it was saved under ended. Normalized the same
+  // way matchedClient below already compares names, so case/whitespace
+  // differences between visits never split one pharmacy into two keys.
+  // Edits of an already-real order never read/write a draft at all (that
+  // order already exists — there's nothing to pause).
+  const draftKey = clientName.toLowerCase().trim();
   // Loaded once, on mount — a later "Save for later" elsewhere while this
   // screen is open can't retroactively change what THIS instance restored.
   const [savedDraft] = useState(() => (editOrder ? null : (loadOrderDrafts()[draftKey] || null)));
