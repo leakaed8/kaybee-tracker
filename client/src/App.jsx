@@ -3728,7 +3728,7 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                     background: (client && matchedEntity) ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 14.5, fontWeight: 600,
                   }}
                 >
-                  {saving || followUpSaving ? "Saving…" : `Save ${INTERACTION_TYPE_LABELS[interactionType].toLowerCase()}`}
+                  {saving || followUpSaving ? "Saving…" : "Save visit & continue"}
                 </button>
               </>
             )}
