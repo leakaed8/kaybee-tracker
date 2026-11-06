@@ -5773,14 +5773,6 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
                 </button>
               </div>
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-              {g.rawItems.map((it) => (
-                <div key={it.key} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
-                  <span>{it.name} × {it.qty}</span>
-                  <button onClick={() => removeItem(it.key)} style={{ background: "none", border: "none", color: "#B7AF9E" }}><X size={12} /></button>
-                </div>
-              ))}
-            </div>
             {g.valid && g.freeItems && g.freeItems.length > 0 && (
               <div style={{ fontSize: 11.5, color: "#4C7A5E", marginTop: 6 }}>
                 Free: {g.freeItems.map((it) => `${it.name} × ${it.qty}`).join(", ")} (auto-selected)
@@ -5849,19 +5841,6 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
         </div>
       )}
 
-      {regularItems.length > 0 && (
-        <div style={groupCardStyle}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: "#8A8272", marginBottom: 6 }}>Regular items (no offer)</div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-            {regularItems.map((it) => (
-              <div key={it.key} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
-                <span>{it.name} × {it.qty}</span>
-                <button onClick={() => removeItem(it.key)} style={{ background: "none", border: "none", color: "#B7AF9E" }}><X size={12} /></button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       {allDisplayItems.length > 0 && (
         <div style={{ marginBottom: 12 }}>
@@ -5875,6 +5854,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
                   <th style={{ padding: "4px 6px" }}>Expiry</th>
                   <th style={{ padding: "4px 6px" }}>Unit price</th>
                   <th style={{ padding: "4px 6px" }}>Total</th>
+                  <th style={{ padding: "4px 6px" }}></th>
                 </tr>
               </thead>
               <tbody>
@@ -5894,10 +5874,18 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
                         <td className="kb-font-mono" style={{ padding: "4px 6px" }}>{it.expiry ? fmtDate(it.expiry) : "-"}</td>
                         <td style={{ padding: "4px 6px" }}>{it.isFree ? "FREE" : it.unitPrice.toFixed(2)}</td>
                         <td style={{ padding: "4px 6px" }}>{it.isFree ? "0.00" : (it.qty * it.unitPrice).toFixed(2)}</td>
+                        <td style={{ padding: "4px 6px" }}>
+                          {/* Free lines are carved out of their paid sibling, not an
+                              independent raw item — same reason the old group-card
+                              list never offered a remove button on them either. */}
+                          {!it.isFree && (
+                            <button onClick={() => removeItem(it.key)} style={{ background: "none", border: "none", color: "#B7AF9E", cursor: "pointer", display: "flex" }}><X size={12} /></button>
+                          )}
+                        </td>
                       </tr>
                       {short && (
                         <tr>
-                          <td colSpan={6} style={{ padding: "2px 6px 8px", fontSize: 11, color: "#B33A3A" }}>
+                          <td colSpan={7} style={{ padding: "2px 6px 8px", fontSize: 11, color: "#B33A3A" }}>
                             Only {it.availableQty} of this exact batch (exp {it.expiry ? fmtDate(it.expiry) : "unknown"}) — the order will be capped here unless you adjust it.
                             {siblings.length > 0 ? (
                               <> Other batches of <strong>{it.name}</strong> with stock: {siblings.map((s) => `${s.qty} in stock (exp ${fmtDate(s.expiry)})`).join(", ")}. Remove this line and re-add from one of those instead if you need more.</>
