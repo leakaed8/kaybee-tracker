@@ -5003,6 +5003,13 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   // pharmacist beforehand; still just a starting value; they can switch it
   // for any individual item exactly as before.
   const [pendingOfferId, setPendingOfferId] = useState(initialOfferId || "");
+  // Whether this instance was opened FROM the new wizard's orderSetup step
+  // (offer already agreed with the pharmacist up front) vs. the older
+  // standalone entry points (quick "+ Add order", editing an existing
+  // order) that never go through orderSetup and still need the manual
+  // per-item picker. Checked via prop presence, not truthiness — orderSetup
+  // can legitimately pass down an empty "no offer" choice.
+  const offerPreselected = initialOfferId !== undefined;
   // The offer INSTANCE the shared add-item row currently targets — distinct
   // from pendingOfferId (which promotion TYPE is selected). null means "the
   // next add starts a brand-new instance." Only three things ever change
@@ -5711,7 +5718,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
           />
         </div>
         <input type="number" min="1" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="Qty" style={{ ...inputStyle, flex: 1, minWidth: 80 }} />
-        {activeOffers.length > 0 && (
+        {!offerPreselected && activeOffers.length > 0 && (
           <select aria-label="Assign to offer" value={pendingOfferId} onChange={(e) => setPendingOfferId(e.target.value)} style={{ ...inputStyle, flex: 1.4, minWidth: 150 }}>
             <option value="">No offer (regular)</option>
             {activeOffers.map((o) => <option key={o.id} value={o.id}>{o.label} (buy {o.buyQty}, get {o.getQty})</option>)}
