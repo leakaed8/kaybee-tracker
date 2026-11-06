@@ -10852,11 +10852,19 @@ function kbCheckBadgeSvg(color, size) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="${color}"/><path d="M7 12.5l3.2 3.2L17 9" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
 
-function brochureCardWrapper(icon, title, innerHtml) {
-  return `<div style="flex:1 1 0;background:#fff;border:1px solid ${BROCHURE_COLORS.border};border-radius:10px;box-shadow:0 6px 14px rgba(23,63,51,0.06);padding:14px;min-width:0;display:flex;flex-direction:column;box-sizing:border-box;">
-    <div style="display:flex;align-items:center;gap:7px;margin-bottom:10px;">
-      <span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:${BROCHURE_COLORS.sageLight};flex:0 0 auto;">${kbIcon(icon, BROCHURE_COLORS.sage, 14)}</span>
-      <span style="font-family:Inter,sans-serif;font-weight:700;font-size:11px;letter-spacing:0.8px;color:${BROCHURE_COLORS.ink};text-transform:uppercase;">${title}</span>
+// `compact` shrinks padding/icon/title size for the two-products-per-page
+// layout below — same card, smaller chrome, so two products' worth of
+// cards can share the vertical space one product's cards used to have
+// alone.
+function brochureCardWrapper(icon, title, innerHtml, compact = false) {
+  const pad = compact ? 9 : 14;
+  const iconSize = compact ? 18 : 24;
+  const iconGlyphSize = compact ? 11 : 14;
+  const titleSize = compact ? 9 : 11;
+  return `<div style="flex:1 1 0;background:#fff;border:1px solid ${BROCHURE_COLORS.border};border-radius:10px;box-shadow:0 6px 14px rgba(23,63,51,0.06);padding:${pad}px;min-width:0;display:flex;flex-direction:column;box-sizing:border-box;">
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:${compact ? 6 : 10}px;">
+      <span style="display:inline-flex;align-items:center;justify-content:center;width:${iconSize}px;height:${iconSize}px;border-radius:50%;background:${BROCHURE_COLORS.sageLight};flex:0 0 auto;">${kbIcon(icon, BROCHURE_COLORS.sage, iconGlyphSize)}</span>
+      <span style="font-family:Inter,sans-serif;font-weight:700;font-size:${titleSize}px;letter-spacing:0.8px;color:${BROCHURE_COLORS.ink};text-transform:uppercase;">${title}</span>
     </div>
     <div style="flex:1 1 auto;">${innerHtml}</div>
   </div>`;
@@ -10875,17 +10883,17 @@ function buildBrochureHeaderHtml(logoDataUrl, primarySpecialty) {
   </div>`;
 }
 
-function buildBrochureHeadlineHtml(product, overviewRows) {
+function buildBrochureHeadlineHtml(product, overviewRows, compact = false) {
   const strengthRow = overviewRows.find((r) => r.label === "Strength");
   const packRow = overviewRows.find((r) => r.label === "Pack Size");
   const subtitleParts = [];
   if (strengthRow) subtitleParts.push(strengthRow.value);
   if (product.form) subtitleParts.push(product.form);
   if (packRow) subtitleParts.push(`Pack of ${packRow.value}`);
-  return `<div style="margin-top:18px;flex:0 0 auto;">
-    <div style="font-family:'Playfair Display',serif;font-weight:700;font-size:36px;line-height:1.15;color:${BROCHURE_COLORS.ink};">${escapeHtml(product.name)}</div>
-    ${subtitleParts.length ? `<div style="font-family:Inter,sans-serif;font-size:15px;color:${BROCHURE_COLORS.sage};margin-top:6px;letter-spacing:0.3px;">${subtitleParts.map(escapeHtml).join("&nbsp;&nbsp;·&nbsp;&nbsp;")}</div>` : ""}
-    <div style="height:2px;width:72px;background:${BROCHURE_COLORS.sage};margin-top:14px;border-radius:2px;"></div>
+  return `<div style="margin-top:${compact ? 10 : 18}px;flex:0 0 auto;">
+    <div style="font-family:'Playfair Display',serif;font-weight:700;font-size:${compact ? 20 : 36}px;line-height:1.15;color:${BROCHURE_COLORS.ink};">${escapeHtml(product.name)}</div>
+    ${subtitleParts.length ? `<div style="font-family:Inter,sans-serif;font-size:${compact ? 11 : 15}px;color:${BROCHURE_COLORS.sage};margin-top:${compact ? 4 : 6}px;letter-spacing:0.3px;">${subtitleParts.map(escapeHtml).join("&nbsp;&nbsp;·&nbsp;&nbsp;")}</div>` : ""}
+    <div style="height:2px;width:${compact ? 48 : 72}px;background:${BROCHURE_COLORS.sage};margin-top:${compact ? 8 : 14}px;border-radius:2px;"></div>
   </div>`;
 }
 
@@ -10905,7 +10913,7 @@ function buildBrochureHeadlineHtml(product, overviewRows) {
 // what actually fixes "too small to read" here.
 const BROCHURE_HERO_HEIGHT_PX = { side: 560, bottleOnly: 460 };
 
-function buildBrochureHeroSideHtml({ bottleDataUrl, factsDataUrl }) {
+function buildBrochureHeroSideHtml({ bottleDataUrl, factsDataUrl, heightPx = BROCHURE_HERO_HEIGHT_PX.side }) {
   // Top-aligned, not vertically centered: with a tall bottle photo next to a
   // much shorter landscape facts panel, centering both within the same
   // shared-height row left the facts panel visibly floating with a large,
@@ -10913,8 +10921,10 @@ function buildBrochureHeroSideHtml({ bottleDataUrl, factsDataUrl }) {
   // Facts gets the bigger share of the row (65% vs. the bottle photo's
   // 35%) — the bottle is a simple product shot that reads fine small, the
   // facts panel is dense printed text that needs the extra width to stay
-  // legible.
-  return `<div style="flex:0 0 auto;height:${BROCHURE_HERO_HEIGHT_PX.side}px;display:flex;align-items:flex-start;gap:28px;margin:20px 0 24px;">
+  // legible. heightPx is overridable so the two-products-per-page compact
+  // layout below can reuse this exact markup at a smaller fixed size
+  // instead of duplicating it.
+  return `<div style="flex:0 0 auto;height:${heightPx}px;display:flex;align-items:flex-start;gap:28px;margin:20px 0 24px;">
     <div style="flex:0 0 35%;height:100%;display:flex;align-items:flex-start;justify-content:center;min-width:0;">
       ${bottleDataUrl ? `<img class="kbdoc-bottle-img" src="${bottleDataUrl}" style="max-width:100%;max-height:100%;object-fit:contain;filter:drop-shadow(0 14px 18px rgba(23,63,51,0.18));"/>` : ""}
     </div>
@@ -10925,48 +10935,52 @@ function buildBrochureHeroSideHtml({ bottleDataUrl, factsDataUrl }) {
     </div>
   </div>`;
 }
-function buildBrochureHeroBottleOnlyHtml({ bottleDataUrl }) {
-  return `<div style="flex:0 0 auto;height:${BROCHURE_HERO_HEIGHT_PX.bottleOnly}px;display:flex;align-items:center;justify-content:center;margin:20px 0 24px;">
+function buildBrochureHeroBottleOnlyHtml({ bottleDataUrl, heightPx = BROCHURE_HERO_HEIGHT_PX.bottleOnly }) {
+  return `<div style="flex:0 0 auto;height:${heightPx}px;display:flex;align-items:center;justify-content:center;margin:20px 0 24px;">
     ${bottleDataUrl ? `<img class="kbdoc-bottle-img" src="${bottleDataUrl}" style="max-width:60%;max-height:100%;object-fit:contain;filter:drop-shadow(0 16px 20px rgba(23,63,51,0.2));"/>` : ""}
   </div>`;
 }
 
-function buildBrochureSpecialtyCardHtml(subcats) {
+function buildBrochureSpecialtyCardHtml(subcats, compact = false) {
   if (!subcats.length) return null;
-  const blocks = subcats.map(({ specialty, topics }) => `<div style="margin-bottom:8px;">
-    <div style="font-family:Inter,sans-serif;font-weight:600;font-size:11px;color:${BROCHURE_COLORS.ink};text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">${escapeHtml(specialty)}</div>
+  const topicFont = compact ? 9.5 : 11.5;
+  const blocks = subcats.map(({ specialty, topics }) => `<div style="margin-bottom:${compact ? 5 : 8}px;">
+    <div style="font-family:Inter,sans-serif;font-weight:600;font-size:${compact ? 9.5 : 11}px;color:${BROCHURE_COLORS.ink};text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">${escapeHtml(specialty)}</div>
     <div style="display:flex;flex-direction:column;gap:3px;">
-      ${topics.map((t) => `<div style="display:flex;align-items:center;gap:6px;font-family:Inter,sans-serif;font-size:11.5px;color:#333;"><span style="flex:0 0 auto;">${kbCheckBadgeSvg(BROCHURE_COLORS.sage, 13)}</span><span>${escapeHtml(t)}</span></div>`).join("")}
+      ${topics.map((t) => `<div style="display:flex;align-items:center;gap:6px;font-family:Inter,sans-serif;font-size:${topicFont}px;color:#333;"><span style="flex:0 0 auto;">${kbCheckBadgeSvg(BROCHURE_COLORS.sage, compact ? 11 : 13)}</span><span>${escapeHtml(t)}</span></div>`).join("")}
     </div>
   </div>`).join("");
-  return brochureCardWrapper("heart", "Medical Specialty", blocks + `<div style="font-family:Inter,sans-serif;font-style:italic;font-size:9px;color:${BROCHURE_COLORS.textGray};margin-top:4px;">Discussion categories, not a treatment claim.</div>`);
+  const footnote = compact ? "" : `<div style="font-family:Inter,sans-serif;font-style:italic;font-size:9px;color:${BROCHURE_COLORS.textGray};margin-top:4px;">Discussion categories, not a treatment claim.</div>`;
+  return brochureCardWrapper("heart", "Medical Specialty", blocks + footnote, compact);
 }
-function buildBrochureOverviewCardHtml(overviewRows) {
+function buildBrochureOverviewCardHtml(overviewRows, compact = false) {
   if (!overviewRows.length) return null;
-  const rows = overviewRows.map(({ label, value }) => `<div style="display:flex;justify-content:space-between;gap:8px;font-family:Inter,sans-serif;font-size:11.5px;padding:3px 0;border-bottom:1px solid ${BROCHURE_COLORS.border};">
+  const font = compact ? 9.5 : 11.5;
+  const rows = overviewRows.map(({ label, value }) => `<div style="display:flex;justify-content:space-between;gap:8px;font-family:Inter,sans-serif;font-size:${font}px;padding:${compact ? 2 : 3}px 0;border-bottom:1px solid ${BROCHURE_COLORS.border};">
     <span style="color:${BROCHURE_COLORS.textGray};">${escapeHtml(label)}</span>
     <span style="color:#222;font-weight:600;text-align:right;">${escapeHtml(value)}</span>
   </div>`).join("");
-  return brochureCardWrapper("pill", "Product Overview", rows);
+  return brochureCardWrapper("pill", "Product Overview", rows, compact);
 }
-function buildBrochureIngredientsCardHtml(ingredients) {
+function buildBrochureIngredientsCardHtml(ingredients, compact = false) {
   if (!ingredients.length) return null;
+  const font = compact ? 9.5 : 11.5;
   const rows = ingredients.map((ing) => {
     const amount = [ing.amount, ing.unit].filter((v) => v !== "" && v != null).join(" ");
-    return `<div style="margin-bottom:7px;">
-      <div style="display:flex;justify-content:space-between;gap:6px;font-family:Inter,sans-serif;font-size:11.5px;">
+    return `<div style="margin-bottom:${compact ? 4 : 7}px;">
+      <div style="display:flex;justify-content:space-between;gap:6px;font-family:Inter,sans-serif;font-size:${font}px;">
         <span style="color:#222;font-weight:600;">${escapeHtml(ing.name)}</span>
         ${amount ? `<span style="color:${BROCHURE_COLORS.sage};font-weight:700;white-space:nowrap;">${escapeHtml(amount)}</span>` : ""}
       </div>
-      ${ing.form ? `<div style="font-family:Inter,sans-serif;font-style:italic;font-size:9.5px;color:${BROCHURE_COLORS.textGray};">${escapeHtml(ing.form)}</div>` : ""}
+      ${ing.form && !compact ? `<div style="font-family:Inter,sans-serif;font-style:italic;font-size:9.5px;color:${BROCHURE_COLORS.textGray};">${escapeHtml(ing.form)}</div>` : ""}
     </div>`;
   }).join("");
-  return brochureCardWrapper("flask", "Key Ingredients", rows);
+  return brochureCardWrapper("flask", "Key Ingredients", rows, compact);
 }
-function buildBrochureInfoRowHtml(cards) {
+function buildBrochureInfoRowHtml(cards, compact = false) {
   const present = cards.filter(Boolean);
   if (!present.length) return "";
-  return `<div style="flex:0 0 auto;display:flex;gap:14px;margin-bottom:16px;">${present.join("")}</div>`;
+  return `<div style="flex:0 0 auto;display:flex;gap:${compact ? 10 : 14}px;margin-bottom:${compact ? 10 : 16}px;">${present.join("")}</div>`;
 }
 function buildBrochureFooterHtml(logoDataUrl, pageIndex, pageCount) {
   return `<div style="flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;border-top:1px solid ${BROCHURE_COLORS.border};padding-top:10px;font-family:Inter,sans-serif;font-size:9.5px;color:${BROCHURE_COLORS.textGray};">
@@ -10995,6 +11009,119 @@ function buildBrochurePageHtml({ product, logoDataUrl, overviewRows, ingredients
     ${buildBrochureFooterHtml(logoDataUrl, pageIndex, pageCount)}
   </div>`;
 }
+
+// ---- Two-products-per-page mode ---------------------------------------
+// Reported: the exported brochure is too large to download quickly on a
+// weak connection. Every page is a full-page screenshot (see
+// BROCHURE_PAGE_JPEG_QUALITY above) — that per-page overhead, not any
+// individual product photo, is what actually dominates file size, so
+// halving the page count roughly halves it. Two products now share ONE
+// page's header/footer instead of each paying for their own, each shown
+// in a smaller "compact" version of the same product block.
+//
+// This never risks silently clipping content: a candidate pair's compact
+// block is first MEASURED off-screen at its natural (unconstrained)
+// height — no html2canvas rasterization yet — and only committed to a
+// shared page if it actually fits the page's content budget. A pair that
+// doesn't fit (e.g. one product has an unusually long ingredient list)
+// just falls back to two separate full-size pages instead, exactly as if
+// this feature didn't exist for that pair. See planBrochurePages below.
+const BROCHURE_COMPACT_HERO_HEIGHT_PX = { side: 230, bottleOnly: 190 };
+// Page interior (1123 - 2*45 padding), minus a safety margin so a pair
+// that measures right at the edge doesn't end up flush against the footer.
+const BROCHURE_TWO_UP_CONTENT_BUDGET_PX = 1123 - 45 * 2 - 20;
+
+function buildBrochureCompactProductBlockHtml({ product, overviewRows, ingredients, subcats }, { bottleDataUrl, factsDataUrl, heroMode }) {
+  const heroHtml = heroMode === "bottle-only"
+    ? buildBrochureHeroBottleOnlyHtml({ bottleDataUrl, heightPx: BROCHURE_COMPACT_HERO_HEIGHT_PX.bottleOnly })
+    : buildBrochureHeroSideHtml({ bottleDataUrl, factsDataUrl, heightPx: BROCHURE_COMPACT_HERO_HEIGHT_PX.side });
+  const infoRow = buildBrochureInfoRowHtml([
+    buildBrochureSpecialtyCardHtml(subcats, true),
+    buildBrochureOverviewCardHtml(overviewRows, true),
+    buildBrochureIngredientsCardHtml(ingredients, true),
+  ], true);
+  return `<div style="flex:0 0 auto;">
+    ${buildBrochureHeadlineHtml(product, overviewRows, true)}
+    ${heroHtml}
+    ${infoRow}
+  </div>`;
+}
+
+// The shared inner content for a two-product page (header once, two
+// compact blocks with a divider, footer once) — NOT wrapped in the fixed
+// 794x1123 page box, so the same markup can be measured at its natural
+// height (buildTwoProductMeasurementHtml) or rendered into the real fixed
+// page size for rasterization (buildTwoProductFinalPageHtml) without
+// duplicating the content itself.
+function buildTwoProductPageInnerHtml({ entryA, entryB, logoDataUrl, pageIndex, pageCount }) {
+  const primarySpecialty = entryA.subcats[0]?.specialty || entryB.subcats[0]?.specialty || "";
+  return `${buildBrochureHeaderHtml(logoDataUrl, primarySpecialty)}
+    ${buildBrochureCompactProductBlockHtml(entryA, entryA.images)}
+    <div style="flex:0 0 auto;height:1px;background:${BROCHURE_COLORS.border};margin:14px 0;"></div>
+    ${buildBrochureCompactProductBlockHtml(entryB, entryB.images)}
+    <div style="flex:1 1 auto;min-height:0;"></div>
+    ${buildBrochureFooterHtml(logoDataUrl, pageIndex, pageCount)}`;
+}
+function buildTwoProductMeasurementHtml(args) {
+  // Fixed width (matches the real page's content width exactly) but
+  // height:auto, so the mounted element's natural scrollHeight tells us
+  // whether this pair would actually fit the real page's fixed height.
+  return `<div style="width:704px;box-sizing:border-box;padding:0;display:flex;flex-direction:column;font-family:Inter,sans-serif;">
+    ${buildTwoProductPageInnerHtml(args)}
+  </div>`;
+}
+function buildTwoProductFinalPageHtml(args) {
+  return `<div style="width:794px;height:1123px;box-sizing:border-box;padding:45px;background:${BROCHURE_COLORS.ivory};display:flex;flex-direction:column;font-smooth:always;-webkit-font-smoothing:antialiased;">
+    ${buildTwoProductPageInnerHtml(args)}
+  </div>`;
+}
+
+// Mounts the measurement markup off-screen, reads its real rendered
+// height, and tears it down — never rasterized, so this is cheap even
+// across many candidate pairs in a large specialty.
+async function measureTwoProductPageHeight(args) {
+  const { container, pageEl } = await mountBrochurePageForMeasurement(buildTwoProductMeasurementHtml(args));
+  const height = pageEl.scrollHeight;
+  document.body.removeChild(container);
+  return height;
+}
+
+// One pass over every product, deciding up front (before any image is
+// fetched or any pixel is rasterized) how many pages the export will need
+// and which products share one. Needed so the existing "Page X of N"
+// footer and the onProgress callback can report a real, final number from
+// the very first page — not a running guess that changes mid-export.
+// heroMode only depends on whether each product HAS a facts image
+// (product.hasSupplementFactsImage), never on the actual fetched image
+// bytes, so this planning pass needs no network access at all.
+async function planBrochurePages(products, contributions) {
+  const entryFor = (product) => {
+    const ingredients = parseProductIngredientsJson(product.ingredients);
+    const overviewRows = buildProductOverviewRows(product, ingredients);
+    const subcats = specialtySubcategoriesFor(product.name, contributions);
+    const heroMode = product.hasSupplementFactsImage ? "side" : "bottle-only";
+    return { product, ingredients, overviewRows, subcats, heroMode, images: { bottleDataUrl: "", factsDataUrl: "", heroMode } };
+  };
+
+  const pages = [];
+  let i = 0;
+  while (i < products.length) {
+    const entryA = entryFor(products[i]);
+    const entryB = i + 1 < products.length ? entryFor(products[i + 1]) : null;
+    if (entryB) {
+      const height = await measureTwoProductPageHeight({ entryA, entryB, logoDataUrl: "", pageIndex: 1, pageCount: 1 });
+      if (height <= BROCHURE_TWO_UP_CONTENT_BUDGET_PX) {
+        pages.push({ type: "pair", entries: [entryA, entryB] });
+        i += 2;
+        continue;
+      }
+    }
+    pages.push({ type: "single", entries: [entryA] });
+    i += 1;
+  }
+  return pages;
+}
+
 // Mounts a page's HTML off-screen (so it still gets real layout/paint, just
 // not visible) and waits for every image to finish decoding and the
 // brochure fonts to be ready — but does NOT rasterize it. Used on its own
@@ -11050,17 +11177,23 @@ function decideBrochureHeroLayout(factsData) {
 // Renders exactly one product's page using an already-decided heroMode
 // (from decideBrochureHeroLayout) — no more trial-and-error here, since the
 // decision was already made before this is called.
-async function renderDoctorBrochurePage(doc, product, { contributions, pageIndex, pageCount, prefetched, logoDataUrl, heroMode }) {
-  const ingredients = parseProductIngredientsJson(product.ingredients);
-  const overviewRows = buildProductOverviewRows(product, ingredients);
-  const subcats = specialtySubcategoriesFor(product.name, contributions);
-  const { bottleData, factsData } = prefetched;
+// entry is one of planBrochurePages's plan entries, with .images already
+// populated by fetchPageImages (bottleDataUrl/factsDataUrl/heroMode).
+async function renderDoctorBrochurePage(doc, entry, { pageIndex, pageCount, logoDataUrl }) {
+  const { product, overviewRows, ingredients, subcats, images } = entry;
   const baseArgs = {
     product, logoDataUrl, overviewRows, ingredients, subcats,
-    bottleDataUrl: bottleData?.dataUrl || "", factsDataUrl: factsData?.dataUrl || "",
+    bottleDataUrl: images.bottleDataUrl, factsDataUrl: images.factsDataUrl,
     pageIndex, pageCount,
   };
-  const { canvas, container } = await renderBrochurePageToCanvas(buildBrochurePageHtml({ ...baseArgs, heroMode }));
+  const { canvas, container } = await renderBrochurePageToCanvas(buildBrochurePageHtml({ ...baseArgs, heroMode: images.heroMode }));
+  doc.addImage(canvas.toDataURL("image/jpeg", BROCHURE_PAGE_JPEG_QUALITY), "JPEG", 0, 0, 210, 297);
+  document.body.removeChild(container);
+}
+
+// Renders two entries' compact blocks sharing one page.
+async function renderTwoProductBrochurePage(doc, { entryA, entryB, pageIndex, pageCount, logoDataUrl }) {
+  const { canvas, container } = await renderBrochurePageToCanvas(buildTwoProductFinalPageHtml({ entryA, entryB, logoDataUrl, pageIndex, pageCount }));
   doc.addImage(canvas.toDataURL("image/jpeg", BROCHURE_PAGE_JPEG_QUALITY), "JPEG", 0, 0, 210, 297);
   document.body.removeChild(container);
 }
@@ -11105,6 +11238,24 @@ async function fetchProductBrochureData(product) {
   return { bottleData, factsData };
 }
 
+// Fetches one plan entry's own images and attaches the result as
+// entry.images — heroMode is re-derived from the ACTUAL fetched facts data
+// here (not just the catalog's hasSupplementFactsImage flag planBrochurePages
+// used), so a failed image fetch still renders correctly (falls back to the
+// shorter bottle-only hero instead of leaving a blank gap where facts would
+// have been).
+async function fetchEntryImages(entry) {
+  const { bottleData, factsData } = await fetchProductBrochureData(entry.product);
+  entry.images = {
+    bottleDataUrl: bottleData?.dataUrl || "", factsDataUrl: factsData?.dataUrl || "",
+    heroMode: decideBrochureHeroLayout(factsData).heroMode,
+  };
+  return entry;
+}
+function fetchPageImages(page) {
+  return Promise.all(page.entries.map(fetchEntryImages)).then(() => page);
+}
+
 async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName, contributions, onProgress) {
   const seen = new Set();
   const products = [];
@@ -11118,40 +11269,48 @@ async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName
     }
   }
 
-  // Every product is exactly one page now (facts images never get a page
-  // of their own — see decideBrochureHeroLayout), so the total is known
-  // upfront without a separate planning pass.
+  // Decided entirely up front, with no network access (see
+  // planBrochurePages) — which products share a page and which get their
+  // own — so the real final page count is known before any image is
+  // fetched or any pixel is rasterized.
+  const pages = await planBrochurePages(products, contributions || []);
   // compress: true turns on jsPDF's own lossless Deflate compression of the
   // PDF's internal object streams — free (no visual effect at all) on top
   // of the JPEG quality reduction above.
   const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait", compress: true });
-  const pageCount = products.length + 1;
+  const pageCount = pages.length + 1;
 
-  // Kick off the first product's fetch right away (it keeps downloading in
+  // Kick off the first page's fetch right away (it keeps downloading in
   // the background while we await the tiny, same-origin, usually-cached
   // logo asset needed for the cover page below).
-  let nextFetch = products.length ? fetchProductBrochureData(products[0]) : null;
+  let nextFetch = pages.length ? fetchPageImages(pages[0]) : null;
   const logoDataUrl = await ensureBrochureLogoDataUrl();
 
   const cover = await renderBrochurePageToCanvas(buildBrochureCoverPageHtml({ specialty, productCount: products.length, pageIndex: 1, pageCount, logoDataUrl }));
   doc.addImage(cover.canvas.toDataURL("image/jpeg", BROCHURE_PAGE_JPEG_QUALITY), "JPEG", 0, 0, 210, 297);
   document.body.removeChild(cover.container);
 
-  // Pipelined, one-ahead fetch: while product i is being rendered (CPU-bound
-  // html2canvas work), product i+1's images are already downloading in the
-  // background, instead of fetching every product's data up front before
-  // any rendering (and any progress feedback) starts. This keeps peak
-  // network concurrency and memory bounded to ~2 products at a time and
-  // makes "Exporting 1/N…" appear right away even for a large specialty.
+  // Pipelined, one-ahead fetch: while page i is being rendered (CPU-bound
+  // html2canvas work), page i+1's images are already downloading in the
+  // background, instead of fetching every page's data up front before any
+  // rendering (and any progress feedback) starts. This keeps peak network
+  // concurrency bounded (at most 2 products' worth in flight — a "pair"
+  // page's own 2, or a "single" page's 1 alongside a "pair" fetch ahead of
+  // it) and makes "Exporting 1/N…" appear right away even for a large
+  // specialty.
   let pageIndex = 1;
-  for (let i = 0; i < products.length; i++) {
+  for (let i = 0; i < pages.length; i++) {
     pageIndex++;
-    const prefetched = await nextFetch;
-    if (i + 1 < products.length) nextFetch = fetchProductBrochureData(products[i + 1]);
-    const { heroMode } = decideBrochureHeroLayout(prefetched.factsData);
+    const page = await nextFetch;
+    if (i + 1 < pages.length) nextFetch = fetchPageImages(pages[i + 1]);
     doc.addPage();
-    await renderDoctorBrochurePage(doc, products[i], { contributions: contributions || [], pageIndex, pageCount, prefetched, logoDataUrl, heroMode });
-    if (onProgress) onProgress(i + 1, products.length);
+    if (page.type === "pair") {
+      const [entryA, entryB] = page.entries;
+      await renderTwoProductBrochurePage(doc, { entryA, entryB, pageIndex, pageCount, logoDataUrl });
+    } else {
+      await renderDoctorBrochurePage(doc, page.entries[0], { pageIndex, pageCount, logoDataUrl });
+    }
+    if (onProgress) onProgress(i + 1, pages.length);
   }
   // Returns the blob instead of calling doc.save() itself — on an iOS
   // home-screen PWA, a blob download routinely isn't honored as a download
