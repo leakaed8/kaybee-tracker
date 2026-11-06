@@ -5101,10 +5101,8 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     // open instance already holds items under a DIFFERENT promotion, the
     // rep changed the dropdown while still targeting it — same as clicking
     // "Edit offer" then picking a different promotion, so every item
-    // already in that instance is retagged to match (mirrors
-    // switchGroupOffer, just triggered from the dropdown instead of the
-    // auto-suggestion button). A brand-new instance can never have this
-    // problem, since nothing is in it yet.
+    // already in that instance is retagged to match. A brand-new instance
+    // can never have this problem, since nothing is in it yet.
     let groupId = "";
     if (offerId) {
       if (activeGroupId) {
@@ -5170,14 +5168,6 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   const editGroupOffer = (groupId, offerId) => {
     setActiveGroupId(groupId);
     setPendingOfferId(offerId);
-  };
-
-  // Reassigns every raw item currently in one specific offer INSTANCE
-  // (groupId) to a different promotion — used by the "Switch to next offer"
-  // suggestion below. Never touches qty/price/product, and never touches
-  // any other instance, even one under the same promotion.
-  const switchGroupOffer = (groupId, toOfferId) => {
-    setItems((prev) => prev.map((it) => (it.groupId === groupId ? { ...it, offerId: toOfferId } : it)));
   };
 
   // Never-assigned items are "regular". Items whose offerId points at an
@@ -5317,31 +5307,12 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   const totalUnits = allDisplayItems.reduce((sum, it) => sum + it.qty, 0);
   const totalFreeUnits = offerGroups.reduce((sum, g) => sum + (g.valid ? g.freeQty : 0), 0);
 
-  // "If you have 13 and 7+1 requires 8, the next offer that fits 13 is
-  // 14+2 (needs 14)" — the smallest-threshold active offer, other than the
-  // one already assigned, whose requirement is still >= what's been added.
-  // Only offered when the group is OVER its requirement; being under just
-  // needs more units added, not a different offer. Restricted to the SAME
-  // ratio family as the offer already assigned (same equivalence the
-  // approval ceiling and findGroupAdjustment's "over" case already use) —
-  // this used to scan every active offer regardless of family, which could
-  // suggest switching e.g. a 7+1 group to a same-sized 6+1-family offer
-  // (a MORE generous ratio the rep/pharmacist never asked for), not a
-  // bigger instance of the SAME deal.
-  const nextOfferSuggestion = (group) => {
-    if (group.totalQty <= group.required) return null;
-    const ratio = offerFreeRatio(group.offer);
-    return activeOffers
-      .filter((o) => o.id !== group.offerId && o.buyQty + o.getQty >= group.totalQty && Math.abs(offerFreeRatio(o) - ratio) < 1e-9)
-      .sort((a, b) => (a.buyQty + a.getQty) - (b.buyQty + b.getQty))[0] || null;
-  };
-
   // --- Smart Promotional Offer Assistant ---------------------------------
   // Finds the one UNDER-threshold group (if any) that's genuinely close to
   // completing the promotion the rep already picked for it — the
-  // complement to nextOfferSuggestion above, which only ever handles the
-  // OVER-threshold case. Deliberately narrow in scope (confirmed with the
-  // user): suggests completing the SAME offer the rep already assigned,
+  // OVER-threshold case is findGroupAdjustment's job instead. Deliberately
+  // narrow in scope (confirmed with the user): suggests completing the
+  // SAME offer the rep already assigned,
   // never a scan across every other active offer for a theoretically
   // better one — that's a materially bigger feature than what shipped
   // here. "Close" means missing no more than ~30% of the group's own
@@ -5506,20 +5477,25 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     doCreateOrder();
   };
 
-  // "over" ACCEPT — carves instanceCount×required units (cheapest first)
-  // into instanceCount separate new instances of the SAME offer (each
-  // exactly `required` units, so each is independently valid and the
-  // existing pooling mechanic combines them), chunked in cheapest-first
-  // order — a single raw line can straddle an instance boundary and end
-  // up split across two, which only affects how the cards are grouped on
-  // screen, never the free-item math (pooled across all instances of one
-  // offerId regardless). Whatever's left is the priciest remainder; if
-  // any is left, asks whether to top it up into one more instance (the
-  // rep then adds the missing units themselves — never auto-filled, since
-  // only they know which product to add) or leave it as plain regular.
-  // Never auto-submits, same policy as every other mutating accept here.
-  const acceptGroupOverAdjustment = (adj) => {
-    const { group, baseOffer, instanceCount, tailRemainder } = adj;
+  // "over" — carves instanceCount×required units (cheapest first) into
+  // instanceCount separate new instances of the SAME offer (each exactly
+  // `required` units, so each is independently valid and the existing
+  // pooling mechanic combines them), chunked in cheapest-first order — a
+  // single raw line can straddle an instance boundary and end up split
+  // across two, which only affects how the cards are grouped on screen,
+  // never the free-item math (pooled across all instances of one offerId
+  // regardless). Whatever's left is the priciest remainder.
+  //
+  // Only two outcomes, both resolve the group (no bare "decline" — leaving
+  // a mismatched group completely unresolved only re-lands the rep on the
+  // same hard validation error, which isn't a real choice): `addMore`
+  // true tops the remainder up into one more still-incomplete instance for
+  // the rep to finish themselves (never auto-filled — only they know which
+  // product to add); false just releases it as plain regular. Never
+  // auto-submits either way — the rep reviews, then clicks "Create order"
+  // again themselves.
+  const resolveGroupOverAdjustment = (adj, addMore) => {
+    const { group, baseOffer, instanceCount } = adj;
     const baseRequired = baseOffer.buyQty + baseOffer.getQty;
     const { stageItems } = splitItemPool(group.rawItems, instanceCount * baseRequired);
     const otherItems = items.filter((it) => it.groupId !== group.groupId);
@@ -5549,9 +5525,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
       .map((s) => (s.type === "kept" ? { ...s.original } : { ...s.original, qty: s.keptQty, key: nextKeyRef.current++ }));
 
     let leftoverItems;
-    if (tailRemainder > 0 && window.confirm(
-      `${tailRemainder} unit${tailRemainder === 1 ? "" : "s"} left over after making ${instanceCount} complete ${baseOffer.label} offer${instanceCount === 1 ? "" : "s"}.\n\nAdd ${baseRequired - tailRemainder} more to complete one more offer?`
-    )) {
+    if (addMore && leftoverRaw.length > 0) {
       const topUpGroupId = `g${nextGroupKeyRef.current++}`;
       leftoverItems = leftoverRaw.map((it) => ({ ...it, offerId: baseOffer.id, groupId: topUpGroupId }));
       setActiveGroupId(topUpGroupId);
@@ -5561,16 +5535,6 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
 
     setItems([...otherItems, ...newGroupItems, ...leftoverItems]);
     setPendingAdjustment(null);
-  };
-
-  // "over" DECLINE — same as every other decline in this assistant:
-  // changes nothing, just retries the submit, which the existing,
-  // unmodified group-validity check still blocks exactly as before.
-  const declineGroupOverAdjustment = () => {
-    if (!pendingAdjustment) return;
-    declinedSuggestionKeys.current.add(adjustmentKey(pendingAdjustment));
-    setPendingAdjustment(null);
-    doCreateOrder();
   };
 
   // "under, not close" — ADD MORE bumps the last product by `missing`,
@@ -5738,11 +5702,10 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
       {error && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{error}</div>}
 
       {offerGroups.map((g, idx) => {
-        const suggestion = nextOfferSuggestion(g);
         const statusColor = g.valid ? "#4C7A5E" : "#B33A3A";
         const isActive = activeGroupId === g.groupId;
         return (
-          <div key={g.groupId} data-testid="offer-group-card" data-group-id={g.groupId} style={{ ...groupCardStyle, background: g.valid ? "#F7FBF8" : "#FBF3F0", borderColor: isActive ? "#1F2A24" : (g.valid ? "#C7DFCE" : "#E5B8B0") }}>
+          <div key={g.groupId} data-testid="offer-group-card" data-group-id={g.groupId} style={{ ...groupCardStyle, background: "#F7FBF8", borderColor: isActive ? "#1F2A24" : "#C7DFCE" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, flexWrap: "wrap", gap: 6 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ fontSize: 10, fontWeight: 700, color: "#7A3B3B", background: "#F0EBE0", borderRadius: 5, padding: "2px 7px" }}>OFFER {idx + 1}</span>
@@ -5778,27 +5741,11 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
                 Free: {g.freeItems.map((it) => `${it.name} × ${it.qty}`).join(", ")} (auto-selected)
               </div>
             )}
-            {!g.valid && g.totalQty < g.required && (
-              <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 6 }}>⚠ Add {g.required - g.totalQty} more unit{g.required - g.totalQty === 1 ? "" : "s"} to reach {g.required}.</div>
-            )}
-            {!g.valid && g.totalQty > g.required && (
-              <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 6 }}>
-                ⚠ {g.offer.label} requires exactly {g.required} units. You have {g.totalQty - g.required} unit{g.totalQty - g.required === 1 ? "" : "s"} above this offer.
-                {suggestion && (
-                  <div style={{ marginTop: 4 }}>
-                    If you want to order {g.totalQty} units, the next available offer is <strong>{suggestion.label}</strong>, which requires {suggestion.buyQty + suggestion.getQty} units.
-                    <div style={{ marginTop: 4 }}>
-                      <button
-                        onClick={() => switchGroupOffer(g.groupId, suggestion.id)}
-                        style={{ fontSize: 11.5, fontWeight: 600, color: "#C17817", background: "#FBF3E8", border: "1px solid #E9C88A", borderRadius: 6, padding: "4px 8px", cursor: "pointer" }}
-                      >
-                        Switch to {suggestion.label}
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
+            {/* No inline "requires exactly N units" / "switch to..." message
+                here anymore — a mismatched group is explained and resolved
+                entirely by the submit-time popup (findGroupAdjustment)
+                instead, so this card no longer needs to double as a warning
+                while the rep is still adding items. */}
           </div>
         );
       })}
@@ -5984,10 +5931,15 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
           // suggestion applies (or the rep declines one that doesn't fix
           // it), the same "Fix the quantity for…" error fires exactly as
           // it always did — this only ever adds a helpful detour in front
-          // of that, never removes the gate itself.
+          // of that, never removes the gate itself. The button's COLOR
+          // only reflects whether it's actually clickable (saving / empty
+          // cart) — never whether a group happens to be mismatched, since
+          // clicking it in that state is always the right thing to do
+          // (it opens the popup that fixes it), not something to be
+          // visually discouraged from pressing.
           disabled={saving || allDisplayItems.length === 0}
           onClick={handleCreateOrderClick}
-          style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: !saving && allDisplayItems.length > 0 && allGroupsValid ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
+          style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: !saving && allDisplayItems.length > 0 ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2", fontSize: 13, fontWeight: 500 }}
         >
           {saving ? (editOrder ? "Saving…" : "Creating…") : editOrder ? "Save changes & download PDF" : "Create order & download PDF"}
         </button>
@@ -6025,14 +5977,12 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
           return (
             <GroupOverAdjustmentPopup
               offerLabel={pendingAdjustment.baseOffer.label}
-              totalQty={pendingAdjustment.group.totalQty}
               instanceCount={pendingAdjustment.instanceCount}
-              keepUnits={pendingAdjustment.instanceCount * (pendingAdjustment.baseOffer.buyQty + pendingAdjustment.baseOffer.getQty)}
               tailRemainder={pendingAdjustment.tailRemainder}
               freeQty={sim.freeQty || 0}
               benefitValue={benefitValue}
-              onAccept={() => acceptGroupOverAdjustment(pendingAdjustment)}
-              onDecline={declineGroupOverAdjustment}
+              onKeep={() => resolveGroupOverAdjustment(pendingAdjustment, false)}
+              onAddMore={() => resolveGroupOverAdjustment(pendingAdjustment, true)}
             />
           );
         }
@@ -6100,24 +6050,30 @@ function PromoRecommendationPopup({ offerLabel, productName, missing, benefitVal
 
 // Smart Promotional Offer Assistant, second mode, OVER-threshold popup —
 // the rep committed to an offer (picked from the dropdown) and added more
-// than it needs. Offers to split the pool into multiple complete
-// instances of that SAME offer (cheapest units first, so any leftover is
-// always whatever's priciest) rather than hunting for a different,
-// bigger catalog sibling; DECLINE changes nothing and retries the submit,
-// which the existing, unmodified group-validity check still blocks
-// exactly as before — same no-backdrop-dismiss / two-explicit-outcomes
-// pattern as the other popups here. The "add N more to complete one more
-// offer?" follow-up (when there's a leftover) is a plain native confirm,
-// handled in acceptGroupOverAdjustment itself.
-function GroupOverAdjustmentPopup({ offerLabel, totalQty, instanceCount, keepUnits, tailRemainder, freeQty, benefitValue, onAccept, onDecline }) {
+// than it needs. Splits the pool into multiple complete instances of that
+// SAME offer (cheapest units first, so any leftover is always whatever's
+// priciest) rather than hunting for a different, bigger catalog sibling.
+// Only one real decision when there's a leftover: keep it as a plain
+// regular purchase, or add more items to turn it into one more complete
+// instance (the rep adds the missing units themselves — never
+// auto-filled, since only they know which product to add). No DECLINE
+// here — leaving a mismatched group unresolved never did anything useful
+// beyond re-triggering the same hard validation error, so this always
+// closes with one of the two real outcomes above. When the total's
+// already an exact multiple (no leftover), there's nothing to decide —
+// just a single confirmation.
+function GroupOverAdjustmentPopup({ offerLabel, instanceCount, tailRemainder, freeQty, benefitValue, onKeep, onAddMore }) {
+  const hasLeftover = tailRemainder > 0;
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(31,42,36,0.55)", zIndex: 300, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
       <div style={{ background: "#FAF7F2", borderRadius: "16px 16px 0 0", width: "100%", maxWidth: 480, padding: 20, boxShadow: "0 -4px 24px rgba(0,0,0,0.2)" }}>
         <h3 className="kb-font-display" style={{ fontSize: 16, fontWeight: 600, margin: "0 0 4px", display: "flex", alignItems: "center", gap: 6 }}>
-          <Megaphone size={17} /> You have {totalQty} units on {offerLabel}
+          <Megaphone size={17} /> You have {instanceCount} offer{instanceCount === 1 ? "" : "s"}{hasLeftover ? ` and ${tailRemainder} extra piece${tailRemainder === 1 ? "" : "s"}` : ""}
         </h3>
         <p style={{ fontSize: 12.5, color: "#5B5445", margin: "0 0 14px" }}>
-          Split into <strong>{instanceCount} complete {offerLabel} offer{instanceCount === 1 ? "" : "s"}</strong> ({keepUnits} units — <span style={{ color: "#4C7A5E", fontWeight: 600 }}>{freeQty} free</span>), leaving {tailRemainder} as regular — or keep it as one offer and fix the quantity yourself.
+          {hasLeftover
+            ? "Do you want to keep it that way, or add more items to get another offer?"
+            : <>Confirm <strong>{instanceCount} complete {offerLabel} offer{instanceCount === 1 ? "" : "s"}</strong> (<span style={{ color: "#4C7A5E", fontWeight: 600 }}>{freeQty} free</span>).</>}
         </p>
         <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 14, marginBottom: 16, fontSize: 13 }}>
           <div style={{ display: "flex", justifyContent: "space-between" }}>
@@ -6127,17 +6083,19 @@ function GroupOverAdjustmentPopup({ offerLabel, totalQty, instanceCount, keepUni
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button
-            onClick={onAccept}
+            onClick={onKeep}
             style={{ flex: 1, padding: "11px 16px", borderRadius: 8, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 13.5, fontWeight: 600 }}
           >
-            USE {instanceCount} OFFERS
+            {hasLeftover ? "KEEP IT THAT WAY" : `USE ${instanceCount} OFFER${instanceCount === 1 ? "" : "S"}`}
           </button>
-          <button
-            onClick={onDecline}
-            style={{ flex: 1, padding: "11px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", fontSize: 13.5, fontWeight: 600 }}
-          >
-            DECLINE
-          </button>
+          {hasLeftover && (
+            <button
+              onClick={onAddMore}
+              style={{ flex: 1, padding: "11px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", fontSize: 13.5, fontWeight: 600 }}
+            >
+              ADD MORE ITEMS
+            </button>
+          )}
         </div>
       </div>
     </div>
