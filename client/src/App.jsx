@@ -5420,27 +5420,42 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   // handles "a little under, and close." This catches the other two ways
   // a started group can be off: too FEW units for even the smallest
   // family member (and NOT close — that's the other function's job), or
-  // too MANY.
+  // enough for at least one complete instance of the family's SMALLEST
+  // active member.
   //
-  // OVER: rather than hunting for one bigger catalog sibling, this repeats
-  // the SAME offer the rep already picked as many times as the total
-  // supports (floor(totalQty/required) complete instances) — exactly as
-  // if the rep had picked it that many times themselves. The existing,
-  // unmodified "same offer picked 2+ times" pooling mechanic (see
-  // promotionFamilies above) already combines repeat instances into one
-  // pool for free-item selection, so this produces the identical
-  // financial result as a same-ratio bigger offer would, with no need to
-  // search the catalog for one. Whatever's left over after filling
-  // complete instances cheapest-first is always the PRICIEST remaining
-  // units — protects the priciest item the same way the regular-cart
-  // carve (see splitItemPool) already does.
+  // "OVER" is judged against the family's smallest member, not whichever
+  // one the rep happens to have assigned — a group under-threshold for a
+  // bigger sibling (e.g. 14/16 on "Buy 14 Get 2 Free") can still be a
+  // clean multi-instance fit for a smaller one (14 units = one complete
+  // "Buy 7 Get 1 Free" + 6 regular). findCloseToQualifyingGroup already
+  // offers completing the ASSIGNED offer first when that's close; this is
+  // the fallback once that's declined (or was never close to begin with).
+  // Repeats that base member as many times as the total supports
+  // (floor(totalQty/required) complete instances) rather than hunting for
+  // one bigger catalog sibling — the existing, unmodified "same offer
+  // picked 2+ times" pooling mechanic (see promotionFamilies above)
+  // already combines repeat instances into one pool for free-item
+  // selection, so this produces the identical financial result a bigger
+  // same-ratio offer would, with no catalog search needed beyond finding
+  // the smallest member. Whatever's left over after filling complete
+  // instances cheapest-first is always the PRICIEST remaining units —
+  // protects the priciest item the same way the regular-cart carve (see
+  // splitItemPool) already does.
+  const smallestFamilyMember = (offer) => {
+    const ratio = offerFreeRatio(offer);
+    const familyMembers = activeOffers.filter((o) => Math.abs(offerFreeRatio(o) - ratio) < 1e-9);
+    return familyMembers.reduce((best, o) =>
+      (!best || (o.buyQty + o.getQty) < (best.buyQty + best.getQty)) ? o : best, null) || offer;
+  };
   const findGroupAdjustment = () => {
     for (const g of offerGroups) {
       if (g.valid) continue;
-      if (g.totalQty > g.required) {
-        const instanceCount = Math.floor(g.totalQty / g.required);
-        const tailRemainder = g.totalQty % g.required;
-        return { direction: "over", group: g, instanceCount, tailRemainder };
+      const baseOffer = smallestFamilyMember(g.offer);
+      const baseRequired = baseOffer.buyQty + baseOffer.getQty;
+      if (g.totalQty >= baseRequired) {
+        const instanceCount = Math.floor(g.totalQty / baseRequired);
+        const tailRemainder = g.totalQty % baseRequired;
+        return { direction: "over", group: g, baseOffer, instanceCount, tailRemainder };
       }
       const missing = g.required - g.totalQty;
       const closeEnough = missing <= Math.ceil(g.required * CLOSE_TO_QUALIFYING_MAX_MISSING_RATIO);
@@ -5450,7 +5465,7 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     return null;
   };
   const adjustmentKey = (adj) => adj.direction === "over"
-    ? `over:${adj.group.groupId}:${adj.group.totalQty}:${adj.group.offerId}`
+    ? `over:${adj.group.groupId}:${adj.group.totalQty}:${adj.baseOffer.id}`
     : `under:${adj.group.groupId}:${adj.group.totalQty}:${adj.group.offerId}`;
 
   // Preview-only for the "over" case — pools the cheapest
@@ -5460,9 +5475,10 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   // unmodified applyOfferToItems so the popup's free-unit math can never
   // drift from what actually happens if the rep accepts.
   const simulateGroupOverAdjustment = (adj) => {
-    const { group, instanceCount } = adj;
-    const { poolItems } = splitItemPool(group.rawItems, instanceCount * group.required);
-    const syntheticOffer = { ...group.offer, buyQty: group.offer.buyQty * instanceCount, getQty: group.offer.getQty * instanceCount };
+    const { group, baseOffer, instanceCount } = adj;
+    const required = baseOffer.buyQty + baseOffer.getQty;
+    const { poolItems } = splitItemPool(group.rawItems, instanceCount * required);
+    const syntheticOffer = { ...baseOffer, buyQty: baseOffer.buyQty * instanceCount, getQty: baseOffer.getQty * instanceCount };
     return applyOfferToItems(poolItems, [syntheticOffer]);
   };
 
@@ -5496,8 +5512,9 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   // only they know which product to add) or leave it as plain regular.
   // Never auto-submits, same policy as every other mutating accept here.
   const acceptGroupOverAdjustment = (adj) => {
-    const { group, instanceCount, tailRemainder } = adj;
-    const { stageItems } = splitItemPool(group.rawItems, instanceCount * group.required);
+    const { group, baseOffer, instanceCount, tailRemainder } = adj;
+    const baseRequired = baseOffer.buyQty + baseOffer.getQty;
+    const { stageItems } = splitItemPool(group.rawItems, instanceCount * baseRequired);
     const otherItems = items.filter((it) => it.groupId !== group.groupId);
 
     const movedRaw = [];
@@ -5506,17 +5523,17 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
       else if (s.type === "split") movedRaw.push({ ...s.original, qty: s.movedQty });
     }
     const newGroupItems = [];
-    let remainingInInstance = group.required;
+    let remainingInInstance = baseRequired;
     let currentGroupId = null;
     for (const raw of movedRaw) {
       let qtyLeft = raw.qty;
       while (qtyLeft > 0) {
         if (currentGroupId === null) currentGroupId = `g${nextGroupKeyRef.current++}`;
         const take = Math.min(qtyLeft, remainingInInstance);
-        newGroupItems.push({ ...raw, qty: take, offerId: group.offerId, groupId: currentGroupId, key: nextKeyRef.current++ });
+        newGroupItems.push({ ...raw, qty: take, offerId: baseOffer.id, groupId: currentGroupId, key: nextKeyRef.current++ });
         qtyLeft -= take;
         remainingInInstance -= take;
-        if (remainingInInstance === 0) { currentGroupId = null; remainingInInstance = group.required; }
+        if (remainingInInstance === 0) { currentGroupId = null; remainingInInstance = baseRequired; }
       }
     }
 
@@ -5526,10 +5543,10 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
 
     let leftoverItems;
     if (tailRemainder > 0 && window.confirm(
-      `${tailRemainder} unit${tailRemainder === 1 ? "" : "s"} left over after making ${instanceCount} complete ${group.offer.label} offer${instanceCount === 1 ? "" : "s"}.\n\nAdd ${group.required - tailRemainder} more to complete one more offer?`
+      `${tailRemainder} unit${tailRemainder === 1 ? "" : "s"} left over after making ${instanceCount} complete ${baseOffer.label} offer${instanceCount === 1 ? "" : "s"}.\n\nAdd ${baseRequired - tailRemainder} more to complete one more offer?`
     )) {
       const topUpGroupId = `g${nextGroupKeyRef.current++}`;
-      leftoverItems = leftoverRaw.map((it) => ({ ...it, offerId: group.offerId, groupId: topUpGroupId }));
+      leftoverItems = leftoverRaw.map((it) => ({ ...it, offerId: baseOffer.id, groupId: topUpGroupId }));
       setActiveGroupId(topUpGroupId);
     } else {
       leftoverItems = leftoverRaw.map((it) => ({ ...it, offerId: "", groupId: "" }));
@@ -5583,7 +5600,12 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     if (!pendingSuggestion) return;
     declinedSuggestionKeys.current.add(suggestionKey(pendingSuggestion));
     setPendingSuggestion(null);
-    doCreateOrder();
+    // Re-enter the chain (not doCreateOrder directly) — this is the FIRST
+    // check, so declining it must still give findGroupAdjustment a chance
+    // to catch e.g. a group under its own assigned offer's threshold but
+    // already enough for a smaller same-family offer, instead of skipping
+    // straight to the hard validation error.
+    handleCreateOrderClick();
   };
 
   const doCreateOrder = async () => {
@@ -6007,10 +6029,10 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
           const benefitValue = (sim.freeItems || []).reduce((sum, it) => sum + it.qty * (it.originalPrice || 0), 0);
           return (
             <GroupOverAdjustmentPopup
-              offerLabel={pendingAdjustment.group.offer.label}
+              offerLabel={pendingAdjustment.baseOffer.label}
               totalQty={pendingAdjustment.group.totalQty}
               instanceCount={pendingAdjustment.instanceCount}
-              keepUnits={pendingAdjustment.instanceCount * pendingAdjustment.group.required}
+              keepUnits={pendingAdjustment.instanceCount * (pendingAdjustment.baseOffer.buyQty + pendingAdjustment.baseOffer.getQty)}
               tailRemainder={pendingAdjustment.tailRemainder}
               freeQty={sim.freeQty || 0}
               benefitValue={benefitValue}
