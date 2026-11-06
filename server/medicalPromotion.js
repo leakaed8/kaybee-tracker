@@ -33,19 +33,32 @@ function inferBrand(name) {
 
 const BRAND_DISPLAY_NAMES = { Alfa: "Alfa Vitamins", Mason: "Mason Natural" };
 
+// "Beirut" tags along on some area entries ("Beirut Hamra") and not others
+// ("Hamra") for what's still the same real neighborhood — every area this
+// company tracks is within Beirut anyway, so the word adds no actual
+// distinction and is dropped entirely rather than merely reordered. Only
+// dropped when something else is left to identify the place by; an area
+// that's genuinely just "Beirut" with nothing more specific stays "Beirut"
+// instead of collapsing to empty (which would wrongly fall into
+// "Unassigned").
+const LOCATION_NOISE_WORDS = new Set(["beirut"]);
+
 // A doctor's "area" (free-text territory) can have the same real place
-// entered in a different word order — "Beirut Hamra" vs "Hamra Beirut" —
-// which otherwise split one location into two separate groups/dropdown
-// entries. Canonicalized by sorting its words alphabetically: safe, since
-// this only ever merges EXACT word-order permutations of the same words,
-// never two genuinely different place names (a single-word "Hamra" stays
-// its own distinct value, not folded into the two-word combo). Always
-// displayed in that same sorted, title-cased order so the merged group
-// shows one consistent label no matter which variant a doctor's record
-// happened to use.
+// entered in a different word order ("Beirut Hamra" vs "Hamra Beirut") or
+// with a redundant qualifier only sometimes included ("Beirut Hamra" vs
+// plain "Hamra") — both otherwise split one location into separate
+// groups/dropdown entries. Canonicalized by dropping noise words, then
+// sorting whatever's left alphabetically: safe, since this only ever
+// merges entries built from the same meaningful word(s) in a different
+// order or with/without "Beirut", never two genuinely different place
+// names. Always displayed in that same sorted, title-cased order so the
+// merged group shows one consistent label no matter which variant a
+// doctor's record happened to use.
 function canonicalizeLocation(area) {
-  const words = String(area || "").trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0) return "";
+  const allWords = String(area || "").trim().split(/\s+/).filter(Boolean);
+  if (allWords.length === 0) return "";
+  const meaningfulWords = allWords.filter((w) => !LOCATION_NOISE_WORDS.has(w.toLowerCase()));
+  const words = meaningfulWords.length > 0 ? meaningfulWords : allWords;
   return words
     .map((w) => w.toLowerCase())
     .sort()
