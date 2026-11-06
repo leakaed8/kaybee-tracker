@@ -72,6 +72,22 @@ const savePendingOrders = (list) => {
   try { localStorage.setItem(PENDING_ORDERS_KEY, JSON.stringify(list)); } catch { /* storage unavailable — nothing more we can do */ }
 };
 
+// An in-progress order (items, discount, offer groups) the rep deliberately
+// paused on — not ready to finalize with the pharmacist yet — saved via
+// "Save for later" in OrderBuilder. Deliberately local-only, same as the
+// offline queues above: no server order exists yet, nothing is deducted
+// from stock, and reopening the SAME order screen (same visit) just
+// restores exactly what was there. Keyed by whatever identifies "this
+// order being built", one draft per key (a newer save overwrites the
+// older one for that same key).
+const ORDER_DRAFTS_KEY = "kb_order_drafts";
+const loadOrderDrafts = () => {
+  try { return JSON.parse(localStorage.getItem(ORDER_DRAFTS_KEY) || "{}"); } catch { return {}; }
+};
+const saveOrderDrafts = (map) => {
+  try { localStorage.setItem(ORDER_DRAFTS_KEY, JSON.stringify(map)); } catch { /* storage unavailable — nothing more we can do */ }
+};
+
 // Pharmacies/doctors/products only ever lived in React state, refetched
 // fresh on every app load — fine online, but it meant a rep opening the app
 // with no reception at all (not mid-session, but a fresh load/reopen) saw
@@ -4976,22 +4992,44 @@ function reconstituteRawItems(groupItems) {
 }
 
 function OrderBuilder({ clientName, visitId, products, offers, clients, onCreateOrder, onUpdateOrder, onQueueOrderOffline, pendingVisitLocalKey, onAttachPendingOrder, editOrder, onDone, initialDiscountRate, initialOfferId }) {
+  // Identifies "this order being built", for the local "Save for later"
+  // draft below — one per visit, falling back to the client name in the
+  // rare case neither a real visit id nor an offline local key is
+  // available yet. Edits of an already-real order never read/write a
+  // draft at all (that order already exists — there's nothing to pause).
+  const draftKey = pendingVisitLocalKey || visitId || clientName;
+  // Loaded once, on mount — a later "Save for later" elsewhere while this
+  // screen is open can't retroactively change what THIS instance restored.
+  const [savedDraft] = useState(() => (editOrder ? null : (loadOrderDrafts()[draftKey] || null)));
   const [productQuery, setProductQuery] = useState("");
   const [qty, setQty] = useState("");
   // Editing an existing order pre-fills its items — matched back to a
   // current product batch by id for stock re-validation where possible;
   // a batch that's since been removed just skips the stock cap rather than
-  // blocking the edit.
+  // blocking the edit. A resumed "Save for later" draft restores its items
+  // in the same component's own working shape they were saved in
+  // (key/groupId included, no editOrder-style re-derivation needed there)
+  // but a draft can sit for a while, so its availableQty snapshot gets the
+  // same stock re-check as editOrder above rather than trusting a
+  // possibly-stale number from whenever it was saved.
   const [items, setItems] = useState(() => {
-    if (!editOrder) return [];
-    return editOrder.items.map((it, i) => {
-      const matched = products.find((p) => p.id === it.productId);
-      // Orders saved before independent offer instances existed have no
-      // groupId — fall back to one group per offerId, exactly the single
-      // grouping those items ever had (see validateOfferGroups server-side).
-      const groupId = it.groupId || (it.offerId ? `legacy-${it.offerId}` : "");
-      return { key: i, ...it, groupId, availableQty: matched ? matched.qty : Infinity };
-    });
+    if (editOrder) {
+      return editOrder.items.map((it, i) => {
+        const matched = products.find((p) => p.id === it.productId);
+        // Orders saved before independent offer instances existed have no
+        // groupId — fall back to one group per offerId, exactly the single
+        // grouping those items ever had (see validateOfferGroups server-side).
+        const groupId = it.groupId || (it.offerId ? `legacy-${it.offerId}` : "");
+        return { key: i, ...it, groupId, availableQty: matched ? matched.qty : Infinity };
+      });
+    }
+    if (savedDraft) {
+      return savedDraft.items.map((it) => {
+        const matched = products.find((p) => p.id === it.productId);
+        return { ...it, availableQty: matched ? matched.qty : Infinity };
+      });
+    }
+    return [];
   });
   // Which offer group the NEXT added item joins — "" means regular/no-offer.
   // This is the one place a rep assigns a product to an offer; correcting a
@@ -5017,8 +5055,12 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   // another offer" (clears it so the next add mints a fresh one), and
   // "Edit offer" on a past group (re-opens that exact instance as the
   // target). This is what lets the same promotion be picked twice on one
-  // order as two independent groups instead of being summed together.
-  const [activeGroupId, setActiveGroupId] = useState(null);
+  // order as two independent groups instead of being summed together. A
+  // resumed draft restores whatever this was at save time too — otherwise
+  // the very next item added after resuming would silently mint a BRAND
+  // NEW group instead of continuing the one the rep was mid-building,
+  // splitting what should be one offer group into two incomplete ones.
+  const [activeGroupId, setActiveGroupId] = useState(() => (savedDraft ? savedDraft.activeGroupId ?? null : null));
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   // Smart Promotional Offer Assistant — a recommendation to complete an
@@ -5048,10 +5090,15 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   // genuinely new situation still gets a fresh recommendation. Shared
   // between both suggestion modes above (their key formats never collide).
   const declinedSuggestionKeys = useRef(new Set());
-  const nextKeyRef = useRef(editOrder ? editOrder.items.length : 0);
+  // editOrder.items' keys are always a contiguous 0..n-1 (freshly assigned
+  // right above), so .length is exact; a restored draft already carries
+  // whatever keys it had when saved, so it needs the max-plus-one instead
+  // to guarantee a new item's key can never collide with a restored one.
+  const nextKeyRef = useRef(editOrder ? editOrder.items.length : (savedDraft ? Math.max(-1, ...savedDraft.items.map((it) => it.key)) + 1 : 0));
   const nextGroupKeyRef = useRef((() => {
-    if (!editOrder) return 0;
-    const nums = editOrder.items
+    const sourceItems = editOrder ? editOrder.items : (savedDraft ? savedDraft.items : null);
+    if (!sourceItems) return 0;
+    const nums = sourceItems
       .map((it) => /^g(\d+)$/.exec(it.groupId || ""))
       .filter(Boolean)
       .map((m) => Number(m[1]));
@@ -5064,11 +5111,18 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
   // existing order instead pre-fills that order's own discount, not the
   // pharmacy's current default.
   const matchedClient = (clients || []).find((c) => c.name.toLowerCase().trim() === clientName.toLowerCase().trim());
-  // initialDiscountRate (from the Check-In flow's new "Set the discount"
-  // step) takes priority over the pharmacy's own default — it's the rep's
-  // explicit choice for this invoice, which that step itself already
-  // pre-filled from the same default as a starting point.
-  const [discountRate, setDiscountRate] = useState(editOrder ? editOrder.discountRate || "" : (initialDiscountRate !== undefined && initialDiscountRate !== null && initialDiscountRate !== "" ? initialDiscountRate : matchedClient?.discountRate || ""));
+  // A resumed draft's discount takes priority over everything else below —
+  // it's the rep's own explicit choice from when they paused, not a
+  // default to re-derive. Otherwise initialDiscountRate (from the Check-In
+  // flow's new "Set the discount" step) takes priority over the pharmacy's
+  // own default — it's the rep's explicit choice for this invoice, which
+  // that step itself already pre-filled from the same default as a
+  // starting point.
+  const [discountRate, setDiscountRate] = useState(() => {
+    if (editOrder) return editOrder.discountRate || "";
+    if (savedDraft) return savedDraft.discountRate;
+    return initialDiscountRate !== undefined && initialDiscountRate !== null && initialDiscountRate !== "" ? initialDiscountRate : matchedClient?.discountRate || "";
+  });
 
   const matchedProduct = products.find((p) => batchLabel(p) === productQuery.trim());
 
@@ -5656,6 +5710,11 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
       } else {
         downloadOrderPdf(saved || { ...payload, date: editOrder ? editOrder.date : new Date().toISOString(), total: finalTotal, netTotal: finalTotal * (1 - finalDiscountRate / 100) }, stockWarnings);
       }
+      // A real order now exists (confirmed, pending sign-off, or queued
+      // offline to sync later) — any paused draft for this same visit is
+      // stale from here on, so it's removed rather than left to confuse a
+      // future "+ Add order" on this visit with a half-built leftover.
+      if (!editOrder) clearOrderDraft();
       onDone();
     } catch (e) {
       setError(e.message || "Couldn't save the order.");
@@ -5664,11 +5723,36 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
     }
   };
 
+  const clearOrderDraft = () => {
+    const drafts = loadOrderDrafts();
+    if (drafts[draftKey] === undefined) return;
+    delete drafts[draftKey];
+    saveOrderDrafts(drafts);
+  };
+
+  // Pauses the order exactly as built — not ready to finalize with the
+  // pharmacist yet — without creating any real order, touching stock, or
+  // generating a PDF. Local-only (see loadOrderDrafts/saveOrderDrafts
+  // above): reopening the order screen for this SAME visit restores it
+  // automatically. Overwrites whatever was previously saved for this key,
+  // same as every other "last write wins" draft in this app.
+  const saveForLater = () => {
+    const drafts = loadOrderDrafts();
+    drafts[draftKey] = { items, discountRate, activeGroupId, savedAt: new Date().toISOString() };
+    saveOrderDrafts(drafts);
+    onDone();
+  };
+
   const groupCardStyle = { border: "1px solid #E5DFD3", borderRadius: 8, padding: 10, marginBottom: 8 };
 
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 20 }}>
       <h3 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 10px" }}>{editOrder ? `Edit order for ${clientName}` : `Order for ${clientName}`}</h3>
+      {savedDraft && (
+        <div style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 8 }}>
+          Resumed a saved draft from {new Date(savedDraft.savedAt).toLocaleString()}.
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
         <div style={{ flex: 2, minWidth: 160 }}>
@@ -5943,6 +6027,19 @@ function OrderBuilder({ clientName, visitId, products, offers, clients, onCreate
         >
           {saving ? (editOrder ? "Saving…" : "Creating…") : editOrder ? "Save changes & download PDF" : "Create order & download PDF"}
         </button>
+        {/* Pauses the order as-built — no real order, no PDF, no stock
+            touched — for when the pharmacist isn't ready to commit yet.
+            Not shown when editing an already-real order (editOrder): that
+            order already exists, there's nothing left to "pause". */}
+        {!editOrder && (
+          <button
+            disabled={saving || allDisplayItems.length === 0}
+            onClick={saveForLater}
+            style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: allDisplayItems.length > 0 ? "#5B5445" : "#B7AF9E", fontSize: 13, fontWeight: 500 }}
+          >
+            Save for later
+          </button>
+        )}
         <button onClick={onDone} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", fontSize: 13 }}>Cancel</button>
       </div>
 
