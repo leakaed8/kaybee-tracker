@@ -14,19 +14,44 @@ function normalizeProductKey(name) {
   return String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-// A product's brand (Alfa/Mason) is derivable from its own name prefix for
-// every product this company actually carries. Mirrors
+// A product's brand (Alfa/Mason) is derivable from its own name for every
+// product this company actually carries — but almost always as a
+// parenthesized SUFFIX ("Biotin 5000 Mcg 100 Tabs (alfa)"), not a prefix;
+// only a handful of names happen to start with the brand word too. Matched
+// as a whole word anywhere in the name (word-boundaried, so an unrelated
+// word that merely contains "alfa"/"mason" as a substring, like a
+// hypothetical "Alfalfa Extract", is never mistaken for the brand). Mirrors
 // server/index.js's own inferProductCatalogBrand exactly (that one
 // backfills ProductCatalog.brand; this one is used as the fallback when a
 // mentioned item's name has no match in the catalog's brand map at all).
 function inferBrand(name) {
-  const n = String(name || "").trim().toLowerCase();
-  if (n.startsWith("alfa")) return "Alfa";
-  if (n.startsWith("mason")) return "Mason";
+  const n = String(name || "");
+  if (/\balfa\b/i.test(n)) return "Alfa";
+  if (/\bmason\b/i.test(n)) return "Mason";
   return "";
 }
 
 const BRAND_DISPLAY_NAMES = { Alfa: "Alfa Vitamins", Mason: "Mason Natural" };
+
+// A doctor's "area" (free-text territory) can have the same real place
+// entered in a different word order — "Beirut Hamra" vs "Hamra Beirut" —
+// which otherwise split one location into two separate groups/dropdown
+// entries. Canonicalized by sorting its words alphabetically: safe, since
+// this only ever merges EXACT word-order permutations of the same words,
+// never two genuinely different place names (a single-word "Hamra" stays
+// its own distinct value, not folded into the two-word combo). Always
+// displayed in that same sorted, title-cased order so the merged group
+// shows one consistent label no matter which variant a doctor's record
+// happened to use.
+function canonicalizeLocation(area) {
+  const words = String(area || "").trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "";
+  return words
+    .map((w) => w.toLowerCase())
+    .sort()
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
 
 // A (product, location) group this few distinct doctors make up is itself
 // enough to point at a specific doctor in a small territory — these are
@@ -90,7 +115,7 @@ function buildMedicalPromotionSummary({
     let items = [];
     try { items = JSON.parse(row.itemsMentioned || "[]"); } catch { items = []; }
     if (!items.length) continue;
-    const area = doctorAreaByName.get(clientKey) || "Unassigned";
+    const area = canonicalizeLocation(doctorAreaByName.get(clientKey)) || "Unassigned";
     if (locationFilterLower && !area.toLowerCase().includes(locationFilterLower)) continue;
 
     // Dedup within THIS visit by normalized product name — a product
@@ -139,4 +164,4 @@ function buildMedicalPromotionSummary({
   return { from: resolvedFrom, to: resolvedTo, rows, suppressedGroups };
 }
 
-module.exports = { buildMedicalPromotionSummary, MIN_DOCTORS_FOR_DISCLOSURE, BRAND_DISPLAY_NAMES, inferBrand, normalizeProductKey };
+module.exports = { buildMedicalPromotionSummary, MIN_DOCTORS_FOR_DISCLOSURE, BRAND_DISPLAY_NAMES, inferBrand, normalizeProductKey, canonicalizeLocation };

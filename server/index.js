@@ -10171,14 +10171,17 @@ const ensureOurProductsMasterDataSeeded = singleFlight(async function ensureOurP
   ourProductsMasterDataSeedChecked = true;
 });
 
-// A product's brand (Alfa/Mason) is derivable from its own name prefix for
-// every product this company actually carries, so this backfills it once
-// for rows that predate the field rather than asking a manager to re-enter
-// it by hand. Never overwrites a brand a manager already set/edited.
+// A product's brand (Alfa/Mason) is derivable from its own name for every
+// product this company actually carries — but almost always as a
+// parenthesized SUFFIX ("Biotin 5000 Mcg 100 Tabs (alfa)"), not a prefix;
+// matched as a whole word anywhere in the name so this backfills correctly
+// for rows that predate the field, rather than asking a manager to
+// re-enter it by hand. Never overwrites a brand a manager already
+// set/edited.
 function inferProductCatalogBrand(name) {
-  const n = String(name || "").trim().toLowerCase();
-  if (n.startsWith("alfa")) return "Alfa";
-  if (n.startsWith("mason")) return "Mason";
+  const n = String(name || "");
+  if (/\balfa\b/i.test(n)) return "Alfa";
+  if (/\bmason\b/i.test(n)) return "Mason";
   return "";
 }
 
