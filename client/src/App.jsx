@@ -11023,6 +11023,16 @@ async function renderBrochurePageToCanvas(innerHtml, { scale = 2 } = {}) {
   return { canvas, container, pageEl };
 }
 
+// Every brochure page (cover + one per product) is a full-page SCREENSHOT
+// embedded as a single JPEG — by far the biggest driver of the exported
+// PDF's size, independent of the individual product photos (already
+// downscaled separately below). 0.95 was near-lossless and made a
+// large-specialty brochure slow to download for no visible benefit at
+// normal zoom; 0.8 is still sharp (this is a screenshot of crisp text and
+// CSS graphics, not a noisy photo, so JPEG artifacting stays unnoticeable
+// at this quality) while cutting each page's size roughly in half.
+const BROCHURE_PAGE_JPEG_QUALITY = 0.8;
+
 // Bottle and facts images always sit side by side on the product's one
 // page — the only other layout is "bottle-only", for a product with no
 // facts image uploaded at all. An earlier version of this tried to detect
@@ -11051,7 +11061,7 @@ async function renderDoctorBrochurePage(doc, product, { contributions, pageIndex
     pageIndex, pageCount,
   };
   const { canvas, container } = await renderBrochurePageToCanvas(buildBrochurePageHtml({ ...baseArgs, heroMode }));
-  doc.addImage(canvas.toDataURL("image/jpeg", 0.95), "JPEG", 0, 0, 210, 297);
+  doc.addImage(canvas.toDataURL("image/jpeg", BROCHURE_PAGE_JPEG_QUALITY), "JPEG", 0, 0, 210, 297);
   document.body.removeChild(container);
 }
 
@@ -11111,7 +11121,10 @@ async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName
   // Every product is exactly one page now (facts images never get a page
   // of their own — see decideBrochureHeroLayout), so the total is known
   // upfront without a separate planning pass.
-  const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+  // compress: true turns on jsPDF's own lossless Deflate compression of the
+  // PDF's internal object streams — free (no visual effect at all) on top
+  // of the JPEG quality reduction above.
+  const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait", compress: true });
   const pageCount = products.length + 1;
 
   // Kick off the first product's fetch right away (it keeps downloading in
@@ -11121,7 +11134,7 @@ async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName
   const logoDataUrl = await ensureBrochureLogoDataUrl();
 
   const cover = await renderBrochurePageToCanvas(buildBrochureCoverPageHtml({ specialty, productCount: products.length, pageIndex: 1, pageCount, logoDataUrl }));
-  doc.addImage(cover.canvas.toDataURL("image/jpeg", 0.95), "JPEG", 0, 0, 210, 297);
+  doc.addImage(cover.canvas.toDataURL("image/jpeg", BROCHURE_PAGE_JPEG_QUALITY), "JPEG", 0, 0, 210, 297);
   document.body.removeChild(cover.container);
 
   // Pipelined, one-ahead fetch: while product i is being rendered (CPU-bound
