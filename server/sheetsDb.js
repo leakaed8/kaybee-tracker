@@ -211,6 +211,26 @@ const SCHEMAS = {
     // nutritionists already have the structured `concern` field for this).
     // "" on every visit that predates this change.
     "objectionResolution", "objectionNotes",
+    // Manager-facing readability columns — appended, computed/denormalized
+    // at save time, never user-entered. "" on every visit that predates
+    // this change. specialty/area are looked up from Doctors/Clients/
+    // Nutritionists by client name (same lookup Medical Promotion already
+    // did internally, just not previously written to the sheet) so a
+    // manager can filter/scan the Visits tab without cross-referencing
+    // another tab. notesSummary/itemsSummary are plain-text renderings of
+    // data that already exists elsewhere on the row in a form meant for
+    // the APP to parse, not a human to read at a glance: notesSummary is
+    // `notes` as-is for a pharmacy visit, or every non-empty doctor
+    // quality-call field (objective/doctorNeeds/reaction/concern/
+    // doctorInsight/commitment/patientsToTry/callOutcome/keyLearning/
+    // nextAction/treatmentGoal/keyMessage/plannedObjectionHandling/
+    // plannedClose/buyingMotive/customerComments) concatenated with labels
+    // for a doctor/nutritionist visit; itemsSummary turns itemsMentioned's
+    // JSON into "Product ×qty (sample given)" style plain text. See
+    // computeNotesSummary/computeItemsSummary in visitSummaries.js —
+    // neither column is ever read back by the app itself, so reformatting
+    // them further later can never break anything that depends on them.
+    "specialty", "area", "notesSummary", "itemsSummary",
   ],
   // subTerritory appended (Pharmacy territory hierarchy) — a finer
   // classification WITHIN `area` (e.g. area="Dahiyeh", subTerritory="Chiyah"),

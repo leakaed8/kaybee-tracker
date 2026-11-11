@@ -15,6 +15,7 @@ const { buildMedicalPromotionSummary, MIN_DOCTORS_FOR_DISCLOSURE } = require("./
 const { computeFullRetailValue, hasPromotionalItems, computeEffectiveDiscountPct, evaluatePromotionalCap, MAX_PROMOTIONAL_EFFECTIVE_DISCOUNT_PCT } = require("./effectiveDiscount");
 const { offerRequiresApproval, orderNeedsOfferApproval } = require("./offerEligibility");
 const { isPromotionallyEligible } = require("./discountEligibility");
+const { computeNotesSummary, computeItemsSummary, attachVisitSummaryColumns } = require("./visitSummaries");
 
 const app = express();
 // Render sits in front of this app behind a proxy/load balancer — without
@@ -1150,6 +1151,8 @@ function parseVisit(v) {
     plannedObjectionHandling: v.plannedObjectionHandling || "", plannedClose: v.plannedClose || "",
     buyingMotive: v.buyingMotive || "", customerComments: v.customerComments || "",
     objectionResolution: v.objectionResolution || "", objectionNotes: v.objectionNotes || "",
+    specialty: v.specialty || "", area: v.area || "",
+    notesSummary: v.notesSummary || "", itemsSummary: v.itemsSummary || "",
   };
 }
 // Same formula as haversineKm in client/src/helpers.js — used here to check
@@ -1207,6 +1210,11 @@ function visitToRow(v) {
     plannedObjectionHandling: v.plannedObjectionHandling || "", plannedClose: v.plannedClose || "",
     buyingMotive: v.buyingMotive || "", customerComments: v.customerComments || "",
     objectionResolution: v.objectionResolution || "", objectionNotes: v.objectionNotes || "",
+    specialty: v.specialty || "", area: v.area || "",
+    // Filled in by attachVisitSummaryColumns right before the row is
+    // written — left blank here since they're derived from the fields
+    // above, never independent inputs of their own.
+    notesSummary: "", itemsSummary: "",
   };
 }
 
@@ -2781,8 +2789,15 @@ app.post("/api/visits", async (req, res) => {
       locationVerified,
       distanceFromCustomerKm,
       ...sanitizeDoctorVisitFields(req.body),
+      // Denormalized from whichever roster entity this visit actually
+      // matched (matchedClient/matchedDoctor/matchedNutritionist are
+      // already resolved above) so a manager can see specialty/area
+      // straight on the Visits row instead of cross-referencing another
+      // tab. A pharmacy/supplement store has no specialty.
+      specialty: matchedDoctor?.specialty || matchedNutritionist?.specialty || "",
+      area: matchedClient?.area || matchedDoctor?.area || matchedNutritionist?.area || "",
     };
-    const row = visitToRow(visit);
+    const row = attachVisitSummaryColumns(visitToRow(visit));
     await db.appendRow("Visits", row);
     if (req.repName) {
       const rep = allReps.find((r) => r.name === req.repName);
@@ -2956,6 +2971,20 @@ app.patch("/api/visits/:id", async (req, res) => {
       patch.treatmentGoal = sanitized.treatmentGoal; patch.keyMessage = sanitized.keyMessage;
       patch.plannedObjectionHandling = sanitized.plannedObjectionHandling; patch.plannedClose = sanitized.plannedClose;
       patch.buyingMotive = sanitized.buyingMotive; patch.customerComments = sanitized.customerComments;
+    }
+    // Keeps the two readable summary columns in sync with whatever this
+    // edit actually touched — merged onto the EXISTING row first, since
+    // patch here only ever carries the fields this one edit changed, not
+    // every doctor-call field (e.g. editing just `notes` on a pharmacy
+    // visit must not wipe out unrelated doctor fields that were never
+    // sent in this request — there are none for a pharmacy visit, but the
+    // merge is what makes that true in general, not a pharmacy-specific
+    // assumption).
+    if (patch.notes !== undefined || hasDoctorVisitFields) {
+      patch.notesSummary = computeNotesSummary({ ...visit, ...patch });
+    }
+    if (Array.isArray(mentionedItems)) {
+      patch.itemsSummary = computeItemsSummary(patch.itemsMentioned);
     }
     if (Object.keys(patch).length > 0) {
       await db.updateRowById("Visits", req.params.id, patch);
@@ -15154,6 +15183,13 @@ function rescheduleButtons(followUpId) {
 // builder — rebuilding that inside Telegram's button-only UI isn't
 // practical), so this deliberately only covers the visit itself.
 async function createVisitFromFollowUp(followUp) {
+  const nameLower = followUp.entityName.toLowerCase().trim();
+  const [clients, doctors, nutritionists] = await Promise.all([
+    db.getAllRows("Clients"), db.getAllRows("Doctors"), db.getAllRows("Nutritionists"),
+  ]);
+  const matchedClient = clients.find((c) => c.name.toLowerCase().trim() === nameLower);
+  const matchedDoctor = doctors.find((d) => d.name.toLowerCase().trim() === nameLower);
+  const matchedNutritionist = nutritionists.find((n) => n.name.toLowerCase().trim() === nameLower);
   const visit = {
     id: `v${crypto.randomUUID()}`,
     client: followUp.entityName,
@@ -15163,18 +15199,16 @@ async function createVisitFromFollowUp(followUp) {
     repName: followUp.repName,
     mentionedItems: [],
     objectionTag: "",
+    specialty: matchedDoctor?.specialty || matchedNutritionist?.specialty || "",
+    area: matchedClient?.area || matchedDoctor?.area || matchedNutritionist?.area || "",
   };
-  const row = visitToRow(visit);
+  const row = attachVisitSummaryColumns(visitToRow(visit));
   await db.appendRow("Visits", row);
   const reps = await db.getAllRows("Reps");
   const rep = reps.find((r) => r.name === followUp.repName);
   if (rep?.exportSheetId) await db.appendToRepExportSheet(rep.exportSheetId, row);
-  if (followUp.entityType !== "doctor") {
-    const clients = await db.getAllRows("Clients");
-    const matchedClient = clients.find((c) => c.name.toLowerCase().trim() === followUp.entityName.toLowerCase().trim());
-    if (matchedClient && !matchedClient.assignedRep) {
-      await db.updateRowById("Clients", matchedClient.id, { assignedRep: followUp.repName });
-    }
+  if (followUp.entityType !== "doctor" && matchedClient && !matchedClient.assignedRep) {
+    await db.updateRowById("Clients", matchedClient.id, { assignedRep: followUp.repName });
   }
   return visit;
 }
