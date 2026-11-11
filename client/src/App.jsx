@@ -1320,6 +1320,7 @@ function ProductRow({ product, repPhone, onRemove }) {
 function StockView({ products }) {
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("all");
+  const [exportingPriceList, setExportingPriceList] = useState(false);
 
   const categories = Array.from(new Set(products.map((p) => p.category).filter(Boolean))).sort();
 
@@ -1331,9 +1332,39 @@ function StockView({ products }) {
     .sort((a, b) => a.name.localeCompare(b.name));
   const shown = filtered.slice(0, LIST_DISPLAY_CAP);
 
+  // Simplified price list for handing to pharmacies — name, TTC price and
+  // brand only, one row per product (qty/expiry don't matter for this).
+  // Comes from a dedicated server endpoint, not this view's own `products`
+  // prop, since this is meant to be the FULL catalog, not whatever's
+  // currently filtered/capped on screen.
+  const handleExportPriceList = async () => {
+    setExportingPriceList(true);
+    try {
+      const { priceList } = await api.exportProductPriceList();
+      const rows = (priceList || []).map((p) => ({ Name: p.name, "TTC Price": p.ttc, Brand: p.brand }));
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Price List");
+      XLSX.writeFile(wb, `stock-price-list-${todayBeirutStr()}.xlsx`);
+    } catch (e) {
+      alert(e?.message || "Couldn't export the price list.");
+    } finally {
+      setExportingPriceList(false);
+    }
+  };
+
   return (
     <div>
-      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Stock</h2>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Stock</h2>
+        <button
+          onClick={handleExportPriceList}
+          disabled={exportingPriceList}
+          style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 12.5, fontWeight: 500 }}
+        >
+          <Download size={14} /> {exportingPriceList ? "Exporting…" : "Export price list"}
+        </button>
+      </div>
       <p style={{ fontSize: 13, color: "#8A8272", margin: "0 0 16px" }}>
         Quick lookup of what's in stock right now — handy even when you're not placing an order.
       </p>

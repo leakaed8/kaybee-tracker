@@ -1967,6 +1967,37 @@ app.post("/api/products/import-bulk", requireManagerOrSupervisor, async (req, re
   }
 });
 
+// Simplified price list for handing to pharmacies — unlike the import
+// above, open to anyone (no requireManagerOrSupervisor): every rep already
+// receives the full Products data as-is via /api/bootstrap/reference for
+// order-building autocomplete, so there's no extra data this exposes.
+// Collapses every batch of the same product (one row per expiry) down to a
+// single row — qty/expiry are internal stock-tracking detail a pharmacy
+// doesn't need on a price list — and reuses the same name-based brand
+// inference Product Catalog already uses, spelled out in full since this
+// copy leaves the app.
+app.get("/api/products/export-price-list", async (req, res) => {
+  try {
+    const rows = await db.getAllRows("Products");
+    const byName = new Map();
+    for (const row of rows) {
+      const key = String(row.name || "").trim().toLowerCase();
+      if (!key || byName.has(key)) continue;
+      const brand = inferProductCatalogBrand(row.name);
+      byName.set(key, {
+        name: String(row.name || "").trim(),
+        ttc: Number(row.price) || 0,
+        brand: brand === "Alfa" ? "Alfa Vitamins" : brand === "Mason" ? "Mason Vitamins" : "",
+      });
+    }
+    const priceList = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ priceList });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---------- Product Catalog (manager-curated master list, decoupled from Stock) ----------
 // Stock (the Products tab above) tracks per-batch qty + expiry and gets
 // fully replaced on every re-import, so it's the wrong place to hang

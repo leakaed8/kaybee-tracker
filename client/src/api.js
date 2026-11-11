@@ -113,6 +113,7 @@ export const api = {
   getProductCatalogStudies: (id) => request(`/product-catalog/${id}/studies`),
   importSampleInventory: () => request("/products/import-sample", { method: "POST" }),
   importBulkProducts: (products) => request("/products/import-bulk", { method: "POST", body: JSON.stringify({ products }) }),
+  exportProductPriceList: () => request("/products/export-price-list"),
   addVisit: (visit) => request("/visits", { method: "POST", body: JSON.stringify(visit) }),
   updateVisit: (id, patch) => request(`/visits/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   removeVisit: (id) => request(`/visits/${id}`, { method: "DELETE" }),
