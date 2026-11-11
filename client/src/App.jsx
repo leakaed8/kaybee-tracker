@@ -16571,6 +16571,10 @@ function RepsManagementSection({ onRepsChanged }) {
   const [savingEmailFor, setSavingEmailFor] = useState(null);
   const [rowErrors, setRowErrors] = useState({}); // per-rep error messages
   const [rowSaved, setRowSaved] = useState({}); // per-rep "saved" confirmation flash
+  const [passcodeEditFor, setPasscodeEditFor] = useState(null); // rep id currently showing the change-passcode input
+  const [passcodeDrafts, setPasscodeDrafts] = useState({}); // per-rep draft value while editing
+  const [savingPasscodeFor, setSavingPasscodeFor] = useState(null);
+  const [passcodeSaved, setPasscodeSaved] = useState({}); // per-rep "saved" confirmation flash — kept separate from rowSaved (email save) so the two controls don't flash together
   const [telegramStatus, setTelegramStatus] = useState(null);
   const [telegramLinkFor, setTelegramLinkFor] = useState({}); // rep id -> { code, botUsername }
   const [telegramLinking, setTelegramLinking] = useState(null);
@@ -16664,6 +16668,25 @@ function RepsManagementSection({ onRepsChanged }) {
     }
   };
 
+  const changePasscodeFor = async (rep) => {
+    const draft = passcodeDrafts[rep.id] || "";
+    if (!draft) return;
+    setSavingPasscodeFor(rep.id);
+    setRowErrors((prev) => ({ ...prev, [rep.id]: "" }));
+    try {
+      await api.updateRep(rep.id, { passcode: draft });
+      setPasscodeEditFor(null);
+      setPasscodeDrafts((prev) => ({ ...prev, [rep.id]: "" }));
+      setPasscodeSaved((prev) => ({ ...prev, [rep.id]: true }));
+      setTimeout(() => setPasscodeSaved((prev) => ({ ...prev, [rep.id]: false })), 1500);
+      await load();
+    } catch (e) {
+      setRowErrors((prev) => ({ ...prev, [rep.id]: e.message }));
+    } finally {
+      setSavingPasscodeFor(null);
+    }
+  };
+
   const saveEmailFor = async (rep) => {
     const emailToUse = (sheetEmails[rep.id] || "").trim();
     if (!emailToUse) return;
@@ -16711,7 +16734,17 @@ function RepsManagementSection({ onRepsChanged }) {
           {reps.map((r) => (
             <div key={r.id} style={{ background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 12px", fontSize: 12.5 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
-                <span><strong>{r.name}</strong> · passcode: {r.passcode}</span>
+                <span>
+                  <strong>{r.name}</strong> · passcode: {r.passcode}
+                  {passcodeEditFor !== r.id && (
+                    <button
+                      onClick={() => { setPasscodeEditFor(r.id); setPasscodeDrafts((prev) => ({ ...prev, [r.id]: "" })); }}
+                      style={{ marginLeft: 6, background: "none", border: "none", color: "#4C7A5E", fontSize: 11.5, cursor: "pointer", padding: 0 }}
+                    >
+                      Change
+                    </button>
+                  )}
+                </span>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, color: "#5B5445" }} title="Sees every rep's Locations + Performance, and can comment on any visit">
                     <input type="checkbox" checked={!!r.isSupervisor} onChange={() => toggleSupervisor(r)} />
@@ -16728,6 +16761,30 @@ function RepsManagementSection({ onRepsChanged }) {
                   <button onClick={() => removeRep(r.id)} style={{ background: "none", border: "none", color: "#B33A3A", fontSize: 11.5 }}>Remove</button>
                 </div>
               </div>
+              {passcodeEditFor === r.id && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                  <input
+                    value={passcodeDrafts[r.id] || ""}
+                    onChange={(e) => setPasscodeDrafts((prev) => ({ ...prev, [r.id]: e.target.value }))}
+                    placeholder="New passcode"
+                    style={{ ...inputStyle, flex: 1, minWidth: 140, fontSize: 11.5, padding: "5px 8px" }}
+                  />
+                  <button
+                    disabled={!passcodeDrafts[r.id] || savingPasscodeFor === r.id}
+                    onClick={() => changePasscodeFor(r)}
+                    style={{ fontSize: 11.5, padding: "5px 10px", borderRadius: 6, border: "none", background: passcodeDrafts[r.id] ? "#1F2A24" : "#D8D2C4", color: "#FAF7F2" }}
+                  >
+                    {savingPasscodeFor === r.id ? "Saving…" : passcodeSaved[r.id] ? "✓ Saved" : "Save"}
+                  </button>
+                  <button
+                    onClick={() => { setPasscodeEditFor(null); setPasscodeDrafts((prev) => ({ ...prev, [r.id]: "" })); }}
+                    style={{ fontSize: 11.5, padding: "5px 10px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445" }}
+                  >
+                    Cancel
+                  </button>
+                  {rowErrors[r.id] && <div style={{ fontSize: 11, color: "#B33A3A", width: "100%" }}>{rowErrors[r.id]}</div>}
+                </div>
+              )}
               {r.exportSheetId ? (
                 <a href={`https://docs.google.com/spreadsheets/d/${r.exportSheetId}/edit`} target="_blank" rel="noreferrer" style={{ fontSize: 11.5, color: "#4C7A5E", display: "inline-block", marginTop: 6 }}>
                   Visits sheet ({r.email}) →

@@ -5254,6 +5254,10 @@ app.patch("/api/reps/:id", requireManager, async (req, res) => {
   try {
     const patch = {};
     if (req.body.email !== undefined) patch.email = req.body.email.trim();
+    if (req.body.passcode !== undefined) {
+      if (!req.body.passcode) return res.status(400).json({ error: "Passcode can't be empty." });
+      patch.passcode = req.body.passcode;
+    }
     if (req.body.isSupervisor !== undefined) patch.isSupervisor = req.body.isSupervisor ? "true" : "false";
     // Independent, combinable flags, not mutually exclusive — a rep can be
     // both a sales rep (Pharmacies + Supplement Stores) and a med rep
