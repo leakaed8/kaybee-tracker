@@ -1591,8 +1591,56 @@ function clampLimit(raw, def, max) {
 // only by the specific view/moment that needs them instead of shipped to
 // every open session on a fixed timer.
 
+// specialty/area/notesSummary/itemsSummary were only ever computed going
+// FORWARD (POST /api/visits, PATCH /api/visits/:id, createVisitFromFollowUp)
+// when those columns were added — every visit already on the sheet at that
+// point was left with "" in all four, since nothing ever went back and
+// filled them in. Same backfill-on-read shape as
+// ensureProductCatalogBrandBackfilled: runs the full Visits scan at most
+// once per server lifetime (the checked flag), only fills a column that's
+// currently blank (never overwrites a value already there), and batches
+// every row's patch into one write instead of one Sheets call per visit.
+let visitSummaryColumnsBackfillChecked = false;
+const ensureVisitSummaryColumnsBackfilled = singleFlight(async function ensureVisitSummaryColumnsBackfilled() {
+  if (visitSummaryColumnsBackfillChecked) return;
+  const [rows, clients, doctors, nutritionists] = await Promise.all([
+    db.getAllRows("Visits"), db.getAllRows("Clients"), db.getAllRows("Doctors"), db.getAllRows("Nutritionists"),
+  ]);
+  const clientByName = new Map(clients.map((c) => [c.name.toLowerCase().trim(), c]));
+  const doctorByName = new Map(doctors.map((d) => [d.name.toLowerCase().trim(), d]));
+  const nutritionistByName = new Map(nutritionists.map((n) => [n.name.toLowerCase().trim(), n]));
+  const updates = [];
+  for (const row of rows) {
+    const nameLower = String(row.client || "").toLowerCase().trim();
+    const matchedClient = clientByName.get(nameLower);
+    const matchedDoctor = doctorByName.get(nameLower);
+    const matchedNutritionist = nutritionistByName.get(nameLower);
+    const patch = {};
+    if (!row.specialty) {
+      const specialty = matchedDoctor?.specialty || matchedNutritionist?.specialty || "";
+      if (specialty) patch.specialty = specialty;
+    }
+    if (!row.area) {
+      const area = matchedClient?.area || matchedDoctor?.area || matchedNutritionist?.area || "";
+      if (area) patch.area = area;
+    }
+    if (!row.notesSummary) {
+      const notesSummary = computeNotesSummary(row);
+      if (notesSummary) patch.notesSummary = notesSummary;
+    }
+    if (!row.itemsSummary) {
+      const itemsSummary = computeItemsSummary(row.itemsMentioned);
+      if (itemsSummary) patch.itemsSummary = itemsSummary;
+    }
+    if (Object.keys(patch).length) updates.push({ id: row.id, patch });
+  }
+  if (updates.length) await db.batchUpdateRows("Visits", updates);
+  visitSummaryColumnsBackfillChecked = true;
+});
+
 app.get("/api/visits", async (req, res) => {
   try {
+    await ensureVisitSummaryColumnsBackfilled();
     const { client, repName, limit, all } = req.query;
     const isTeamWide = req.role === "manager" || req.isSupervisor;
     const [rows, commentRows] = await Promise.all([
