@@ -207,6 +207,16 @@ function requireManager(req, res, next) {
   next();
 }
 
+// Narrower than opening up the whole Settings tab (which stays
+// manager-only in the nav/UI) — lets the Head of Sales use ONE specific
+// manager capability (currently just the Stock import) without exposing
+// every other manager-only control. Same "manager or Head of Sales"
+// convention already used elsewhere (e.g. POST /api/orders/:id/approve-offer).
+function requireManagerOrSupervisor(req, res, next) {
+  if (req.role !== "manager" && !req.isSupervisor) return res.status(403).json({ error: "Managers or Head of Sales only." });
+  next();
+}
+
 // /api/login had no attempt limit at all — a script could try passcodes
 // back-to-back with no delay or lockout. This is a simple in-memory, per-IP
 // sliding-window limiter: good enough for a small team app on a single
@@ -314,6 +324,13 @@ const DEFAULT_SETTINGS = {
   qualityCallRequiredFields: ["reaction", "commitment", "callOutcome"],
   tierVisitFrequency: { A: { perMonth: 2 }, B: { perMonth: 1 }, C: { perMonth: 0.4 } },
   tabVisibility: DEFAULT_TAB_VISIBILITY,
+  // Who last ran the Stock (Excel) import under Settings and when — the
+  // import itself is now open to the manager or the Head of Sales (see
+  // requireManagerOrSupervisor), so this is the audit trail that lets
+  // either of them see who touched it last without granting the Head of
+  // Sales any other Settings access.
+  stockImportLastBy: "",
+  stockImportLastAt: "",
 };
 
 // A saved tabVisibility JSON might predate a tab added to
@@ -357,6 +374,8 @@ function parseSettings(raw) {
     // its correct fallback is "whichever year it actually is right now,"
     // not whatever year the server happened to boot in.
     stockMovementActiveYear: raw.stockMovementActiveYear !== undefined ? Number(raw.stockMovementActiveYear) : beirutDateParts(new Date()).year,
+    stockImportLastBy: raw.stockImportLastBy !== undefined ? raw.stockImportLastBy : DEFAULT_SETTINGS.stockImportLastBy,
+    stockImportLastAt: raw.stockImportLastAt !== undefined ? raw.stockImportLastAt : DEFAULT_SETTINGS.stockImportLastAt,
   };
 }
 
@@ -1842,7 +1861,7 @@ app.post("/api/products/import-sample", async (req, res) => {
   }
 });
 
-app.post("/api/products/import-bulk", async (req, res) => {
+app.post("/api/products/import-bulk", requireManagerOrSupervisor, async (req, res) => {
   try {
     const { products } = req.body;
     if (!Array.isArray(products) || products.length === 0) {
@@ -1891,6 +1910,8 @@ app.post("/api/products/import-bulk", async (req, res) => {
       return res.status(400).json({ error: "None of the rows had both a name and an expiry date" });
     }
     await db.replaceAllRows("Products", normalized);
+    const importedBy = req.role === "manager" ? "Manager" : req.repName;
+    await db.setSettings({ stockImportLastBy: importedBy, stockImportLastAt: new Date().toISOString() });
     res.json({ ok: true, count: normalized.length });
   } catch (e) {
     logErr(e);

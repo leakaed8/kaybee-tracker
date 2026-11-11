@@ -691,6 +691,10 @@ export default function App() {
         {canSeeTab("samples") && <TabBtn active={tab === "samples"} onClick={() => setTab("samples")} icon={<Gift size={15} />} label="Samples" />}
         {canSeeTab("medicalPromotion") && <TabBtn active={tab === "medicalPromotion"} onClick={() => setTab("medicalPromotion")} icon={<Megaphone size={15} />} label="Medical Promotion Activity" />}
         {role === "manager" && <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} icon={<Settings size={15} />} label="Settings" />}
+        {/* Head of Sales gets just this one manager capability (keeping the
+            stock available with expiry dates current), not the rest of
+            Settings — see requireManagerOrSupervisor server-side. */}
+        {isSupervisor && <TabBtn active={tab === "stockImport"} onClick={() => setTab("stockImport")} icon={<Upload size={15} />} label="Stock Import" />}
       </nav>
 
       <main style={{ padding: "24px", maxWidth: 900, margin: "0 auto" }}>
@@ -883,6 +887,14 @@ export default function App() {
               />
             )}
             {tab === "broadcast" && role === "manager" && <BroadcastView zoned={zoned} clients={clients} />}
+            {tab === "stockImport" && isSupervisor && (
+              <StockImportView
+                onBulkImport={bulkImportProducts}
+                productCount={products.length}
+                lastUpdatedBy={settings.stockImportLastBy}
+                lastUpdatedAt={settings.stockImportLastAt}
+              />
+            )}
             {tab === "settings" && role === "manager" && (
               <SettingsView
                 role={role}
@@ -892,6 +904,8 @@ export default function App() {
                 templates={settings.templates} setTemplates={(v) => updateSettingsField({ templates: v })}
                 onBulkImport={bulkImportProducts}
                 productCount={products.length}
+                stockImportLastBy={settings.stockImportLastBy}
+                stockImportLastAt={settings.stockImportLastAt}
                 onRepsChanged={refreshLive}
                 offers={offers}
                 onAddOffer={addOffer}
@@ -16320,7 +16334,19 @@ function ProductCatalogSection({ products, onAdd, onUpdate, onRemove, onImportBu
 }
 
 // ---------- Excel upload with column mapping ----------
-function ExcelImportSection({ onImport, productCount }) {
+// Head of Sales' entire view of this capability — just the one import
+// section, not the rest of Settings (see requireManagerOrSupervisor
+// server-side and the "Stock Import" nav tab above).
+function StockImportView({ onBulkImport, productCount, lastUpdatedBy, lastUpdatedAt }) {
+  return (
+    <div>
+      <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Stock Import</h2>
+      <ExcelImportSection onImport={onBulkImport} productCount={productCount} lastUpdatedBy={lastUpdatedBy} lastUpdatedAt={lastUpdatedAt} />
+    </div>
+  );
+}
+
+function ExcelImportSection({ onImport, productCount, lastUpdatedBy, lastUpdatedAt }) {
   const [sheetNames, setSheetNames] = useState([]);
   const [selectedSheet, setSelectedSheet] = useState("");
   const [workbook, setWorkbook] = useState(null);
@@ -16441,6 +16467,12 @@ function ExcelImportSection({ onImport, productCount }) {
       <p style={{ fontSize: 11.5, color: "#8A8272", marginBottom: 10, fontStyle: "italic" }}>
         If your sheet has a product code / SKU, map it below — matching by code means a product keeps its dosage/pack-size details (and any orders/samples pointing to it) across re-imports even if its name changes. Without one, matching falls back to name.
       </p>
+
+      {lastUpdatedAt && (
+        <p style={{ fontSize: 12, color: "#5B5445", marginBottom: 10 }}>
+          Last updated: {new Date(lastUpdatedAt).toLocaleString()}{lastUpdatedBy ? ` by ${lastUpdatedBy}` : ""}
+        </p>
+      )}
 
       <button
         onClick={() => fileInputRef.current?.click()}
@@ -18411,7 +18443,7 @@ function CollapsibleSection({ title, defaultOpen = false, children }) {
 }
 
 // ---------- Settings ----------
-function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts, onUploadCatalogProductImages, onSetCatalogProductImageApproval, onFindMissingCatalogImages, onGetFindImagesStatus, onRefreshAfterFindImages, competitors, onAddCompetitor, onUpdateCompetitor, onRemoveCompetitor, onAddCompetitorProduct, onUpdateCompetitorProduct, onRemoveCompetitorProduct, onImportCompetitorProducts, repNames = [], tabVisibility, setTabVisibility, products = [], stockMovementActiveYear, onLockStockMovementYear }) {
+function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepPhone, dailyTarget, setDailyTarget, templates, setTemplates, onBulkImport, productCount, onRepsChanged, offers, onAddOffer, onToggleOfferActive, onRemoveOffer, productCatalog, onAddCatalogProduct, onUpdateCatalogProduct, onRemoveCatalogProduct, onBulkImportCatalogProducts, onUploadCatalogProductImages, onSetCatalogProductImageApproval, onFindMissingCatalogImages, onGetFindImagesStatus, onRefreshAfterFindImages, competitors, onAddCompetitor, onUpdateCompetitor, onRemoveCompetitor, onAddCompetitorProduct, onUpdateCompetitorProduct, onRemoveCompetitorProduct, onImportCompetitorProducts, repNames = [], tabVisibility, setTabVisibility, products = [], stockMovementActiveYear, onLockStockMovementYear, stockImportLastBy, stockImportLastAt }) {
   return (
     <div>
       <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 16px" }}>Settings</h2>
@@ -18446,7 +18478,7 @@ function SettingsView({ role, slowThreshold, setSlowThreshold, repPhone, setRepP
 
       {role === "manager" && (
         <CollapsibleSection title="Import products (Excel)">
-          <ExcelImportSection onImport={onBulkImport} productCount={productCount} />
+          <ExcelImportSection onImport={onBulkImport} productCount={productCount} lastUpdatedBy={stockImportLastBy} lastUpdatedAt={stockImportLastAt} />
         </CollapsibleSection>
       )}
 
