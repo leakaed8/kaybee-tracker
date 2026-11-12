@@ -672,10 +672,7 @@ export default function App() {
         {false && role === "manager" && <TabBtn active={tab === "outreach"} onClick={() => setTab("outreach")} icon={<MessageCircle size={15} />} label="Outreach" />}
         {false && role === "manager" && <TabBtn active={tab === "broadcast"} onClick={() => setTab("broadcast")} icon={<Megaphone size={15} />} label="Broadcast" />}
         {role === "rep" && <TabBtn active={tab === "checkin"} onClick={() => setTab("checkin")} icon={<MapPin size={15} />} label="Check-In" />}
-        {/* Route tab hidden for now (temporary — flip this back to
-            role === "rep" && !isSupervisor to re-enable). RouteView and its
-            render block below are untouched, so this is a one-line revert. */}
-        {false && role === "rep" && !isSupervisor && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
+        {role === "rep" && !isSupervisor && <TabBtn active={tab === "route"} onClick={() => setTab("route")} icon={<Navigation size={15} />} label="Route" />}
         {canSales && <TabBtn active={tab === "clients"} onClick={() => setTab("clients")} icon={<Users size={15} />} label="Pharmacies" />}
         {canSales && <TabBtn active={tab === "supplementStores"} onClick={() => setTab("supplementStores")} icon={<Boxes size={15} />} label="Supplement Stores" />}
         {!isSupervisor && canMed && <TabBtn active={tab === "doctors"} onClick={() => setTab("doctors")} icon={<Stethoscope size={15} />} label="Doctors" />}
@@ -8030,6 +8027,70 @@ function RepRouteMap({ points }) {
   return <div ref={containerRef} style={{ height: 420, borderRadius: 10, border: "1px solid #E5DFD3" }} />;
 }
 
+// Team-wide version of RepRouteMap — every rep's events for one day on the
+// same map, one polyline per rep in its own color (cycling through
+// CHART_COLORS, same palette already used for per-series coloring
+// elsewhere) instead of RepRouteMap's single-rep punch/visit coloring,
+// which stops being meaningful once several reps' points are mixed
+// together. Each rep's own points are still numbered in their own
+// chronological order (1, 2, 3... per rep, not one shared sequence).
+function TeamRouteMap({ points }) {
+  const containerRef = useRef(null);
+  const mapRef = useRef(null);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const map = L.map(containerRef.current, { scrollWheelZoom: true }).setView([33.89, 35.5], 12);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap contributors",
+      maxZoom: 19,
+    }).addTo(map);
+    mapRef.current = map;
+    return () => { map.remove(); mapRef.current = null; };
+  }, []);
+
+  const repNames = [...new Set(points.map((p) => p.repName))].sort();
+  const colorFor = (repName) => CHART_COLORS[repNames.indexOf(repName) % CHART_COLORS.length];
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.eachLayer((layer) => { if (!(layer instanceof L.TileLayer)) map.removeLayer(layer); });
+    if (points.length === 0) return;
+
+    const allLatlngs = [];
+    for (const repName of repNames) {
+      const repPoints = points.filter((p) => p.repName === repName).sort((a, b) => new Date(a.time) - new Date(b.time));
+      const color = colorFor(repName);
+      const latlngs = repPoints.map((p) => [Number(p.coords.lat), Number(p.coords.lng)]);
+      allLatlngs.push(...latlngs);
+      L.polyline(latlngs, { color, weight: 3, opacity: 0.75 }).addTo(map);
+      repPoints.forEach((p, i) => {
+        const marker = L.circleMarker(latlngs[i], { radius: 10, color: "#fff", weight: 2, fillColor: color, fillOpacity: 1 }).addTo(map);
+        marker.bindTooltip(String(i + 1), { permanent: true, direction: "center", className: "kb-route-marker-label" });
+        marker.bindPopup(`<b>${repName} — ${i + 1}. ${p.label}</b><br/>${new Date(p.time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Beirut" })}`);
+      });
+    }
+
+    if (allLatlngs.length === 1) map.setView(allLatlngs[0], 15);
+    else map.fitBounds(allLatlngs, { padding: [30, 30] });
+  }, [points]);
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+        {repNames.map((repName) => (
+          <div key={repName} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 5, background: colorFor(repName), display: "inline-block" }} />
+            {repName}
+          </div>
+        ))}
+      </div>
+      <div ref={containerRef} style={{ height: 420, borderRadius: 10, border: "1px solid #E5DFD3" }} />
+    </div>
+  );
+}
+
 function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemoveVisit, onAddComment }) {
   const [selectedRep, setSelectedRep] = useState("all");
   const [confirmId, setConfirmId] = useState(null);
@@ -8138,16 +8199,15 @@ function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemov
 
   const shownEvents = allEvents.slice(0, LIST_DISPLAY_CAP);
 
-  // The route map only ever makes sense for one rep on one day — plotting
-  // several reps' movements on the same map would just overlap into an
-  // unreadable tangle. Points are ordered oldest-first (the direction the
-  // rep actually moved), and anything without a captured GPS is dropped
+  // One rep selected: that rep's own events for the day, oldest-first (the
+  // direction they actually moved). "All reps": every rep's events for the
+  // day in one list — TeamRouteMap below groups them back out by repName
+  // and draws one route per rep in its own color, so this stays a single
+  // computation either way. Anything without a captured GPS is dropped
   // rather than plotted at a wrong/default spot.
-  const routePoints = selectedRep !== "all"
-    ? [...visitEvents, ...punchEvents]
-        .filter((e) => e.coords && beirutDateStrOfInstant(e.time) === routeDate)
-        .sort((a, b) => new Date(a.time) - new Date(b.time))
-    : [];
+  const routePoints = [...visitEvents, ...punchEvents]
+    .filter((e) => e.coords && beirutDateStrOfInstant(e.time) === routeDate)
+    .sort((a, b) => new Date(a.time) - new Date(b.time));
 
   const doDelete = (id) => { onRemoveVisit(id).then(loadEvents); setConfirmId(null); };
 
@@ -8192,18 +8252,21 @@ function LocationsView({ role, isSupervisor, clients, doctors, repNames, onRemov
       </div>
 
       {viewMode === "map" ? (
-        selectedRep === "all" ? (
-          <EmptyState text="Pick a specific rep above to see their route for a day." />
+        routePoints.length === 0 ? (
+          <EmptyState text={selectedRep === "all" ? "No GPS-tagged events for anyone on this day." : "No GPS-tagged events for this rep on this day."} />
+        ) : selectedRep === "all" ? (
+          <div>
+            <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 10px" }}>
+              Every rep's {fmtDate(routeDate)} — one route per rep, numbered in the order it happened. Pick a specific rep above for punch-in/punch-out/visit coloring instead.
+            </p>
+            <TeamRouteMap points={routePoints} />
+          </div>
         ) : (
           <div>
             <p style={{ fontSize: 12.5, color: "#8A8272", margin: "0 0 10px" }}>
               {selectedRep}'s {fmtDate(routeDate)} — numbered in the order it happened. Green = punched in, red = punched out, blue = pharmacy/doctor visit.
             </p>
-            {routePoints.length === 0 ? (
-              <EmptyState text="No GPS-tagged events for this rep on this day." />
-            ) : (
-              <RepRouteMap points={routePoints} />
-            )}
+            <RepRouteMap points={routePoints} />
           </div>
         )
       ) : (
