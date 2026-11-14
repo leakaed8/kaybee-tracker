@@ -1510,22 +1510,54 @@ function StockView({ products }) {
   // Comes from a dedicated server endpoint, not this view's own `products`
   // prop, since this is meant to be the FULL catalog, not whatever's
   // currently filtered/capped on screen.
+  //
+  // A branded PDF, not an Excel file — the free Excel library this app
+  // uses (SheetJS Community Edition) can't write cell colors/fonts at all
+  // (verified directly against its output), so there's no way to get a
+  // real KB Pharma look in an .xlsx. jsPDF + autoTable (already used for
+  // the order PDF below) gives crisp, real text with proper automatic
+  // pagination for a long catalog, unlike a rasterized brochure-style page.
+  // Reuses the brochure's own logo loader and green palette (BROCHURE_COLORS)
+  // so this reads as the same brand, not a different shade of green.
   const handleExportPriceList = async () => {
     setExportingPriceList(true);
     try {
-      const { priceList } = await api.exportProductPriceList();
-      const rows = (priceList || []).map((p) => ({ Name: p.name, "TTC Price": p.ttc, Brand: p.brand }));
-      const ws = XLSX.utils.json_to_sheet(rows);
-      // Without explicit widths, every column defaults to just wide enough
-      // for its header ("Name") — fine in a real spreadsheet app where a
-      // rep can drag it wider, but several phone/tablet file previews open
-      // straight into a fixed, non-editable view at that default width, so
-      // product names were showing up truncated before this ever got to a
-      // real editor.
-      ws["!cols"] = [{ wch: 45 }, { wch: 12 }, { wch: 16 }];
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "Price List");
-      XLSX.writeFile(wb, `stock-price-list-${todayBeirutStr()}.xlsx`);
+      const [{ priceList }, logoDataUrl] = await Promise.all([api.exportProductPriceList(), ensureBrochureLogoDataUrl()]);
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const inkRgb = [23, 63, 51]; // BROCHURE_COLORS.ink
+      const sageRgb = [74, 124, 89]; // BROCHURE_COLORS.sage
+      const sageLightRgb = [234, 242, 236]; // BROCHURE_COLORS.sageLight
+
+      // Repeated on every page (didDrawPage fires once per page, page 1
+      // included) so a long catalog spanning several pages still reads as
+      // one branded document throughout, not just a title page followed by
+      // plain table pages.
+      const drawHeader = () => {
+        if (logoDataUrl) doc.addImage(logoDataUrl, "JPEG", pageWidth / 2 - 13, 10, 26, 26);
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(22);
+        doc.setTextColor(...inkRgb);
+        doc.text("KB PHARMA", pageWidth / 2, 45, { align: "center" });
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(12);
+        doc.setTextColor(...sageRgb);
+        doc.text("In Stock", pageWidth / 2, 52, { align: "center" });
+      };
+
+      autoTable(doc, {
+        startY: 60,
+        margin: { top: 60 },
+        head: [["Name", "TTC Price", "Brand"]],
+        body: (priceList || []).map((p) => [p.name, Number(p.ttc).toFixed(2), p.brand]),
+        headStyles: { fillColor: inkRgb, textColor: [255, 255, 255], fontStyle: "bold" },
+        alternateRowStyles: { fillColor: sageLightRgb },
+        styles: { fontSize: 9.5, textColor: [40, 40, 40], cellPadding: 4 },
+        columnStyles: { 1: { halign: "right" } },
+        didDrawPage: drawHeader,
+      });
+
+      doc.save(`kb-pharma-in-stock-${todayBeirutStr()}.pdf`);
     } catch (e) {
       alert(e?.message || "Couldn't export the price list.");
     } finally {
