@@ -21,6 +21,17 @@ const REQUEST_TIMEOUT_MS = 60000;
 // visit) risks a real double-submission if the first attempt actually
 // reached the server and only the response was lost in transit.
 async function request(path, options, retries = 0) {
+  // Airplane mode (or any state with zero network interface up) should fail
+  // instantly, not wait out the 60s cold-start allowance above — that's for
+  // a request that actually went out and got no answer back, not one that
+  // never had anywhere to go. navigator.onLine reflects "no network
+  // interface at all," which is exactly airplane mode; a real captive-
+  // portal/DNS-is-up-but-server-is-down case still falls through to fetch()
+  // and the timeout below, since the browser can't know about that in
+  // advance.
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    throw new TypeError("Failed to fetch");
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   let res;
