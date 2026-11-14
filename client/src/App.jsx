@@ -1534,20 +1534,19 @@ function StockView({ products }) {
       // one branded document throughout, not just a title page followed by
       // plain table pages.
       const drawHeader = () => {
-        if (logoDataUrl) doc.addImage(logoDataUrl, "JPEG", pageWidth / 2 - 13, 10, 26, 26);
-        doc.setFont("helvetica", "bold");
-        doc.setFontSize(22);
-        doc.setTextColor(...inkRgb);
-        doc.text("KB PHARMA", pageWidth / 2, 45, { align: "center" });
+        // The logo already reads "KayBee Pharma" on its own — no separate
+        // text title alongside it, just the logo (large, since it's now
+        // the only thing carrying the brand) and the "In Stock" subtitle.
+        if (logoDataUrl) doc.addImage(logoDataUrl, "JPEG", pageWidth / 2 - 23, 10, 46, 46);
         doc.setFont("helvetica", "normal");
-        doc.setFontSize(12);
+        doc.setFontSize(14);
         doc.setTextColor(...sageRgb);
-        doc.text("In Stock", pageWidth / 2, 52, { align: "center" });
+        doc.text("In Stock", pageWidth / 2, 64, { align: "center" });
       };
 
       autoTable(doc, {
-        startY: 60,
-        margin: { top: 60 },
+        startY: 74,
+        margin: { top: 74 },
         head: [["Name", "TTC Price", "Brand"]],
         body: (priceList || []).map((p) => [p.name, Number(p.ttc).toFixed(2), p.brand]),
         headStyles: { fillColor: inkRgb, textColor: [255, 255, 255], fontStyle: "bold" },
