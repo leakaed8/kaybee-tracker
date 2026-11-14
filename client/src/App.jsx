@@ -1516,6 +1516,13 @@ function StockView({ products }) {
       const { priceList } = await api.exportProductPriceList();
       const rows = (priceList || []).map((p) => ({ Name: p.name, "TTC Price": p.ttc, Brand: p.brand }));
       const ws = XLSX.utils.json_to_sheet(rows);
+      // Without explicit widths, every column defaults to just wide enough
+      // for its header ("Name") — fine in a real spreadsheet app where a
+      // rep can drag it wider, but several phone/tablet file previews open
+      // straight into a fixed, non-editable view at that default width, so
+      // product names were showing up truncated before this ever got to a
+      // real editor.
+      ws["!cols"] = [{ wch: 45 }, { wch: 12 }, { wch: 16 }];
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Price List");
       XLSX.writeFile(wb, `stock-price-list-${todayBeirutStr()}.xlsx`);
