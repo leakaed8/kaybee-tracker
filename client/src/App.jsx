@@ -1494,6 +1494,11 @@ function StockView({ products }) {
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("all");
   const [exportingPriceList, setExportingPriceList] = useState(false);
+  // Holds {blob, filename} once generated, on a device that can share a
+  // real file (see canShareFiles) — see the comment on handleExportPriceList
+  // for why the actual share/save has to wait for a SECOND, fresh tap
+  // rather than happening right after generation finishes.
+  const [priceListReadyToShare, setPriceListReadyToShare] = useState(null);
 
   const categories = Array.from(new Set(products.map((p) => p.category).filter(Boolean))).sort();
 
@@ -1519,8 +1524,23 @@ function StockView({ products }) {
   // pagination for a long catalog, unlike a rasterized brochure-style page.
   // Reuses the brochure's own logo loader and green palette (BROCHURE_COLORS)
   // so this reads as the same brand, not a different shade of green.
+  //
+  // Reuses the brochure PDFs' own share-vs-download handling — on an iOS
+  // home-screen PWA in particular, doc.save() isn't honored as a real
+  // download at all; it just navigates to the generated blob: URL and
+  // displays the PDF inline in the browser, address bar and all, with
+  // nothing to actually hand off yet. canShareFiles()/shareOrDownloadPdfBlob
+  // route this through the native share sheet instead wherever the OS
+  // supports it, so a rep sends the pharmacy the real file (WhatsApp, Mail,
+  // AirDrop, Save to Files…), never that page or its link. Web Share API
+  // needs a fresh user gesture, and this PDF takes a moment to build (the
+  // logo fetch, autoTable laying out a long catalog) — too long to still
+  // count as "the same click" — so when sharing is possible, this stops at
+  // priceListReadyToShare and waits for a second tap on "Share PDF"/"Save"
+  // below instead of trying to share immediately.
   const handleExportPriceList = async () => {
     setExportingPriceList(true);
+    setPriceListReadyToShare(null);
     try {
       const [{ priceList }, logoDataUrl] = await Promise.all([api.exportProductPriceList(), ensureBrochureLogoDataUrl()]);
       const doc = new jsPDF();
@@ -1556,7 +1576,13 @@ function StockView({ products }) {
         didDrawPage: drawHeader,
       });
 
-      doc.save(`kb-pharma-in-stock-${todayBeirutStr()}.pdf`);
+      const blob = doc.output("blob");
+      const filename = `kb-pharma-in-stock-${todayBeirutStr()}.pdf`;
+      if (canShareFiles()) {
+        setPriceListReadyToShare({ blob, filename });
+      } else {
+        await shareOrDownloadPdfBlob(blob, filename);
+      }
     } catch (e) {
       alert(e?.message || "Couldn't export the price list.");
     } finally {
@@ -1568,13 +1594,32 @@ function StockView({ products }) {
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <h2 className="kb-font-display" style={{ fontSize: 20, fontWeight: 600, margin: "0 0 6px" }}>Stock</h2>
-        <button
-          onClick={handleExportPriceList}
-          disabled={exportingPriceList}
-          style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 12.5, fontWeight: 500 }}
-        >
-          <Download size={14} /> {exportingPriceList ? "Exporting…" : "Export price list"}
-        </button>
+        {priceListReadyToShare ? (
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              onClick={() => { const { blob, filename } = priceListReadyToShare; setPriceListReadyToShare(null); shareOrDownloadPdfBlob(blob, filename); }}
+              title="Send this PDF straight to WhatsApp/Mail/AirDrop — no app link, no preview page"
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 8, border: "1px solid #4C7A5E", background: "#4C7A5E", color: "#fff", fontSize: 12.5, fontWeight: 500 }}
+            >
+              Share PDF
+            </button>
+            <button
+              onClick={() => { const { blob, filename } = priceListReadyToShare; setPriceListReadyToShare(null); downloadPdfBlobDirectly(blob, filename); }}
+              title="Save this PDF straight to your device, no share sheet"
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 8, border: "1px solid #4C7A5E", background: "#fff", color: "#4C7A5E", fontSize: 12.5, fontWeight: 500 }}
+            >
+              Save
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={handleExportPriceList}
+            disabled={exportingPriceList}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 12.5, fontWeight: 500 }}
+          >
+            <Download size={14} /> {exportingPriceList ? "Exporting…" : "Export price list"}
+          </button>
+        )}
       </div>
       <p style={{ fontSize: 13, color: "#8A8272", margin: "0 0 16px" }}>
         Quick lookup of what's in stock right now — handy even when you're not placing an order.
