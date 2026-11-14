@@ -75,6 +75,21 @@ const savePendingDoctors = (list) => {
   try { localStorage.setItem(PENDING_DOCTORS_KEY, JSON.stringify(list)); } catch { /* storage unavailable — nothing more we can do */ }
 };
 
+// Same idea, for Punch In/Out — this one matters more than most: the whole
+// app is gated behind having punched in today (see PunchInGate), so a rep
+// with no reception at the very start of the day used to be stuck on that
+// screen, unable to do anything at all. Queued here and merged into the
+// "effective" last punch the app actually checks against (see
+// effectiveLastPunch in App) so punching in offline unlocks everything
+// immediately, same as a real one would.
+const PENDING_PUNCHES_KEY = "kb_pending_punches";
+const loadPendingPunches = () => {
+  try { return JSON.parse(localStorage.getItem(PENDING_PUNCHES_KEY) || "[]"); } catch { return []; }
+};
+const savePendingPunches = (list) => {
+  try { localStorage.setItem(PENDING_PUNCHES_KEY, JSON.stringify(list)); } catch { /* storage unavailable — nothing more we can do */ }
+};
+
 // Same idea, for orders placed against a pharmacy/supplement store while
 // there's no reception — a rep in a dead zone shouldn't lose an order just
 // because the request couldn't go out yet.
@@ -115,6 +130,23 @@ const loadReferenceCache = () => {
 };
 const saveReferenceCache = (data) => {
   try { localStorage.setItem(REFERENCE_CACHE_KEY, JSON.stringify(data)); } catch { /* storage unavailable — nothing more we can do */ }
+};
+
+// GET /api/session needs a connection just like anything else — without
+// this, a rep whose phone has no reception yet (first thing in the
+// morning, or the browser/PWA was closed and reopened) got bounced to the
+// login screen, which itself can't succeed offline either: the app
+// genuinely couldn't be opened at all with no signal. Caches the last
+// successful session so a network failure here (see isNetworkError below)
+// can restore it instead of forcing a login that has no chance of working.
+// A real rejection (session actually invalid/expired) is a normal server
+// response, not a network error, so it still logs out as before.
+const SESSION_CACHE_KEY = "kb_session_cache";
+const loadSessionCache = () => {
+  try { return JSON.parse(localStorage.getItem(SESSION_CACHE_KEY) || "null"); } catch { return null; }
+};
+const saveSessionCache = (data) => {
+  try { localStorage.setItem(SESSION_CACHE_KEY, JSON.stringify(data)); } catch { /* storage unavailable — nothing more we can do */ }
 };
 
 // Distinguishes "the request never reached the server" (no reception — safe
@@ -230,16 +262,20 @@ function isTabVisibleFor(tabVisibility, tabKey, role, isSupervisor, isSalesRep, 
 // ---------- main app ----------
 export default function App() {
   const [authState, setAuthState] = useState("checking"); // checking | out | in
-  const [role, setRole] = useState("manager");
-  const [repName, setRepName] = useState("");
-  const [isSupervisor, setIsSupervisor] = useState(false);
+  // Seeded from the last successful /api/session (see SESSION_CACHE_KEY) so
+  // that if the live check below fails with a network error rather than a
+  // real rejection, these are already the right values to fall back to —
+  // nothing further to set in that branch.
+  const [role, setRole] = useState(() => loadSessionCache()?.role || "manager");
+  const [repName, setRepName] = useState(() => loadSessionCache()?.repName || "");
+  const [isSupervisor, setIsSupervisor] = useState(() => !!loadSessionCache()?.isSupervisor);
   // Sales rep — visits Pharmacies + Supplement Stores — and med rep —
   // visits Doctors + Nutritionists/Dietitians — are independent, combinable
   // flags set per-rep in Settings (a rep can be both). Neither set means
   // this rep hasn't been categorized yet, which this app treats as full
   // access to every category, same as every rep before this split existed.
-  const [isSalesRep, setIsSalesRep] = useState(false);
-  const [isMedRep, setIsMedRep] = useState(false);
+  const [isSalesRep, setIsSalesRep] = useState(() => !!loadSessionCache()?.isSalesRep);
+  const [isMedRep, setIsMedRep] = useState(() => !!loadSessionCache()?.isMedRep);
   const [tab, setTab] = useState("expiry");
   // "Reference" tier — Products/Clients/Doctors — loaded once at login, then
   // refreshed on a slow timer (see REFERENCE_POLL_INTERVAL_MS below), not
@@ -274,12 +310,24 @@ export default function App() {
 
   useEffect(() => {
     api.getSession()
-      .then((data) => { setRole(data.role); setRepName(data.repName || ""); setIsSupervisor(!!data.isSupervisor); setIsSalesRep(!!data.isSalesRep); setIsMedRep(!!data.isMedRep); setTab(defaultTabFor(data.role, !!data.isSupervisor)); setAuthState("in"); })
-      .catch(() => setAuthState("out"));
+      .then((data) => {
+        setRole(data.role); setRepName(data.repName || ""); setIsSupervisor(!!data.isSupervisor); setIsSalesRep(!!data.isSalesRep); setIsMedRep(!!data.isMedRep); setTab(defaultTabFor(data.role, !!data.isSupervisor)); setAuthState("in");
+        saveSessionCache({ role: data.role, repName: data.repName || "", isSupervisor: !!data.isSupervisor, isSalesRep: !!data.isSalesRep, isMedRep: !!data.isMedRep });
+      })
+      .catch((e) => {
+        // No connection at all to even ask — fall back to the last session
+        // this device successfully confirmed (already seeded into
+        // role/repName/etc. above) rather than bouncing to a login screen
+        // that has no chance of succeeding either. A real rejection (no
+        // cache, or the server actually said no) still logs out.
+        if (isNetworkError(e) && loadSessionCache()) { setTab(defaultTabFor(role, isSupervisor)); setAuthState("in"); return; }
+        setAuthState("out");
+      });
   }, []);
 
   const logout = async () => {
     try { await api.logout(); } catch { /* cookie is cleared client-side regardless */ }
+    try { localStorage.removeItem(SESSION_CACHE_KEY); } catch { /* storage unavailable — nothing more we can do */ }
     setAuthState("out");
   };
 
@@ -378,6 +426,16 @@ export default function App() {
   const [pendingVisitCount, setPendingVisitCount] = useState(() => loadPendingVisits().length);
   const [pendingOrderCount, setPendingOrderCount] = useState(() => loadPendingOrders().length);
   const [pendingDoctors, setPendingDoctors] = useState(() => loadPendingDoctors());
+  const [pendingPunches, setPendingPunches] = useState(() => loadPendingPunches());
+
+  const queuePunchOffline = useCallback((type, coords) => {
+    const localKey = `local_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const entry = { type, coords, time: new Date().toISOString(), localKey };
+    const pending = [...loadPendingPunches(), entry];
+    savePendingPunches(pending);
+    setPendingPunches(pending);
+    return entry;
+  }, []);
 
   const queueVisitOffline = useCallback((visit) => {
     const pending = loadPendingVisits();
@@ -507,7 +565,26 @@ export default function App() {
       setPendingDoctors(remaining);
       if (remaining.length !== pending.length) refreshReference({ fresh: true });
     };
-    const trySyncAll = async () => { await trySyncPendingDoctors(); await trySyncPendingVisits(); trySyncPendingOrders(); };
+    // Same as visits (see the comment on "time" there) — the server always
+    // stamps a punch with the moment it's actually received, not whenever it
+    // was originally queued offline. An accepted, pre-existing limitation of
+    // this whole offline-queue approach, not something new here.
+    const trySyncPendingPunches = async () => {
+      const pending = loadPendingPunches();
+      if (pending.length === 0) return;
+      const remaining = [];
+      for (const pch of pending) {
+        try {
+          await api.punch(pch.type, pch.coords);
+        } catch (e) {
+          remaining.push(pch);
+        }
+      }
+      savePendingPunches(remaining);
+      setPendingPunches(remaining);
+      if (remaining.length !== pending.length) refreshLive({ fresh: true });
+    };
+    const trySyncAll = async () => { await trySyncPendingPunches(); await trySyncPendingDoctors(); await trySyncPendingVisits(); trySyncPendingOrders(); };
     trySyncAll();
     const id = setInterval(trySyncAll, 30000);
     window.addEventListener("online", trySyncAll);
@@ -563,7 +640,18 @@ export default function App() {
   const updateVisit = (id, patch) => withSync(() => api.updateVisit(id, patch));
   const removeVisit = (id) => withSync(() => api.removeVisit(id));
   const cancelSavedVisit = (id) => withSync(() => api.cancelVisit(id));
-  const punch = (type, coords) => withSync(() => api.punch(type, coords));
+  // No reception at all — queue it locally instead of leaving the rep
+  // stuck on PunchInGate with no way to even open the app (see
+  // queuePunchOffline/effectiveLastPunch). A real rejection from the server
+  // still throws normally.
+  const punch = async (type, coords) => {
+    try {
+      return await withSync(() => api.punch(type, coords));
+    } catch (e) {
+      if (isNetworkError(e)) return { ...queuePunchOffline(type, coords), queued: true };
+      throw e;
+    }
+  };
   const createOrder = (order) => withSync(() => api.createOrder(order));
   const updateOrder = (id, patch) => withSync(() => api.updateOrder(id, patch));
   const addClient = (client) => withSync(() => api.addClient(client), { touchesReference: true });
@@ -641,7 +729,12 @@ export default function App() {
   // older unconfirmed entry left some reps permanently stuck with an error
   // the UI had no way to resolve. Removed entirely; punch-in is simply
   // allowed whenever the rep isn't already punched in today.
-  const punchedInToday = myLastPunch?.type === "in" && beirutDateStrOfInstant(myLastPunch.time) === todayBeirutStr();
+  // A punch still only queued offline (see queuePunchOffline) is chronologically
+  // after whatever the server last confirmed, so it wins here — this is what
+  // lets punching in with no reception unlock the rest of the app immediately,
+  // instead of leaving the rep stuck on PunchInGate until it actually syncs.
+  const effectiveLastPunch = pendingPunches.length > 0 ? pendingPunches[pendingPunches.length - 1] : myLastPunch;
+  const punchedInToday = effectiveLastPunch?.type === "in" && beirutDateStrOfInstant(effectiveLastPunch.time) === todayBeirutStr();
   if (loaded && role === "rep" && !punchedInToday) {
     return <PunchInGate repName={repName} onPunch={punch} onLogout={logout} />;
   }
@@ -704,6 +797,11 @@ export default function App() {
           {pendingDoctors.length > 0 && (
             <div style={{ fontSize: 11, color: "#C17817", marginTop: 2 }}>
               ⏳ {pendingDoctors.length} doctor{pendingDoctors.length === 1 ? "" : "s"} waiting for signal to sync
+            </div>
+          )}
+          {pendingPunches.length > 0 && (
+            <div style={{ fontSize: 11, color: "#C17817", marginTop: 2 }}>
+              ⏳ {pendingPunches.length} punch{pendingPunches.length === 1 ? "" : "es"} waiting for signal to sync
             </div>
           )}
         </div>
@@ -819,7 +917,7 @@ export default function App() {
                 pendingOrderCount={pendingOrderCount}
                 onAttachPendingOrder={attachPendingOrder}
                 competitors={competitors}
-                myLastPunch={myLastPunch}
+                myLastPunch={effectiveLastPunch}
               />
             )}
             {tab === "schedule" && (
