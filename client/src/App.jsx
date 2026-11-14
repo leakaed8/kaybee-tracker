@@ -61,6 +61,20 @@ const savePendingVisits = (list) => {
   try { localStorage.setItem(PENDING_VISITS_KEY, JSON.stringify(list)); } catch { /* storage unavailable — nothing more we can do */ }
 };
 
+// Same idea, for a doctor added from Check-In while there's no reception at
+// all — a med rep who's just met a doctor not yet in the system shouldn't
+// have to turn away and come back later just to log the visit. Queued here
+// (never given a real id until it syncs), and merged into the doctors list
+// Check-In itself searches against (see doctorsForCheckIn in App) so the
+// rep can check in to them immediately, in the same offline session.
+const PENDING_DOCTORS_KEY = "kb_pending_doctors";
+const loadPendingDoctors = () => {
+  try { return JSON.parse(localStorage.getItem(PENDING_DOCTORS_KEY) || "[]"); } catch { return []; }
+};
+const savePendingDoctors = (list) => {
+  try { localStorage.setItem(PENDING_DOCTORS_KEY, JSON.stringify(list)); } catch { /* storage unavailable — nothing more we can do */ }
+};
+
 // Same idea, for orders placed against a pharmacy/supplement store while
 // there's no reception — a rep in a dead zone shouldn't lose an order just
 // because the request couldn't go out yet.
@@ -363,12 +377,27 @@ export default function App() {
   // actually flush.
   const [pendingVisitCount, setPendingVisitCount] = useState(() => loadPendingVisits().length);
   const [pendingOrderCount, setPendingOrderCount] = useState(() => loadPendingOrders().length);
+  const [pendingDoctors, setPendingDoctors] = useState(() => loadPendingDoctors());
 
   const queueVisitOffline = useCallback((visit) => {
     const pending = loadPendingVisits();
     pending.push(visit);
     savePendingVisits(pending);
     setPendingVisitCount(pending.length);
+  }, []);
+
+  // A doctor added from Check-In with no reception — never given a real id
+  // until trySyncPendingDoctors below gets it through. The localKey doubles
+  // as its id in doctorsForCheckIn so Check-In's own matching logic (which
+  // only ever looks for a name match) treats it exactly like a real doctor
+  // in the meantime.
+  const queueDoctorOffline = useCallback((doctor) => {
+    const localKey = `local_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const entry = { ...doctor, localKey, queuedAt: new Date().toISOString() };
+    const pending = [...loadPendingDoctors(), entry];
+    savePendingDoctors(pending);
+    setPendingDoctors(pending);
+    return entry;
   }, []);
 
   // Removes a visit that was queued offline (never seen by the server) so
@@ -456,7 +485,29 @@ export default function App() {
       setPendingOrderCount(remaining.length);
       if (remaining.length !== pending.length) refreshLive({ fresh: true });
     };
-    const trySyncAll = () => { trySyncPendingVisits(); trySyncPendingOrders(); };
+    // Runs before trySyncPendingVisits — a visit queued against a doctor
+    // that's itself still pending would otherwise fail every retry (POST
+    // /api/visits 400s on a name with no real Doctors row behind it yet)
+    // until this catches up on some later tick anyway. Matching is by name,
+    // not id, so syncing the doctor first (same name, now a real row) is
+    // all a dependent visit needs to go through right after.
+    const trySyncPendingDoctors = async () => {
+      const pending = loadPendingDoctors();
+      if (pending.length === 0) return;
+      const remaining = [];
+      for (const d of pending) {
+        const { localKey, queuedAt, ...payload } = d;
+        try {
+          await api.addDoctor(payload);
+        } catch (e) {
+          remaining.push(d);
+        }
+      }
+      savePendingDoctors(remaining);
+      setPendingDoctors(remaining);
+      if (remaining.length !== pending.length) refreshReference({ fresh: true });
+    };
+    const trySyncAll = async () => { await trySyncPendingDoctors(); await trySyncPendingVisits(); trySyncPendingOrders(); };
     trySyncAll();
     const id = setInterval(trySyncAll, 30000);
     window.addEventListener("online", trySyncAll);
@@ -527,7 +578,19 @@ export default function App() {
   const commitClientImport = (rows) => withSync(() => api.commitClientImport(rows), { touchesReference: true });
   const completeClientInfo = (id, patch) => withSync(() => api.completeClientInfo(id, patch), { touchesReference: true });
   const completeDoctorInfo = (id, patch) => withSync(() => api.completeDoctorInfo(id, patch), { touchesReference: true });
-  const addDoctor = (doctor) => withSync(() => api.addDoctor(doctor), { touchesReference: true });
+  // No reception at all — queue it locally instead of failing outright, so
+  // a med rep who's just met a doctor not yet in the system can still add
+  // them and check in right away (see queueDoctorOffline/doctorsForCheckIn).
+  // A real rejection from the server (e.g. a validation error) still throws
+  // normally for the caller's own error handling.
+  const addDoctor = async (doctor) => {
+    try {
+      return await withSync(() => api.addDoctor(doctor), { touchesReference: true });
+    } catch (e) {
+      if (isNetworkError(e)) return { ...queueDoctorOffline(doctor), queued: true };
+      throw e;
+    }
+  };
   const removeDoctor = (id) => withSync(() => api.removeDoctor(id), { touchesReference: true });
   const bulkImportDoctors = (payload) => withSync(() => api.importDoctorsBulk(payload), { touchesReference: true });
   const completeNutritionistInfo = (id, patch) => withSync(() => api.completeNutritionistInfo(id, patch), { touchesReference: true });
@@ -598,6 +661,15 @@ export default function App() {
   const canSales = !repHasRepType || isSalesRep;
   const canMed = !repHasRepType || isMedRep;
 
+  // Check-In's own matching only ever looks for a name match (see
+  // matchedEntity there), so a doctor still waiting to sync just needs to
+  // show up in the list it searches, under the same name it'll have for
+  // real once it syncs. Scoped to Check-In only — the Doctors tab itself
+  // keeps showing just the real, already-synced roster. A plain computed
+  // value (not useMemo) since it's cheap and, unlike a hook, safe to sit
+  // after the early LoginView return above.
+  const doctorsForCheckIn = [...doctors, ...pendingDoctors.map((d) => ({ ...d, id: d.localKey, pendingSync: true }))];
+
   return (
     <div style={{ minHeight: "100vh", background: "#FAF7F2", fontFamily: "'IBM Plex Sans', system-ui, sans-serif", color: "#1F2A24" }}>
       <style>{`
@@ -627,6 +699,11 @@ export default function App() {
           {pendingOrderCount > 0 && (
             <div style={{ fontSize: 11, color: "#C17817", marginTop: 2 }}>
               ⏳ {pendingOrderCount} order{pendingOrderCount === 1 ? "" : "s"} waiting for signal to sync
+            </div>
+          )}
+          {pendingDoctors.length > 0 && (
+            <div style={{ fontSize: 11, color: "#C17817", marginTop: 2 }}>
+              ⏳ {pendingDoctors.length} doctor{pendingDoctors.length === 1 ? "" : "s"} waiting for signal to sync
             </div>
           )}
         </div>
@@ -719,7 +796,7 @@ export default function App() {
             {tab === "checkin" && role === "rep" && (
               <CheckInView
                 clients={clients}
-                doctors={doctors}
+                doctors={doctorsForCheckIn}
                 nutritionists={nutritionists}
                 products={products}
                 offers={offers}
@@ -727,6 +804,7 @@ export default function App() {
                 isSupervisor={isSupervisor}
                 isSalesRep={isSalesRep}
                 isMedRep={isMedRep}
+                onQuickAddDoctor={addDoctor}
                 onAddVisit={addVisit}
                 onUpdateVisit={updateVisit}
                 onCancelSavedVisit={cancelSavedVisit}
@@ -2262,7 +2340,7 @@ function DoctorHistoryModal({ visits, onClose }) {
 }
 
 // ---------- Check-In View (rep) ----------
-function CheckInView({ clients, doctors, nutritionists = [], products, offers, repName, isSupervisor, isSalesRep, isMedRep, onAddVisit, onUpdateVisit, onCancelSavedVisit, onCancelPendingVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, onQueueOrderOffline, pendingOrderCount, onAttachPendingOrder, competitors, myLastPunch }) {
+function CheckInView({ clients, doctors, nutritionists = [], products, offers, repName, isSupervisor, isSalesRep, isMedRep, onQuickAddDoctor, onAddVisit, onUpdateVisit, onCancelSavedVisit, onCancelPendingVisit, onCreateOrder, onUpdateOrder, onRequestDeleteOrder, onPunch, onQueueOffline, pendingVisitCount, onQueueOrderOffline, pendingOrderCount, onAttachPendingOrder, competitors, myLastPunch }) {
   // Sales rep (Pharmacies + Supplement Stores) and med rep (Doctors +
   // Nutritionists/Dietitians) are independent, combinable flags — a rep can
   // be both, in which case every entity type below is available. Neither
@@ -2306,6 +2384,19 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   const entityTypeLabel = entityType === "doctor" ? "Doctor" : entityType === "supplement_store" ? "Supplement store" : entityType === "nutritionist" ? "Nutritionist/Dietitian" : "Pharmacy";
   const entityTabLabel = entityType === "doctor" ? "Doctors" : entityType === "supplement_store" ? "Supplement Stores" : entityType === "nutritionist" ? "Nutritionists/Dietitians" : "Pharmacies";
   const [client, setClient] = useState("");
+  // Quick-add for a doctor not yet in the system (e.g. met in the field with
+  // no reception) — lets a med rep add just enough to check in right away
+  // (hospital/phone/address/registration number are left for later, via
+  // Complete Info on the Doctors tab, same as any other incomplete record)
+  // instead of being sent away to the Doctors tab first. See
+  // onQuickAddDoctor/doctorsForCheckIn in App.
+  const [showQuickAddDoctor, setShowQuickAddDoctor] = useState(false);
+  const [quickAddSpecialty, setQuickAddSpecialty] = useState("");
+  const [quickAddArea, setQuickAddArea] = useState("");
+  const [quickAddTier, setQuickAddTier] = useState("B");
+  const [quickAddSaving, setQuickAddSaving] = useState(false);
+  const [quickAddError, setQuickAddError] = useState("");
+  const [quickAddConfirmation, setQuickAddConfirmation] = useState("");
   const [notes, setNotes] = useState("");
   // Objection resolution (pharmacy-only) — manual tag overrides the server's
   // notes-text auto-classifier; resolution/notes are meaningless without a
@@ -2534,14 +2625,43 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
   // A visit must point at a real Pharmacies/Doctors/Nutritionists/
   // Supplement Stores record, not just whatever string got typed —
   // otherwise it logs against a name with no tier, address, or assigned rep
-  // behind it. New entities get added properly (with full details) via
-  // their own tab, not invented here.
+  // behind it. Pharmacies/supplement stores/nutritionists still get added
+  // properly via their own tab; a doctor can instead be quick-added right
+  // here (see showQuickAddDoctor below) — doctors is already doctorsForCheckIn
+  // from App, so a doctor just added (or still only queued offline) matches
+  // here immediately either way.
   const matchedEntity = isDoctorEntity
     ? doctors.find((d) => d.name.toLowerCase().trim() === client.toLowerCase().trim())
     : isNutritionistEntity
     ? nutritionists.find((n) => n.name.toLowerCase().trim() === client.toLowerCase().trim())
     : matchedClient;
   const unknownEntity = client.trim().length > 0 && !matchedEntity;
+
+  // Picking/typing a different name invalidates whatever quick-add state
+  // was showing for the previous one.
+  useEffect(() => {
+    setShowQuickAddDoctor(false); setQuickAddError(""); setQuickAddConfirmation(""); setQuickAddSpecialty(""); setQuickAddArea(""); setQuickAddTier("B");
+  }, [client]);
+
+  const submitQuickAddDoctor = async () => {
+    if (!quickAddSpecialty.trim()) { setQuickAddError("Specialty is required."); return; }
+    setQuickAddSaving(true);
+    setQuickAddError("");
+    try {
+      const result = await onQuickAddDoctor({ name: client.trim(), specialty: quickAddSpecialty.trim(), area: quickAddArea.trim(), tier: quickAddTier });
+      setQuickAddConfirmation(
+        result?.queued
+          ? `Saved offline — "${client.trim()}" will sync once you have a signal. You can check in to them right now.`
+          : `"${client.trim()}" added. Hospital, phone, address, etc. can be filled in later from the Doctors tab.`
+      );
+      setShowQuickAddDoctor(false);
+      setQuickAddSpecialty(""); setQuickAddArea(""); setQuickAddTier("B");
+    } catch (e) {
+      setQuickAddError(e?.message || "Couldn't add this doctor.");
+    } finally {
+      setQuickAddSaving(false);
+    }
+  };
 
   // The last couple of visits to whoever's just been picked — a memory
   // refresher right in the flow so a rep isn't walking in blind on what was
@@ -3266,9 +3386,60 @@ function CheckInView({ clients, doctors, nutritionists = [], products, offers, r
                 ⚠ {client} is assigned to <strong>{otherRepWarning}</strong> — you're about to visit another rep's account.
               </div>
             )}
-            {unknownEntity && (
+            {unknownEntity && !isDoctorEntity && (
               <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", color: "#7A5B2E", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 10, fontWeight: 500 }}>
                 ⚠ "{client}" isn't in the system yet. Go to the {entityTabLabel} tab and add it there first (with full details{!isDoctorStyleEntity ? ", including registration number" : ""}), then come back to check in.
+              </div>
+            )}
+            {unknownEntity && isDoctorEntity && !showQuickAddDoctor && (
+              <div style={{ background: "#FBF3E8", border: "1px solid #E9C88A", color: "#7A5B2E", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 10, fontWeight: 500, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span>⚠ "{client}" isn't in the system yet.</span>
+                <button type="button" onClick={() => setShowQuickAddDoctor(true)} style={{ background: "none", border: "1px solid #7A5B2E", borderRadius: 6, padding: "4px 10px", color: "#7A5B2E", fontWeight: 600, fontSize: 12 }}>
+                  Add "{client}" now
+                </button>
+                <span style={{ fontWeight: 400 }}>— works offline too, syncs once you have a signal.</span>
+              </div>
+            )}
+            {unknownEntity && isDoctorEntity && showQuickAddDoctor && (
+              <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 8, padding: 12, marginBottom: 10 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Add "{client}" as a new doctor</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                  <Field label="Specialty">
+                    <input value={quickAddSpecialty} onChange={(e) => setQuickAddSpecialty(e.target.value)} placeholder="e.g. Cardiology" style={inputStyle} />
+                  </Field>
+                  <Field label="Area (optional)">
+                    <input value={quickAddArea} onChange={(e) => setQuickAddArea(e.target.value)} placeholder="e.g. Achrafieh" style={inputStyle} />
+                  </Field>
+                </div>
+                <Field label="Tier">
+                  <select value={quickAddTier} onChange={(e) => setQuickAddTier(e.target.value)} style={{ ...inputStyle, maxWidth: 100 }}>
+                    <option value="A">A</option>
+                    <option value="B">B</option>
+                    <option value="C">C</option>
+                  </select>
+                </Field>
+                <p style={{ fontSize: 11.5, color: "#8A8272", margin: "8px 0" }}>
+                  Hospital, phone, address, etc. can be filled in later from the Doctors tab — this is just enough to check in now.
+                </p>
+                {quickAddError && <div style={{ fontSize: 12, color: "#B33A3A", marginBottom: 8 }}>{quickAddError}</div>}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    type="button"
+                    disabled={quickAddSaving}
+                    onClick={submitQuickAddDoctor}
+                    style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: quickAddSaving ? "#D8D2C4" : "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500 }}
+                  >
+                    {quickAddSaving ? "Adding…" : "Add & continue"}
+                  </button>
+                  <button type="button" onClick={() => setShowQuickAddDoctor(false)} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", fontSize: 12.5 }}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+            {quickAddConfirmation && (
+              <div style={{ background: "#EFF6F1", border: "1px solid #4C7A5E55", color: "#2F5B43", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 10, fontWeight: 500 }}>
+                ✓ {quickAddConfirmation}
               </div>
             )}
 
