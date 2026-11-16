@@ -232,7 +232,13 @@ export const parseExcelCellDate = (value) => {
       if (month !== undefined) {
         let year = Number(monthYear[2]);
         if (year < 100) year += year < 80 ? 2000 : 1900;
-        return new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
+        // No specific day is given — a batch labeled only "Dec-26" is good
+        // through the END of that month, not just its first day. Using day
+        // 1 was effectively treating every such batch as expiring up to
+        // ~30 days earlier than intended (this is the "expiry date minus a
+        // month" the import appeared to apply). Day 0 of the FOLLOWING
+        // month is the last day of THIS month in JS's Date arithmetic.
+        return new Date(Date.UTC(year, month + 1, 0)).toISOString().slice(0, 10);
       }
     }
     const d = new Date(text);
