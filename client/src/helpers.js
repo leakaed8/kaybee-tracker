@@ -210,16 +210,32 @@ const MONTH_ABBR = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug
 // Handles the three shapes a spreadsheet cell can hand back: a JS Date (xlsx
 // parses formatted date cells this way), an Excel serial day number (cells
 // that hold a date but aren't formatted as one), or a plain text date string.
+//
+// Only used for expiry dates (stock/competitor-product import), which in
+// practice are only ever recorded to MONTH precision — a batch is labeled
+// "Dec-26" or "02/2027", never a specific day. Every branch below resolves
+// only to a {year, month}, deliberately discarding whatever day value
+// Excel happened to attach (almost always day 1, since that's what Excel
+// itself defaults to for a cell typed/formatted as just a month+year), and
+// the LAST day of that month is returned — the date through which the
+// batch is actually good, not its first day. Using day 1 was effectively
+// treating every batch as expiring up to ~30 days earlier than intended.
 export const parseExcelCellDate = (value) => {
+  let year, month; // month is 0-indexed, same convention as Date itself
+
   if (value instanceof Date && !isNaN(value.getTime())) {
-    return value.toISOString().slice(0, 10);
-  }
-  if (typeof value === "number" && isFinite(value)) {
+    // Local getters, not toISOString() — xlsx constructs this Date from the
+    // cell's calendar fields as LOCAL midnight, so converting through
+    // toISOString() (which re-expresses it in UTC) rolls it back a whole
+    // calendar day in any timezone ahead of UTC (Beirut included): a cell
+    // meaning "February 2027" was coming back as "31 January 2027".
+    year = value.getFullYear();
+    month = value.getMonth();
+  } else if (typeof value === "number" && isFinite(value)) {
     const epoch = Date.UTC(1899, 11, 30);
     const d = new Date(epoch + value * 86400000);
-    if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
-  }
-  if (typeof value === "string" && value.trim()) {
+    if (!isNaN(d.getTime())) { year = d.getUTCFullYear(); month = d.getUTCMonth(); }
+  } else if (typeof value === "string" && value.trim()) {
     const text = value.trim();
     // A cell formatted as "mmm-yy" (e.g. "Sep-26" for an expiry sheet) can come
     // back as that literal text after an export/re-import round trip. JS's
@@ -228,21 +244,18 @@ export const parseExcelCellDate = (value) => {
     // explicitly before falling back to the generic parser below.
     const monthYear = text.match(/^([A-Za-z]{3,9})[\s-]+(\d{2,4})$/);
     if (monthYear) {
-      const month = MONTH_ABBR[monthYear[1].slice(0, 3).toLowerCase()];
-      if (month !== undefined) {
-        let year = Number(monthYear[2]);
+      const m = MONTH_ABBR[monthYear[1].slice(0, 3).toLowerCase()];
+      if (m !== undefined) {
+        year = Number(monthYear[2]);
         if (year < 100) year += year < 80 ? 2000 : 1900;
-        // No specific day is given — a batch labeled only "Dec-26" is good
-        // through the END of that month, not just its first day. Using day
-        // 1 was effectively treating every such batch as expiring up to
-        // ~30 days earlier than intended (this is the "expiry date minus a
-        // month" the import appeared to apply). Day 0 of the FOLLOWING
-        // month is the last day of THIS month in JS's Date arithmetic.
-        return new Date(Date.UTC(year, month + 1, 0)).toISOString().slice(0, 10);
+        month = m;
       }
+    } else {
+      const d = new Date(text);
+      if (!isNaN(d.getTime())) { year = d.getFullYear(); month = d.getMonth(); }
     }
-    const d = new Date(text);
-    if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
   }
-  return null;
+
+  if (year === undefined || month === undefined) return null;
+  return new Date(Date.UTC(year, month + 1, 0)).toISOString().slice(0, 10);
 };
