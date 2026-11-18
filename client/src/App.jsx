@@ -1882,6 +1882,8 @@ function MyVisitsView({ repName, onClose }) {
   const [visits, setVisits] = useState([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
+  const [exportingVisits, setExportingVisits] = useState(false);
+  const [visitsReadyToShare, setVisitsReadyToShare] = useState(null);
 
   useEffect(() => {
     setLoading(true);
@@ -1895,11 +1897,100 @@ function MyVisitsView({ repName, onClose }) {
     ? visits.filter((v) => v.client.toLowerCase().includes(query.toLowerCase().trim()))
     : visits;
 
+  // A rep's own export of everything they've logged (pharmacy + doctor) —
+  // date, who it was with, the notes, and whatever products/samples came
+  // up — for sending to themselves or handing off, not just browsing
+  // on-screen. Fetches the FULL history (all=true), not the 200-row cap
+  // this view itself shows, since this is meant to be the complete record,
+  // not a snapshot of whatever's currently loaded on screen.
+  //
+  // A branded PDF, not an Excel file — same reasoning as the stock price
+  // list (the free Excel library this app uses can't write cell colors/
+  // fonts at all), and the same share-vs-download handling as that and the
+  // brochure PDFs: on a device that supports it, this stops short of
+  // sharing immediately and waits for a second tap ("Share PDF"/"Save"),
+  // since Web Share API needs a fresh user gesture and generating/fetching
+  // takes long enough that the original click's is already spent.
+  const handleExportVisits = async () => {
+    setExportingVisits(true);
+    setVisitsReadyToShare(null);
+    try {
+      const [{ visits: allVisits }, logoDataUrl] = await Promise.all([
+        api.getVisits({ repName, all: true }),
+        ensureBrochureLogoDataUrl(),
+      ]);
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const inkRgb = [23, 63, 51]; // BROCHURE_COLORS.ink
+      const sageRgb = [74, 124, 89]; // BROCHURE_COLORS.sage
+      const sageLightRgb = [234, 242, 236]; // BROCHURE_COLORS.sageLight
+
+      const drawHeader = () => {
+        if (logoDataUrl) doc.addImage(logoDataUrl, "JPEG", pageWidth / 2 - 18, 10, 36, 36);
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(13);
+        doc.setTextColor(...sageRgb);
+        doc.text(`${repName}'s Visits`, pageWidth / 2, 54, { align: "center" });
+      };
+
+      const sorted = [...(allVisits || [])].sort((a, b) => new Date(b.time) - new Date(a.time));
+      autoTable(doc, {
+        startY: 64,
+        margin: { top: 64 },
+        head: [["Date", "Client", "Notes", "Products / Samples"]],
+        body: sorted.map((v) => [fmtDateOfInstant(v.time), v.client, v.notesSummary || "", v.itemsSummary || ""]),
+        headStyles: { fillColor: inkRgb, textColor: [255, 255, 255], fontStyle: "bold" },
+        alternateRowStyles: { fillColor: sageLightRgb },
+        styles: { fontSize: 8.5, textColor: [40, 40, 40], cellPadding: 3.5, valign: "top" },
+        columnStyles: { 0: { cellWidth: 22 }, 1: { cellWidth: 32 } },
+        didDrawPage: drawHeader,
+      });
+
+      const blob = doc.output("blob");
+      const filename = `${repName.replace(/\s+/g, "-")}-visits-${todayBeirutStr()}.pdf`;
+      if (canShareFiles()) {
+        setVisitsReadyToShare({ blob, filename });
+      } else {
+        await shareOrDownloadPdfBlob(blob, filename);
+      }
+    } catch (e) {
+      alert(e?.message || "Couldn't export your visits.");
+    } finally {
+      setExportingVisits(false);
+    }
+  };
+
   return (
     <div style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 16, marginBottom: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
         <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>My visits</h3>
-        <button onClick={onClose} style={{ background: "none", border: "none", color: "#8A8272", cursor: "pointer" }}><X size={16} /></button>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {visitsReadyToShare ? (
+            <>
+              <button
+                onClick={() => { const { blob, filename } = visitsReadyToShare; setVisitsReadyToShare(null); shareOrDownloadPdfBlob(blob, filename); }}
+                style={{ fontSize: 11.5, fontWeight: 600, padding: "5px 10px", borderRadius: 6, border: "1px solid #4C7A5E", background: "#4C7A5E", color: "#fff" }}
+              >
+                Share PDF
+              </button>
+              <button
+                onClick={() => { const { blob, filename } = visitsReadyToShare; setVisitsReadyToShare(null); downloadPdfBlobDirectly(blob, filename); }}
+                style={{ fontSize: 11.5, fontWeight: 600, padding: "5px 10px", borderRadius: 6, border: "1px solid #4C7A5E", background: "#fff", color: "#4C7A5E" }}
+              >
+                Save
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={handleExportVisits}
+              disabled={exportingVisits}
+              style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 500, padding: "5px 10px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24" }}
+            >
+              <Download size={12} /> {exportingVisits ? "Exporting…" : "Export PDF"}
+            </button>
+          )}
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#8A8272", cursor: "pointer" }}><X size={16} /></button>
+        </div>
       </div>
       <input
         value={query}

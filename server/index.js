@@ -1661,9 +1661,12 @@ app.get("/api/visits", async (req, res) => {
     const total = visits.length;
     // Dashboard/Performance need the true complete history to compute
     // per-account overdue status and monthly aggregates correctly — capping
-    // that would silently produce wrong numbers. Reserved for
-    // manager/supervisor views that fetch once on tab-open, not polled.
-    const wantsAll = all === "true" && isTeamWide;
+    // that would silently produce wrong numbers. Also used by a rep
+    // exporting their OWN full visit history (My Visits) — safe to allow
+    // for anyone, not just manager/supervisor, since the repName filtering
+    // above already happened first: a plain rep asking for "all" still only
+    // ever gets back their own already-filtered visits, never the team's.
+    const wantsAll = all === "true";
     if (!wantsAll) visits = visits.slice(0, clampLimit(limit, 20, 200));
 
     const commentsByVisit = new Map();
