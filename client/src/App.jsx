@@ -1904,54 +1904,37 @@ function MyVisitsView({ repName, onClose }) {
   // this view itself shows, since this is meant to be the complete record,
   // not a snapshot of whatever's currently loaded on screen.
   //
-  // A branded PDF, not an Excel file — same reasoning as the stock price
-  // list (the free Excel library this app uses can't write cell colors/
-  // fonts at all), and the same share-vs-download handling as that and the
-  // brochure PDFs: on a device that supports it, this stops short of
-  // sharing immediately and waits for a second tap ("Share PDF"/"Save"),
-  // since Web Share API needs a fresh user gesture and generating/fetching
-  // takes long enough that the original click's is already spent.
+  // An Excel file, not a PDF — unlike the stock price list (which wanted
+  // the KB Pharma branding a spreadsheet can't do), this is meant to be
+  // worked with as a table: sorted, filtered, pivoted. Explicit column
+  // widths (see the stock export's own history) so a phone's default
+  // preview doesn't truncate the Notes/Products columns down to their
+  // header width. Same share-vs-download handling as the PDFs (a real
+  // file via the native share sheet on mobile, never a blob: link) — just
+  // generalized to the .xlsx mime type instead of assuming PDF.
   const handleExportVisits = async () => {
     setExportingVisits(true);
     setVisitsReadyToShare(null);
     try {
-      const [{ visits: allVisits }, logoDataUrl] = await Promise.all([
-        api.getVisits({ repName, all: true }),
-        ensureBrochureLogoDataUrl(),
-      ]);
-      const doc = new jsPDF();
-      const pageWidth = doc.internal.pageSize.getWidth();
-      const inkRgb = [23, 63, 51]; // BROCHURE_COLORS.ink
-      const sageRgb = [74, 124, 89]; // BROCHURE_COLORS.sage
-      const sageLightRgb = [234, 242, 236]; // BROCHURE_COLORS.sageLight
-
-      const drawHeader = () => {
-        if (logoDataUrl) doc.addImage(logoDataUrl, "JPEG", pageWidth / 2 - 18, 10, 36, 36);
-        doc.setFont("helvetica", "normal");
-        doc.setFontSize(13);
-        doc.setTextColor(...sageRgb);
-        doc.text(`${repName}'s Visits`, pageWidth / 2, 54, { align: "center" });
-      };
-
+      const { visits: allVisits } = await api.getVisits({ repName, all: true });
       const sorted = [...(allVisits || [])].sort((a, b) => new Date(b.time) - new Date(a.time));
-      autoTable(doc, {
-        startY: 64,
-        margin: { top: 64 },
-        head: [["Date", "Client", "Notes", "Products / Samples"]],
-        body: sorted.map((v) => [fmtDateOfInstant(v.time), v.client, v.notesSummary || "", v.itemsSummary || ""]),
-        headStyles: { fillColor: inkRgb, textColor: [255, 255, 255], fontStyle: "bold" },
-        alternateRowStyles: { fillColor: sageLightRgb },
-        styles: { fontSize: 8.5, textColor: [40, 40, 40], cellPadding: 3.5, valign: "top" },
-        columnStyles: { 0: { cellWidth: 22 }, 1: { cellWidth: 32 } },
-        didDrawPage: drawHeader,
-      });
-
-      const blob = doc.output("blob");
-      const filename = `${repName.replace(/\s+/g, "-")}-visits-${todayBeirutStr()}.pdf`;
-      if (canShareFiles()) {
-        setVisitsReadyToShare({ blob, filename });
+      const rows = sorted.map((v) => ({
+        Date: fmtDateOfInstant(v.time),
+        Client: v.client,
+        Notes: v.notesSummary || "",
+        "Products / Samples": v.itemsSummary || "",
+      }));
+      const ws = XLSX.utils.json_to_sheet(rows);
+      ws["!cols"] = [{ wch: 14 }, { wch: 28 }, { wch: 60 }, { wch: 50 }];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Visits");
+      const xlsxMime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+      const blob = new Blob([XLSX.write(wb, { bookType: "xlsx", type: "array" })], { type: xlsxMime });
+      const filename = `${repName.replace(/\s+/g, "-")}-visits-${todayBeirutStr()}.xlsx`;
+      if (canShareFiles(xlsxMime, "xlsx")) {
+        setVisitsReadyToShare({ blob, filename, mimeType: xlsxMime });
       } else {
-        await shareOrDownloadPdfBlob(blob, filename);
+        await shareOrDownloadPdfBlob(blob, filename, xlsxMime);
       }
     } catch (e) {
       alert(e?.message || "Couldn't export your visits.");
@@ -1968,10 +1951,10 @@ function MyVisitsView({ repName, onClose }) {
           {visitsReadyToShare ? (
             <>
               <button
-                onClick={() => { const { blob, filename } = visitsReadyToShare; setVisitsReadyToShare(null); shareOrDownloadPdfBlob(blob, filename); }}
+                onClick={() => { const { blob, filename, mimeType } = visitsReadyToShare; setVisitsReadyToShare(null); shareOrDownloadPdfBlob(blob, filename, mimeType); }}
                 style={{ fontSize: 11.5, fontWeight: 600, padding: "5px 10px", borderRadius: 6, border: "1px solid #4C7A5E", background: "#4C7A5E", color: "#fff" }}
               >
-                Share PDF
+                Share
               </button>
               <button
                 onClick={() => { const { blob, filename } = visitsReadyToShare; setVisitsReadyToShare(null); downloadPdfBlobDirectly(blob, filename); }}
@@ -1986,7 +1969,7 @@ function MyVisitsView({ repName, onClose }) {
               disabled={exportingVisits}
               style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 500, padding: "5px 10px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24" }}
             >
-              <Download size={12} /> {exportingVisits ? "Exporting…" : "Export PDF"}
+              <Download size={12} /> {exportingVisits ? "Exporting…" : "Export Excel"}
             </button>
           )}
           <button onClick={onClose} style={{ background: "none", border: "none", color: "#8A8272", cursor: "pointer" }}><X size={16} /></button>
@@ -11878,9 +11861,12 @@ async function downloadSpecialtyBrochurePdf(specialty, topics, catalogByNormName
 // AirDrop…), with no in-app page, no address bar, and no link ever shown.
 // Desktop browsers (and older mobile ones) typically don't support this, so
 // they keep the plain, single-click auto-download behavior instead.
-function canShareFiles() {
+// mimeType/extension default to PDF for every existing caller; the Excel
+// exports (e.g. My Visits) pass their own, since canShare's answer can
+// genuinely differ by file type, not just by browser.
+function canShareFiles(mimeType = "application/pdf", extension = "pdf") {
   try {
-    return Boolean(navigator.canShare && navigator.canShare({ files: [new File([new Blob(["x"])], "test.pdf", { type: "application/pdf" })] }));
+    return Boolean(navigator.canShare && navigator.canShare({ files: [new File([new Blob(["x"])], `test.${extension}`, { type: mimeType })] }));
   } catch {
     return false;
   }
@@ -11907,8 +11893,8 @@ function downloadPdfBlobDirectly(blob, filename) {
 // fetching/rendering), so that gesture is long since spent by the time
 // generation finishes. The caller is responsible for making this call the
 // very first thing a NEW click does.
-async function shareOrDownloadPdfBlob(blob, filename) {
-  const file = new File([blob], filename, { type: "application/pdf" });
+async function shareOrDownloadPdfBlob(blob, filename, mimeType = "application/pdf") {
+  const file = new File([blob], filename, { type: mimeType });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
     try {
       await navigator.share({ files: [file] });
