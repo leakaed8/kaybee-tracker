@@ -9735,6 +9735,8 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, isSuperviso
   const [discountHistory, setDiscountHistory] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [exportingLocations, setExportingLocations] = useState(false);
+  const [locationsReadyToShare, setLocationsReadyToShare] = useState(null);
   const [name, setName] = useState("");
   const [nameAr, setNameAr] = useState("");
   const [phone, setPhone] = useState("");
@@ -9899,6 +9901,42 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, isSuperviso
   const tierColor = { A: "#B33A3A", B: "#D9A441", C: "#6B7280" };
   const scoreColor = (s) => (s >= 65 ? "#B33A3A" : s >= 40 ? "#C17817" : "#6B7280");
 
+  // Addresses for small local pharmacies have no reliable public lookup —
+  // GPS is what the app already has, more accurately, from reps physically
+  // having been there (see GET /api/clients/export-locations). An Excel
+  // file (not PDF) since this is meant to be checked/worked with as a
+  // table, same reasoning and share-vs-download handling as My Visits.
+  const handleExportLocations = async () => {
+    setExportingLocations(true);
+    setLocationsReadyToShare(null);
+    try {
+      const { locations } = await api.exportClientLocations(kind);
+      const rows = (locations || []).map((l) => ({
+        [`${entityWordCap} Name`]: l.name,
+        Latitude: l.lat,
+        Longitude: l.lng,
+        "Map Link": l.lat && l.lng ? `https://maps.google.com/?q=${l.lat},${l.lng}` : "",
+        Source: l.source,
+      }));
+      const ws = XLSX.utils.json_to_sheet(rows);
+      ws["!cols"] = [{ wch: 32 }, { wch: 12 }, { wch: 12 }, { wch: 42 }, { wch: 28 }];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Locations");
+      const xlsxMime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+      const blob = new Blob([XLSX.write(wb, { bookType: "xlsx", type: "array" })], { type: xlsxMime });
+      const filename = `${kind}-locations-${todayBeirutStr()}.xlsx`;
+      if (canShareFiles(xlsxMime, "xlsx")) {
+        setLocationsReadyToShare({ blob, filename, mimeType: xlsxMime });
+      } else {
+        await shareOrDownloadPdfBlob(blob, filename, xlsxMime);
+      }
+    } catch (e) {
+      alert(e?.message || "Couldn't export locations.");
+    } finally {
+      setExportingLocations(false);
+    }
+  };
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 18, flexWrap: "wrap", gap: 10 }}>
@@ -9908,7 +9946,37 @@ function ClientsView({ clients: allClients, kind = "pharmacy", role, isSuperviso
             Tier A: visit every {TIER_CADENCE.A}d · B: {TIER_CADENCE.B}d · C: {TIER_CADENCE.C}d. Overdue {entityWordPlural} sort to the top.
           </p>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {(role === "manager" || isSupervisor) && (
+            locationsReadyToShare ? (
+              <>
+                <button
+                  onClick={() => { const { blob, filename, mimeType } = locationsReadyToShare; setLocationsReadyToShare(null); shareOrDownloadPdfBlob(blob, filename, mimeType); }}
+                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "1px solid #4C7A5E", background: "#4C7A5E", color: "#fff", fontSize: 13, fontWeight: 500 }}
+                >
+                  Share
+                </button>
+                <button
+                  onClick={() => { const { blob, filename } = locationsReadyToShare; setLocationsReadyToShare(null); downloadPdfBlobDirectly(blob, filename); }}
+                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8, border: "1px solid #4C7A5E", background: "#fff", color: "#4C7A5E", fontSize: 13, fontWeight: 500 }}
+                >
+                  Save
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={handleExportLocations}
+                disabled={exportingLocations}
+                title={`Export each ${entityWord}'s saved GPS location (or last visit's, if none saved) as an Excel table`}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,
+                  background: "#fff", color: "#1F2A24", border: "1px solid #E5DFD3", fontSize: 13, fontWeight: 500,
+                }}
+              >
+                <Download size={15} /> {exportingLocations ? "Exporting…" : "Export locations"}
+              </button>
+            )
+          )}
           {role === "manager" && (
             <button onClick={() => { setShowImport((v) => !v); setShowAdd(false); }} style={{
               display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: 8,

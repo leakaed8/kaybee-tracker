@@ -4916,6 +4916,54 @@ app.post("/api/clients", async (req, res) => {
   }
 });
 
+// A manager asked for pharmacy ADDRESSES, but for small local businesses
+// like these there's no reliable public source to look them up from — GPS
+// is what the app already has, more accurately, from reps physically
+// having been there. For every client of the requested kind: prefer the
+// coords already saved on their own record (a GPS fix captured when they
+// were added, or a geocoded address — see POST /api/clients above),
+// falling back to the most recent VISIT that captured GPS for that same
+// name, same fallback RouteView's own coordsFor already uses per-client —
+// just done here as one batched pass over the whole roster instead of one
+// request per client, which a report covering everyone needs.
+app.get("/api/clients/export-locations", async (req, res) => {
+  try {
+    if (!(req.role === "manager" || req.isSupervisor)) {
+      return res.status(403).json({ error: "Managers or Head of Sales only." });
+    }
+    const kind = req.query.kind === "supplement_store" ? "supplement_store" : "pharmacy";
+    const [clientRows, visitRows] = await Promise.all([db.getAllRows("Clients"), db.getAllRows("Visits")]);
+    const clients = clientRows.filter((c) => (c.type || "pharmacy") === kind);
+
+    const latestVisitCoordsByName = new Map();
+    for (const v of visitRows) {
+      if (!v.coordsLat || !v.coordsLng) continue;
+      const key = String(v.client || "").toLowerCase().trim();
+      if (!key) continue;
+      const existing = latestVisitCoordsByName.get(key);
+      if (!existing || new Date(v.time) > new Date(existing.time)) {
+        latestVisitCoordsByName.set(key, { lat: v.coordsLat, lng: v.coordsLng, time: v.time });
+      }
+    }
+
+    const locations = clients.map((c) => {
+      if (c.coordsLat && c.coordsLng) {
+        return { name: c.name, lat: c.coordsLat, lng: c.coordsLng, source: "Saved on pharmacy record" };
+      }
+      const fromVisit = latestVisitCoordsByName.get(c.name.toLowerCase().trim());
+      if (fromVisit) {
+        return { name: c.name, lat: fromVisit.lat, lng: fromVisit.lng, source: `From a visit on ${fromVisit.time.slice(0, 10)}` };
+      }
+      return { name: c.name, lat: "", lng: "", source: "No location found" };
+    }).sort((a, b) => a.name.localeCompare(b.name));
+
+    res.json({ locations });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // discountRate is deliberately NOT patchable here — a client's permanent
 // registered discount only ever changes through POST
 // /:id/discount-change below, which requires a reason, writes an audit

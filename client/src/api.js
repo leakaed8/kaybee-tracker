@@ -125,6 +125,7 @@ export const api = {
   importSampleInventory: () => request("/products/import-sample", { method: "POST" }),
   importBulkProducts: (products) => request("/products/import-bulk", { method: "POST", body: JSON.stringify({ products }) }),
   exportProductPriceList: () => request("/products/export-price-list"),
+  exportClientLocations: (kind) => request(`/clients/export-locations${qs({ kind })}`),
   addVisit: (visit) => request("/visits", { method: "POST", body: JSON.stringify(visit) }),
   updateVisit: (id, patch) => request(`/visits/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   removeVisit: (id) => request(`/visits/${id}`, { method: "DELETE" }),
