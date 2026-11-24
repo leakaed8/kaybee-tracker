@@ -9722,13 +9722,13 @@ function DahiyehMatchTool({ onApply }) {
 function ClientsView({ clients: allClients, kind = "pharmacy", role, isSupervisor, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onChangeDiscount, onUpdateSubTerritory, onApplyDahiyehSuggestions, onApplyZahraaTerritoryFix, onBulkRemove, onDuplicateSafeImport, onCompleteInfo }) {
   // A manager or Head of Sales still browses/searches the whole roster
   // (reassigning reps, auditing coverage); an ordinary rep only ever needs
-  // to find their OWN pharmacies/supplement stores here — this tab used to
-  // show every rep's accounts to everyone, which was never the point for a
-  // rep, just an accident of nothing filtering it.
+  // to find their OWN pharmacies/supplement stores here, PLUS anything
+  // still unassigned (added/imported with no rep set) — a rep still needs
+  // to be able to find and claim one of those, not just a manager.
   const canSeeAllAccounts = role === "manager" || isSupervisor;
   const clients = useMemo(() => {
     const byKind = allClients.filter((c) => (c.type || "pharmacy") === kind);
-    return canSeeAllAccounts ? byKind : byKind.filter((c) => c.assignedRep === repName);
+    return canSeeAllAccounts ? byKind : byKind.filter((c) => c.assignedRep === repName || !c.assignedRep);
   }, [allClients, kind, canSeeAllAccounts, repName]);
   const isSupplementStore = kind === "supplement_store";
   const entityWord = isSupplementStore ? "supplement store" : "pharmacy";
@@ -10597,14 +10597,14 @@ const DOCTOR_FILLABLE_FIELDS = [
 function DoctorsView({ doctors: allDoctors, role, repName, onAdd, onRemove, onBulkImport, onCompleteInfo, onSetSchedule, dismissedDuplicateDoctorNames = [], onDismissDuplicateDoctorName }) {
   // A manager still browses/searches the whole roster (reassigning,
   // auditing coverage, the duplicate-name warning below); an ordinary rep
-  // only ever needs their OWN doctors here — this tab used to show every
-  // rep's doctors to everyone, which was never the point for a rep, just an
-  // accident of nothing filtering it. (The Doctors tab is hidden from
-  // supervisors entirely — see its render gate in App — so there's no
-  // Head-of-Sales case to carve out here.)
+  // only ever needs their OWN doctors here, PLUS anything still
+  // unassigned (added/imported with no rep set) — a rep still needs to be
+  // able to find and claim one of those, not just a manager. (The Doctors
+  // tab is hidden from supervisors entirely — see its render gate in App —
+  // so there's no Head-of-Sales case to carve out here.)
   const canSeeAllDoctors = role === "manager";
   const doctors = useMemo(
-    () => (canSeeAllDoctors ? allDoctors : allDoctors.filter((d) => d.assignedRep === repName)),
+    () => (canSeeAllDoctors ? allDoctors : allDoctors.filter((d) => d.assignedRep === repName || !d.assignedRep)),
     [allDoctors, canSeeAllDoctors, repName]
   );
   const [completingId, setCompletingId] = useState(null);
@@ -11212,12 +11212,13 @@ const NUTRITIONIST_FILLABLE_FIELDS = [
 ];
 
 function NutritionistsView({ nutritionists: allNutritionists, role, repName, onAdd, onRemove, onBulkImport, onCompleteInfo, onUpdateDiscount }) {
-  // Same scoping as DoctorsView — a manager sees everyone, a rep only
-  // their own. Nutritionists/dietitians tab is hidden from supervisors
-  // entirely (see its render gate in App), so no Head-of-Sales case here.
+  // Same scoping as DoctorsView — a manager sees everyone, a rep sees their
+  // own PLUS anything still unassigned. Nutritionists/dietitians tab is
+  // hidden from supervisors entirely (see its render gate in App), so no
+  // Head-of-Sales case here.
   const canSeeAllNutritionists = role === "manager";
   const nutritionists = useMemo(
-    () => (canSeeAllNutritionists ? allNutritionists : allNutritionists.filter((n) => n.assignedRep === repName)),
+    () => (canSeeAllNutritionists ? allNutritionists : allNutritionists.filter((n) => n.assignedRep === repName || !n.assignedRep)),
     [allNutritionists, canSeeAllNutritionists, repName]
   );
   const [completingId, setCompletingId] = useState(null);
