@@ -246,7 +246,12 @@ const SCHEMAS = {
   // Clients.assignedRep exactly, including the same auto-claim-on-first-visit
   // behavior, so per-rep doctor coverage/targets mean something. "" = doctor
   // is unassigned, matching every pre-existing row.
-  Doctors: ["id", "name", "hospital", "area", "phone", "specialty", "tier", "registrationNumber", "address", "coordsLat", "coordsLng", "assignedRep"],
+  // schedule appended (Doctor Schedule feature) — a JSON-stringified array
+  // of {day, start, end} standing availability windows (day one of
+  // Sun/Mon/.../Sat, start/end "HH:MM"), same "stringify a structured value
+  // into one cell" convention as Visits.doctorNeeds. "" on every
+  // pre-existing row = no recorded availability.
+  Doctors: ["id", "name", "hospital", "area", "phone", "specialty", "tier", "registrationNumber", "address", "coordsLat", "coordsLng", "assignedRep", "schedule"],
   // Same pattern as Doctors (own roster, own tab, own entityType in
   // Check-In), but unlike doctors a nutritionist/dietitian visit can end in
   // an order — hence the extra discountRate, mirroring Clients.discountRate.

@@ -277,6 +277,131 @@ function DayDetailSheet({ dateStr, rows, onClose, expandedId, onToggleExpand, on
   );
 }
 
+// Which date a given weekday ("Sun".."Sat") next falls on, counting today
+// as a match (offset 0) — a doctor available "today" should book for today,
+// not skip ahead a full week.
+function nextDateForWeekday(targetDay) {
+  const todayStr = todayBeirutStr();
+  const targetIdx = WEEKDAY_LABELS.indexOf(targetDay);
+  const todayIdx = weekdayOfDateStr(todayStr);
+  const offset = (targetIdx - todayIdx + 7) % 7;
+  return addDaysToDateStr(todayStr, offset);
+}
+
+// Weekly doctor-availability view (Doctor Schedule feature) — reads the
+// standing {day, start, end} windows set on each doctor record (Doctors
+// tab) and lets a rep book a visit straight onto their calendar for the
+// next occurrence of that weekday. Deliberately the "lean" version: no
+// conflict-checking across reps, no confirmation step with the doctor —
+// booking just creates an ordinary My Schedule meeting (same
+// POST /api/schedule/meetings every other meeting goes through), which the
+// rep can still reschedule or cancel like any other activity. If reps start
+// double-booking each other in practice, that's the signal to build real
+// conflict-checking later — not before.
+function DoctorAvailabilityView({ doctors, repName, onBooked }) {
+  const [selectedDay, setSelectedDay] = useState(WEEKDAY_LABELS[weekdayOfDateStr(todayBeirutStr())]);
+  const [bookingKey, setBookingKey] = useState(null);
+  const [bookedKeys, setBookedKeys] = useState(new Set());
+  const [error, setError] = useState("");
+
+  // Scoped to doctors actually assigned to this rep — same ownership rule
+  // Performance already applies to "this rep's doctors" (Doctors.assignedRep).
+  const myDoctors = useMemo(() => doctors.filter((d) => d.assignedRep === repName), [doctors, repName]);
+
+  const entriesForDay = useMemo(() => {
+    const list = [];
+    myDoctors.forEach((d) => {
+      (d.schedule || []).forEach((w) => {
+        if (w.day === selectedDay) list.push({ doctor: d, window: w });
+      });
+    });
+    return list.sort((a, b) => a.window.start.localeCompare(b.window.start));
+  }, [myDoctors, selectedDay]);
+
+  const book = async (entry) => {
+    const key = `${entry.doctor.id}-${entry.window.day}-${entry.window.start}`;
+    setError("");
+    setBookingKey(key);
+    try {
+      await api.createMeeting({
+        entityName: entry.doctor.name,
+        entityType: "doctor",
+        date: nextDateForWeekday(entry.window.day),
+        time: entry.window.start,
+        purpose: "Follow-up",
+        notes: "",
+        reminderEnabled: true,
+        reminderOffset: "1d",
+      });
+      setBookedKeys((prev) => new Set(prev).add(key));
+      onBooked();
+    } catch (e) {
+      setError(e.message || "Couldn't book this visit.");
+    } finally {
+      setBookingKey(null);
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ fontSize: 12.5, color: "#8A8272", marginBottom: 10 }}>
+        Based on each doctor's set availability (Doctors tab) — pick a day to see who's usually open, then book it straight onto your calendar.
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+        {WEEKDAY_LABELS.map((d) => (
+          <button
+            key={d}
+            onClick={() => setSelectedDay(d)}
+            style={{
+              padding: "7px 12px", borderRadius: 7, fontSize: 12.5, fontWeight: 500, minHeight: 36,
+              border: selectedDay === d ? "1.5px solid #1F2A24" : "1px solid #E5DFD3",
+              background: selectedDay === d ? "#1F2A24" : "#fff",
+              color: selectedDay === d ? "#FAF7F2" : "#1F2A24",
+            }}
+          >
+            {d}
+          </button>
+        ))}
+      </div>
+
+      {myDoctors.length === 0 ? (
+        <EmptyState text="No doctors assigned to you yet." />
+      ) : entriesForDay.length === 0 ? (
+        <EmptyState text={`No doctor availability recorded for ${selectedDay} — set it from a doctor's card in the Doctors tab.`} />
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {entriesForDay.map((entry) => {
+            const key = `${entry.doctor.id}-${entry.window.day}-${entry.window.start}`;
+            const booked = bookedKeys.has(key);
+            return (
+              <div key={key} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600 }}>{entry.doctor.name}</div>
+                  <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 2 }}>
+                    {entry.doctor.hospital || "no hospital set"} · {entry.window.start}–{entry.window.end}
+                  </div>
+                </div>
+                {booked ? (
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "#4C7A5E", whiteSpace: "nowrap" }}>✓ Booked</span>
+                ) : (
+                  <button
+                    disabled={bookingKey === key}
+                    onClick={() => book(entry)}
+                    style={{ padding: "8px 14px", borderRadius: 7, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500, whiteSpace: "nowrap", minHeight: 36 }}
+                  >
+                    {bookingKey === key ? "Booking…" : "Book"}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {error && <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 10 }}>{error}</div>}
+    </div>
+  );
+}
+
 function MonthCalendar({ monthKey, rowsByDate, onPickDate, todayStr }) {
   const [year, month] = monthKey.split("-").map(Number);
   const firstDay = `${monthKey}-01`;
@@ -335,7 +460,7 @@ export function ScheduleView({ role, repName, isSupervisor, repNames, clients, d
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState("all");
-  const [subView, setSubView] = useState("today"); // today | calendar
+  const [subView, setSubView] = useState("today"); // today | calendar | availability
   const [selectedDate, setSelectedDate] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
   const [showAddMeeting, setShowAddMeeting] = useState(false);
@@ -443,9 +568,17 @@ export function ScheduleView({ role, repName, isSupervisor, repNames, clients, d
           <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
             <button onClick={() => setSubView("today")} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: subView === "today" ? "1.5px solid #1F2A24" : "1px solid #E5DFD3", background: subView === "today" ? "#1F2A24" : "#fff", color: subView === "today" ? "#FAF7F2" : "#1F2A24", fontSize: 13, fontWeight: 500, minHeight: 44 }}>Today</button>
             <button onClick={() => setSubView("calendar")} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: subView === "calendar" ? "1.5px solid #1F2A24" : "1px solid #E5DFD3", background: subView === "calendar" ? "#1F2A24" : "#fff", color: subView === "calendar" ? "#FAF7F2" : "#1F2A24", fontSize: 13, fontWeight: 500, minHeight: 44 }}>Calendar</button>
+            <button onClick={() => setSubView("availability")} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: subView === "availability" ? "1.5px solid #1F2A24" : "1px solid #E5DFD3", background: subView === "availability" ? "#1F2A24" : "#fff", color: subView === "availability" ? "#FAF7F2" : "#1F2A24", fontSize: 13, fontWeight: 500, minHeight: 44 }}>Availability</button>
           </div>
 
-          {loading ? (
+          {subView === "availability" ? (
+            // Checked before the loading gate below — booking a visit here
+            // triggers a background refresh of the Today/Calendar rows
+            // (onBooked -> load), which flips `loading` briefly. That must
+            // NOT unmount this view, or its own just-booked confirmation
+            // state is lost the instant it appears.
+            <DoctorAvailabilityView doctors={doctors} repName={effectiveRep} onBooked={load} />
+          ) : loading ? (
             <EmptyState text="Loading…" />
           ) : subView === "today" ? (
             <div>
@@ -470,7 +603,7 @@ export function ScheduleView({ role, repName, isSupervisor, repNames, clients, d
                 ))
               )}
             </div>
-          ) : (
+          ) : subView === "calendar" ? (
             <div>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
                 <button onClick={() => setMonthKey(addDaysToDateStr(`${monthKey}-01`, -1).slice(0, 7))} style={{ background: "none", border: "none", padding: 8, minHeight: 44, minWidth: 44 }}><ChevronLeft size={18} /></button>
@@ -481,7 +614,7 @@ export function ScheduleView({ role, repName, isSupervisor, repNames, clients, d
               </div>
               <MonthCalendar monthKey={monthKey} rowsByDate={rowsByDate} onPickDate={setSelectedDate} todayStr={todayStr} />
             </div>
-          )}
+          ) : null}
 
           {actionError && <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 10 }}>{actionError}</div>}
         </>

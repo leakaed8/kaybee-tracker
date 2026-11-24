@@ -1530,10 +1530,23 @@ async function buildReferenceBootstrapPayload() {
       ...ytdMovementFor(p.name, movementIndex),
     })),
     clients,
-    doctors,
+    doctors: doctors.map(parseDoctorSchedule),
     nutritionists,
     productCatalog: productCatalog.map(parseProductCatalogForClient),
   };
+}
+
+// Doctor Schedule feature — availability windows live on the Doctors sheet
+// as a JSON-stringified array (same "stringify a structured value into one
+// cell" convention as Visits.doctorNeeds), so every reader of a doctor
+// record needs this same parse. "" or anything unparseable -> [], never
+// thrown — a doctor added before this feature existed just has no windows.
+function parseDoctorSchedule(d) {
+  let schedule = [];
+  if (d.schedule) {
+    try { schedule = JSON.parse(d.schedule); } catch { schedule = []; }
+  }
+  return { ...d, schedule };
 }
 
 // Raw R2 image keys never leave the server (same rule as RecallProductFeatures'
@@ -5293,6 +5306,39 @@ app.patch("/api/doctors/:id/complete-info", async (req, res) => {
       await writeAuditLog({ entityType: "doctor_rename", entityId: existing.id, field: "name", oldValue: oldName, newValue: patch.name, changedBy: req.repName || "Manager", reason: "Corrected via Edit info" });
     }
     res.json({ ok: true, patch });
+  } catch (e) {
+    logErr(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Doctor Schedule feature — a doctor's standing availability windows (e.g.
+// "Mondays 4-6pm"), separate from DOCTOR_FILLABLE_FIELDS above since it's a
+// structured list, not a single trimmed string. Purely informational: it
+// never validates or blocks an actual booked meeting (My Schedule's
+// POST /api/schedule/meetings, below) — that stays a free pick of any date/
+// time, same as today. Replaces the doctor's whole window list every save,
+// same "resend the full small list" shape as Visits.itemsMentioned.
+const DOCTOR_SCHEDULE_DAYS = new Set(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]);
+const SCHEDULE_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+app.patch("/api/doctors/:id/schedule", async (req, res) => {
+  try {
+    if (!req.repName && req.role !== "manager") return res.status(403).json({ error: "Reps or managers only." });
+    const doctors = await db.getAllRows("Doctors");
+    const existing = doctors.find((d) => d.id === req.params.id);
+    if (!existing) return res.status(404).json({ error: "Doctor not found" });
+    const input = Array.isArray(req.body.schedule) ? req.body.schedule : [];
+    const schedule = [];
+    for (const w of input) {
+      const day = DOCTOR_SCHEDULE_DAYS.has(w?.day) ? w.day : null;
+      const start = SCHEDULE_TIME_RE.test(w?.start) ? w.start : null;
+      const end = SCHEDULE_TIME_RE.test(w?.end) ? w.end : null;
+      if (!day || !start || !end) return res.status(400).json({ error: "Each availability window needs a day and a valid start/end time." });
+      if (start >= end) return res.status(400).json({ error: `${day}'s window must end after it starts.` });
+      schedule.push({ day, start, end });
+    }
+    await db.updateRowById("Doctors", existing.id, { schedule: schedule.length ? JSON.stringify(schedule) : "" });
+    res.json({ ok: true, schedule });
   } catch (e) {
     logErr(e);
     res.status(500).json({ error: e.message });

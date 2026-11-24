@@ -667,6 +667,7 @@ export default function App() {
   const commitClientImport = (rows) => withSync(() => api.commitClientImport(rows), { touchesReference: true });
   const completeClientInfo = (id, patch) => withSync(() => api.completeClientInfo(id, patch), { touchesReference: true });
   const completeDoctorInfo = (id, patch) => withSync(() => api.completeDoctorInfo(id, patch), { touchesReference: true });
+  const setDoctorSchedule = (id, schedule) => withSync(() => api.setDoctorSchedule(id, schedule), { touchesReference: true });
   // No reception at all — queue it locally instead of failing outright, so
   // a med rep who's just met a doctor not yet in the system can still add
   // them and check in right away (see queueDoctorOffline/doctorsForCheckIn).
@@ -979,6 +980,7 @@ export default function App() {
                 onRemove={removeDoctor}
                 onBulkImport={bulkImportDoctors}
                 onCompleteInfo={completeDoctorInfo}
+                onSetSchedule={setDoctorSchedule}
                 dismissedDuplicateDoctorNames={settings.dismissedDuplicateDoctorNames}
                 onDismissDuplicateDoctorName={(name) => updateSettingsField({
                   dismissedDuplicateDoctorNames: [...(settings.dismissedDuplicateDoctorNames || []), name],
@@ -10503,6 +10505,73 @@ function DoctorExcelImportSection({ existingDoctors, onImport, onDone }) {
   );
 }
 
+// ---------- Doctor Schedule (standing weekly availability, e.g. "Mondays
+// 4-6pm") — a short list of {day, start, end} windows per doctor, purely
+// informational: it's shown here and read by My Schedule's weekly
+// availability view, but never validates or blocks an actual booked
+// meeting. Exported so ScheduleView.jsx can reuse the same day labels. ----------
+export const DOCTOR_SCHEDULE_DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+export function formatScheduleWindows(schedule) {
+  if (!schedule || schedule.length === 0) return "";
+  return schedule.map((w) => `${w.day} ${w.start}–${w.end}`).join(", ");
+}
+
+function ScheduleEditor({ schedule, onSave, onCancel }) {
+  const [windows, setWindows] = useState(schedule && schedule.length ? schedule : [{ day: "Mon", start: "", end: "" }]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const updateWindow = (i, field, value) => setWindows((prev) => prev.map((w, idx) => (idx === i ? { ...w, [field]: value } : w)));
+  const addWindow = () => setWindows((prev) => [...prev, { day: "Mon", start: "", end: "" }]);
+  const removeWindow = (i) => setWindows((prev) => prev.filter((_, idx) => idx !== i));
+
+  const save = async () => {
+    setError("");
+    const cleaned = windows.filter((w) => w.start && w.end);
+    for (const w of cleaned) {
+      if (w.start >= w.end) { setError(`${w.day}'s window must end after it starts.`); return; }
+    }
+    setSaving(true);
+    try {
+      await onSave(cleaned);
+    } catch (e) {
+      setError(e.message || "Couldn't save the schedule.");
+      setSaving(false);
+    }
+  };
+
+  const fieldStyle = { padding: "6px 4px", borderRadius: 6, border: "1px solid #E5DFD3", fontSize: 12, background: "#fff" };
+  return (
+    <div style={{ marginTop: 10, padding: 10, background: "#FAF7F2", borderRadius: 8, border: "1px solid #E5DFD3" }}>
+      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>When is this doctor usually available?</div>
+      {windows.map((w, i) => (
+        <div key={i} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}>
+          <select value={w.day} onChange={(e) => updateWindow(i, "day", e.target.value)} style={fieldStyle}>
+            {DOCTOR_SCHEDULE_DAYS.map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
+          <input type="time" value={w.start} onChange={(e) => updateWindow(i, "start", e.target.value)} style={{ ...fieldStyle, width: 92 }} />
+          <span style={{ fontSize: 12, color: "#8A8272" }}>to</span>
+          <input type="time" value={w.end} onChange={(e) => updateWindow(i, "end", e.target.value)} style={{ ...fieldStyle, width: 92 }} />
+          <button onClick={() => removeWindow(i)} title="Remove this window" style={{ background: "none", border: "none", color: "#B7AF9E", fontSize: 13, padding: 4 }}>✕</button>
+        </div>
+      ))}
+      <button onClick={addWindow} style={{ background: "none", border: "none", color: "#4C7A5E", fontSize: 11.5, fontWeight: 500, padding: "4px 0", marginBottom: 8, display: "block" }}>
+        + Add another time
+      </button>
+      {error && <div style={{ fontSize: 11.5, color: "#B33A3A", marginBottom: 6 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button disabled={saving} onClick={save} style={{ padding: "8px 14px", borderRadius: 6, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12, fontWeight: 500, minHeight: 36 }}>
+          {saving ? "Saving…" : "Save"}
+        </button>
+        <button disabled={saving} onClick={onCancel} style={{ padding: "8px 14px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", color: "#1F2A24", fontSize: 12, fontWeight: 500, minHeight: 36 }}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Doctors View (tiering + follow-up nudges) ----------
 const DOCTOR_FILLABLE_FIELDS = [
   { key: "name", label: "Name" },
@@ -10514,8 +10583,9 @@ const DOCTOR_FILLABLE_FIELDS = [
   { key: "registrationNumber", label: "Registration number" },
 ];
 
-function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteInfo, dismissedDuplicateDoctorNames = [], onDismissDuplicateDoctorName }) {
+function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteInfo, onSetSchedule, dismissedDuplicateDoctorNames = [], onDismissDuplicateDoctorName }) {
   const [completingId, setCompletingId] = useState(null);
+  const [schedulingId, setSchedulingId] = useState(null);
   const [historyId, setHistoryId] = useState(null);
   const [historyProfile, setHistoryProfile] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
@@ -10806,6 +10876,11 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
                 </div>
                 {d.address && <div style={{ fontSize: 11, color: "#8A8272", marginTop: 2 }}>{d.address}</div>}
                 {d.specialty && <div style={{ fontSize: 11.5, color: "#5B5445", marginTop: 3 }}>{d.specialty}</div>}
+                {d.schedule && d.schedule.length > 0 && (
+                  <div style={{ fontSize: 11, color: "#4C7A5E", marginTop: 3, fontWeight: 500 }}>
+                    Available: {formatScheduleWindows(d.schedule)}
+                  </div>
+                )}
                 {d.pendingSamples.length > 0 && (
                   <div style={{ fontSize: 11, color: "#C17817", marginTop: 3, fontWeight: 500 }}>
                     Give next visit: {d.pendingSamples.map((s) => s.productName).join(", ")}
@@ -10831,6 +10906,11 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
               <button onClick={() => setHistoryId(historyId === d.id ? null : d.id)} style={{ background: "none", border: "none", color: "#5B5445", fontSize: 11, fontWeight: 500 }}>
                 {historyId === d.id ? "Hide history" : "History"}
               </button>
+              {(role === "rep" || role === "manager") && (
+                <button onClick={() => setSchedulingId(schedulingId === d.id ? null : d.id)} style={{ background: "none", border: "none", color: "#4C7A5E", fontSize: 11, fontWeight: 500 }}>
+                  {schedulingId === d.id ? "Cancel" : d.schedule && d.schedule.length > 0 ? "Edit schedule" : "Set schedule"}
+                </button>
+              )}
               <button onClick={() => onRemove(d.id)} style={{ background: "none", border: "none", color: "#B7AF9E", fontSize: 11 }}>Remove</button>
             </div>
             {historyId === d.id && (
@@ -10844,6 +10924,13 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
                 currentValues={d}
                 onSave={(values) => onCompleteInfo(d.id, values)}
                 onCancel={() => setCompletingId(null)}
+              />
+            )}
+            {(role === "rep" || role === "manager") && schedulingId === d.id && (
+              <ScheduleEditor
+                schedule={d.schedule}
+                onSave={async (cleaned) => { await onSetSchedule(d.id, cleaned); setSchedulingId(null); }}
+                onCancel={() => setSchedulingId(null)}
               />
             )}
           </div>

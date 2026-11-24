@@ -165,6 +165,7 @@ export const api = {
   applyDahiyehSubTerritorySuggestions: (assignments) => request("/clients/dahiyeh-subterritory-suggestions/apply", { method: "POST", body: JSON.stringify({ assignments }) }),
   completeClientInfo: (id, patch) => request(`/clients/${id}/complete-info`, { method: "PATCH", body: JSON.stringify(patch) }),
   completeDoctorInfo: (id, patch) => request(`/doctors/${id}/complete-info`, { method: "PATCH", body: JSON.stringify(patch) }),
+  setDoctorSchedule: (id, schedule) => request(`/doctors/${id}/schedule`, { method: "PATCH", body: JSON.stringify({ schedule }) }),
   mergeDoctorSpecialty: (fromValues, toValue) => request("/doctors/merge-specialty", { method: "POST", body: JSON.stringify({ fromValues, toValue }) }),
   addDoctor: (doctor) => request("/doctors", { method: "POST", body: JSON.stringify(doctor) }),
   importDoctorsBulk: (payload) => request("/doctors/import-bulk", { method: "POST", body: JSON.stringify(payload) }),
