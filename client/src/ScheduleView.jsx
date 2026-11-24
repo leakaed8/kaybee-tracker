@@ -301,7 +301,8 @@ function nextDateForWeekday(targetDay) {
 function DoctorAvailabilityView({ doctors, repName, onBooked }) {
   const [selectedDay, setSelectedDay] = useState(WEEKDAY_LABELS[weekdayOfDateStr(todayBeirutStr())]);
   const [bookingKey, setBookingKey] = useState(null);
-  const [bookedKeys, setBookedKeys] = useState(new Set());
+  const [bookedByKey, setBookedByKey] = useState(new Map()); // key -> created meeting (for its id, to cancel)
+  const [cancelingKey, setCancelingKey] = useState(null);
   const [error, setError] = useState("");
 
   // Scoped to doctors actually assigned to this rep — same ownership rule
@@ -323,7 +324,7 @@ function DoctorAvailabilityView({ doctors, repName, onBooked }) {
     setError("");
     setBookingKey(key);
     try {
-      await api.createMeeting({
+      const meeting = await api.createMeeting({
         entityName: entry.doctor.name,
         entityType: "doctor",
         date: nextDateForWeekday(entry.window.day),
@@ -333,12 +334,32 @@ function DoctorAvailabilityView({ doctors, repName, onBooked }) {
         reminderEnabled: true,
         reminderOffset: "1d",
       });
-      setBookedKeys((prev) => new Set(prev).add(key));
+      setBookedByKey((prev) => new Map(prev).set(key, meeting));
       onBooked();
     } catch (e) {
       setError(e.message || "Couldn't book this visit.");
     } finally {
       setBookingKey(null);
+    }
+  };
+
+  // Lets a rep immediately undo a tap-to-book from right here, instead of
+  // having to go find the same meeting under Today/Calendar to cancel it —
+  // same underlying activity, same api.cancelActivity every other cancel
+  // button in My Schedule already uses.
+  const cancelBooking = async (key) => {
+    const meeting = bookedByKey.get(key);
+    if (!meeting) return;
+    setError("");
+    setCancelingKey(key);
+    try {
+      await api.cancelActivity(meeting.id);
+      setBookedByKey((prev) => { const next = new Map(prev); next.delete(key); return next; });
+      onBooked();
+    } catch (e) {
+      setError(e.message || "Couldn't cancel this booking.");
+    } finally {
+      setCancelingKey(null);
     }
   };
 
@@ -372,7 +393,7 @@ function DoctorAvailabilityView({ doctors, repName, onBooked }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {entriesForDay.map((entry) => {
             const key = `${entry.doctor.id}-${entry.window.day}-${entry.window.start}`;
-            const booked = bookedKeys.has(key);
+            const bookedMeeting = bookedByKey.get(key);
             return (
               <div key={key} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
                 <div style={{ minWidth: 0 }}>
@@ -381,8 +402,17 @@ function DoctorAvailabilityView({ doctors, repName, onBooked }) {
                     {entry.doctor.hospital || "no hospital set"} · {entry.window.start}–{entry.window.end}
                   </div>
                 </div>
-                {booked ? (
-                  <span style={{ fontSize: 12, fontWeight: 600, color: "#4C7A5E", whiteSpace: "nowrap" }}>✓ Booked</span>
+                {bookedMeeting ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: "#4C7A5E", whiteSpace: "nowrap" }}>✓ Booked</span>
+                    <button
+                      disabled={cancelingKey === key}
+                      onClick={() => cancelBooking(key)}
+                      style={{ padding: "7px 12px", borderRadius: 7, border: "1px solid #E5DFD3", background: "#fff", color: "#B33A3A", fontSize: 11.5, fontWeight: 500, whiteSpace: "nowrap", minHeight: 32 }}
+                    >
+                      {cancelingKey === key ? "Cancelling…" : "Cancel"}
+                    </button>
+                  </div>
                 ) : (
                   <button
                     disabled={bookingKey === key}
