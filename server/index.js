@@ -331,6 +331,13 @@ const DEFAULT_SETTINGS = {
   // Sales any other Settings access.
   stockImportLastBy: "",
   stockImportLastAt: "",
+  // Two doctor records can legitimately share an exact name (different real
+  // people, different hospitals) — the duplicate finder would otherwise
+  // nag about these forever, since it can't tell "entered twice by mistake"
+  // apart from "two different doctors who happen to share a name" on its
+  // own. Lowercase+trimmed names a manager has explicitly confirmed are the
+  // SECOND kind — dismissed from that warning, nothing merged/removed.
+  dismissedDuplicateDoctorNames: [],
 };
 
 // A saved tabVisibility JSON might predate a tab added to
@@ -376,6 +383,8 @@ function parseSettings(raw) {
     stockMovementActiveYear: raw.stockMovementActiveYear !== undefined ? Number(raw.stockMovementActiveYear) : beirutDateParts(new Date()).year,
     stockImportLastBy: raw.stockImportLastBy !== undefined ? raw.stockImportLastBy : DEFAULT_SETTINGS.stockImportLastBy,
     stockImportLastAt: raw.stockImportLastAt !== undefined ? raw.stockImportLastAt : DEFAULT_SETTINGS.stockImportLastAt,
+    dismissedDuplicateDoctorNames: raw.dismissedDuplicateDoctorNames
+      ? JSON.parse(raw.dismissedDuplicateDoctorNames) : DEFAULT_SETTINGS.dismissedDuplicateDoctorNames,
   };
 }
 

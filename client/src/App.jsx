@@ -300,6 +300,7 @@ export default function App() {
     tierVisitFrequency: { A: { perMonth: 2 }, B: { perMonth: 1 }, C: { perMonth: 0.4 } },
     tabVisibility: DEFAULT_TAB_VISIBILITY,
     stockMovementActiveYear: new Date().getFullYear(),
+    dismissedDuplicateDoctorNames: [],
   });
   const [loaded, setLoaded] = useState(false);
   const [syncStatus, setSyncStatus] = useState("");
@@ -978,6 +979,10 @@ export default function App() {
                 onRemove={removeDoctor}
                 onBulkImport={bulkImportDoctors}
                 onCompleteInfo={completeDoctorInfo}
+                dismissedDuplicateDoctorNames={settings.dismissedDuplicateDoctorNames}
+                onDismissDuplicateDoctorName={(name) => updateSettingsField({
+                  dismissedDuplicateDoctorNames: [...(settings.dismissedDuplicateDoctorNames || []), name],
+                })}
               />
             )}
             {tab === "nutritionists" && !isSupervisor && canMed && (
@@ -10509,7 +10514,7 @@ const DOCTOR_FILLABLE_FIELDS = [
   { key: "registrationNumber", label: "Registration number" },
 ];
 
-function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteInfo }) {
+function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteInfo, dismissedDuplicateDoctorNames = [], onDismissDuplicateDoctorName }) {
   const [completingId, setCompletingId] = useState(null);
   const [historyId, setHistoryId] = useState(null);
   const [historyProfile, setHistoryProfile] = useState(null);
@@ -10549,16 +10554,27 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
   // lost by doing that, since it was never attached to a specific id in the
   // first place.
   const duplicateDoctorGroups = useMemo(() => {
+    const dismissed = new Set(dismissedDuplicateDoctorNames);
     const groups = new Map();
     for (const d of doctors) {
       const key = (d.name || "").trim().toLowerCase();
-      if (!key) continue;
+      if (!key || dismissed.has(key)) continue;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(d);
     }
     return [...groups.values()].filter((g) => g.length >= 2);
-  }, [doctors]);
+  }, [doctors, dismissedDuplicateDoctorNames]);
   const [resolvingDuplicateKey, setResolvingDuplicateKey] = useState(null);
+  // A same-name pair isn't always a real duplicate — two different doctors
+  // can genuinely share a name at different hospitals. This just stops the
+  // warning for THIS name (stored in Settings, see dismissedDuplicateDoctorNames
+  // server-side); it doesn't touch either record. Check-In and the Samples
+  // log still can't tell the two apart by name alone (see the comment
+  // above) — dismissing only silences the nag, it doesn't fix that.
+  const dismissDuplicate = (name) => {
+    if (!onDismissDuplicateDoctorName) return;
+    onDismissDuplicateDoctorName(name.trim().toLowerCase());
+  };
   const keepDoctor = async (group, keeperId) => {
     const others = group.filter((d) => d.id !== keeperId);
     const keeper = group.find((d) => d.id === keeperId);
@@ -10730,7 +10746,16 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
               const busy = resolvingDuplicateKey === key;
               return (
                 <div key={key} style={{ background: "#fff", border: "1px solid #E5B8B0", borderRadius: 8, padding: 10 }}>
-                  <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>{group[0].name}</div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{group[0].name}</div>
+                    <button
+                      onClick={() => dismissDuplicate(group[0].name)}
+                      title="These are different doctors who happen to share a name — leave both records as they are"
+                      style={{ fontSize: 10.5, fontWeight: 500, padding: "4px 8px", borderRadius: 6, border: "1px solid #E5DFD3", background: "#fff", color: "#5B5445", whiteSpace: "nowrap" }}
+                    >
+                      Not a duplicate
+                    </button>
+                  </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                     {group.map((d) => (
                       <div key={d.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 6, padding: "6px 8px" }}>
