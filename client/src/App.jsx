@@ -976,6 +976,7 @@ export default function App() {
               <DoctorsView
                 doctors={doctors}
                 role={role}
+                repName={repName}
                 onAdd={addDoctor}
                 onRemove={removeDoctor}
                 onBulkImport={bulkImportDoctors}
@@ -991,6 +992,7 @@ export default function App() {
               <NutritionistsView
                 nutritionists={nutritionists}
                 role={role}
+                repName={repName}
                 onAdd={addNutritionist}
                 onRemove={removeNutritionist}
                 onBulkImport={bulkImportNutritionists}
@@ -9718,7 +9720,16 @@ function DahiyehMatchTool({ onApply }) {
 // history — works identically for supplement stores with no separate
 // component to maintain.
 function ClientsView({ clients: allClients, kind = "pharmacy", role, isSupervisor, repName, repNames, onAdd, onRemove, onBulkImport, onAssignRep, onChangeDiscount, onUpdateSubTerritory, onApplyDahiyehSuggestions, onApplyZahraaTerritoryFix, onBulkRemove, onDuplicateSafeImport, onCompleteInfo }) {
-  const clients = useMemo(() => allClients.filter((c) => (c.type || "pharmacy") === kind), [allClients, kind]);
+  // A manager or Head of Sales still browses/searches the whole roster
+  // (reassigning reps, auditing coverage); an ordinary rep only ever needs
+  // to find their OWN pharmacies/supplement stores here — this tab used to
+  // show every rep's accounts to everyone, which was never the point for a
+  // rep, just an accident of nothing filtering it.
+  const canSeeAllAccounts = role === "manager" || isSupervisor;
+  const clients = useMemo(() => {
+    const byKind = allClients.filter((c) => (c.type || "pharmacy") === kind);
+    return canSeeAllAccounts ? byKind : byKind.filter((c) => c.assignedRep === repName);
+  }, [allClients, kind, canSeeAllAccounts, repName]);
   const isSupplementStore = kind === "supplement_store";
   const entityWord = isSupplementStore ? "supplement store" : "pharmacy";
   const entityWordPlural = isSupplementStore ? "supplement stores" : "pharmacies";
@@ -10583,7 +10594,19 @@ const DOCTOR_FILLABLE_FIELDS = [
   { key: "registrationNumber", label: "Registration number" },
 ];
 
-function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteInfo, onSetSchedule, dismissedDuplicateDoctorNames = [], onDismissDuplicateDoctorName }) {
+function DoctorsView({ doctors: allDoctors, role, repName, onAdd, onRemove, onBulkImport, onCompleteInfo, onSetSchedule, dismissedDuplicateDoctorNames = [], onDismissDuplicateDoctorName }) {
+  // A manager still browses/searches the whole roster (reassigning,
+  // auditing coverage, the duplicate-name warning below); an ordinary rep
+  // only ever needs their OWN doctors here — this tab used to show every
+  // rep's doctors to everyone, which was never the point for a rep, just an
+  // accident of nothing filtering it. (The Doctors tab is hidden from
+  // supervisors entirely — see its render gate in App — so there's no
+  // Head-of-Sales case to carve out here.)
+  const canSeeAllDoctors = role === "manager";
+  const doctors = useMemo(
+    () => (canSeeAllDoctors ? allDoctors : allDoctors.filter((d) => d.assignedRep === repName)),
+    [allDoctors, canSeeAllDoctors, repName]
+  );
   const [completingId, setCompletingId] = useState(null);
   const [schedulingId, setSchedulingId] = useState(null);
   const [historyId, setHistoryId] = useState(null);
@@ -10608,11 +10631,15 @@ function DoctorsView({ doctors, role, onAdd, onRemove, onBulkImport, onCompleteI
   // ("Cardio") — the free-text field itself is exactly how specialty names
   // fragmented in the first place. Still freely typable for a genuinely new
   // specialty; this only narrows, never blocks.
+  // Sourced from the FULL roster, not the rep-scoped `doctors` above — this
+  // is just shared vocabulary (specialty names), not another rep's client
+  // data, and a rep with few of their own doctors still deserves the same
+  // standardized suggestions everyone else gets.
   const existingSpecialties = useMemo(() => {
     const counts = new Map();
-    doctors.forEach((d) => { const s = (d.specialty || "").trim(); if (s) counts.set(s, (counts.get(s) || 0) + 1); });
+    allDoctors.forEach((d) => { const s = (d.specialty || "").trim(); if (s) counts.set(s, (counts.get(s) || 0) + 1); });
     return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([s]) => ({ specialty: s }));
-  }, [doctors]);
+  }, [allDoctors]);
 
   // Two doctor records with the EXACT same name are indistinguishable to
   // Check-In and the Samples log — both key purely off the name string, not
@@ -11184,7 +11211,15 @@ const NUTRITIONIST_FILLABLE_FIELDS = [
   { key: "registrationNumber", label: "Registration number" },
 ];
 
-function NutritionistsView({ nutritionists, role, onAdd, onRemove, onBulkImport, onCompleteInfo, onUpdateDiscount }) {
+function NutritionistsView({ nutritionists: allNutritionists, role, repName, onAdd, onRemove, onBulkImport, onCompleteInfo, onUpdateDiscount }) {
+  // Same scoping as DoctorsView — a manager sees everyone, a rep only
+  // their own. Nutritionists/dietitians tab is hidden from supervisors
+  // entirely (see its render gate in App), so no Head-of-Sales case here.
+  const canSeeAllNutritionists = role === "manager";
+  const nutritionists = useMemo(
+    () => (canSeeAllNutritionists ? allNutritionists : allNutritionists.filter((n) => n.assignedRep === repName)),
+    [allNutritionists, canSeeAllNutritionists, repName]
+  );
   const [completingId, setCompletingId] = useState(null);
   const [historyId, setHistoryId] = useState(null);
   const [historyProfile, setHistoryProfile] = useState(null);
