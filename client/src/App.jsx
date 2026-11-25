@@ -1957,7 +1957,10 @@ function MyVisitsView({ repName, onClose }) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
         <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>My visits</h3>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          {visitsReadyToShare ? (
+          {/* Export Excel hidden for now (temporary — flip this back to
+              true to re-enable). Neither handleExportVisits nor its state
+              is touched, so this is a one-line revert. */}
+          {false && (visitsReadyToShare ? (
             <>
               <button
                 onClick={() => { const { blob, filename, mimeType } = visitsReadyToShare; setVisitsReadyToShare(null); shareOrDownloadPdfBlob(blob, filename, mimeType); }}
@@ -1980,7 +1983,7 @@ function MyVisitsView({ repName, onClose }) {
             >
               <Download size={12} /> {exportingVisits ? "Exporting…" : "Export Excel"}
             </button>
-          )}
+          ))}
           <button onClick={onClose} style={{ background: "none", border: "none", color: "#8A8272", cursor: "pointer" }}><X size={16} /></button>
         </div>
       </div>
