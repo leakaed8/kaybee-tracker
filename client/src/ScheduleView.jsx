@@ -300,6 +300,7 @@ function nextDateForWeekday(targetDay) {
 // conflict-checking later — not before.
 function DoctorAvailabilityView({ doctors, repName, onBooked }) {
   const [selectedDay, setSelectedDay] = useState(WEEKDAY_LABELS[weekdayOfDateStr(todayBeirutStr())]);
+  const [doctorQuery, setDoctorQuery] = useState("");
   const [bookingKey, setBookingKey] = useState(null);
   const [bookedByKey, setBookedByKey] = useState(new Map()); // key -> created meeting (for its id, to cancel)
   const [cancelingKey, setCancelingKey] = useState(null);
@@ -318,6 +319,15 @@ function DoctorAvailabilityView({ doctors, repName, onBooked }) {
     });
     return list.sort((a, b) => a.window.start.localeCompare(b.window.start));
   }, [myDoctors, selectedDay]);
+
+  // Searching by name switches from "who's open on day X" to "this one
+  // doctor's whole week" — a rep who already knows who they want to see
+  // doesn't need to hunt across 7 day chips for every window that doctor has.
+  const matchedDoctors = useMemo(() => {
+    const q = doctorQuery.toLowerCase().trim();
+    if (!q) return [];
+    return myDoctors.filter((d) => d.name.toLowerCase().includes(q));
+  }, [myDoctors, doctorQuery]);
 
   const book = async (entry) => {
     const key = `${entry.doctor.id}-${entry.window.day}-${entry.window.start}`;
@@ -363,71 +373,143 @@ function DoctorAvailabilityView({ doctors, repName, onBooked }) {
     }
   };
 
+  const isSearching = doctorQuery.trim().length > 0;
+
   return (
     <div>
-      <div style={{ fontSize: 12.5, color: "#8A8272", marginBottom: 10 }}>
-        Based on each doctor's set availability (Doctors tab) — pick a day to see who's usually open, then book it straight onto your calendar.
-      </div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
-        {WEEKDAY_LABELS.map((d) => (
-          <button
-            key={d}
-            onClick={() => setSelectedDay(d)}
-            style={{
-              padding: "7px 12px", borderRadius: 7, fontSize: 12.5, fontWeight: 500, minHeight: 36,
-              border: selectedDay === d ? "1.5px solid #1F2A24" : "1px solid #E5DFD3",
-              background: selectedDay === d ? "#1F2A24" : "#fff",
-              color: selectedDay === d ? "#FAF7F2" : "#1F2A24",
-            }}
-          >
-            {d}
-          </button>
-        ))}
-      </div>
+      <input
+        value={doctorQuery}
+        onChange={(e) => setDoctorQuery(e.target.value)}
+        placeholder="Search a doctor to see their whole week…"
+        style={{ ...inputStyle, marginBottom: 10 }}
+      />
 
-      {myDoctors.length === 0 ? (
+      {!isSearching && (
+        <>
+          <div style={{ fontSize: 12.5, color: "#8A8272", marginBottom: 10 }}>
+            Based on each doctor's set availability (Doctors tab) — pick a day to see who's usually open, then book it straight onto your calendar.
+          </div>
+          <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+            {WEEKDAY_LABELS.map((d) => (
+              <button
+                key={d}
+                onClick={() => setSelectedDay(d)}
+                style={{
+                  padding: "7px 12px", borderRadius: 7, fontSize: 12.5, fontWeight: 500, minHeight: 36,
+                  border: selectedDay === d ? "1.5px solid #1F2A24" : "1px solid #E5DFD3",
+                  background: selectedDay === d ? "#1F2A24" : "#fff",
+                  color: selectedDay === d ? "#FAF7F2" : "#1F2A24",
+                }}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {isSearching ? (
+        matchedDoctors.length === 0 ? (
+          <EmptyState text={`No doctor of yours matches "${doctorQuery.trim()}".`} />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {matchedDoctors.map((d) => {
+              const windows = [...(d.schedule || [])].sort(
+                (a, b) => WEEKDAY_LABELS.indexOf(a.day) - WEEKDAY_LABELS.indexOf(b.day) || a.start.localeCompare(b.start)
+              );
+              return (
+                <div key={d.id} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600 }}>{d.name}</div>
+                  <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 2, marginBottom: 8 }}>{d.hospital || "no hospital set"}</div>
+                  {windows.length === 0 ? (
+                    <div style={{ fontSize: 12, color: "#8A8272" }}>No availability set yet — add it from this doctor's card in the Doctors tab.</div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {windows.map((w) => (
+                        <AvailabilityWindowRow
+                          key={`${d.id}-${w.day}-${w.start}`}
+                          label={`${w.day} · ${w.start}–${w.end}`}
+                          doctor={d}
+                          window={w}
+                          bookedByKey={bookedByKey}
+                          bookingKey={bookingKey}
+                          cancelingKey={cancelingKey}
+                          onBook={book}
+                          onCancel={cancelBooking}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )
+      ) : myDoctors.length === 0 ? (
         <EmptyState text="No doctors assigned to you yet." />
       ) : entriesForDay.length === 0 ? (
         <EmptyState text={`No doctor availability recorded for ${selectedDay} — set it from a doctor's card in the Doctors tab.`} />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {entriesForDay.map((entry) => {
-            const key = `${entry.doctor.id}-${entry.window.day}-${entry.window.start}`;
-            const bookedMeeting = bookedByKey.get(key);
-            return (
-              <div key={key} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 600 }}>{entry.doctor.name}</div>
-                  <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 2 }}>
-                    {entry.doctor.hospital || "no hospital set"} · {entry.window.start}–{entry.window.end}
-                  </div>
-                </div>
-                {bookedMeeting ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: "#4C7A5E", whiteSpace: "nowrap" }}>✓ Booked</span>
-                    <button
-                      disabled={cancelingKey === key}
-                      onClick={() => cancelBooking(key)}
-                      style={{ padding: "7px 12px", borderRadius: 7, border: "1px solid #E5DFD3", background: "#fff", color: "#B33A3A", fontSize: 11.5, fontWeight: 500, whiteSpace: "nowrap", minHeight: 32 }}
-                    >
-                      {cancelingKey === key ? "Cancelling…" : "Cancel"}
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    disabled={bookingKey === key}
-                    onClick={() => book(entry)}
-                    style={{ padding: "8px 14px", borderRadius: 7, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500, whiteSpace: "nowrap", minHeight: 36 }}
-                  >
-                    {bookingKey === key ? "Booking…" : "Book"}
-                  </button>
-                )}
+          {entriesForDay.map((entry) => (
+            <div key={`${entry.doctor.id}-${entry.window.day}-${entry.window.start}`} style={{ background: "#fff", border: "1px solid #E5DFD3", borderRadius: 10, padding: 12 }}>
+              <div style={{ minWidth: 0, marginBottom: 8 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600 }}>{entry.doctor.name}</div>
+                <div style={{ fontSize: 11.5, color: "#8A8272", marginTop: 2 }}>{entry.doctor.hospital || "no hospital set"}</div>
               </div>
-            );
-          })}
+              <AvailabilityWindowRow
+                label={`${entry.window.start}–${entry.window.end}`}
+                doctor={entry.doctor}
+                window={entry.window}
+                bookedByKey={bookedByKey}
+                bookingKey={bookingKey}
+                cancelingKey={cancelingKey}
+                onBook={book}
+                onCancel={cancelBooking}
+                bare
+              />
+            </div>
+          ))}
         </div>
       )}
       {error && <div style={{ fontSize: 12, color: "#B33A3A", marginTop: 10 }}>{error}</div>}
+    </div>
+  );
+}
+
+// One bookable window, shared by the per-day list and the per-doctor search
+// results above — same key/Book/Cancel logic either way, just a different
+// label (a bare time range vs. "Day · time range"). `bare` drops this row's
+// own card chrome when its parent (the per-day list) already supplies one.
+function AvailabilityWindowRow({ label, doctor, window, bookedByKey, bookingKey, cancelingKey, onBook, onCancel, bare = false }) {
+  const key = `${doctor.id}-${window.day}-${window.start}`;
+  const bookedMeeting = bookedByKey.get(key);
+  return (
+    <div style={{
+      display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10,
+      ...(bare ? {} : { background: "#FAF7F2", border: "1px solid #E5DFD3", borderRadius: 8, padding: "8px 10px" }),
+    }}>
+      <div style={{ fontSize: 12.5, fontWeight: 500, color: "#1F2A24" }}>{label}</div>
+      {bookedMeeting ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: "#4C7A5E", whiteSpace: "nowrap" }}>✓ Booked</span>
+          <button
+            disabled={cancelingKey === key}
+            onClick={() => onCancel(key)}
+            style={{ padding: "7px 12px", borderRadius: 7, border: "1px solid #E5DFD3", background: "#fff", color: "#B33A3A", fontSize: 11.5, fontWeight: 500, whiteSpace: "nowrap", minHeight: 32 }}
+          >
+            {cancelingKey === key ? "Cancelling…" : "Cancel"}
+          </button>
+        </div>
+      ) : (
+        <button
+          disabled={bookingKey === key}
+          onClick={() => onBook({ doctor, window })}
+          style={{ padding: "8px 14px", borderRadius: 7, border: "none", background: "#1F2A24", color: "#FAF7F2", fontSize: 12.5, fontWeight: 500, whiteSpace: "nowrap", minHeight: 36 }}
+        >
+          {bookingKey === key ? "Booking…" : "Book"}
+        </button>
+      )}
     </div>
   );
 }
